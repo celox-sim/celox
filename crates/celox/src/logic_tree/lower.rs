@@ -1060,6 +1060,46 @@ struct LowerEnv<'parent, A: Hash + Eq + Clone> {
     parent: Option<&'parent LowerEnv<'parent, A>>,
 }
 
+#[derive(Clone, Copy)]
+struct FoldGroupLowerSpec<'arena, A: Hash + Eq + Clone> {
+    loop_var: &'arena A,
+    loop_width: usize,
+    loop_signed: bool,
+    start: &'arena BigInt,
+    step: &'arena BigInt,
+    trip_count: usize,
+    entry_guard: NodeId,
+    states: &'arena [SLTForFoldGroupState<A>],
+}
+
+impl<'arena, A: Hash + Eq + Clone> FoldGroupLowerSpec<'arena, A> {
+    fn from_root(root: NodeId, arena: &'arena SLTNodeArena<A>) -> Option<Self> {
+        let SLTNode::ForFoldGroup {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            step,
+            trip_count,
+            entry_guard,
+            states,
+        } = arena.get_checked(root)?
+        else {
+            return None;
+        };
+        Some(Self {
+            loop_var,
+            loop_width: *loop_width,
+            loop_signed: *loop_signed,
+            start,
+            step,
+            trip_count: *trip_count,
+            entry_guard: *entry_guard,
+            states,
+        })
+    }
+}
+
 impl SLTToSIRLowerer {
     pub fn new(four_state: bool) -> Self {
         Self {
@@ -1089,6 +1129,198 @@ impl SLTToSIRLowerer {
     ) -> RegisterId {
         self.reset_cost_cache(node, arena, cache, true);
         self.lower_inner(builder, node, arena, cache, None, true)
+    }
+
+    /// Lower several independent recovered folds as one counted loop.
+    ///
+    /// This entry point is intentionally transactional: a rejected family
+    /// leaves both the builder and the materialization cache unchanged.  The
+    /// scheduler remains responsible for proving that the roots are mutually
+    /// unordered in its dependency graph; this method rechecks every local
+    /// property needed by the joint loop itself.
+    pub(crate) fn lower_fold_groups_jointly<
+        A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
+    >(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        roots: &[NodeId],
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> bool {
+        if roots.is_empty()
+            || roots.iter().any(|root| cache.contains_key(root))
+            || roots.iter().copied().collect::<crate::HashSet<_>>().len() != roots.len()
+        {
+            return false;
+        }
+        let Some(specs) = roots
+            .iter()
+            .copied()
+            .map(|root| FoldGroupLowerSpec::from_root(root, arena))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        if !Self::joint_fold_group_specs_are_legal(&specs, arena) {
+            return false;
+        }
+
+        self.reset_cost_cache_roots(roots, arena, cache, true);
+        let results = self.lower_fold_group_specs(builder, arena, cache, &specs, None, true);
+        debug_assert_eq!(results.len(), roots.len());
+        for (&root, result) in roots.iter().zip(results) {
+            let previous = cache.insert(root, result);
+            debug_assert!(previous.is_none());
+            self.cache_insert_log.borrow_mut().push(root);
+        }
+        true
+    }
+
+    fn joint_fold_group_specs_are_legal<A: Hash + Eq + Clone>(
+        specs: &[FoldGroupLowerSpec<'_, A>],
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        let Some(first) = specs.first() else {
+            return false;
+        };
+        if specs.iter().any(|spec| {
+            spec.loop_width != first.loop_width
+                || spec.loop_signed != first.loop_signed
+                || spec.start != first.start
+                || spec.step != first.step
+                || spec.trip_count != first.trip_count
+                || spec.entry_guard != first.entry_guard
+                || spec.loop_width == 0
+                || spec.trip_count == 0
+                || spec.states.is_empty()
+        }) {
+            return false;
+        }
+
+        let mut state_owners: crate::HashMap<A, Vec<(usize, BitAccess)>> =
+            crate::HashMap::default();
+        for (owner, spec) in specs.iter().enumerate() {
+            for state in spec.states {
+                if specs
+                    .iter()
+                    .any(|candidate| *candidate.loop_var == state.target.id)
+                {
+                    return false;
+                }
+                let owners = state_owners.entry(state.target.id.clone()).or_default();
+                if owners
+                    .iter()
+                    .any(|(_, access)| access.overlaps(&state.target.access))
+                {
+                    return false;
+                }
+                owners.push((owner, state.target.access));
+            }
+        }
+
+        let mut preheader_visited = crate::HashSet::default();
+        if !Self::joint_fold_tree_is_legal(
+            first.entry_guard,
+            None,
+            specs,
+            &state_owners,
+            arena,
+            &mut preheader_visited,
+        ) {
+            return false;
+        }
+        let mut update_visited = (0..specs.len())
+            .map(|_| crate::HashSet::default())
+            .collect::<Vec<_>>();
+        for (owner, spec) in specs.iter().enumerate() {
+            for state in spec.states {
+                if !Self::joint_fold_tree_is_legal(
+                    state.initial,
+                    None,
+                    specs,
+                    &state_owners,
+                    arena,
+                    &mut preheader_visited,
+                ) || !Self::joint_fold_tree_is_legal(
+                    state.update,
+                    Some(owner),
+                    specs,
+                    &state_owners,
+                    arena,
+                    &mut update_visited[owner],
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn joint_fold_tree_is_legal<A: Hash + Eq + Clone>(
+        root: NodeId,
+        update_owner: Option<usize>,
+        specs: &[FoldGroupLowerSpec<'_, A>],
+        state_owners: &crate::HashMap<A, Vec<(usize, BitAccess)>>,
+        arena: &SLTNodeArena<A>,
+        visited: &mut crate::HashSet<NodeId>,
+    ) -> bool {
+        let mut work = vec![root];
+        while let Some(node) = work.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            match arena.get(node) {
+                SLTNode::Input {
+                    variable,
+                    index,
+                    access,
+                    ..
+                } => {
+                    if let (Some(owner), Some(owners)) = (update_owner, state_owners.get(variable))
+                    {
+                        let overlaps = owners
+                            .iter()
+                            .filter(|(_, target)| !index.is_empty() || target.overlaps(access));
+                        for (state_owner, _) in overlaps {
+                            if owner != *state_owner {
+                                return false;
+                            }
+                        }
+                    }
+                    if let Some(owner) = update_owner {
+                        for spec in specs {
+                            if *spec.loop_var == *variable
+                                && (*spec.loop_var != *specs[owner].loop_var || !index.is_empty())
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    work.extend(index.iter().map(|entry| entry.node));
+                }
+                SLTNode::Constant(..) => {}
+                SLTNode::Binary(lhs, _, rhs) => {
+                    work.push(*lhs);
+                    work.push(*rhs);
+                }
+                SLTNode::Unary(_, inner) => work.push(*inner),
+                SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => {
+                    work.push(*cond);
+                    work.push(*then_expr);
+                    work.push(*else_expr);
+                }
+                SLTNode::Concat(parts) => {
+                    work.extend(parts.iter().map(|(part, _)| *part));
+                }
+                SLTNode::Slice { expr, .. } => work.push(*expr),
+                SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return false,
+            }
+        }
+        true
     }
 
     pub fn lower_with_inputs<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
@@ -1425,30 +1657,18 @@ impl SLTToSIRLowerer {
                 effects,
                 *continue_cond,
             ),
-            SLTNode::ForFoldGroup {
-                loop_var,
-                loop_width,
-                loop_signed,
-                start,
-                step,
-                trip_count,
-                entry_guard,
-                states,
-            } => self.lower_for_fold_group(
-                builder,
-                arena,
-                cache,
-                loop_var,
-                *loop_width,
-                *loop_signed,
-                start,
-                step,
-                *trip_count,
-                *entry_guard,
-                states,
-                env,
-                allow_cache,
-            ),
+            SLTNode::ForFoldGroup { .. } => {
+                let spec = FoldGroupLowerSpec::from_root(node, arena)
+                    .expect("matched ForFoldGroup must remain present in its arena");
+                self.lower_fold_group_specs(
+                    builder,
+                    arena,
+                    cache,
+                    std::slice::from_ref(&spec),
+                    env,
+                    allow_cache,
+                )[0]
+            }
         };
 
         if allow_cache {
@@ -2056,11 +2276,26 @@ impl SLTToSIRLowerer {
         materialized: &crate::HashMap<NodeId, RegisterId>,
         honor_materialized: bool,
     ) {
+        self.reset_cost_cache_roots(
+            std::slice::from_ref(&root),
+            arena,
+            materialized,
+            honor_materialized,
+        );
+    }
+
+    fn reset_cost_cache_roots<A: Hash + Eq + Clone>(
+        &self,
+        roots: &[NodeId],
+        arena: &SLTNodeArena<A>,
+        materialized: &crate::HashMap<NodeId, RegisterId>,
+        honor_materialized: bool,
+    ) {
         let node_count = arena.len();
         let mut fanout = vec![0usize; node_count];
         let mut initially_materialized = vec![false; node_count];
         let mut visited = crate::HashSet::default();
-        let mut work = vec![root];
+        let mut work = roots.to_vec();
         while let Some(node) = work.pop() {
             if !visited.insert(node) {
                 continue;
@@ -3112,36 +3347,56 @@ impl SLTToSIRLowerer {
         packed
     }
 
-    /// Lower an effect-free, fixed-trip-count multi-state fold.
+    /// Lower one or more independent, fixed-trip-count multi-state folds.
     ///
     /// The loop body sees one immutable set of block parameters, so every
     /// update is computed from the previous iteration and the backedge applies
     /// all updates simultaneously.  The counter is a remaining-iteration
     /// count: it cannot stall and needs neither a safety cap nor an Error exit.
-    #[allow(clippy::too_many_arguments)]
-    fn lower_for_fold_group<'env, A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+    fn lower_fold_group_specs<'env, A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
-        loop_var: &A,
-        loop_width: usize,
-        loop_signed: bool,
-        start: &BigInt,
-        step: &BigInt,
-        trip_count: usize,
-        entry_guard: NodeId,
-        states: &[SLTForFoldGroupState<A>],
+        specs: &[FoldGroupLowerSpec<'_, A>],
         outer_env: Option<&'env LowerEnv<'env, A>>,
         allow_cache: bool,
-    ) -> RegisterId {
-        debug_assert!(loop_width > 0);
-        debug_assert!(trip_count > 0);
-        debug_assert!(!states.is_empty());
+    ) -> Vec<RegisterId> {
+        let first = specs
+            .first()
+            .expect("joint fold lowering requires at least one group");
+        debug_assert!(first.loop_width > 0);
+        debug_assert!(first.trip_count > 0);
+        debug_assert!(specs.iter().all(|spec| !spec.states.is_empty()));
+        debug_assert!(specs.iter().all(|spec| {
+            spec.loop_width == first.loop_width
+                && spec.loop_signed == first.loop_signed
+                && spec.start == first.start
+                && spec.step == first.step
+                && spec.trip_count == first.trip_count
+                && spec.entry_guard == first.entry_guard
+        }));
 
-        let guard = self.lower_inner(builder, entry_guard, arena, cache, outer_env, allow_cache);
-        let initial_states: Vec<_> = states
+        let guard = self.lower_inner(
+            builder,
+            first.entry_guard,
+            arena,
+            cache,
+            outer_env,
+            allow_cache,
+        );
+        let mut group_ranges = Vec::with_capacity(specs.len());
+        let mut state_count = 0usize;
+        for spec in specs {
+            let start = state_count;
+            state_count = state_count
+                .checked_add(spec.states.len())
+                .expect("verified joint fold state count must fit usize");
+            group_ranges.push(start..state_count);
+        }
+        let initial_states: Vec<_> = specs
             .iter()
+            .flat_map(|spec| spec.states)
             .map(|state| {
                 let initial =
                     self.lower_inner(builder, state.initial, arena, cache, outer_env, allow_cache);
@@ -3152,40 +3407,50 @@ impl SLTToSIRLowerer {
                 )
             })
             .collect();
-        let initial_packed = self
-            .four_state
-            .then(|| self.pack_fold_group_states(builder, &initial_states));
+        let initial_packed = if self.four_state {
+            group_ranges
+                .iter()
+                .map(|range| {
+                    Some(self.pack_fold_group_states(builder, &initial_states[range.clone()]))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![None; specs.len()]
+        };
 
-        let remaining_width = (usize::BITS as usize - trip_count.leading_zeros() as usize).max(1);
+        let remaining_width =
+            (usize::BITS as usize - first.trip_count.leading_zeros() as usize).max(1);
         let initial_remaining = builder.alloc_bit(remaining_width, false);
         builder.emit(SIRInstruction::Imm(
             initial_remaining,
-            SIRValue::new(BigUint::from(trip_count)),
+            SIRValue::new(BigUint::from(first.trip_count)),
         ));
         let zero = builder.alloc_bit(remaining_width, false);
         builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
         let one = builder.alloc_bit(remaining_width, false);
         builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
 
-        let initial_loop_value = builder.alloc_bit(loop_width, loop_signed);
+        let initial_loop_value = builder.alloc_bit(first.loop_width, first.loop_signed);
         builder.emit(SIRInstruction::Imm(
             initial_loop_value,
-            SIRValue::new(Self::bigint_payload(start, loop_width)),
+            SIRValue::new(Self::bigint_payload(first.start, first.loop_width)),
         ));
-        let step_value = builder.alloc_bit(loop_width, loop_signed);
+        let step_value = builder.alloc_bit(first.loop_width, first.loop_signed);
         builder.emit(SIRInstruction::Imm(
             step_value,
-            SIRValue::new(Self::bigint_payload(step, loop_width)),
+            SIRValue::new(Self::bigint_payload(first.step, first.loop_width)),
         ));
 
         let body_remaining = builder.alloc_bit(remaining_width, false);
-        let body_loop_value = builder.alloc_bit(loop_width, loop_signed);
-        let body_states: Vec<_> = states
+        let body_loop_value = builder.alloc_bit(first.loop_width, first.loop_signed);
+        let body_states: Vec<_> = specs
             .iter()
+            .flat_map(|spec| spec.states)
             .map(|state| builder.alloc_logic(state.target.access.msb - state.target.access.lsb + 1))
             .collect();
-        let exit_states: Vec<_> = states
+        let exit_states: Vec<_> = specs
             .iter()
+            .flat_map(|spec| spec.states)
             .map(|state| builder.alloc_logic(state.target.access.msb - state.target.access.lsb + 1))
             .collect();
         let body = builder.new_block_with(
@@ -3210,22 +3475,37 @@ impl SLTToSIRLowerer {
 
         builder.switch_to_block(body);
         let mut env_inputs = crate::HashMap::default();
-        for (state, value) in states.iter().zip(body_states.iter().copied()) {
+        for (state, value) in specs
+            .iter()
+            .flat_map(|spec| spec.states)
+            .zip(body_states.iter().copied())
+        {
             env_inputs.insert(state.target.clone(), value);
         }
-        env_inputs.insert(
-            VarAtomBase::new(loop_var.clone(), 0, loop_width - 1),
-            body_loop_value,
-        );
+        for spec in specs {
+            env_inputs.insert(
+                VarAtomBase::new(spec.loop_var.clone(), 0, first.loop_width - 1),
+                body_loop_value,
+            );
+        }
         let env = LowerEnv {
             inputs: env_inputs,
             parent: outer_env,
         };
         let mut local_cache = crate::HashMap::default();
         let local_cache_transaction = self.cache_transaction();
-        let next_states: Vec<_> = states
+        let next_states: Vec<_> = specs
             .iter()
+            .flat_map(|spec| spec.states)
             .map(|state| {
+                // The loop body uses its own environment-scoped cache.  A
+                // child that was materialized while lowering a guard or an
+                // initial value is not reusable here: its value may depend on
+                // the loop variable or an old carried state.  Rebuild the cost
+                // model from the cache that lower_inner will actually use so
+                // mux profitability and mandatory lazy Div/Rem lowering do not
+                // mistake an unavailable outer value for a body-local one.
+                self.reset_cost_cache(state.update, arena, &local_cache, true);
                 let next = self.lower_inner(
                     builder,
                     state.update,
@@ -3266,7 +3546,7 @@ impl SLTToSIRLowerer {
         // false. Computing it eagerly lets the conditional edge carry the next
         // loop parameters directly, avoiding an extra hot advance block and
         // unconditional jump on every taken iteration.
-        let next_loop_value = builder.alloc_bit(loop_width, loop_signed);
+        let next_loop_value = builder.alloc_bit(first.loop_width, first.loop_signed);
         builder.emit(SIRInstruction::Binary(
             next_loop_value,
             body_loop_value,
@@ -3286,14 +3566,18 @@ impl SLTToSIRLowerer {
         });
 
         builder.switch_to_block(exit);
-        let candidate = self.pack_fold_group_states(builder, &exit_states);
-        if let Some(initial) = initial_packed {
-            let result = builder.alloc_logic(builder.register(&candidate).width());
-            builder.emit(SIRInstruction::Mux(result, guard, candidate, initial));
-            result
-        } else {
-            candidate
+        let mut results = Vec::with_capacity(specs.len());
+        for (range, initial) in group_ranges.iter().zip(initial_packed) {
+            let candidate = self.pack_fold_group_states(builder, &exit_states[range.clone()]);
+            if let Some(initial) = initial {
+                let result = builder.alloc_logic(builder.register(&candidate).width());
+                builder.emit(SIRInstruction::Mux(result, guard, candidate, initial));
+                results.push(result);
+            } else {
+                results.push(candidate);
+            }
         }
+        results
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4911,6 +5195,405 @@ mod tests {
             .unwrap();
 
         assert!(!SLTToSIRLowerer::new(false).is_speculatable_pure(fold, &arena));
+    }
+
+    #[test]
+    fn joint_fold_groups_share_one_counted_backedge() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let one = constant(&mut arena, 1, 8);
+        let previous_a = input(&mut arena, 10, 8);
+        let previous_b = input(&mut arena, 11, 8);
+        let update_a = arena
+            .alloc(SLTNode::Binary(previous_a, BinaryOp::Add, one))
+            .unwrap();
+        let update_b = arena
+            .alloc(SLTNode::Binary(previous_b, BinaryOp::Add, one))
+            .unwrap();
+        let group_a = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update: update_a,
+                }],
+            })
+            .unwrap();
+        let group_b = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 21,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(11, 0, 7),
+                    initial,
+                    update: update_b,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(SLTToSIRLowerer::new(false).lower_fold_groups_jointly(
+            &mut builder,
+            &[group_a, group_b],
+            &arena,
+            &mut cache,
+        ));
+        let result_a = cache[&group_a];
+        let result_b = cache[&group_b];
+        let eu = finish_lowering(builder);
+
+        assert_eq!(branch_count(&eu), 2, "one entry branch and one backedge");
+        assert_eq!(
+            eu.blocks
+                .values()
+                .filter(|block| matches!(
+                    &block.terminator,
+                    SIRTerminator::Branch { true_block, .. } if true_block.0 == block.id
+                ))
+                .count(),
+            1,
+        );
+        let values = execute_fold_group_sir(&eu);
+        assert_eq!(values[&result_a].payload, BigUint::from(3u8));
+        assert_eq!(values[&result_b].payload, BigUint::from(3u8));
+    }
+
+    #[test]
+    fn joint_fold_groups_keep_all_updates_simultaneous() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial_a = constant(&mut arena, 0x12, 8);
+        let initial_b = constant(&mut arena, 0x34, 8);
+        let initial_c = constant(&mut arena, 7, 8);
+        let previous_a = input(&mut arena, 10, 8);
+        let previous_b = input(&mut arena, 11, 8);
+        let previous_c = input(&mut arena, 12, 8);
+        let one = constant(&mut arena, 1, 8);
+        let update_c = arena
+            .alloc(SLTNode::Binary(previous_c, BinaryOp::Add, one))
+            .unwrap();
+        let swap_group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(10, 0, 7),
+                        initial: initial_a,
+                        update: previous_b,
+                    },
+                    SLTForFoldGroupState {
+                        target: VarAtomBase::new(11, 0, 7),
+                        initial: initial_b,
+                        update: previous_a,
+                    },
+                ],
+            })
+            .unwrap();
+        let increment_group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 21,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 3,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(12, 0, 7),
+                    initial: initial_c,
+                    update: update_c,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(SLTToSIRLowerer::new(false).lower_fold_groups_jointly(
+            &mut builder,
+            &[swap_group, increment_group],
+            &arena,
+            &mut cache,
+        ));
+        let swap_result = cache[&swap_group];
+        let increment_result = cache[&increment_group];
+        let values = execute_fold_group_sir(&finish_lowering(builder));
+        assert_eq!(values[&swap_result].payload, BigUint::from(0x3412u16));
+        assert_eq!(values[&increment_result].payload, BigUint::from(10u8));
+    }
+
+    #[test]
+    fn joint_fold_groups_reject_mismatched_domains_atomically() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let update_a = input(&mut arena, 10, 8);
+        let update_b = input(&mut arena, 11, 8);
+        let make_group = |arena: &mut SLTNodeArena<u32>, loop_var, target, update, trip_count| {
+            arena
+                .alloc(SLTNode::ForFoldGroup {
+                    loop_var,
+                    loop_width: 8,
+                    loop_signed: false,
+                    start: BigInt::from(0),
+                    step: BigInt::from(1),
+                    trip_count,
+                    entry_guard: guard,
+                    states: vec![SLTForFoldGroupState {
+                        target: VarAtomBase::new(target, 0, 7),
+                        initial,
+                        update,
+                    }],
+                })
+                .unwrap()
+        };
+        let group_a = make_group(&mut arena, 20, 10, update_a, 3);
+        let group_b = make_group(&mut arena, 21, 11, update_b, 4);
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(!SLTToSIRLowerer::new(false).lower_fold_groups_jointly(
+            &mut builder,
+            &[group_a, group_b],
+            &arena,
+            &mut cache,
+        ));
+        assert!(cache.is_empty());
+        assert_eq!(builder.block_count(), 1);
+        let value = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Imm(value, SIRValue::new(1u8)));
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 0);
+        assert_eq!(eu.blocks[&BlockId(0)].instructions.len(), 1);
+    }
+
+    #[test]
+    fn joint_fold_groups_accept_pre_loop_target_initials() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let previous_a = input(&mut arena, 10, 8);
+        let previous_b = input(&mut arena, 11, 8);
+        let make_group = |arena: &mut SLTNodeArena<u32>, loop_var, target, previous| {
+            arena
+                .alloc(SLTNode::ForFoldGroup {
+                    loop_var,
+                    loop_width: 8,
+                    loop_signed: false,
+                    start: BigInt::from(0),
+                    step: BigInt::from(1),
+                    trip_count: 2,
+                    entry_guard: guard,
+                    states: vec![SLTForFoldGroupState {
+                        target: VarAtomBase::new(target, 0, 7),
+                        initial: previous,
+                        update: previous,
+                    }],
+                })
+                .unwrap()
+        };
+        let group_a = make_group(&mut arena, 20, 10, previous_a);
+        let group_b = make_group(&mut arena, 21, 11, previous_b);
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(SLTToSIRLowerer::new(false).lower_fold_groups_jointly(
+            &mut builder,
+            &[group_a, group_b],
+            &arena,
+            &mut cache,
+        ));
+        assert!(cache.contains_key(&group_a));
+        assert!(cache.contains_key(&group_b));
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 2);
+    }
+
+    #[test]
+    fn fold_body_cost_analysis_uses_the_environment_scoped_cache() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 8, 8);
+        let previous = input(&mut arena, 10, 8);
+        let cond = input_bit(&mut arena, 10, 0);
+        let divisor = constant(&mut arena, 2, 8);
+        let quotient = arena
+            .alloc(SLTNode::Binary(previous, BinaryOp::DivU, divisor))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr: quotient,
+                else_expr: previous,
+            })
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let unavailable_outer_value = builder.alloc_logic(8);
+        builder.emit(SIRInstruction::Imm(
+            unavailable_outer_value,
+            SIRValue::new(0u8),
+        ));
+        let mut cache = crate::HashMap::default();
+        cache.insert(quotient, unavailable_outer_value);
+        SLTToSIRLowerer::new(false).lower(&mut builder, group, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+
+        assert_eq!(
+            branch_count(&eu),
+            3,
+            "the body-local division arm must retain its mandatory lazy branch"
+        );
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(
+                inst,
+                SIRInstruction::Binary(_, _, BinaryOp::DivU, _)
+            )),
+            1,
+        );
+        eu.verify_result().unwrap();
+    }
+
+    #[test]
+    fn joint_fold_groups_reject_cross_group_carried_reads() {
+        let mut arena = SLTNodeArena::new();
+        let guard = constant(&mut arena, 1, 1);
+        let initial = constant(&mut arena, 0, 8);
+        let previous_a = input(&mut arena, 10, 8);
+        let group_a = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 20,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(10, 0, 7),
+                    initial,
+                    update: previous_a,
+                }],
+            })
+            .unwrap();
+        let group_b = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 21,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(11, 0, 7),
+                    initial,
+                    update: previous_a,
+                }],
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(!SLTToSIRLowerer::new(false).lower_fold_groups_jointly(
+            &mut builder,
+            &[group_a, group_b],
+            &arena,
+            &mut cache,
+        ));
+        assert!(cache.is_empty());
+        assert_eq!(builder.block_count(), 1);
+    }
+
+    #[test]
+    fn four_state_joint_fold_groups_preserve_unknown_guard_per_result() {
+        let mut arena = SLTNodeArena::new();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(1u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial_a = constant(&mut arena, 0x12, 8);
+        let initial_b = constant(&mut arena, 0x34, 8);
+        let update_a = input(&mut arena, 10, 8);
+        let update_b = input(&mut arena, 11, 8);
+        let make_group = |arena: &mut SLTNodeArena<u32>, loop_var, target, initial, update| {
+            arena
+                .alloc(SLTNode::ForFoldGroup {
+                    loop_var,
+                    loop_width: 8,
+                    loop_signed: false,
+                    start: BigInt::from(0),
+                    step: BigInt::from(1),
+                    trip_count: 2,
+                    entry_guard: guard,
+                    states: vec![SLTForFoldGroupState {
+                        target: VarAtomBase::new(target, 0, 7),
+                        initial,
+                        update,
+                    }],
+                })
+                .unwrap()
+        };
+        let group_a = make_group(&mut arena, 20, 10, initial_a, update_a);
+        let group_b = make_group(&mut arena, 21, 11, initial_b, update_b);
+
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        assert!(SLTToSIRLowerer::new(true).lower_fold_groups_jointly(
+            &mut builder,
+            &[group_a, group_b],
+            &arena,
+            &mut cache,
+        ));
+        let result_a = cache[&group_a];
+        let result_b = cache[&group_b];
+        let eu = finish_lowering(builder);
+        assert_eq!(branch_count(&eu), 2);
+        assert_eq!(
+            instruction_count(&eu, |inst| matches!(inst, SIRInstruction::Mux(..))),
+            2,
+        );
+        let values = execute_fold_group_sir(&eu);
+        assert_eq!(values[&result_a].mask, BigUint::from(0xffu8));
+        assert_eq!(values[&result_b].mask, BigUint::from(0xffu8));
     }
 
     #[test]
