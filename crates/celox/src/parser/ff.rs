@@ -7,13 +7,14 @@ use crate::ir::{
 use crate::{
     HashMap, HashSet,
     parser::{
-        BuildConfig, LoweringPhase, ParserError, bitaccess::eval_constexpr,
+        BuildConfig, LoweringPhase, ParserError,
+        bitaccess::{celox_value_from_comptime_in_context, eval_constexpr},
         case::case_arm_condition_expr,
     },
 };
 use bit_set::BitSet;
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 
 use veryl_analyzer::ir::{
     AssertKind, CaseStatement, Expression, FfDeclaration, FfReset, ForBound, ForRange,
@@ -49,6 +50,50 @@ mod loop_bound_status_tests {
             FfParser::loop_bound_status(&ForBound::Const(257), 8, false),
             Some(LoopBoundStatus::OutOfRange)
         );
+    }
+}
+
+#[cfg(test)]
+mod procedural_condition_tests {
+    use super::FfParser;
+    use veryl_analyzer::{
+        ir::{Comptime, Expression, Factor, Shape, Type, TypeKind, ValueVariant},
+        value::Value,
+    };
+    use veryl_parser::token_range::TokenRange;
+
+    fn logic_constant(payload: u128, mask: u128, width: usize) -> Expression {
+        let token = TokenRange::default();
+        let mut ty = Type::new(TypeKind::Logic);
+        ty.set_concrete_width(Shape::new(vec![Some(width)]));
+        Expression::Term(Box::new(Factor::Value(Comptime {
+            value: ValueVariant::Numeric(Value::from_u128(payload, mask, width, false)),
+            r#type: ty,
+            is_const: true,
+            is_global: true,
+            evaluated: true,
+            token,
+            ..Default::default()
+        })))
+    }
+
+    #[test]
+    fn constant_truth_ignores_unknown_bits_but_keeps_known_ones() {
+        // Veryl encodes X=(payload 0, mask 1) and Z=(payload 1, mask 1).
+        for (payload, mask, expected) in [
+            (0x80, 0x04, true),
+            (0x00, 0x04, false),
+            (0x04, 0x04, false),
+            (0x00, 0x00, false),
+            (0x80, 0x00, true),
+        ] {
+            let condition = logic_constant(payload, mask, 8);
+            assert_eq!(
+                FfParser::get_constant_procedural_truth(&condition),
+                Some(expected),
+                "payload={payload:#x}, mask={mask:#x}",
+            );
+        }
     }
 }
 
@@ -339,6 +384,7 @@ impl<'a> FfParser<'a> {
                     &cond.0, targets, domain, convert, sources, ir_builder, None,
                 )?;
                 let cond_reg = self.stack.pop_back().unwrap();
+                let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
                 let pass_bb = ir_builder.new_block();
                 let fail_bb = ir_builder.new_block();
                 let event_kind = match kind {
@@ -387,6 +433,76 @@ impl<'a> FfParser<'a> {
 
     fn get_constant_value(&self, expr: &Expression) -> Option<u64> {
         eval_constexpr(expr)?.to_u64()
+    }
+
+    fn get_constant_procedural_truth(expr: &Expression) -> Option<bool> {
+        let comptime = expr.comptime();
+        let is_value = matches!(expr, Expression::Term(factor) if matches!(factor.as_ref(), veryl_analyzer::ir::Factor::Value(_)));
+        if !comptime.is_const && !(is_value && comptime.evaluated) {
+            return None;
+        }
+
+        if let Some((value, mask, width, _)) = celox_value_from_comptime_in_context(comptime, None)
+        {
+            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let known = &width_mask ^ (&mask & &width_mask);
+            return Some(!(value & known).is_zero());
+        }
+
+        comptime
+            .r#type
+            .is_2state()
+            .then(|| eval_constexpr(expr).map(|value| !value.is_zero()))
+            .flatten()
+    }
+
+    fn lower_procedural_condition<A>(
+        &self,
+        condition: RegisterId,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        if matches!(
+            ir_builder.register(&condition),
+            RegisterType::Bit {
+                width: 1,
+                signed: false
+            }
+        ) {
+            return condition;
+        }
+
+        if matches!(
+            ir_builder.register(&condition),
+            RegisterType::Logic { width: 1 }
+        ) {
+            let known_truth = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Unary(
+                known_truth,
+                UnaryOp::ToTwoState,
+                condition,
+            ));
+            return known_truth;
+        }
+
+        let source_is_two_state =
+            matches!(ir_builder.register(&condition), RegisterType::Bit { .. });
+        let truth = if source_is_two_state {
+            ir_builder.alloc_bit(1, false)
+        } else {
+            ir_builder.alloc_logic(1)
+        };
+        ir_builder.emit(SIRInstruction::Unary(truth, UnaryOp::Or, condition));
+        if source_is_two_state {
+            truth
+        } else {
+            let known_truth = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Unary(
+                known_truth,
+                UnaryOp::ToTwoState,
+                truth,
+            ));
+            known_truth
+        }
     }
 
     fn cast_reg_width_ext<A>(
@@ -499,8 +615,8 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<ControlFlow, ParserError> {
         // Constant folding: if condition is compile-time constant, inline the appropriate side
-        if let Some(const_val) = self.get_constant_value(&stmt.cond) {
-            let side = if const_val != 0 {
+        if let Some(cond_is_true) = Self::get_constant_procedural_truth(&stmt.cond) {
+            let side = if cond_is_true {
                 &stmt.true_side
             } else {
                 &stmt.false_side
@@ -513,6 +629,7 @@ impl<'a> FfParser<'a> {
             &stmt.cond, targets, domain, convert, sources, ir_builder, None,
         )?;
         let cond_reg = self.stack.pop_back().unwrap();
+        let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();
@@ -624,8 +741,8 @@ impl<'a> FfParser<'a> {
         };
 
         let cond = case_arm_condition_expr(&stmt.case_target, &arm.patterns);
-        if let Some(const_val) = self.get_constant_value(&cond) {
-            return if const_val != 0 {
+        if let Some(cond_is_true) = Self::get_constant_procedural_truth(&cond) {
+            return if cond_is_true {
                 self.parse_statement_list(&arm.body, targets, domain, convert, sources, ir_builder)
             } else {
                 self.parse_case_arm(
@@ -642,6 +759,7 @@ impl<'a> FfParser<'a> {
 
         self.parse_expression(&cond, targets, domain, convert, sources, ir_builder, None)?;
         let cond_reg = self.stack.pop_back().unwrap();
+        let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();
@@ -1863,7 +1981,7 @@ impl<'a> FfParser<'a> {
 
         // 1.1 Handle reset polarity (Invert if Low-Active)
         if is_low {
-            let inverted_reg = ir_builder.alloc_bit(1, false);
+            let inverted_reg = ir_builder.alloc_logic(1);
             ir_builder.emit(SIRInstruction::Unary(
                 inverted_reg,
                 UnaryOp::LogicNot,
@@ -1871,6 +1989,7 @@ impl<'a> FfParser<'a> {
             ));
             cond_reg = inverted_reg;
         }
+        cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();

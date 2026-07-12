@@ -185,6 +185,7 @@ module Top (
         }
     }
 
+    #[ignore = "Veryl 0.20.2 folds signed numeric casts before Celox receives AIR"]
     fn constant_and_runtime_casts_use_the_same_resize_rule(sim) {
         @omit_veryl;
         @build Simulator::builder(r#"
@@ -248,6 +249,27 @@ module Top (
         for prefix in ["c_const", "c_runtime", "f_const", "f_runtime"] {
             let name = format!("{prefix}_lt");
             assert_eq!(sim.get(sim.signal(&name)), 1u8.into(), "{name}");
+        }
+    }
+
+    fn folded_and_runtime_builtin_selects_are_unsigned(sim) {
+        @build Simulator::builder(r#"
+module Top (
+    a: input signed logic<8>,
+    const_part: output logic<16>,
+    runtime_part: output logic<16>,
+) {
+    const VALUE: signed logic<8> = 8'sh8f;
+    assign const_part = VALUE[3:0];
+    assign runtime_part = a[3:0];
+}
+"#, "Top");
+
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x8fu8)).unwrap();
+        for name in ["const_part", "runtime_part"] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), 0x000fu16.into(), "{name}");
         }
     }
 
@@ -401,9 +423,10 @@ module Top (
         }
     }
 
-    fn bitwise_not_preserves_signedness_at_comparison_boundary(sim) {
-        // Veryl simulator 0.20.2 incorrectly makes unary `~` unsigned. The
-        // language and SystemVerilog both preserve the operand's signedness.
+    fn signed_type_cast_keeps_comparison_operands_signed(sim) {
+        // Veryl simulator 0.20.2 loses the signed result of the same-width
+        // `as i8` while lowering this comparison. `~a` itself is not the
+        // failure: comparing it with a signed variable works there.
         @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (

@@ -340,6 +340,282 @@ module Top (
         );
     }
 
+    fn ff_procedural_control_uses_known_nonzero_truth(sim) {
+        @omit_veryl;
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    cond: input logic<8>,
+    wide_cond: input logic<130>,
+    if_result: output logic,
+    wide_if_result: output logic,
+    case_result: output logic,
+    function_result: output logic,
+    function_side: output logic,
+) {
+    function choose (c: input logic<8>, side: output logic) -> logic {
+        if c {
+            side = 1'b1;
+            return 1'b1;
+        } else {
+            side = 1'b0;
+            return 1'b0;
+        }
+    }
+    always_ff (clk) {
+        if cond {
+            if_result = 1'b1;
+        } else {
+            if_result = 1'b0;
+        }
+        if wide_cond {
+            wide_if_result = 1'b1;
+        } else {
+            wide_if_result = 1'b0;
+        }
+        case cond {
+            8'h80: case_result = 1'b1;
+            default: case_result = 1'b0;
+        }
+        function_result = choose(cond, function_side);
+    }
+}
+"#, "Top").four_state(true);
+
+        let clk = sim.event("clk");
+        let cond = sim.signal("cond");
+        let wide_cond = sim.signal("wide_cond");
+        let unknown = BigUint::from(1u8) << 2usize;
+        let known_one = BigUint::from(1u8) << 7usize;
+        let wide_known_one = BigUint::from(1u8) << 100usize;
+
+        for (unknown_value, label) in [(1u8, "X"), (0u8, "Z")] {
+            sim.modify(|io| {
+                io.set_four_state(
+                    cond,
+                    known_one.clone() | (&unknown * unknown_value),
+                    unknown.clone(),
+                );
+                io.set_four_state(
+                    wide_cond,
+                    wide_known_one.clone() | (&unknown * unknown_value),
+                    unknown.clone(),
+                );
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            for name in [
+                "if_result",
+                "wide_if_result",
+                "function_result",
+                "function_side",
+            ] {
+                assert_eq!(
+                    sim.get_four_state(sim.signal(name)),
+                    (BigUint::from(1u8), BigUint::from(0u8)),
+                    "{name}, known one plus {label}",
+                );
+            }
+            assert_eq!(
+                sim.get_four_state(sim.signal("case_result")),
+                (BigUint::from(0u8), BigUint::from(0u8)),
+                "an unknown equality must not select a case arm ({label})",
+            );
+
+            sim.modify(|io| {
+                io.set_four_state(cond, &unknown * unknown_value, unknown.clone());
+                io.set_four_state(wide_cond, &unknown * unknown_value, unknown.clone());
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            for name in [
+                "if_result",
+                "wide_if_result",
+                "case_result",
+                "function_result",
+                "function_side",
+            ] {
+                assert_eq!(
+                    sim.get_four_state(sim.signal(name)),
+                    (BigUint::from(0u8), BigUint::from(0u8)),
+                    "{name}, only {label}",
+                );
+            }
+        }
+
+        sim.modify(|io| {
+            io.set_four_state(cond, known_one, BigUint::from(0u8));
+            io.set_four_state(wide_cond, wide_known_one, BigUint::from(0u8));
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("case_result")),
+            (BigUint::from(1u8), BigUint::from(0u8)),
+        );
+    }
+
+    fn ff_unknown_reset_is_not_active(sim) {
+        @omit_veryl;
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    reset_high: input reset_sync_high,
+    reset_low: input reset_sync_low,
+    d: input logic,
+    q_high: output logic,
+    q_low: output logic,
+) {
+    always_ff (clk, reset_high) {
+        if_reset {
+            q_high = 1'b0;
+        } else {
+            q_high = d;
+        }
+    }
+    always_ff (clk, reset_low) {
+        if_reset {
+            q_low = 1'b0;
+        } else {
+            q_low = d;
+        }
+    }
+}
+"#, "Top").four_state(true);
+
+        let clk = sim.event("clk");
+        let reset_high = sim.signal("reset_high");
+        let reset_low = sim.signal("reset_low");
+        let d = sim.signal("d");
+        sim.modify(|io| io.set(d, 1u8)).unwrap();
+
+        for (value, label) in [(1u8, "X"), (0u8, "Z")] {
+            sim.modify(|io| {
+                io.set_four_state(
+                    reset_high,
+                    BigUint::from(value),
+                    BigUint::from(1u8),
+                );
+                io.set_four_state(reset_low, BigUint::from(value), BigUint::from(1u8));
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            for name in ["q_high", "q_low"] {
+                assert_eq!(
+                    sim.get_four_state(sim.signal(name)),
+                    (BigUint::from(1u8), BigUint::from(0u8)),
+                    "{name}, reset={label}",
+                );
+            }
+        }
+
+        sim.modify(|io| {
+            io.set_four_state(reset_high, BigUint::from(1u8), BigUint::from(0u8));
+            io.set_four_state(reset_low, BigUint::from(0u8), BigUint::from(0u8));
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        for name in ["q_high", "q_low"] {
+            assert_eq!(
+                sim.get_four_state(sim.signal(name)),
+                (BigUint::from(0u8), BigUint::from(0u8)),
+                "{name}, known active reset",
+            );
+        }
+    }
+
+    fn ff_assert_uses_procedural_four_state_truth(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @build Simulator::builder(r#"
+module Top (
+    clk: input clock,
+    cond: input logic<130>,
+) {
+    always_ff (clk) {
+        $assert_continue(cond, "bad condition");
+    }
+}
+"#, "Top").four_state(true);
+
+        let clk = sim.event("clk");
+        let cond = sim.signal("cond");
+        let known_one = BigUint::from(1u8) << 100usize;
+        let unknown = BigUint::from(1u8) << 2usize;
+
+        sim.modify(|io| {
+            io.set_four_state(cond, &known_one | &unknown, unknown.clone());
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert!(sim.drain_runtime_events().is_empty());
+
+        for (value, mask, label) in [
+            (BigUint::from(0u8), BigUint::from(0u8), "0"),
+            (unknown.clone(), unknown.clone(), "X"),
+            (BigUint::from(0u8), unknown.clone(), "Z"),
+        ] {
+            sim.modify(|io| {
+                io.set_four_state(cond, value.clone(), mask.clone());
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(
+                sim.drain_runtime_events(),
+                vec![celox::RuntimeEvent::AssertContinue {
+                    message: "bad condition".to_string(),
+                }],
+                "cond={label}",
+            );
+        }
+    }
+
+    fn comb_assert_uses_procedural_four_state_truth(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @build Simulator::builder(r#"
+module Top (
+    cond: input logic<130>,
+) {
+    always_comb {
+        $assert_continue(cond, "bad condition");
+    }
+}
+"#, "Top").four_state(true);
+
+        let cond = sim.signal("cond");
+        let known_one = BigUint::from(1u8) << 100usize;
+        let unknown = BigUint::from(1u8) << 2usize;
+        sim.drain_runtime_events();
+
+        for (unknown_value, label) in [(1u8, "X"), (0u8, "Z")] {
+            sim.modify(|io| {
+                io.set_four_state(
+                    cond,
+                    &known_one | (&unknown * unknown_value),
+                    unknown.clone(),
+                );
+            })
+            .unwrap();
+            assert!(
+                sim.drain_runtime_events().is_empty(),
+                "known one plus {label} must pass",
+            );
+
+            sim.modify(|io| {
+                io.set_four_state(cond, &unknown * unknown_value, unknown.clone());
+            })
+            .unwrap();
+            assert_eq!(
+                sim.drain_runtime_events(),
+                vec![celox::RuntimeEvent::AssertContinue {
+                    message: "bad condition".to_string(),
+                }],
+                "only {label} must fail",
+            );
+        }
+    }
+
     fn wide_ternary_condition_known_one_dominates_unknown_bits(sim) {
         @omit_veryl;
         @build Simulator::builder(r#"

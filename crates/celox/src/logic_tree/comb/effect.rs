@@ -138,7 +138,7 @@ fn collect_system_function_effect(
         observed_inputs.extend(cond_sources.iter().copied());
         collector.sensitivity.extend(cond_sources);
         collect_expression_position_inputs(module, cond, &mut position_inputs)?;
-        Some(cond_node)
+        Some(procedural_condition(arena, cond_node)?)
     } else {
         None
     };
@@ -560,6 +560,7 @@ fn collect_function_body_effects(
 
         let ((cond_node, cond_sources), cond_bounds) =
             eval_expression(module, &state.store, &cond, arena, None)?;
+        let cond_node = procedural_condition(arena, cond_node)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
         if let Some(cond_val) = constant_bool(arena, cond_node) {
@@ -740,6 +741,7 @@ fn collect_function_body_effects(
 
                 let ((cond_node, cond_sources), _) =
                     eval_expression(module, &state.store, &if_stmt.cond, arena, None)?;
+                let cond_node = procedural_condition(arena, cond_node)?;
                 let true_guard = arena.alloc(SLTNode::Binary(
                     state.live_expr,
                     BinaryOp::LogicAnd,
@@ -970,6 +972,7 @@ pub(super) fn collect_comb_effects_statements(
                 collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)?;
                 let ((cond_node, sources), _) =
                     eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                let cond_node = procedural_condition(arena, cond_node)?;
                 collector.sensitivity.extend(sources.iter().copied());
                 let saved_guard = collector.active_guard;
                 let saved_guard_sources = collector.active_guard_sources.clone();
@@ -1058,6 +1061,7 @@ fn collect_comb_effects_case(
         let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         collect_expression_effects(module, &store, &cond, arena, collector)?;
         let ((cond_node, sources), _) = eval_expression(module, &store, &cond, arena, None)?;
+        let cond_node = procedural_condition(arena, cond_node)?;
         collector.sensitivity.extend(sources.iter().copied());
 
         let saved_guard = collector.active_guard;

@@ -704,6 +704,81 @@ assign y = a >: b;
 
     }
 
+    // Signed ordering must use the declared sign bit when the top storage
+    // chunk is only partially occupied.
+    fn test_wide_signed_compare_non_chunk_aligned(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+a65: input signed logic<65>,
+b65: input signed logic<65>,
+a127: input signed logic<127>,
+b127: input signed logic<127>,
+lt65: output logic,
+le65: output logic,
+gt65: output logic,
+ge65: output logic,
+lt127: output logic,
+le127: output logic,
+gt127: output logic,
+ge127: output logic,
+) {
+assign lt65 = a65 <: b65;
+assign le65 = a65 <= b65;
+assign gt65 = a65 >: b65;
+assign ge65 = a65 >= b65;
+assign lt127 = a127 <: b127;
+assign le127 = a127 <= b127;
+assign gt127 = a127 >: b127;
+assign ge127 = a127 >= b127;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let a65 = sim.signal("a65");
+        let b65 = sim.signal("b65");
+        let a127 = sim.signal("a127");
+        let b127 = sim.signal("b127");
+        let outputs = [
+            sim.signal("lt65"),
+            sim.signal("le65"),
+            sim.signal("gt65"),
+            sim.signal("ge65"),
+            sim.signal("lt127"),
+            sim.signal("le127"),
+            sim.signal("gt127"),
+            sim.signal("ge127"),
+        ];
+
+        let negative65 = (BigUint::from(1u8) << 65usize) - BigUint::from(1u8);
+        let negative127 = (BigUint::from(1u8) << 127usize) - BigUint::from(1u8);
+
+        // -1 compared with +1. At widths 65 and 127 the sign bits are
+        // physical top-chunk bits 0 and 62 respectively, never bit 63.
+        sim.modify(|io| {
+            io.set_wide(a65, negative65.clone());
+            io.set_wide(b65, BigUint::from(1u8));
+            io.set_wide(a127, negative127.clone());
+            io.set_wide(b127, BigUint::from(1u8));
+        })
+        .unwrap();
+        for (signal, expected) in outputs.iter().zip([1u8, 1, 0, 0, 1, 1, 0, 0]) {
+            assert_eq!(sim.get(*signal), expected.into());
+        }
+
+        // Reverse the signs to cover both signed ordering directions.
+        sim.modify(|io| {
+            io.set_wide(a65, BigUint::from(1u8));
+            io.set_wide(b65, negative65);
+            io.set_wide(a127, BigUint::from(1u8));
+            io.set_wide(b127, negative127);
+        })
+        .unwrap();
+        for (signal, expected) in outputs.iter().zip([0u8, 0, 1, 1, 0, 0, 1, 1]) {
+            assert_eq!(sim.get(*signal), expected.into());
+        }
+    }
+
     // 128-bit reduction NAND.
     fn test_wide_comb_reduction_nand(sim) {
         @ignore_on(veryl);

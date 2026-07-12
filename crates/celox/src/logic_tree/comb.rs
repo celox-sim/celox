@@ -470,6 +470,7 @@ fn eval_case(
         let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         let ((cond_expr, cond_sources), cond_bounds) =
             eval_expression(module, &store, &cond, arena, None)?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -523,6 +524,34 @@ fn constant_bool(arena: &SLTNodeArena<VarId>, node: NodeId) -> Option<bool> {
         SLTNode::Constant(val, _, _, _) => Some(*val != BigUint::from(0u8)),
         _ => None,
     }
+}
+
+/// Convert an expression result to the boolean used by procedural control.
+///
+/// Unlike the conditional operator, an unknown condition in an `if`, `case`,
+/// or loop does not merge both paths: only a definite one takes the true
+/// path.  Keep that distinction in the SLT instead of relying on a backend's
+/// treatment of a four-state mux.
+fn procedural_condition<A: Clone + Eq + Hash>(
+    arena: &mut SLTNodeArena<A>,
+    condition: NodeId,
+) -> Result<NodeId, SLTNodeFactsError> {
+    if let SLTNode::Constant(value, unknown, width, _) = arena.get(condition) {
+        let known_mask = if *width == 0 {
+            BigUint::from(0u8)
+        } else {
+            let width_mask = (BigUint::from(1u8) << *width) - BigUint::from(1u8);
+            &width_mask ^ (unknown & &width_mask)
+        };
+        return arena.alloc(SLTNode::Constant(
+            BigUint::from(u8::from((value & known_mask) != BigUint::from(0u8))),
+            BigUint::from(0u8),
+            1,
+            false,
+        ));
+    }
+    let truth = arena.alloc(SLTNode::Unary(UnaryOp::Or, condition))?;
+    arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, truth))
 }
 
 fn merge_control_expr(
@@ -781,6 +810,7 @@ fn eval_loop_case(
             arena,
             None,
         )?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -854,6 +884,7 @@ fn eval_loop_if(
 ) -> Result<LoopControlState, ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
         eval_expression(module, &state.store, &stmt.cond, arena, None)?;
+    let cond_expr = procedural_condition(arena, cond_expr)?;
     let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
     if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -2243,6 +2274,7 @@ fn eval_if(
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
         eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+    let cond_expr = procedural_condition(arena, cond_expr)?;
     boundaries.extend(cond_bounds);
 
     // Constant folding: if condition is a constant, inline the appropriate side

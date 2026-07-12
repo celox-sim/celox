@@ -1856,17 +1856,82 @@ fn test_four_state_multibit_mux_with_x(sim) {
     })
     .unwrap();
 
-    // Selector has X → result should have X (conservative mux of all branches)
+    // A procedural condition takes its true branch only for a definite one.
+    // Both equality tests are unknown here, so control reaches the final else.
     sim.modify(|io| {
         io.set_four_state(id_sel, BigUint::from(0u32), BigUint::from(1u32)); // bit 0 is X
     })
     .unwrap();
-    let (_, m) = sim.get_four_state(id_y);
-    assert_ne!(
-        m,
-        BigUint::from(0u32),
-        "Multi-bit mux with X in selector should produce X in output"
-    );
+    let (v, m) = sim.get_four_state(id_y);
+    assert_eq!(m, BigUint::from(0u32));
+    assert_eq!(v, BigUint::from(0xCCu32));
+}
+
+fn test_four_state_procedural_case_x_uses_default(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            sel: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                case sel {
+                    2'd0: y = 8'd10;
+                    2'd1: y = 8'd20;
+                    default: y = 8'd99;
+                }
+            }
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let sel = sim.signal("sel");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set_four_state(sel, BigUint::from(1u32), BigUint::from(1u32));
+    })
+    .unwrap();
+
+    let (value, mask) = sim.get_four_state(y);
+    assert_eq!(mask, BigUint::from(0u32));
+    assert_eq!(value, BigUint::from(99u32));
+}
+
+fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            cond: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                if cond {
+                    y = 8'hA5;
+                } else {
+                    y = 8'h5A;
+                }
+            }
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let cond = sim.signal("cond");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        // 2'b1x has a known nonzero bit, so it is a true procedural condition.
+        io.set_four_state(cond, BigUint::from(2u32), BigUint::from(1u32));
+    })
+    .unwrap();
+
+    let (value, mask) = sim.get_four_state(y);
+    assert_eq!(mask, BigUint::from(0u32));
+    assert_eq!(value, BigUint::from(0xA5u32));
 }
 
 // ==========================================================================

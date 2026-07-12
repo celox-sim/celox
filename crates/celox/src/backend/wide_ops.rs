@@ -65,7 +65,7 @@ pub fn emit_wide_binary(
 
         // 8. Signed comparisons ─────────────────────────────
         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS => {
-            emit_wide_signed_cmp(builder, op, l_chunks, r_chunks, num_chunks)
+            emit_wide_signed_cmp(builder, op, l_chunks, r_chunks, num_chunks, operation_width)
         }
 
         // 9. Division / remainder ───────────────────────────
@@ -696,6 +696,7 @@ fn emit_wide_signed_cmp(
     l_chunks: &[Value],
     r_chunks: &[Value],
     num_chunks: usize,
+    logical_width: usize,
 ) -> Vec<Value> {
     // Result when both operands are equal:
     // LeS/GeS => true, LtS/GtS => false.
@@ -705,12 +706,26 @@ fn emit_wide_signed_cmp(
         0i64
     };
     let mut res = builder.ins().iconst(types::I8, init_val);
+    let top_bits = logical_width - (num_chunks - 1) * 64;
     for i in 0..num_chunks {
         let l = get_chunk_as_i64(builder, l_chunks, i);
         let r = get_chunk_as_i64(builder, r_chunks, i);
         let eq = builder.ins().icmp(IntCC::Equal, l, r);
         let cmp = if i == num_chunks - 1 {
-            // The most-significant chunk uses signed (strict) comparison.
+            // A partial top chunk stores its sign below physical bit 63.
+            // Sign-extend from the logical sign bit before using an i64 signed
+            // comparison; otherwise negative non-chunk-aligned values appear
+            // positive.
+            let (l, r) = if top_bits < 64 {
+                let shift = (64 - top_bits) as i64;
+                let l = builder.ins().ishl_imm(l, shift);
+                let l = builder.ins().sshr_imm(l, shift);
+                let r = builder.ins().ishl_imm(r, shift);
+                let r = builder.ins().sshr_imm(r, shift);
+                (l, r)
+            } else {
+                (l, r)
+            };
             builder.ins().icmp(
                 match op {
                     BinaryOp::LtS | BinaryOp::LeS => IntCC::SignedLessThan,

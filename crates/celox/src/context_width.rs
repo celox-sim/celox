@@ -100,84 +100,22 @@ pub(crate) fn factor_signed(factor: &Factor) -> bool {
             SystemFunctionKind::Unsigned(_) => false,
             _ => call.comptime.r#type.signed,
         },
-        Factor::Value(comptime) | Factor::Variable(_, _, _, comptime) => comptime.r#type.signed,
+        // Constant folding resets expr_context and can leave the copied type
+        // describing the pre-selection base. The evaluated Value is the only
+        // remaining unsigned-select fact in that AIR shape. Cases where
+        // folding also erases a type-cast boundary are an upstream AIR loss,
+        // tracked in docs/internals/veryl-analyzer-upstream-issues.md.
+        Factor::Value(comptime) => comptime
+            .get_value()
+            .map(|value| value.signed())
+            .unwrap_or(comptime.expr_context.signed),
+        // VarSelect is a packed bit/part selection. Its value is unsigned;
+        // VarIndex has already been split out and does not change signedness.
+        Factor::Variable(_, _, select, comptime) => {
+            select.is_empty() && comptime.expr_context.signed
+        }
         Factor::FunctionCall(call) => call.comptime.r#type.signed,
         Factor::Anonymous(comptime) | Factor::Unknown(comptime) => comptime.r#type.signed,
-    }
-}
-
-/// Whether an expression contains a numeric size cast (`value as N`).
-///
-/// Veryl 0.20.2 folds these casts as unsigned even though size casts preserve
-/// the source signedness. Celox keeps such expressions structural and applies
-/// the language rule itself instead of consuming that folded value.
-pub(crate) fn contains_numeric_width_cast(expr: &Expression) -> bool {
-    let factor_contains = |factor: &Factor| match factor {
-        Factor::Variable(_, index, select, _) => {
-            index.0.iter().any(contains_numeric_width_cast)
-                || select.0.iter().any(contains_numeric_width_cast)
-                || select
-                    .1
-                    .as_ref()
-                    .is_some_and(|(_, expr)| contains_numeric_width_cast(expr))
-        }
-        Factor::FunctionCall(call) => call.inputs.values().any(contains_numeric_width_cast),
-        Factor::SystemFunctionCall(call) => match &call.kind {
-            SystemFunctionKind::Bits(input)
-            | SystemFunctionKind::Size(input)
-            | SystemFunctionKind::Clog2(input)
-            | SystemFunctionKind::Onehot(input)
-            | SystemFunctionKind::Signed(input)
-            | SystemFunctionKind::Unsigned(input) => contains_numeric_width_cast(&input.0),
-            SystemFunctionKind::Readmemh(input, _) => contains_numeric_width_cast(&input.0),
-            SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => inputs
-                .iter()
-                .any(|input| contains_numeric_width_cast(&input.0)),
-            SystemFunctionKind::Assert { cond, args, .. } => {
-                contains_numeric_width_cast(&cond.0)
-                    || args
-                        .iter()
-                        .any(|input| contains_numeric_width_cast(&input.0))
-            }
-            SystemFunctionKind::Finish => false,
-        },
-        Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
-    };
-
-    match expr {
-        Expression::Term(factor) => factor_contains(factor),
-        Expression::Binary(lhs, Op::As, rhs, _) => {
-            let numeric_target = matches!(
-                rhs.as_ref(),
-                Expression::Term(factor)
-                    if matches!(factor.as_ref(), Factor::Value(comptime)
-                        if matches!(comptime.value, ValueVariant::Numeric(_)))
-            );
-            numeric_target || contains_numeric_width_cast(lhs) || contains_numeric_width_cast(rhs)
-        }
-        Expression::Binary(lhs, _, rhs, _) => {
-            contains_numeric_width_cast(lhs) || contains_numeric_width_cast(rhs)
-        }
-        Expression::Unary(_, inner, _) => contains_numeric_width_cast(inner),
-        Expression::Ternary(cond, then_expr, else_expr, _) => {
-            contains_numeric_width_cast(cond)
-                || contains_numeric_width_cast(then_expr)
-                || contains_numeric_width_cast(else_expr)
-        }
-        Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
-            contains_numeric_width_cast(expr)
-                || repeat.as_ref().is_some_and(contains_numeric_width_cast)
-        }),
-        Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
-            ArrayLiteralItem::Value(expr, repeat) => {
-                contains_numeric_width_cast(expr)
-                    || repeat.as_deref().is_some_and(contains_numeric_width_cast)
-            }
-            ArrayLiteralItem::Defaul(expr) => contains_numeric_width_cast(expr),
-        }),
-        Expression::StructConstructor(_, fields, _) => fields
-            .iter()
-            .any(|(_, expr)| contains_numeric_width_cast(expr)),
     }
 }
 

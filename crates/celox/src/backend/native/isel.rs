@@ -6603,6 +6603,7 @@ fn lower_wide_binary(
         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS => {
             let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
             let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+            let top_bits = operation_width - (n_chunks - 1) * 64;
 
             let init_val = if matches!(op, BinaryOp::LeS | BinaryOp::GeS) {
                 1u64
@@ -6638,10 +6639,17 @@ fn lower_wide_binary(
                     kind: CmpKind::Eq,
                 });
                 // MSB chunk uses signed comparison, lower chunks use unsigned
-                let kind = if i == n_chunks - 1 {
-                    signed_kind
+                let (l, r, kind) = if i == n_chunks - 1 {
+                    // Wide values keep unused top-chunk bits clear. For a
+                    // non-64-multiple width the logical sign is therefore not
+                    // physical bit 63; extend it before the signed compare.
+                    (
+                        sign_extend_scalar(ctx, block, l, top_bits),
+                        sign_extend_scalar(ctx, block, r, top_bits),
+                        signed_kind,
+                    )
                 } else {
-                    unsigned_kind
+                    (l, r, unsigned_kind)
                 };
                 let cmp = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::Cmp {

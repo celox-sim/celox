@@ -187,6 +187,23 @@ fn slt_width<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> usi
     crate::logic_tree::comb::get_width(node, arena)
 }
 
+/// Procedural control represents truth as `ToTwoState(Or(cond))`. Count-idiom
+/// lowering is enabled only in two-state mode, where that exact pair is an
+/// identity for a one-bit `cond`. Do not look through a real wide reduction.
+fn unwrap_slt_one_bit_procedural_truth<A: Hash + Eq + Clone>(
+    node: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> NodeId {
+    if let SLTNode::Unary(UnaryOp::ToTwoState, truth) = arena.get(node)
+        && let SLTNode::Unary(UnaryOp::Or, inner) = arena.get(*truth)
+        && slt_width(*inner, arena) == 1
+    {
+        *inner
+    } else {
+        node
+    }
+}
+
 fn slt_literal_zero_of_width<A: Hash + Eq + Clone>(
     node: NodeId,
     width: usize,
@@ -203,6 +220,7 @@ fn resolve_slt_bit_origin<A: Hash + Eq + Clone>(
     node: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> Option<(SLTBitOrigin<A>, usize)> {
+    let node = unwrap_slt_one_bit_procedural_truth(node, arena);
     match arena.get(node) {
         SLTNode::Input {
             variable,
@@ -255,6 +273,7 @@ fn resolve_slt_extended_bit<A: Hash + Eq + Clone>(
     node: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> Option<SLTBitTerm<A>> {
+    let node = unwrap_slt_one_bit_procedural_truth(node, arena);
     if slt_width(node, arena) == 1 {
         return Some(SLTBitTerm {
             predicate: node,
@@ -481,9 +500,10 @@ fn collect_slt_conditional_increments<A: Hash + Eq + Clone>(
         {
             return None;
         }
+        let cond = unwrap_slt_one_bit_procedural_truth(*cond, arena);
         terms.push(SLTBitTerm {
-            predicate: *cond,
-            origin: resolve_slt_bit_origin(*cond, arena),
+            predicate: cond,
+            origin: resolve_slt_bit_origin(cond, arena),
         });
         cursor = *else_expr;
         if slt_literal_zero_of_width(cursor, accumulator_width, arena) {
@@ -585,6 +605,7 @@ fn match_slt_boolean_not<A: Hash + Eq + Clone>(
     node: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> Option<NodeId> {
+    let node = unwrap_slt_one_bit_procedural_truth(node, arena);
     match arena.get(node) {
         SLTNode::Unary(UnaryOp::LogicNot, inner) => Some(*inner),
         SLTNode::Binary(lhs, BinaryOp::Eq, rhs) if slt_const_u64(*lhs, arena) == Some(0) => {
@@ -624,6 +645,7 @@ fn match_slt_found_update<A: Hash + Eq + Clone>(
     predicate: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> bool {
+    let predicate = unwrap_slt_one_bit_procedural_truth(predicate, arena);
     match arena.get(next) {
         SLTNode::Binary(lhs, BinaryOp::Or | BinaryOp::LogicOr, rhs) => {
             (*lhs == previous && *rhs == predicate) || (*rhs == previous && *lhs == predicate)
@@ -633,7 +655,7 @@ fn match_slt_found_update<A: Hash + Eq + Clone>(
             then_expr,
             else_expr,
         } => {
-            *cond == predicate
+            unwrap_slt_one_bit_procedural_truth(*cond, arena) == predicate
                 && *else_expr == previous
                 && match_slt_sets_found(*then_expr, previous, arena)
         }
@@ -662,8 +684,9 @@ fn match_slt_found_reduction<A: Hash + Eq + Clone>(
         if slt_width(*cond, arena) != 1 || slt_width(*previous, arena) != 1 {
             return None;
         }
+        let cond = unwrap_slt_one_bit_procedural_truth(*cond, arena);
         let predicate = if match_slt_sets_found(*then_expr, *previous, arena) {
-            SLTCountPredicate::Node(*cond)
+            SLTCountPredicate::Node(cond)
         } else {
             let SLTNode::Binary(lhs, BinaryOp::Or | BinaryOp::LogicOr, rhs) = arena.get(*then_expr)
             else {
@@ -679,7 +702,7 @@ fn match_slt_found_reduction<A: Hash + Eq + Clone>(
             if slt_width(lane, arena) != 1 {
                 return None;
             }
-            SLTCountPredicate::And(*cond, lane)
+            SLTCountPredicate::And(cond, lane)
         };
         predicates.push(predicate);
         cursor = *previous;
@@ -738,6 +761,7 @@ fn split_slt_priority_condition<A: Hash + Eq + Clone>(
     accumulator: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> (bool, NodeId, Option<NodeId>) {
+    let cond = unwrap_slt_one_bit_procedural_truth(cond, arena);
     let SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::LogicAnd, rhs) = arena.get(cond) else {
         return (false, cond, None);
     };
@@ -786,11 +810,12 @@ fn match_slt_priority_count<A: Hash + Eq + Clone>(
         else {
             return None;
         };
+        let cond = unwrap_slt_one_bit_procedural_truth(*cond, arena);
         let mut value_node = *then_expr;
-        let mut predicate = SLTCountPredicate::Node(*cond);
-        let mut origin_guard = Some(*cond);
+        let mut predicate = SLTCountPredicate::Node(cond);
+        let mut origin_guard = Some(cond);
         let (is_guarded, guard, matched_default) =
-            split_slt_priority_condition(*cond, *else_expr, arena);
+            split_slt_priority_condition(cond, *else_expr, arena);
 
         // Procedural `if outer { if inner { acc = constant; } }` expands to
         // two muxes with the same else accumulator.  Treat it as one write
@@ -804,19 +829,20 @@ fn match_slt_priority_count<A: Hash + Eq + Clone>(
             } = arena.get(value_node)
             && *inner_else == *else_expr
             && slt_const_u64(*inner_then, arena).is_some()
-            && slt_width(*cond, arena) == 1
+            && slt_width(cond, arena) == 1
             && (is_guarded || slt_width(*inner_cond, arena) == 1)
         {
+            let inner_cond = unwrap_slt_one_bit_procedural_truth(*inner_cond, arena);
             value_node = *inner_then;
             if is_guarded {
-                if conditional_gate.is_some_and(|previous| previous != *inner_cond) {
+                if conditional_gate.is_some_and(|previous| previous != inner_cond) {
                     return None;
                 }
-                conditional_gate = Some(*inner_cond);
+                conditional_gate = Some(inner_cond);
                 predicate = SLTCountPredicate::Node(guard);
                 origin_guard = Some(guard);
             } else {
-                predicate = SLTCountPredicate::And(*cond, *inner_cond);
+                predicate = SLTCountPredicate::And(cond, inner_cond);
                 origin_guard = None;
             }
             true
@@ -1420,6 +1446,16 @@ fn lift_slt_scan_lane_expr<A: Hash + Eq + Clone>(
 ) -> Option<SLTVectorExpr<A>> {
     if let Some(input) = match_slt_scan_indexed_bit(node, spec, state_variables, arena) {
         return Some(input);
+    }
+    // Procedural control normalizes a condition as ToTwoState(|cond).  The
+    // word-scan plan is emitted only in two-state mode, so that pair is an
+    // identity when the original condition is already one bit.  Look through
+    // exactly that shape; a reduction of a wider condition is not lane-wise.
+    if let SLTNode::Unary(UnaryOp::ToTwoState, truth) = arena.get(node)
+        && let SLTNode::Unary(UnaryOp::Or, inner) = arena.get(*truth)
+        && slt_width(*inner, arena) == 1
+    {
+        return lift_slt_scan_lane_expr(*inner, spec, state_variables, arena);
     }
     let mut forbidden = Vec::with_capacity(state_variables.len() + 1);
     forbidden.push(spec.loop_var);

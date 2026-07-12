@@ -1466,7 +1466,7 @@ fn test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_befo
     assert_eq!(sim.get(out_q), 0u32.into());
 }
 
-fn test_ff_function_call_nonvariable_argument_preserves_signed_logic_formal(sim) {
+fn test_ff_function_call_part_select_of_signed_formal_is_unsigned(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -1492,8 +1492,10 @@ fn test_ff_function_call_nonvariable_argument_preserves_signed_logic_formal(sim)
 
     sim.modify(|io| io.set(in_a, 0xFEu8)).unwrap();
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get(out_direct), 0xFFu32.into());
-    assert_eq!(sim.get(out_expr), 0xFFu32.into());
+    // A packed part-select is unsigned even when its base is signed, so >>>
+    // performs a logical shift here.
+    assert_eq!(sim.get(out_direct), 0x7Fu32.into());
+    assert_eq!(sim.get(out_expr), 0x7Fu32.into());
 }
 
 fn test_ff_function_call_sign_extends_narrow_signed_actual_before_slice(sim) {

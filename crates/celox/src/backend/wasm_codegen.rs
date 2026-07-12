@@ -1638,14 +1638,19 @@ fn compile_binary_wide(
             let l_sign = locals.alloc(1);
             let r_sign = locals.alloc(1);
             let top = l.num_chunks.max(r.num_chunks) - 1;
-            // Get sign bits (bit 63 of top chunk, or the actual top bit)
+            let sign_bit = ((l_width.max(r_width) - 1) % 64) as i64;
+            // The sign bit can be below bit 63 in a partial top chunk.
             emit_wide_get_chunk(instrs, &l, top);
-            instrs.push(Instruction::I64Const(63));
+            instrs.push(Instruction::I64Const(sign_bit));
             instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64And);
             instrs.push(Instruction::LocalSet(l_sign));
             emit_wide_get_chunk(instrs, &r, top);
-            instrs.push(Instruction::I64Const(63));
+            instrs.push(Instruction::I64Const(sign_bit));
             instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64And);
             instrs.push(Instruction::LocalSet(r_sign));
 
             // If signs differ: negative < positive

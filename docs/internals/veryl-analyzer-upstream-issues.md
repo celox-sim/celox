@@ -1,9 +1,9 @@
-# Veryl analyzer upstream issues
+# Veryl analyzer and simulator upstream issues
 
 This is a worklist for fixes to send upstream to Veryl. It is not a list of
-Celox compatibility rules. Each issue must first be reproduced with an
-unmodified `veryl-analyzer`, and the upstream regression should compare the
-analyzer/simulator result with the SystemVerilog emitted from the same source.
+Celox compatibility rules. Each issue must first be reproduced with the
+unmodified analyzer and simulator, then compared with the SystemVerilog emitted
+from the same source.
 
 Verified revisions:
 
@@ -12,11 +12,29 @@ Verified revisions:
 - [upstream `master`](https://github.com/veryl-lang/veryl/commit/0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f)
   (`0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f`)
 
-The four issues below are present in 0.20.2 and remain in that `master`
-revision. The 99 commits after 0.20.2 contain no signed-cast or packed-select
-fix that supersedes them.
+The four issue groups below are present in 0.20.2 and remain in that `master`
+revision. The 99 commits after 0.20.2 contain no fix that supersedes them.
 
-## Numeric width casts do not preserve source signedness
+## AIR facts that are not analyzer bugs
+
+AIR does not encode signedness solely in an expression's result type. It also
+keeps the operand evaluation context and represents a variable selection as a
+base variable plus `VarSelect`. Consumers must apply the operator/select rules:
+
+- A comparison has an unsigned one-bit result, but signed Div/Rem/relational
+  evaluation is determined from the two operand contexts. The official
+  simulator correctly recomputes it from
+  `lhs.expr_context.signed && rhs.expr_context.signed`.
+- An ordinary packed bit/part select is unsigned. AIR retains the base variable
+  and `VarSelect`; a consumer must not use the base declaration's signedness as
+  the selected expression's signedness.
+- Unary `~` uses its operand evaluation context. Its result must not be inferred
+  from unrelated parent/result metadata.
+
+Celox treating any one of those metadata fields as universal was a Celox AIR
+consumer bug. These cases must not be filed as analyzer bugs.
+
+## Numeric width cast signedness differs from emitted SystemVerilog
 
 Minimal reproduction:
 
@@ -29,27 +47,62 @@ module Top (
 }
 ```
 
-For `a = 5'b11001` (`-7`), the emitted SystemVerilog size cast is equivalent to
+For `a = 5'b11001` (`-7`), the emitter produces the SystemVerilog equivalent of
 `8'(a)`. A SystemVerilog size cast preserves the self-determined expression's
-signedness, so the eight-bit result is signed and the assignment must produce
-`16'hfff9`. The analyzer instead marks every numeric-width cast unsigned, so
-the runtime expression produces `16'h00f9`. Constant evaluation still widens
-from the source type's signedness, which makes constant and runtime paths
-disagree as well.
+signedness, so that code produces `16'hfff9`. The three existing paths disagree:
+
+- the official simulator's runtime path treats the integer cast as transparent
+  and produces `16'h0019`, without first resizing five bits to eight;
+- analyzer constant evaluation resizes to `8'hf9` but marks the cast result
+  unsigned, producing `16'h00f9` in the outer assignment;
+- emitted SystemVerilog produces `16'hfff9`.
+
+Upstream's current regression explicitly expects unsigned behavior for an
+unsigned input, which cannot distinguish source-signedness preservation from
+always-unsigned behavior. This requires one shared rule across the analyzer,
+simulator, and emitter.
 
 Cause:
 
 - [`Expression::gather_context` forces `ctx.signed = false` for every numeric
   `as` target](https://github.com/veryl-lang/veryl/blob/0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f/crates/analyzer/src/ir/expression.rs#L200-L207).
-- The existing unsigned-source regression cannot distinguish "preserve the
-  source" from "always unsigned" because its input is itself unsigned.
+- The simulator drops most integer cast nodes as transparent, so runtime and
+  constant evaluation do not even agree on resizing.
 
 Upstream fix and regression:
 
-- For a numeric width target, copy the source expression's signedness; for a
-  type target, use the target type's signedness.
+- Implement the SystemVerilog size-cast rule used by the emitter: resize using
+  the source expression's self-determined signedness and preserve that
+  signedness on the result.
 - Test signed and unsigned runtime inputs and the equivalent constants, both
   when widening and when feeding `/`, `%`, comparison, and `>>>`.
+
+## Runtime packed select keeps the base signedness in downstream operations
+
+Minimal reproduction:
+
+```veryl
+module Top (
+    x: input signed logic<8>,
+    y: output logic<8>,
+) {
+    assign y = x[7:0] >>> 1;
+}
+```
+
+For `x = 8'hfe`, a packed part-select is unsigned even when it spans the whole
+vector. The emitted SystemVerilog therefore produces `8'h7f`. All four official
+simulator backends in 0.20.2 instead produce `8'hff`.
+
+AIR correctly retains `VarSelect`, and evaluating the select as a `Value`
+clears its signed flag. The simulator's ProtoExpression conversion separately
+copies the base factor's signed expression context; the later arithmetic-shift
+selection reads that stale context and chooses a signed shift.
+
+The fix must derive the post-select context from the selected expression, not
+blindly copy the base context. Regressions need bit selects, partial and
+full-width part-selects, dynamic selects, and the boundary where selecting one
+element of a packed array yields a named signed element type.
 
 ## Boolean conversion loses wide and four-state values
 
@@ -108,27 +161,16 @@ Upstream fix and regression:
 - Cover U64 and BigUint storage, pure X/Z, known-one-plus-X/Z, and known bits
   above bit 64.
 
-## Packed selects retain the declaration's signedness
+## Constant folding loses operation-specific type information
 
-Minimal reproduction:
+Constant folding replaces an expression with `Expression::create_value`, then
+copies the old result type but not its expression context. Consumers can then
+see three contradictory facts: the folded `Value` signedness, the copied type
+signedness, and a default unsigned expression context. A folded ordinary packed
+select is one example; an integer type cast is another. No downstream consumer
+can recover the erased operator from those fields alone.
 
-```veryl
-module Top (
-    a: input signed logic<8>,
-    bit_result: output logic<16>,
-    part_result: output logic<16>,
-) {
-    assign bit_result = a[7];
-    assign part_result = a[3:0];
-}
-```
-
-For `a = 8'h8f`, SystemVerilog bit- and part-select results are unsigned, so
-the outputs must be `16'h0001` and `16'h000f`. The analyzer updates the
-selected shape but leaves `comptime.r#type.signed` copied from the full
-declaration, allowing the results to sign-extend.
-
-Constant folding can fail more severely for packed enum elements:
+Packed enum selection also loses the selected value and width:
 
 ```veryl
 module EnumSelect (
@@ -147,50 +189,11 @@ Unmodified 0.20.2 analyzer IR lowers the final assignment to `1'h0`; the
 selected enum element should retain its two-bit `Color` type and value
 `2'h2`. This is an analyzer result, not a Celox source-rewrite artifact.
 
-Cause:
-
-- [`Factor::Variable::gather_context` applies the select width and then returns
-  the unchanged type signedness](https://github.com/veryl-lang/veryl/blob/0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f/crates/analyzer/src/ir/expression.rs#L754-L790).
-- Constant folding can replace the selected variable with a value while
-  retaining inconsistent type facts, so constants and runtime variables must
-  be tested separately.
-- The expected unsigned behavior for ordinary signed packed selects was
-  already reported in [Veryl issue #94](https://github.com/veryl-lang/veryl/issues/94).
-
-The fix must not blindly clear signedness for every bracket. A packed array of
-a named signed element type has a signed result exactly when all dimensions
-outside that named type have been consumed. Selecting further inside that
-element, selecting only part of the outer aggregate, or taking any range is
-unsigned. Regressions therefore need ordinary vectors, part selects, nested
-packed dimensions, typedef aliases, named signed elements, enum elements, and
-constant/runtime forms.
-
-## Unary bitwise NOT has contradictory signedness
-
-Minimal reproduction:
-
-```veryl
-module Top (
-    a: input signed logic<8>,
-    y: output logic,
-) {
-    assign y = (~a) <: (1 as i8);
-}
-```
-
-For `a = 0`, `~a` is signed `8'hff` (`-1`), so the signed comparison is true.
-The analyzer's expression-context calculation preserves the operand's
-signedness, but its type calculation clears it. Downstream users of the IR can
-therefore perform an unsigned comparison and produce false.
-
-Cause:
-
-- [`eval_context_unary` correctly returns the input context for
-  `Op::BitNot`](https://github.com/veryl-lang/veryl/blob/0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f/crates/analyzer/src/ir/op.rs#L128-L140).
-- [`eval_type_unary` incorrectly sets the result type to
-  unsigned](https://github.com/veryl-lang/veryl/blob/0230fbe76b8b4fd67bc09b2aa0378a6e96e0683f/crates/analyzer/src/ir/op.rs#L231-L255).
-
-Remove the signedness reset for `Op::BitNot` and add tests that consume the
-result at a signed comparison, division/remainder, arithmetic shift, and wider
-assignment boundary. Reduction NOT/NOR and logical NOT remain one-bit
-unsigned operations and should stay separate.
+Constant selection must preserve both the selected element width and the
+selected named type. A packed array of a named signed element type is signed
+exactly when all dimensions outside that named type have been consumed.
+Selecting further inside that element, selecting only part of the outer
+aggregate, or taking a range is unsigned. Regressions therefore need enum
+elements, typedef aliases, nested named signed elements, ordinary bit/part
+selects, and constant/runtime forms. The ordinary unsigned-select rule is
+already discussed in [Veryl issue #94](https://github.com/veryl-lang/veryl/issues/94).

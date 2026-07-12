@@ -1,7 +1,6 @@
 use super::{Domain, FfParser};
 use crate::context_width::{
-    ValueContext, binary_semantics, cast_semantics, contains_numeric_width_cast, expression_signed,
-    resolve_binary_op,
+    ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
 use crate::ir::{
     BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
@@ -2244,7 +2243,7 @@ impl<'a> FfParser<'a> {
         // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.
         if !matches!(expr, Expression::Term(_)) {
             let ct = expr.comptime();
-            if ct.is_const && !contains_numeric_width_cast(expr) {
+            if ct.is_const {
                 if let Some((celox_value, mask_xz, width, _)) =
                     celox_value_from_comptime_in_context(ct, context_width)
                 {

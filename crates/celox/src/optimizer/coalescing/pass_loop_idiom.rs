@@ -408,7 +408,7 @@ fn match_priority_count(
             return None;
         }
         let (is_guarded, guard, matched_default) =
-            split_priority_condition(instructions, defs, cond, else_value);
+            split_priority_condition(instructions, defs, register_map, cond, else_value);
         if let Some(previous) = guarded {
             if previous != is_guarded {
                 return None;
@@ -502,9 +502,11 @@ fn match_priority_count(
 fn split_priority_condition(
     instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
     defs: &HashMap<RegisterId, usize>,
+    register_map: &HashMap<RegisterId, RegisterType>,
     cond: RegisterId,
     accumulator: RegisterId,
 ) -> (bool, RegisterId, Option<RegisterId>) {
+    let cond = unwrap_one_bit_procedural_truth(instructions, defs, register_map, cond);
     let Some(&idx) = defs.get(&cond) else {
         return (false, cond, None);
     };
@@ -548,6 +550,7 @@ fn resolve_bit_source(
     register_map: &HashMap<RegisterId, RegisterType>,
     reg: RegisterId,
 ) -> Option<(RegisterId, usize)> {
+    let reg = unwrap_one_bit_procedural_truth(instructions, defs, register_map, reg);
     let &idx = defs.get(&reg)?;
     match instructions[idx] {
         SIRInstruction::Slice(_, source, offset, 1) => Some((source, offset)),
@@ -583,6 +586,36 @@ fn resolve_bit_source(
             }
         }
         _ => None,
+    }
+}
+
+/// In two-state lowering, procedural control represents a condition as
+/// `ToTwoState(Or(cond))`. The loop-idiom pass is disabled in four-state mode,
+/// so this exact pair is an identity when `cond` is already one bit. A wider
+/// reduction must remain visible because it is not lane-wise.
+fn unwrap_one_bit_procedural_truth(
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+    defs: &HashMap<RegisterId, usize>,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    reg: RegisterId,
+) -> RegisterId {
+    let Some(&to_two_state_idx) = defs.get(&reg) else {
+        return reg;
+    };
+    let SIRInstruction::Unary(_, UnaryOp::ToTwoState, truth) = instructions[to_two_state_idx]
+    else {
+        return reg;
+    };
+    let Some(&truth_idx) = defs.get(&truth) else {
+        return reg;
+    };
+    let SIRInstruction::Unary(_, UnaryOp::Or, inner) = instructions[truth_idx] else {
+        return reg;
+    };
+    if register_map.get(&inner).map(RegisterType::width) == Some(1) {
+        inner
+    } else {
+        reg
     }
 }
 
@@ -808,6 +841,13 @@ mod tests {
             reg
         }
 
+        fn unary(&mut self, width: usize, op: UnaryOp, source: RegisterId) -> RegisterId {
+            let reg = self.reg(width);
+            self.instructions
+                .push(SIRInstruction::Unary(reg, op, source));
+            reg
+        }
+
         fn slice(&mut self, source: RegisterId, offset: usize) -> RegisterId {
             let reg = self.reg(1);
             self.instructions
@@ -881,6 +921,7 @@ mod tests {
 
     fn priority_unit(
         guarded: bool,
+        procedural_truth: bool,
         bit_order: &[usize],
         values: &[usize],
     ) -> ExecutionUnit<RegionedAbsoluteAddr> {
@@ -894,12 +935,16 @@ mod tests {
         for (&bit_index, &value) in bit_order.iter().zip(values) {
             let bit = b.slice(source, bit_index);
             let guard = b.binary(1, bit, BinaryOp::Eq, one);
-            let cond = if guarded {
+            let mut cond = if guarded {
                 let unmatched = b.binary(1, acc, BinaryOp::Eq, default);
                 b.binary(1, guard, BinaryOp::LogicAnd, unmatched)
             } else {
                 guard
             };
+            if procedural_truth {
+                let truth = b.unary(1, UnaryOp::Or, cond);
+                cond = b.unary(1, UnaryOp::ToTwoState, truth);
+            }
             let value = b.imm(result_width, value as u64);
             acc = b.mux(result_width, cond, value, acc);
         }
@@ -908,7 +953,7 @@ mod tests {
 
     #[test]
     fn recovers_guarded_first_write_clz() {
-        let mut unit = priority_unit(true, &[3, 2, 1, 0], &[0, 1, 2, 3]);
+        let mut unit = priority_unit(true, false, &[3, 2, 1, 0], &[0, 1, 2, 3]);
         let source = RegisterId(0);
         run(&mut unit);
         assert_eq!(count_op(&unit), Some((UnaryOp::CountLeadingZeros, source)));
@@ -921,15 +966,23 @@ mod tests {
     }
 
     #[test]
+    fn recovers_priority_count_through_one_bit_procedural_truth() {
+        let mut unit = priority_unit(true, true, &[3, 2, 1, 0], &[0, 1, 2, 3]);
+        let source = RegisterId(0);
+        run(&mut unit);
+        assert_eq!(count_op(&unit), Some((UnaryOp::CountLeadingZeros, source)));
+    }
+
+    #[test]
     fn recovers_last_write_clz_and_ctz() {
-        let mut clz = priority_unit(false, &[0, 1, 2, 3], &[3, 2, 1, 0]);
+        let mut clz = priority_unit(false, false, &[0, 1, 2, 3], &[3, 2, 1, 0]);
         run(&mut clz);
         assert_eq!(
             count_op(&clz).map(|(op, _)| op),
             Some(UnaryOp::CountLeadingZeros)
         );
 
-        let mut ctz = priority_unit(false, &[3, 2, 1, 0], &[3, 2, 1, 0]);
+        let mut ctz = priority_unit(false, false, &[3, 2, 1, 0], &[3, 2, 1, 0]);
         run(&mut ctz);
         assert_eq!(
             count_op(&ctz).map(|(op, _)| op),
@@ -939,7 +992,7 @@ mod tests {
 
     #[test]
     fn does_not_change_permuted_priority_order() {
-        let mut unit = priority_unit(true, &[3, 1, 2, 0], &[0, 1, 2, 3]);
+        let mut unit = priority_unit(true, false, &[3, 1, 2, 0], &[0, 1, 2, 3]);
         run(&mut unit);
         assert_eq!(count_op(&unit), None);
         assert!(

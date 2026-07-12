@@ -2,8 +2,8 @@ use super::*;
 
 use crate::{
     context_width::{
-        ValueContext, binary_semantics, cast_semantics, contains_numeric_width_cast,
-        expression_signed, get_expr_width, resolve_binary_op,
+        ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
+        resolve_binary_op,
     },
     parser::{
         bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
@@ -508,6 +508,7 @@ pub(super) fn eval_function_body_return(
     ) -> Result<FunctionControlState, ParserError> {
         let ((cond_expr, cond_sources), cond_bounds) =
             eval_expression(module, &state.store, &if_stmt.cond, arena, Some(1))?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -639,6 +640,7 @@ pub(super) fn eval_function_body_return(
         ) -> Result<FunctionLoopControlState, ParserError> {
             let ((cond_expr, cond_sources), cond_bounds) =
                 eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -753,6 +755,7 @@ pub(super) fn eval_function_body_return(
                     arena,
                     Some(1),
                 )?;
+                let cond_expr = procedural_condition(arena, cond_expr)?;
                 let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
                 if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1306,6 +1309,7 @@ pub(super) fn eval_function_body_return(
         let outer_state = state.clone();
         let ((cond_expr, cond_sources), cond_bounds) =
             eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
         let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1447,6 +1451,7 @@ pub(super) fn eval_function_body_return(
                 arena,
                 Some(1),
             )?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1696,6 +1701,7 @@ pub(super) fn eval_function_body_return(
                 arena,
                 Some(1),
             )?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -2017,7 +2023,7 @@ fn eval_expression_in_context(
     // can also lose carry bits when a folded operand is widened by its parent.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
-        if ct.is_const && !contains_numeric_width_cast(expr) {
+        if ct.is_const {
             if let Some((celox_value, mask_xz, width, signed)) =
                 celox_value_from_comptime_in_context(ct, context_width)
             {
