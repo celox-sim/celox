@@ -188,6 +188,7 @@ chmod +x "$mock_cargo_dir/cargo"
     HELIODOR_RESULTS_DIR="$TMP/mock-build-results"
     HELIODOR_BUILD_CELOX_RUNNER=1
     HELIODOR_CELOX_TARGET_DIR="$TMP/fixed-gate-target"
+    HELIODOR_CELOX_CARGO_PROFILE=release
     CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/examples/run_veryl_project_test"
     build_celox_runner >/dev/null
 )

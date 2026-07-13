@@ -863,11 +863,6 @@ fn memory_write(inst: &MInst) -> MemoryWrite {
     }
 }
 
-/// Returns true if the instruction could modify memory that Load reads.
-fn is_memory_clobber(inst: &MInst) -> bool {
-    !matches!(memory_write(inst), MemoryWrite::None)
-}
-
 /// Global GVN: dominator-tree-scoped value numbering.
 fn global_gvn(func: &mut MFunction) {
     let num_blocks = func.blocks.len();
@@ -896,7 +891,7 @@ fn global_gvn(func: &mut MFunction) {
     }
 
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
-    let idom = compute_dominators(num_blocks, &preds);
+    let idom = compute_dominators(num_blocks, &preds, &succs);
 
     // Build dominator tree children
     let mut dom_children: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
@@ -906,98 +901,60 @@ fn global_gvn(func: &mut MFunction) {
         }
     }
 
-    // DFS pre-order traversal of dominator tree
-    let mut order: Vec<usize> = Vec::with_capacity(num_blocks);
-    let mut stack = vec![0usize];
-    while let Some(node) = stack.pop() {
-        order.push(node);
-        // Push children in reverse so they come out in forward order
-        for &child in dom_children[node].iter().rev() {
-            stack.push(child);
-        }
-    }
-
-    // Scoped value table: Vec of scopes, each scope is a HashMap.
-    // When entering a dominator tree node, push a new scope.
-    // When leaving, pop it. All ancestor scopes are visible.
-    //
-    // For efficiency, use a flat HashMap + a "generation" stack to track
-    // which entries belong to which scope level.
     let mut value_table: HashMap<GvnKey, VReg> = HashMap::new();
+    let mut active_load_keys: HashSet<GvnKey> = HashSet::new();
+    let mut table_changes: Vec<(GvnKey, Option<VReg>)> = Vec::new();
     let mut replacements: Vec<(usize, usize, MInst)> = Vec::new(); // (block_idx, inst_idx, new_inst)
 
-    // Process in dominator tree pre-order using iterative DFS with scope tracking
-    // We need to know when we're done with a subtree to pop scope entries.
-    // Use a two-pass approach: track scope entries per block.
-    let mut scope_entries: Vec<Vec<GvnKey>> = vec![Vec::new(); num_blocks];
-
-    // Process blocks in RPO (reverse post-order) which is a valid dominator-tree
-    // compatible order for structured CFGs. For simple cases, layout order works
-    // since ISel produces blocks in topological order.
-    for &bi in &order {
-        let block = &func.blocks[bi];
-
-        // Clear entries from non-dominator ancestors.
-        // Simple approach: for each block, rebuild the value table from its
-        // dominator chain. This is O(depth × entries) but correct.
-        // For performance, only clear if the previous block wasn't our immediate dominator.
-
-        for inst_idx in 0..block.insts.len() {
-            let inst = &block.insts[inst_idx];
-
-            // Memory stores invalidate Load CSE entries
-            if is_memory_clobber(inst) {
-                value_table.retain(|k, _| !matches!(k, GvnKey::Load(..)));
-            }
-
-            if let Some(key) = gvn_key(inst) {
-                if let Some(&prev) = value_table.get(&key) {
-                    let dst = inst.def().unwrap();
-                    if dst != prev {
-                        replacements.push((bi, inst_idx, MInst::Mov { dst, src: prev }));
-                    }
-                } else if let Some(dst) = inst.def() {
-                    value_table.insert(key.clone(), dst);
-                    scope_entries[bi].push(key);
-                }
-            }
-        }
-    }
-
-    // Pop scope entries in reverse dominator tree order
-    // (Not needed for correctness if we process in domtree preorder and
-    // each block only sees entries from its dominators. But the flat HashMap
-    // approach above doesn't scope correctly for sibling subtrees.)
-    //
-    // For correctness: rebuild the value table properly using scoped approach.
-    // Let's redo with a proper scoped implementation.
-
-    // Actually, the simple flat HashMap approach above has a bug: entries from
-    // sibling subtrees leak into each other. Let me implement properly.
-
-    value_table.clear();
-    replacements.clear();
-
-    // Proper domtree DFS with scope push/pop
+    // Dominator-scoped GVN. Every table mutation, including load invalidation
+    // by a store, is undo-logged so sibling subtrees see exactly the state at
+    // their common dominator.
     fn gvn_dfs(
         node: usize,
         dom_children: &[Vec<usize>],
         func: &MFunction,
         value_table: &mut HashMap<GvnKey, VReg>,
+        active_load_keys: &mut HashSet<GvnKey>,
+        table_changes: &mut Vec<(GvnKey, Option<VReg>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
-        let mut added_keys: Vec<GvnKey> = Vec::new();
+        let checkpoint = table_changes.len();
         let block = &func.blocks[node];
 
-        process_gvn_block(node, block, value_table, &mut added_keys, replacements);
+        process_gvn_block(
+            node,
+            block,
+            value_table,
+            active_load_keys,
+            table_changes,
+            replacements,
+        );
 
         for &child in &dom_children[node] {
-            gvn_dfs(child, dom_children, func, value_table, replacements);
+            gvn_dfs(
+                child,
+                dom_children,
+                func,
+                value_table,
+                active_load_keys,
+                table_changes,
+                replacements,
+            );
         }
 
-        // Pop this block's entries
-        for key in added_keys {
-            value_table.remove(&key);
+        while table_changes.len() > checkpoint {
+            let (key, previous) = table_changes.pop().unwrap();
+            if let Some(previous) = previous {
+                value_table.insert(key.clone(), previous);
+                if matches!(key, GvnKey::Load(..)) {
+                    active_load_keys.insert(key);
+                }
+            } else {
+                value_table.remove(&key);
+                if matches!(key, GvnKey::Load(..)) {
+                    active_load_keys.remove(&key);
+                }
+            }
         }
     }
 
@@ -1005,7 +962,8 @@ fn global_gvn(func: &mut MFunction) {
         node: usize,
         block: &MBlock,
         value_table: &mut HashMap<GvnKey, VReg>,
-        added_keys: &mut Vec<GvnKey>,
+        active_load_keys: &mut HashSet<GvnKey>,
+        table_changes: &mut Vec<(GvnKey, Option<VReg>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
         for inst_idx in 0..block.insts.len() {
@@ -1015,8 +973,8 @@ fn global_gvn(func: &mut MFunction) {
             if !matches!(write, MemoryWrite::None) {
                 // Only invalidate Load CSE entries that overlap a known write.
                 // Dynamic/pointer writes remain conservative full clobbers.
-                let load_keys: HashSet<GvnKey> = value_table
-                    .keys()
+                let load_keys = active_load_keys
+                    .iter()
                     .filter(|k| {
                         let GvnKey::Load(load_base, load_offset, load_size) = k else {
                             return false;
@@ -1058,11 +1016,14 @@ fn global_gvn(func: &mut MFunction) {
                         }
                     })
                     .cloned()
-                    .collect();
-                for k in &load_keys {
-                    value_table.remove(k);
+                    .collect::<Vec<_>>();
+                for key in load_keys {
+                    let previous = value_table
+                        .remove(&key)
+                        .expect("active load key must exist in the GVN table");
+                    active_load_keys.remove(&key);
+                    table_changes.push((key, Some(previous)));
                 }
-                added_keys.retain(|k| !load_keys.contains(k));
             }
 
             if let Some(key) = gvn_key(inst) {
@@ -1072,16 +1033,29 @@ fn global_gvn(func: &mut MFunction) {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: prev }));
                     }
                 } else if let Some(dst) = inst.def() {
-                    if !value_table.contains_key(&key) {
-                        value_table.insert(key.clone(), dst);
-                        added_keys.push(key);
+                    let previous = value_table.insert(key.clone(), dst);
+                    debug_assert!(previous.is_none());
+                    if matches!(key, GvnKey::Load(..)) {
+                        active_load_keys.insert(key.clone());
                     }
+                    table_changes.push((key, previous));
                 }
             }
         }
     }
 
-    gvn_dfs(0, &dom_children, func, &mut value_table, &mut replacements);
+    gvn_dfs(
+        0,
+        &dom_children,
+        func,
+        &mut value_table,
+        &mut active_load_keys,
+        &mut table_changes,
+        &mut replacements,
+    );
+    debug_assert!(value_table.is_empty());
+    debug_assert!(active_load_keys.is_empty());
+    debug_assert!(table_changes.is_empty());
 
     // Apply replacements
     for (bi, inst_idx, new_inst) in replacements {
@@ -1091,23 +1065,47 @@ fn global_gvn(func: &mut MFunction) {
 
 /// Compute immediate dominators using the iterative algorithm.
 /// Returns idom[i] = Some(j) where j immediately dominates i, or None for entry.
-fn compute_dominators(n: usize, preds: &[Vec<usize>]) -> Vec<Option<usize>> {
-    // Simple iterative dominator computation (Cooper, Harvey, Kennedy 2001)
-    // Assumes block 0 is the entry.
+fn compute_dominators(n: usize, preds: &[Vec<usize>], succs: &[Vec<usize>]) -> Vec<Option<usize>> {
+    // Cooper-Harvey-Kennedy immediate dominators. `intersect` requires reverse
+    // postorder numbers; MFunction block storage order is not a CFG ordering.
+    let mut visited = vec![false; n];
+    let mut postorder = Vec::with_capacity(n);
+    let mut stack = vec![(0usize, 0usize)];
+    visited[0] = true;
+    while let Some((node, next_successor)) = stack.last_mut() {
+        if *next_successor < succs[*node].len() {
+            let successor = succs[*node][*next_successor];
+            *next_successor += 1;
+            if !visited[successor] {
+                visited[successor] = true;
+                stack.push((successor, 0));
+            }
+        } else {
+            postorder.push(*node);
+            stack.pop();
+        }
+    }
+    postorder.reverse();
+    let rpo = postorder;
+    let mut rpo_number = vec![usize::MAX; n];
+    for (number, &block) in rpo.iter().enumerate() {
+        rpo_number[block] = number;
+    }
+
     let mut idom: Vec<Option<usize>> = vec![None; n];
     idom[0] = Some(0); // Entry dominates itself (sentinel)
 
     let mut changed = true;
     while changed {
         changed = false;
-        for b in 1..n {
+        for &b in rpo.iter().skip(1) {
             // Find first processed predecessor
             let mut new_idom: Option<usize> = None;
             for &p in &preds[b] {
                 if idom[p].is_some() {
                     new_idom = Some(match new_idom {
                         None => p,
-                        Some(cur) => intersect_dom(cur, p, &idom),
+                        Some(cur) => intersect_dom(cur, p, &idom, &rpo_number),
                     });
                 }
             }
@@ -1123,12 +1121,17 @@ fn compute_dominators(n: usize, preds: &[Vec<usize>]) -> Vec<Option<usize>> {
     idom
 }
 
-fn intersect_dom(mut a: usize, mut b: usize, idom: &[Option<usize>]) -> usize {
+fn intersect_dom(
+    mut a: usize,
+    mut b: usize,
+    idom: &[Option<usize>],
+    rpo_number: &[usize],
+) -> usize {
     while a != b {
-        while a > b {
+        while rpo_number[a] > rpo_number[b] {
             a = idom[a].unwrap_or(0);
         }
-        while b > a {
+        while rpo_number[b] > rpo_number[a] {
             b = idom[b].unwrap_or(0);
         }
     }
@@ -3246,6 +3249,18 @@ mod tests {
     }
 
     #[test]
+    fn dominators_do_not_depend_on_block_storage_order() {
+        // Storage order is entry, join, left, right; reverse postorder is
+        // entry, right, left, join.
+        let preds = vec![vec![], vec![2, 3], vec![0], vec![0]];
+        let succs = vec![vec![2, 3], vec![], vec![1], vec![1]];
+        assert_eq!(
+            compute_dominators(4, &preds, &succs),
+            vec![None, Some(0), Some(0), Some(0)]
+        );
+    }
+
+    #[test]
     fn fuses_single_use_cmp_select() {
         let mut func = make_func(
             vec![
@@ -4836,6 +4851,89 @@ mod tests {
             func.blocks[0].insts[2],
             MInst::Mov {
                 dst: VReg(1),
+                src: VReg(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn global_gvn_restores_load_scope_for_sibling_subtrees() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..4).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 1,
+            },
+            MInst::Branch {
+                cond: VReg(1),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        func.push_block(entry);
+
+        let mut writing_child = MBlock::new(BlockId(1));
+        writing_child.insts = vec![
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(writing_child);
+
+        let mut sibling = MBlock::new(BlockId(2));
+        sibling.insts = vec![
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 88,
+                src: VReg(3),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(sibling);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[1].insts[1], MInst::Load { .. }));
+        assert!(matches!(
+            func.blocks[2].insts[0],
+            MInst::Mov {
+                dst: VReg(3),
                 src: VReg(0),
             }
         ));

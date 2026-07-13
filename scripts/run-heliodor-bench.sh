@@ -14,7 +14,8 @@ HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
 HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
-CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/release/examples/run_veryl_project_test}"
+HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
+CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/examples/run_veryl_project_test}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_TARGET_DIR="${HELIODOR_CELOX_TARGET_DIR:-}"
 HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
@@ -63,6 +64,8 @@ Environment:
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
+  HELIODOR_CELOX_CARGO_PROFILE
+                       Cargo profile for the Celox runner (default: heliodor-dev)
   HELIODOR_BUILD_CELOX_RUNNER
                        build CELOX_RUNNER_BIN before Celox runs (default: 1)
   HELIODOR_CELOX_TARGET_DIR
@@ -650,7 +653,7 @@ build_celox_runner() {
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
         cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
-        --example run_veryl_project_test --release --locked \
+        --example run_veryl_project_test --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
         return 1
@@ -1227,6 +1230,7 @@ run_gate() {
     VERYL_BIN=""
     CELOX_OPT_LEVEL=O2
     CELOX_SIR_PASS_OVERRIDES=""
+    HELIODOR_CELOX_CARGO_PROFILE=release
     HELIODOR_CELOX_TARGET_DIR=""
     CELOX_RUNNER_BIN=""
 

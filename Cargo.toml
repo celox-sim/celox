@@ -75,6 +75,14 @@ strip         = "debuginfo"
 lto           = true
 codegen-units = 1
 
+# Fast incremental host build for iterative Heliodor correctness checks.
+# The fixed acceptance gate still uses the release/LTO profile.
+[profile.heliodor-dev]
+inherits      = "release"
+lto           = false
+codegen-units = 16
+incremental   = true
+
 [profile.bench]
 debug = true
 
