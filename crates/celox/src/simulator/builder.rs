@@ -553,11 +553,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             let dse_start = phase_timing.then(crate::timing::now);
-            run_dead_store_elimination(
-                &mut program,
-                &self.live_signals,
-                self.options.dead_store_policy,
-            );
+            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
             if let Some(start) = dse_start {
                 eprintln!(
                     "[phase-timing] dead_store_elimination: {:?}",
@@ -731,11 +727,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             program.build_layout_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(
-                    &mut program,
-                    &self.live_signals,
-                    self.options.dead_store_policy,
-                );
+                run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
             }
 
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
@@ -874,11 +866,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         program.build_layout_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(
-                &mut program,
-                &self.live_signals,
-                self.options.dead_store_policy,
-            );
+            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
         }
         #[cfg(target_arch = "x86_64")]
         let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
@@ -903,7 +891,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 fn run_dead_store_elimination(
     program: &mut Program,
     live_signals: &[(Vec<(String, usize)>, Vec<String>)],
-    policy: DeadStorePolicy,
+    options: &SimulatorOptions,
 ) {
     use crate::HashSet;
     use crate::ir::{AbsoluteAddr, InstancePath};
@@ -924,7 +912,7 @@ fn run_dead_store_elimination(
     }
 
     // PreserveTopPorts: auto-collect top module port addresses
-    if policy == DeadStorePolicy::PreserveTopPorts {
+    if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
         if let Some(&top_instance_id) = program.instance_ids.get(&InstancePath(vec![])) {
             if let Some(&top_module_id) = program.instance_module.get(&top_instance_id) {
                 if let Some(top_vars) = program.module_variables.get(&top_module_id) {
@@ -942,7 +930,7 @@ fn run_dead_store_elimination(
     }
 
     // PreserveAllPorts: collect port addresses from every instance
-    if policy == DeadStorePolicy::PreserveAllPorts {
+    if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
         for (&instance_id, &module_id) in &program.instance_module {
             if let Some(vars) = program.module_variables.get(&module_id) {
                 for info in vars.values() {
@@ -957,8 +945,12 @@ fn run_dead_store_elimination(
         }
     }
 
-    crate::optimizer::coalescing::pass_dead_store_elimination::eliminate_dead_stores(
+    crate::optimizer::coalescing::optimize_rooted_comb_memory(
         program,
         &externally_live,
+        options.four_state,
+        options
+            .optimize_options
+            .is_enabled(crate::optimizer::SirPass::TailCallSplit),
     );
 }

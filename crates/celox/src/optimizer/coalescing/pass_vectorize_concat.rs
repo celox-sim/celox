@@ -205,7 +205,7 @@ fn collect_register_use_counts(
 /// Remove dead pure definitions in one O(instructions + operand edges)
 /// mark/sweep. Loads are pure SIR values; stores, commits and runtime/capture
 /// events are observable roots.
-fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let mut definitions = HashMap::<RegisterId, (BlockId, usize)>::default();
     let mut worklist = Vec::new();
 

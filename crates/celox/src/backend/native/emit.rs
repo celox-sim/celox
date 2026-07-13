@@ -3374,17 +3374,19 @@ pub fn emit_chained_eus(
 
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
-    let (sir_eu, _sir_boundaries) = if units.len() > 1 {
-        let (mut merged, boundaries) = crate::ir::merge_sir_eus(units);
-        // Cross-EU SIR optimization
-        crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-            &mut merged,
-            &boundaries,
-        );
-        (merged, boundaries)
+    let (mut sir_eu, sir_boundaries) = if units.len() > 1 {
+        crate::ir::merge_sir_eus(units)
     } else {
         (units[0].clone(), vec![])
     };
+    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
+        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+    }
+    // Keep the older direct-memory rewrite only for non-promotable round trips.
+    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+        &mut sir_eu,
+        &sir_boundaries,
+    );
     sir_eu
         .verify_result()
         .map_err(|error| ChainedEmitError::Sir {

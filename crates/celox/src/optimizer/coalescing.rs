@@ -37,13 +37,48 @@ mod shared;
 
 pub use pass_tail_call_split::TailCallChunk;
 
+pub(crate) fn promote_eval_apply_working_round_trips(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> bool {
+    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
+}
+
+pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    pass_vectorize_concat::remove_dead_definitions(eu);
+}
+
+pub(crate) fn optimize_rooted_comb_memory(
+    program: &mut Program,
+    externally_live: &crate::HashSet<AbsoluteAddr>,
+    four_state: bool,
+    enable_tail_split: bool,
+) {
+    pass_dead_store_elimination::eliminate_dead_stores(program, externally_live);
+    for eu in &mut program.eval_comb {
+        pass_vectorize_concat::remove_dead_definitions(eu);
+    }
+
+    // The old plan refers to the pre-DSE EUs. Rebuild it from the
+    // transformed function instead of compiling stale chunks.
+    program.eval_comb_plan = None;
+    if enable_tail_split {
+        if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
+        {
+            program.eval_comb_plan = Some(EvalCombPlan::TailCallChunks(chunks));
+        } else if let Some(plan) =
+            pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
+        {
+            program.eval_comb_plan = Some(EvalCombPlan::MemorySpilled(plan));
+        }
+    }
+}
+
 use pass_bit_extract_peephole::BitExtractPeepholePass;
 use pass_branchify_mux::BranchifyMuxPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
-use pass_global_store_load_forwarding::GlobalStoreLoadForwardingPass;
 use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
@@ -500,9 +535,6 @@ fn optimize_with_options(
         comb_passes.add_pass(StoreLoadForwardingPass);
         if on(SirPass::PartialForward) {
             comb_passes.add_pass(PartialForwardPass);
-        }
-        if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-            comb_passes.add_pass(GlobalStoreLoadForwardingPass);
         }
     }
     if on(SirPass::Gvn) {

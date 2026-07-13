@@ -1,30 +1,16 @@
-//! Memory-SSA based store-to-load forwarding for combinational state.
+//! Memory SSA and mem2reg for exact scalar SIR memory slots.
 //!
 //! The local forwarding pass cannot see through branches or recovered loops.
 //! This pass constructs pruned SSA names for exact, non-aliased static memory
-//! slots and replaces dominated loads with the reaching stored value.  Stores
-//! remain in place: observable state, trigger timing, and register pressure do
-//! not depend on a later exit-store materialization policy.
+//! slots and replaces dominated loads with the reaching stored value. Observable
+//! slots retain their stores. A whole-program entry point additionally promotes
+//! non-escaping, definitely-defined combinational slots and removes their stores.
 
 use std::collections::VecDeque;
 
-use super::pass_manager::ExecutionUnitPass;
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
-
-pub(super) struct GlobalStoreLoadForwardingPass;
-
-impl ExecutionUnitPass for GlobalStoreLoadForwardingPass {
-    fn name(&self) -> &'static str {
-        "global_store_load_forwarding"
-    }
-
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        forward_global_static_slots(eu);
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SlotKey {
@@ -40,6 +26,7 @@ struct AddressFacts {
     invalid: bool,
     has_load: bool,
     has_store: bool,
+    has_effectful_store: bool,
     def_blocks: HashSet<BlockId>,
     upward_use_blocks: HashSet<BlockId>,
 }
@@ -62,6 +49,7 @@ struct SlotPlan {
     key: SlotKey,
     ty: RegisterType,
     phi_blocks: Vec<usize>,
+    promote: bool,
 }
 
 struct Cfg {
@@ -224,6 +212,7 @@ fn intersect_dominators(
 
 fn collect_address_facts(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    region: u32,
 ) -> HashMap<RegionedAbsoluteAddr, AddressFacts> {
     let mut facts = HashMap::<RegionedAbsoluteAddr, AddressFacts>::default();
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
@@ -234,7 +223,7 @@ fn collect_address_facts(
         for instruction in &block.instructions {
             match instruction {
                 SIRInstruction::Load(dst, addr, SIROffset::Static(bit_offset), width)
-                    if addr.region == STABLE_REGION =>
+                    if addr.region == region =>
                 {
                     let address_facts = facts.entry(*addr).or_default();
                     address_facts.record_access(
@@ -250,9 +239,14 @@ fn collect_address_facts(
                         address_facts.upward_use_blocks.insert(block_id);
                     }
                 }
-                SIRInstruction::Store(addr, SIROffset::Static(bit_offset), width, source, _, _)
-                    if addr.region == STABLE_REGION =>
-                {
+                SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(bit_offset),
+                    width,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) if addr.region == region => {
                     let address_facts = facts.entry(*addr).or_default();
                     address_facts.record_access(
                         SlotKey {
@@ -263,20 +257,22 @@ fn collect_address_facts(
                         &eu.register_map[source],
                     );
                     address_facts.has_store = true;
+                    address_facts.has_effectful_store |=
+                        !triggers.is_empty() || !capture_sites.is_empty();
                     address_facts.def_blocks.insert(block_id);
                     defined.insert(*addr);
                 }
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
-                    if addr.region == STABLE_REGION =>
+                    if addr.region == region =>
                 {
                     facts.entry(*addr).or_default().invalid = true;
                 }
                 SIRInstruction::Commit(source, destination, ..) => {
-                    if source.region == STABLE_REGION {
+                    if source.region == region {
                         facts.entry(*source).or_default().invalid = true;
                     }
-                    if destination.region == STABLE_REGION {
+                    if destination.region == region {
                         facts.entry(*destination).or_default().invalid = true;
                     }
                 }
@@ -381,22 +377,43 @@ fn append_edge_arguments(
     }
 }
 
+#[cfg(test)]
 fn forward_global_static_slots(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let no_promotions = HashSet::default();
+    rewrite_global_static_slots(eu, STABLE_REGION, PromotionPolicy::Exact(&no_promotions))
+}
+
+#[derive(Clone, Copy)]
+enum PromotionPolicy<'a> {
+    Exact(&'a HashSet<SlotKey>),
+}
+
+fn rewrite_global_static_slots(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    region: u32,
+    promotion: PromotionPolicy<'_>,
+) -> bool {
     let Some(cfg) = Cfg::new(eu) else {
         return false;
     };
-    let facts = collect_address_facts(eu);
+    let facts = collect_address_facts(eu, region);
     let mut candidates = facts
         .into_values()
         .filter(|facts| !facts.invalid && facts.has_load && facts.has_store)
         .filter_map(|facts| {
             let key = facts.key?;
             let phi_blocks = phi_blocks_for_slot(&cfg, &facts);
+            let live_in = live_in_blocks(&cfg, &facts.def_blocks, &facts.upward_use_blocks);
+            let selected_for_promotion = match promotion {
+                PromotionPolicy::Exact(slots) => slots.contains(&key),
+            };
+            let promote = selected_for_promotion && !facts.has_effectful_store && !live_in[0];
             let ty = facts.ty?;
             (!phi_blocks.contains(&0)).then_some(SlotPlan {
                 key,
                 ty,
                 phi_blocks,
+                promote,
             })
         })
         .collect::<Vec<_>>();
@@ -526,6 +543,10 @@ fn forward_global_static_slots(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
                             if let Some(&slot) = slot_index.get(&key) {
                                 values[slot].push(source);
                                 pushed_slots.push(slot);
+                                if candidates[slot].promote {
+                                    changed = true;
+                                    continue;
+                                }
                             }
                             instructions.push(SIRInstruction::Store(
                                 addr,
@@ -583,6 +604,501 @@ fn forward_global_static_slots(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
     changed
 }
 
+#[derive(Default)]
+struct WorkingRoundTripFacts {
+    key: Option<SlotKey>,
+    ty: Option<RegisterType>,
+    invalid: bool,
+    has_seed: bool,
+    has_store: bool,
+    has_apply: bool,
+}
+
+impl WorkingRoundTripFacts {
+    fn record_key(&mut self, key: SlotKey) {
+        if self.key.is_some_and(|previous| previous != key) || key.width == 0 {
+            self.invalid = true;
+        }
+        self.key.get_or_insert(key);
+    }
+
+    fn record_type(&mut self, ty: &RegisterType) {
+        if self.ty.as_ref().is_some_and(|previous| previous != ty) {
+            self.invalid = true;
+        }
+        self.ty.get_or_insert_with(|| ty.clone());
+    }
+}
+
+/// Promote the ordinary WORKING-region round trip in a merged eval_apply_ff:
+///
+/// `Commit(STABLE→WORKING)` becomes the SSA live-in, WORKING stores become SSA
+/// definitions, and `Commit(WORKING→STABLE)` becomes the sole writeback. This
+/// is deliberately limited to one exact static scalar fragment per address;
+/// sparse and dynamically addressed next-state storage keep their own lowering.
+pub(crate) fn promote_eval_apply_working_round_trips(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> bool {
+    let mut facts = HashMap::<AbsoluteAddr, WorkingRoundTripFacts>::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            match instruction {
+                SIRInstruction::Load(destination, address, SIROffset::Static(offset), width)
+                    if address.region == WORKING_REGION =>
+                {
+                    let key = SlotKey {
+                        addr: *address,
+                        bit_offset: *offset,
+                        width: *width,
+                    };
+                    let entry = facts.entry(address.absolute_addr()).or_default();
+                    entry.record_key(key);
+                    entry.record_type(&eu.register_map[destination]);
+                }
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(offset),
+                    width,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) if address.region == WORKING_REGION => {
+                    let key = SlotKey {
+                        addr: *address,
+                        bit_offset: *offset,
+                        width: *width,
+                    };
+                    let entry = facts.entry(address.absolute_addr()).or_default();
+                    entry.record_key(key);
+                    entry.record_type(&eu.register_map[source]);
+                    entry.has_store = true;
+                    entry.invalid |= !triggers.is_empty() || !capture_sites.is_empty();
+                }
+                SIRInstruction::Commit(
+                    source,
+                    destination,
+                    SIROffset::Static(offset),
+                    width,
+                    _,
+                ) if source.region == STABLE_REGION
+                    && destination.region == WORKING_REGION
+                    && source.absolute_addr() == destination.absolute_addr() =>
+                {
+                    let key = SlotKey {
+                        addr: *destination,
+                        bit_offset: *offset,
+                        width: *width,
+                    };
+                    let entry = facts.entry(destination.absolute_addr()).or_default();
+                    entry.record_key(key);
+                    entry.has_seed = true;
+                }
+                SIRInstruction::Commit(
+                    source,
+                    destination,
+                    SIROffset::Static(offset),
+                    width,
+                    _,
+                ) if source.region == WORKING_REGION
+                    && destination.region == STABLE_REGION
+                    && source.absolute_addr() == destination.absolute_addr() =>
+                {
+                    let key = SlotKey {
+                        addr: *source,
+                        bit_offset: *offset,
+                        width: *width,
+                    };
+                    let entry = facts.entry(source.absolute_addr()).or_default();
+                    entry.record_key(key);
+                    entry.has_apply = true;
+                }
+                SIRInstruction::Load(_, address, _, _)
+                | SIRInstruction::Store(address, _, _, _, _, _)
+                    if address.region == WORKING_REGION =>
+                {
+                    facts.entry(address.absolute_addr()).or_default().invalid = true;
+                }
+                SIRInstruction::Commit(source, destination, _, _, _)
+                    if source.region == WORKING_REGION || destination.region == WORKING_REGION =>
+                {
+                    facts
+                        .entry(if source.region == WORKING_REGION {
+                            source.absolute_addr()
+                        } else {
+                            destination.absolute_addr()
+                        })
+                        .or_default()
+                        .invalid = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let eligible = facts
+        .into_values()
+        .filter(|facts| !facts.invalid && facts.has_seed && facts.has_store && facts.has_apply)
+        .filter_map(|facts| Some((facts.key?, facts.ty?)))
+        .collect::<HashMap<_, _>>();
+    if eligible.is_empty() {
+        return false;
+    }
+
+    let mut next_register = eu
+        .register_map
+        .keys()
+        .map(|register| register.0)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for block in eu.blocks.values_mut() {
+        let old_instructions = std::mem::take(&mut block.instructions);
+        let mut instructions = Vec::with_capacity(old_instructions.len());
+        for instruction in old_instructions {
+            match instruction {
+                SIRInstruction::Commit(
+                    source,
+                    destination,
+                    SIROffset::Static(offset),
+                    width,
+                    triggers,
+                ) if source.region == STABLE_REGION
+                    && destination.region == WORKING_REGION
+                    && eligible.contains_key(&SlotKey {
+                        addr: destination,
+                        bit_offset: offset,
+                        width,
+                    }) =>
+                {
+                    let key = SlotKey {
+                        addr: destination,
+                        bit_offset: offset,
+                        width,
+                    };
+                    let register =
+                        alloc_register(&mut eu.register_map, &mut next_register, &eligible[&key]);
+                    instructions.push(SIRInstruction::Load(
+                        register,
+                        source,
+                        SIROffset::Static(offset),
+                        width,
+                    ));
+                    instructions.push(SIRInstruction::Store(
+                        destination,
+                        SIROffset::Static(offset),
+                        width,
+                        register,
+                        triggers,
+                        Vec::new(),
+                    ));
+                }
+                SIRInstruction::Commit(
+                    source,
+                    destination,
+                    SIROffset::Static(offset),
+                    width,
+                    triggers,
+                ) if source.region == WORKING_REGION
+                    && destination.region == STABLE_REGION
+                    && eligible.contains_key(&SlotKey {
+                        addr: source,
+                        bit_offset: offset,
+                        width,
+                    }) =>
+                {
+                    let key = SlotKey {
+                        addr: source,
+                        bit_offset: offset,
+                        width,
+                    };
+                    let register =
+                        alloc_register(&mut eu.register_map, &mut next_register, &eligible[&key]);
+                    instructions.push(SIRInstruction::Load(
+                        register,
+                        source,
+                        SIROffset::Static(offset),
+                        width,
+                    ));
+                    instructions.push(SIRInstruction::Store(
+                        destination,
+                        SIROffset::Static(offset),
+                        width,
+                        register,
+                        triggers,
+                        Vec::new(),
+                    ));
+                }
+                instruction => instructions.push(instruction),
+            }
+        }
+        block.instructions = instructions;
+    }
+
+    let slots = eligible.keys().copied().collect::<HashSet<_>>();
+    let changed = rewrite_global_static_slots(eu, WORKING_REGION, PromotionPolicy::Exact(&slots));
+    if changed {
+        sink_phi_writebacks_to_predecessors(eu);
+    }
+    changed
+}
+
+fn add_register_use(counts: &mut HashMap<RegisterId, usize>, register: RegisterId) {
+    *counts.entry(register).or_default() += 1;
+}
+
+fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
+    let mut counts = HashMap::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            match instruction {
+                SIRInstruction::Imm(..) => {}
+                SIRInstruction::Load(_, _, offset, _) => {
+                    for register in offset.dynamic_registers().into_iter().flatten() {
+                        add_register_use(&mut counts, register);
+                    }
+                }
+                SIRInstruction::Binary(_, lhs, _, rhs) => {
+                    add_register_use(&mut counts, *lhs);
+                    add_register_use(&mut counts, *rhs);
+                }
+                SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+                    add_register_use(&mut counts, *source);
+                }
+                SIRInstruction::Store(_, offset, _, source, _, _) => {
+                    add_register_use(&mut counts, *source);
+                    for register in offset.dynamic_registers().into_iter().flatten() {
+                        add_register_use(&mut counts, register);
+                    }
+                }
+                SIRInstruction::Commit(_, _, offset, _, _) => {
+                    for register in offset.dynamic_registers().into_iter().flatten() {
+                        add_register_use(&mut counts, register);
+                    }
+                }
+                SIRInstruction::Concat(_, sources) => {
+                    for &source in sources {
+                        add_register_use(&mut counts, source);
+                    }
+                }
+                SIRInstruction::Mux(_, condition, then_value, else_value) => {
+                    add_register_use(&mut counts, *condition);
+                    add_register_use(&mut counts, *then_value);
+                    add_register_use(&mut counts, *else_value);
+                }
+                SIRInstruction::RuntimeEvent { args, .. }
+                | SIRInstruction::CombCaptureEvent { args, .. } => {
+                    for &argument in args {
+                        add_register_use(&mut counts, argument);
+                    }
+                }
+                SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+                    add_register_use(&mut counts, *old);
+                    add_register_use(&mut counts, *new);
+                }
+            }
+        }
+        match &block.terminator {
+            SIRTerminator::Jump(_, arguments) => {
+                for &argument in arguments {
+                    add_register_use(&mut counts, argument);
+                }
+            }
+            SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                add_register_use(&mut counts, *cond);
+                for &argument in true_block.1.iter().chain(&false_block.1) {
+                    add_register_use(&mut counts, argument);
+                }
+            }
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    counts
+}
+
+fn ranges_overlap(
+    left_offset: usize,
+    left_width: usize,
+    right_offset: usize,
+    right_width: usize,
+) -> bool {
+    left_offset < right_offset.saturating_add(right_width)
+        && right_offset < left_offset.saturating_add(left_width)
+}
+
+fn instruction_blocks_writeback_motion(
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    address: RegionedAbsoluteAddr,
+    offset: usize,
+    width: usize,
+) -> bool {
+    let aliases = |other: &RegionedAbsoluteAddr, other_offset: &SIROffset, other_width: usize| {
+        if other.absolute_addr() != address.absolute_addr() {
+            return false;
+        }
+        match other_offset {
+            SIROffset::Static(other_offset) => {
+                ranges_overlap(offset, width, *other_offset, other_width)
+            }
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => true,
+        }
+    };
+    match instruction {
+        SIRInstruction::Load(_, other, other_offset, other_width)
+        | SIRInstruction::Store(other, other_offset, other_width, _, _, _) => {
+            aliases(other, other_offset, *other_width)
+        }
+        SIRInstruction::Commit(source, destination, other_offset, other_width, _) => {
+            aliases(source, other_offset, *other_width)
+                || aliases(destination, other_offset, *other_width)
+        }
+        SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => true,
+        _ => false,
+    }
+}
+
+/// A writeback whose only operand is a merge value does not need an actual
+/// phi copy. Put the writeback on each single-successor incoming edge instead.
+/// Repeating this peels chains of merge-only live ranges back to their defs.
+fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    struct Candidate {
+        instruction: usize,
+        parameter: usize,
+        register: RegisterId,
+        edge_stores: Vec<(BlockId, SIRInstruction<RegionedAbsoluteAddr>)>,
+    }
+
+    let mut changed = false;
+    loop {
+        let Some(cfg) = Cfg::new(eu) else {
+            break;
+        };
+        let use_counts = count_register_uses(eu);
+        let mut rewrite = None;
+
+        'blocks: for block_index in 0..cfg.block_ids.len() {
+            let block_id = cfg.block_ids[block_index];
+            let block = &eu.blocks[&block_id];
+            if block.params.is_empty() || cfg.predecessors[block_index].is_empty() {
+                continue;
+            }
+            if cfg.predecessors[block_index].iter().any(|&predecessor| {
+                cfg.successors[predecessor].len() != 1
+                    || !matches!(
+                        eu.blocks[&cfg.block_ids[predecessor]].terminator,
+                        SIRTerminator::Jump(target, _) if target == block_id
+                    )
+            }) {
+                continue;
+            }
+
+            let mut candidates = Vec::new();
+            for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+                let SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(offset),
+                    width,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) = instruction
+                else {
+                    continue;
+                };
+                let Some(parameter_index) = block.params.iter().position(|param| param == source)
+                else {
+                    continue;
+                };
+                if use_counts.get(source).copied() != Some(1)
+                    || block.instructions[..instruction_index].iter().any(|prior| {
+                        instruction_blocks_writeback_motion(prior, *address, *offset, *width)
+                    })
+                {
+                    continue;
+                }
+
+                let mut edge_stores = Vec::with_capacity(cfg.predecessors[block_index].len());
+                for &predecessor in &cfg.predecessors[block_index] {
+                    let predecessor_id = cfg.block_ids[predecessor];
+                    let SIRTerminator::Jump(_, arguments) = &eu.blocks[&predecessor_id].terminator
+                    else {
+                        continue 'blocks;
+                    };
+                    let Some(&incoming) = arguments.get(parameter_index) else {
+                        continue 'blocks;
+                    };
+                    edge_stores.push((
+                        predecessor_id,
+                        SIRInstruction::Store(
+                            *address,
+                            SIROffset::Static(*offset),
+                            *width,
+                            incoming,
+                            triggers.clone(),
+                            capture_sites.clone(),
+                        ),
+                    ));
+                }
+                candidates.push(Candidate {
+                    instruction: instruction_index,
+                    parameter: parameter_index,
+                    register: *source,
+                    edge_stores,
+                });
+            }
+            if !candidates.is_empty() {
+                rewrite = Some((block_id, candidates));
+                break 'blocks;
+            }
+        }
+
+        let Some((block_id, mut candidates)) = rewrite else {
+            break;
+        };
+        for candidate in &candidates {
+            for (predecessor, store) in &candidate.edge_stores {
+                eu.blocks
+                    .get_mut(predecessor)
+                    .unwrap()
+                    .instructions
+                    .push(store.clone());
+            }
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.parameter);
+        for candidate in candidates.iter().rev() {
+            for (predecessor, _) in &candidate.edge_stores {
+                let SIRTerminator::Jump(_, arguments) =
+                    &mut eu.blocks.get_mut(predecessor).unwrap().terminator
+                else {
+                    unreachable!("writeback motion accepted only Jump predecessors");
+                };
+                arguments.remove(candidate.parameter);
+            }
+            eu.blocks
+                .get_mut(&block_id)
+                .unwrap()
+                .params
+                .remove(candidate.parameter);
+            eu.register_map.remove(&candidate.register);
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.instruction);
+        for candidate in candidates.iter().rev() {
+            eu.blocks
+                .get_mut(&block_id)
+                .unwrap()
+                .instructions
+                .remove(candidate.instruction);
+        }
+        changed = true;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,9 +1113,13 @@ mod tests {
     }
 
     fn address(_var: u32) -> RegionedAbsoluteAddr {
+        address_in_instance(0)
+    }
+
+    fn address_in_instance(instance: usize) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
             region: STABLE_REGION,
-            instance_id: InstanceId(0),
+            instance_id: InstanceId(instance),
             var_id: VarId::default(),
         }
     }
@@ -825,6 +1345,192 @@ mod tests {
         );
 
         assert!(!forward_global_static_slots(&mut eu));
+        eu.verify_result().unwrap();
+    }
+
+    #[test]
+    fn promotes_eval_apply_working_round_trip_to_one_load_and_writeback() {
+        let stable = address(0);
+        let mut working = stable;
+        working.region = WORKING_REGION;
+        let mut eu = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0)],
+                instructions: vec![
+                    SIRInstruction::Commit(stable, working, SIROffset::Static(0), 8, Vec::new()),
+                    SIRInstruction::Store(
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    SIRInstruction::Commit(working, stable, SIROffset::Static(0), 8, Vec::new()),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), bit(8))],
+        );
+
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
+        eu.verify_result().unwrap();
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .all(|instruction| {
+                    !matches!(
+                        instruction,
+                        SIRInstruction::Load(_, address, _, _)
+                            | SIRInstruction::Store(address, _, _, _, _, _)
+                            if address.region == WORKING_REGION
+                    ) && !matches!(instruction, SIRInstruction::Commit(..))
+                })
+        );
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.last(),
+            Some(SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(0), _, _))
+                if *address == stable
+        ));
+    }
+
+    #[test]
+    fn eval_apply_writeback_eliminates_a_merge_only_phi() {
+        let stable = address(0);
+        let mut working = stable;
+        working.region = WORKING_REGION;
+        let mut eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: vec![SIRInstruction::Commit(
+                        stable,
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Commit(
+                        working,
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [(RegisterId(0), bit(1)), (RegisterId(1), bit(8))],
+        );
+
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
+        eu.verify_result().unwrap();
+        assert!(eu.blocks[&BlockId(3)].params.is_empty());
+        assert!(eu.blocks[&BlockId(3)].instructions.is_empty());
+        assert!(matches!(
+            eu.blocks[&BlockId(1)].instructions.as_slice(),
+            [SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(1), _, _)]
+                if *address == stable
+        ));
+        assert!(matches!(
+            eu.blocks[&BlockId(2)].instructions.as_slice(),
+            [SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(2), _, _)]
+                if *address == stable
+        ));
+    }
+
+    #[test]
+    fn writeback_motion_preserves_a_phi_used_as_a_dynamic_load_offset() {
+        let writeback = address_in_instance(0);
+        let indexed = address_in_instance(1);
+        let mut eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(1)]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(2)]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![RegisterId(3)],
+                    instructions: vec![
+                        SIRInstruction::Load(
+                            RegisterId(4),
+                            indexed,
+                            SIROffset::Dynamic(RegisterId(3)),
+                            1,
+                        ),
+                        SIRInstruction::Store(
+                            writeback,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(3),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+                (RegisterId(4), bit(1)),
+            ],
+        );
+
+        eu.verify_result().unwrap();
+        assert!(!sink_phi_writebacks_to_predecessors(&mut eu));
         eu.verify_result().unwrap();
     }
 }
