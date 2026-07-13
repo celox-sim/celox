@@ -514,7 +514,7 @@ fn branchified_instruction_cost(
             }
         }
         SIRInstruction::Load(_, _, offset, width) => {
-            3 * chunks(*width) + 3 * u128::from(matches!(offset, SIROffset::Dynamic(_)))
+            3 * chunks(*width) + 3 * u128::from(offset.is_dynamic())
         }
         SIRInstruction::Concat(dst, args) => chunks(register_width(*dst)) + args.len() as u128,
         SIRInstruction::Slice(dst, _, _, _) => 2 * chunks(register_width(*dst)),
@@ -662,7 +662,7 @@ fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess
 fn offset_static(offset: &SIROffset) -> Option<usize> {
     match offset {
         SIROffset::Static(offset) => Some(*offset),
-        SIROffset::Dynamic(_) => None,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
     }
 }
 
@@ -1399,12 +1399,18 @@ fn inst_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
         SIRInstruction::Imm(_, _) => Vec::new(),
         SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
         SIRInstruction::Unary(_, _, src) => vec![*src],
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => vec![*off],
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => Vec::new(),
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => vec![*off, *src],
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => vec![*src],
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => vec![*off],
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => Vec::new(),
+        SIRInstruction::Load(_, _, offset, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
+        }
+        SIRInstruction::Store(_, offset, _, src, _, _) => offset
+            .dynamic_registers()
+            .into_iter()
+            .flatten()
+            .chain(std::iter::once(*src))
+            .collect(),
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
+        }
         SIRInstruction::Concat(_, args) => args.clone(),
         SIRInstruction::Slice(_, src, _, _) => vec![*src],
         SIRInstruction::Mux(_, cond, true_val, false_val) => vec![*cond, *true_val, *false_val],

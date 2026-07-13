@@ -680,17 +680,15 @@ fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>, out: &mut Vec<R
         SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
             out.push(*source);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => out.push(*offset),
+        SIRInstruction::Load(_, _, offset, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
+        }
         SIRInstruction::Store(_, offset, _, source, _, _) => {
-            if let SIROffset::Dynamic(offset) = offset {
-                out.push(*offset);
-            }
+            out.extend(offset.dynamic_registers().into_iter().flatten());
             out.push(*source);
         }
         SIRInstruction::Commit(_, _, offset, _, _) => {
-            if let SIROffset::Dynamic(offset) = offset {
-                out.push(*offset);
-            }
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Concat(_, args)
         | SIRInstruction::RuntimeEvent { args, .. }

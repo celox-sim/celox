@@ -353,20 +353,22 @@ fn record_uses(
         SIRInstruction::Unary(_, _, src) => {
             *use_count.entry(*src).or_default() += 1;
         }
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-            *use_count.entry(*off).or_default() += 1;
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
             *use_count.entry(*src).or_default() += 1;
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-            *use_count.entry(*src).or_default() += 1;
+        SIRInstruction::Load(_, _, offset, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-            *use_count.entry(*off).or_default() += 1;
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
         }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-            *use_count.entry(*off).or_default() += 1;
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => {
             for arg in args {
                 *use_count.entry(*arg).or_default() += 1;

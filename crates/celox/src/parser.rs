@@ -1996,6 +1996,12 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
                 .map(|(unit, eu)| ("apply_ffs", unit, eu)),
         );
     for (group, unit, eu) in units {
+        verify_memory_offset_contract(program, eu).map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
         verify_region_contract(group, eu).map_err(|error| ParserError::SirVerify {
             phase,
             group,
@@ -2008,6 +2014,112 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
             unit,
             error,
         })?;
+    }
+    Ok(())
+}
+
+fn verify_memory_offset_contract(
+    program: &Program,
+    eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::SIRInstruction;
+
+    for block in eu.blocks.values() {
+        for (index, inst) in block.instructions.iter().enumerate() {
+            let (addr, offset, operation) = match inst {
+                SIRInstruction::Load(_, addr, offset, _) => (addr, offset, "Load"),
+                SIRInstruction::Store(addr, offset, _, _, _, _) => (addr, offset, "Store"),
+                SIRInstruction::Commit(src, dst, offset, _, _) => {
+                    verify_memory_offset_for_addr(
+                        program,
+                        block.id,
+                        index,
+                        dst,
+                        offset,
+                        "Commit destination",
+                    )?;
+                    (src, offset, "Commit source")
+                }
+                _ => continue,
+            };
+            verify_memory_offset_for_addr(program, block.id, index, addr, offset, operation)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_memory_offset_for_addr(
+    program: &Program,
+    block: crate::ir::BlockId,
+    index: usize,
+    addr: &RegionedAbsoluteAddr,
+    offset: &crate::ir::SIROffset,
+    operation: &'static str,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::SIROffset;
+
+    let Some(info) = program.get_variable_info(&addr.absolute_addr()) else {
+        return Err(crate::ir::verify::SirVerifyError::instruction(
+            "MEMORY.ADDRESS_HAS_DECLARATION",
+            block,
+            index,
+            format!("no variable declaration for memory address {addr:?}"),
+        ));
+    };
+    let element_count = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |count, &dimension| count.checked_mul(dimension));
+    let declared_element_width = element_count
+        .filter(|&count| count != 0 && info.width % count == 0)
+        .map(|count| info.width / count);
+
+    match offset {
+        SIROffset::Dynamic(_) if !info.array_dims.is_empty() => {
+            let absolute_addr = addr.absolute_addr();
+            return Err(crate::ir::verify::SirVerifyError::instruction(
+                "MEMORY.UNPACKED_OFFSET_IS_ELEMENT",
+                block,
+                index,
+                format!(
+                    "{operation} addresses unpacked array {} with dimensions {:?} by an arbitrary dynamic bit offset; preserve the element index as SIROffset::Element",
+                    program.get_path(&absolute_addr),
+                    info.array_dims,
+                ),
+            ));
+        }
+        SIROffset::Element { element_width, .. } => {
+            if info.array_dims.is_empty() {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_OFFSET_REQUIRES_UNPACKED_ARRAY",
+                    block,
+                    index,
+                    "SIROffset::Element used for a variable without unpacked dimensions",
+                ));
+            }
+            let Some(declared_element_width) = declared_element_width else {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.UNPACKED_DECLARATION_HAS_ELEMENT_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "array dimensions {:?} do not divide declared width {}",
+                        info.array_dims, info.width
+                    ),
+                ));
+            };
+            if *element_width != declared_element_width {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_WIDTH_MATCHES_DECLARATION",
+                    block,
+                    index,
+                    format!(
+                        "SIR element width {element_width} does not match declared element width {declared_element_width}"
+                    ),
+                ));
+            }
+        }
+        SIROffset::Static(_) | SIROffset::Dynamic(_) => {}
     }
     Ok(())
 }

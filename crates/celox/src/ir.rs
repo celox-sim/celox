@@ -211,6 +211,17 @@ impl Program {
     /// Build and store the memory layout. Also removes identity Stores for
     /// validated aliases and runs DCE to clean up dead instruction chains.
     pub fn build_layout(&mut self, four_state: bool) {
+        self.build_layout_with_mode(
+            four_state,
+            crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        );
+    }
+
+    pub fn build_layout_with_mode(
+        &mut self,
+        four_state: bool,
+        mode: crate::backend::memory_layout::MemoryLayoutMode,
+    ) {
         if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
                 .comb_observers
@@ -223,7 +234,7 @@ impl Program {
                 !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
-        let layout = crate::backend::MemoryLayout::build(self, four_state);
+        let layout = crate::backend::MemoryLayout::build(self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
         if !self.address_aliases.is_empty() {
@@ -584,10 +595,19 @@ impl<V: fmt::Display> fmt::Display for AbsoluteAddrBase<V> {
 /// a [`SignalRef`] stores the pre-resolved memory offset and metadata, allowing
 /// for essentially zero-cost reads and writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignalArrayLayout {
+    pub element_width: usize,
+    pub element_count: usize,
+    pub element_stride: usize,
+    pub plane_size: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SignalRef {
     pub offset: usize,
     pub width: usize,
     pub is_4state: bool,
+    pub array_layout: Option<SignalArrayLayout>,
 }
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct InstancePath(pub Vec<(StrId, usize)>);
@@ -887,6 +907,17 @@ fn renumber_sir_inst<A: Clone>(
     let off = |o: &SIROffset| match o {
         SIROffset::Static(v) => SIROffset::Static(*v),
         SIROffset::Dynamic(reg) => SIROffset::Dynamic(r(*reg)),
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => SIROffset::Element {
+            index: r(*index),
+            element_width: *element_width,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: dynamic_bit_offset.map(r),
+        },
     };
 
     match inst {
@@ -1249,6 +1280,18 @@ pub enum SIROffset {
     Static(usize),
     /// Dynamic bit offset (register value)
     Dynamic(RegisterId),
+    /// Access to one element of an unpacked array.
+    ///
+    /// `index` is the flattened element index, not a bit offset.  The logical
+    /// bit offset is `index * element_width + bit_offset`.  Keeping this form
+    /// in SIR lets a backend choose an element-strided physical layout without
+    /// recovering source type information from arithmetic instructions.
+    Element {
+        index: RegisterId,
+        element_width: usize,
+        bit_offset: usize,
+        dynamic_bit_offset: Option<RegisterId>,
+    },
 }
 
 impl fmt::Display for SIROffset {
@@ -1256,7 +1299,41 @@ impl fmt::Display for SIROffset {
         match self {
             SIROffset::Static(val) => write!(f, "{}", val),
             SIROffset::Dynamic(reg) => write!(f, "r{}", reg.0),
+            SIROffset::Element {
+                index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset,
+            } => {
+                write!(
+                    f,
+                    "element(r{}, width={}, bit={}",
+                    index.0, element_width, bit_offset
+                )?;
+                if let Some(dynamic) = dynamic_bit_offset {
+                    write!(f, "+r{}", dynamic.0)?;
+                }
+                write!(f, ")")
+            }
         }
+    }
+}
+
+impl SIROffset {
+    pub fn dynamic_registers(&self) -> [Option<RegisterId>; 2] {
+        match self {
+            SIROffset::Static(_) => [None, None],
+            SIROffset::Dynamic(register) => [Some(*register), None],
+            SIROffset::Element {
+                index,
+                dynamic_bit_offset,
+                ..
+            } => [Some(*index), *dynamic_bit_offset],
+        }
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        !matches!(self, SIROffset::Static(_))
     }
 }
 

@@ -480,21 +480,16 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         SIRInstruction::Unary(_, _, src) => {
             out.push(*src);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-            out.push(*off);
+        SIRInstruction::Load(_, _, offset, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-            out.push(*off);
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
             out.push(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-            out.push(*src);
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-            out.push(*off);
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);

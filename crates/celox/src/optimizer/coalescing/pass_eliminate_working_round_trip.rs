@@ -62,7 +62,7 @@ pub(crate) fn eliminate_working_round_trip(
                     let abs = src.absolute_addr();
                     if src.region == STABLE_REGION && dst.region == WORKING_REGION {
                         // Seed: STABLE → WORKING
-                        let has_dynamic = matches!(offset, SIROffset::Dynamic(_));
+                        let has_dynamic = offset.is_dynamic();
                         let entry = vars.entry(abs).or_insert_with(|| VarInfo {
                             stable_addr: *src,
                             seed_locs: Vec::new(),
@@ -77,7 +77,7 @@ pub(crate) fn eliminate_working_round_trip(
                     } else if src.region == WORKING_REGION && dst.region == STABLE_REGION {
                         // Apply: WORKING → STABLE
                         let abs_w = src.absolute_addr();
-                        let has_dynamic = matches!(offset, SIROffset::Dynamic(_));
+                        let has_dynamic = offset.is_dynamic();
                         let entry = vars.entry(abs_w).or_insert_with(|| VarInfo {
                             stable_addr: *dst,
                             seed_locs: Vec::new(),
@@ -93,7 +93,7 @@ pub(crate) fn eliminate_working_round_trip(
                 }
                 SIRInstruction::Load(_, addr, offset, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
-                    if matches!(offset, SIROffset::Dynamic(_)) {
+                    if offset.is_dynamic() {
                         vars.entry(abs).and_modify(|v| v.has_dynamic = true);
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
@@ -102,7 +102,7 @@ pub(crate) fn eliminate_working_round_trip(
                     if addr.region == WORKING_REGION =>
                 {
                     let abs = addr.absolute_addr();
-                    if matches!(offset, SIROffset::Dynamic(_)) {
+                    if offset.is_dynamic() {
                         vars.entry(abs).and_modify(|v| v.has_dynamic = true);
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);

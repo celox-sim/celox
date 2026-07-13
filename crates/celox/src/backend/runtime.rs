@@ -623,6 +623,7 @@ impl JitBackend {
             offset,
             width,
             is_4state,
+            array_layout: None,
         }
     }
 

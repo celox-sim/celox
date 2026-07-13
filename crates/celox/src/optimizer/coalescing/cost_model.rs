@@ -156,7 +156,7 @@ pub fn estimate_clif_cost(
             let nc = num_chunks(*op_width);
             let base = if *op_width <= 64 {
                 3
-            } else if matches!(offset, SIROffset::Dynamic(_)) {
+            } else if offset.is_dynamic() {
                 // Dynamic offset: unaligned access, ~9 per chunk + 3 setup
                 9 * nc + 3
             } else if op_width.is_multiple_of(64) {

@@ -44,8 +44,8 @@ type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
 pub(crate) use node::SLTNodeArenaEditError;
 pub use node::{
-    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTLoopBound, SLTNode,
-    SLTNodeArena, SLTStepOp,
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
+    SLTNode, SLTNodeArena, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 
@@ -2205,6 +2205,12 @@ fn eval_dynamic_select_offset(
     token: Option<&TokenRange>,
 ) -> Result<DynamicSelectOffset, ParserError> {
     let geometry = select_geometry(module, var_id, index, select)?;
+    let array_dimension_count = module.variables[&var_id].r#type.array.iter().count();
+    let array_element_width = if array_dimension_count == 0 {
+        None
+    } else {
+        geometry.strides.get(array_dimension_count - 1).copied()
+    };
     let mut offset = arena.alloc(SLTNode::Constant(
         BigUint::from(0u8),
         BigUint::from(0u8),
@@ -2232,7 +2238,14 @@ fn eval_dynamic_select_offset(
                 token,
             )
         })?;
-        indices.push(SLTIndex { node, stride });
+        let kind = if dimension < array_dimension_count {
+            SLTIndexKind::Unpacked {
+                element_width: array_element_width.expect("unpacked array has an element width"),
+            }
+        } else {
+            SLTIndexKind::Packed
+        };
+        indices.push(SLTIndex { node, stride, kind });
         let stride_node = arena.alloc(SLTNode::Constant(
             BigUint::from(stride),
             BigUint::from(0u8),
@@ -2320,6 +2333,7 @@ fn eval_dynamic_select_offset(
         indices.push(SLTIndex {
             node: start,
             stride,
+            kind: SLTIndexKind::Packed,
         });
         let stride_node = arena.alloc(SLTNode::Constant(
             BigUint::from(stride),

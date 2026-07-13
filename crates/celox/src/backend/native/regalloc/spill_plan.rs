@@ -1,5 +1,6 @@
 //! Braun--Hack sections 4.2 and 4.3: W/S states and coupling plan.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::backend::native::mir::{BlockId, MFunction, VReg};
@@ -620,14 +621,32 @@ fn limit_live_through_clobber(
         })
         .collect::<BTreeSet<_>>();
     while live_through.len() > capacity {
-        let Some(victim) = live_through.iter().copied().max_by_key(|value| {
-            logical_distance_at(
+        let Some(victim) = live_through.iter().copied().max_by(|left, right| {
+            compare_eviction_candidates(
                 func,
-                next_use,
-                &plan.logical,
-                block,
-                instruction + 1,
-                *value,
+                spilled,
+                (
+                    *left,
+                    logical_distance_at(
+                        func,
+                        next_use,
+                        &plan.logical,
+                        block,
+                        instruction + 1,
+                        *left,
+                    ),
+                ),
+                (
+                    *right,
+                    logical_distance_at(
+                        func,
+                        next_use,
+                        &plan.logical,
+                        block,
+                        instruction + 1,
+                        *right,
+                    ),
+                ),
             )
         }) else {
             return Err(SpillPlanError::new(
@@ -762,14 +781,32 @@ fn limit(
             .iter()
             .copied()
             .filter(|value| !pinned.contains(value))
-            .max_by_key(|value| {
-                logical_distance_at(
+            .max_by(|left, right| {
+                compare_eviction_candidates(
                     func,
-                    next_use,
-                    &plan.logical,
-                    block,
-                    distance_instruction,
-                    *value,
+                    spilled,
+                    (
+                        *left,
+                        logical_distance_at(
+                            func,
+                            next_use,
+                            &plan.logical,
+                            block,
+                            distance_instruction,
+                            *left,
+                        ),
+                    ),
+                    (
+                        *right,
+                        logical_distance_at(
+                            func,
+                            next_use,
+                            &plan.logical,
+                            block,
+                            distance_instruction,
+                            *right,
+                        ),
+                    ),
                 )
             })
         else {
@@ -800,6 +837,62 @@ fn limit(
         resident.remove(&victim);
     }
     Ok(())
+}
+
+/// Compare two possible split points by the cost density of keeping the value
+/// resident until its next use.  Braun--Hack MIN is the equal-cost special
+/// case: with equal spill/reload costs, the farther next use is still evicted.
+/// For target values with different rematerialization and memory costs, the
+/// numerator is the machine-instruction cost avoided by retaining the value,
+/// and the denominator is the register occupancy until that use.
+fn compare_eviction_candidates(
+    func: &MFunction,
+    spilled: &BTreeSet<LogicalValue>,
+    left: (LogicalValue, NextUseDistance),
+    right: (LogicalValue, NextUseDistance),
+) -> Ordering {
+    match (left.1, right.1) {
+        (NextUseDistance::Dead, NextUseDistance::Dead) => left.0.cmp(&right.0),
+        (NextUseDistance::Dead, _) => Ordering::Greater,
+        (_, NextUseDistance::Dead) => Ordering::Less,
+        (
+            NextUseDistance::Finite {
+                loop_exits: left_exits,
+                instructions: left_instructions,
+            },
+            NextUseDistance::Finite {
+                loop_exits: right_exits,
+                instructions: right_instructions,
+            },
+        ) => left_exits.cmp(&right_exits).then_with(|| {
+            let left_cost = eviction_cost(func, spilled, left.0) as u128;
+            let right_cost = eviction_cost(func, spilled, right.0) as u128;
+            let left_span = left_instructions as u128 + 1;
+            let right_span = right_instructions as u128 + 1;
+            // Lower avoided-cost density is the better eviction candidate.
+            // Cross multiplication keeps the decision deterministic and free
+            // of floating-point rounding.
+            (right_cost * left_span)
+                .cmp(&(left_cost * right_span))
+                .then_with(|| left_instructions.cmp(&right_instructions))
+                .then_with(|| left.0.cmp(&right.0))
+        }),
+    }
+}
+
+fn eviction_cost(func: &MFunction, spilled: &BTreeSet<LogicalValue>, value: LogicalValue) -> u16 {
+    let Some(desc) = func.spill_desc(VReg(value.0)) else {
+        // A missing descriptor is rejected by MIR verification before this
+        // phase.  Keep this helper total so malformed input remains a
+        // structured verifier error rather than a planner panic.
+        return u16::MAX;
+    };
+    u16::from(desc.reload_cost)
+        + if spilled.contains(&value) {
+            0
+        } else {
+            u16::from(desc.spill_cost)
+        }
 }
 
 fn logical_entry_distance(
@@ -1166,6 +1259,55 @@ mod tests {
         assert_eq!(error.rule, "SPILL_PLAN.CLOBBER_CAPACITY");
         assert_eq!(error.block, Some(BlockId(0)));
         assert_eq!(error.instruction, Some(1));
+    }
+
+    #[test]
+    fn eviction_uses_target_cost_density_and_preserves_min_as_tie_breaker() {
+        let mut vregs = VRegAllocator::new();
+        let cheap = vregs.alloc();
+        let costly = vregs.alloc();
+        let func = MFunction::new(vregs, vec![SpillDesc::remat(1), SpillDesc::transient()]);
+        let spilled = BTreeSet::new();
+        let local = |instructions| NextUseDistance::Finite {
+            loop_exits: 0,
+            instructions,
+        };
+
+        assert_eq!(
+            compare_eviction_candidates(
+                &func,
+                &spilled,
+                (LogicalValue(cheap.0), local(1)),
+                (LogicalValue(costly.0), local(1)),
+            ),
+            Ordering::Greater,
+            "equal spans must evict the cheaper rematerializable value"
+        );
+        assert_eq!(
+            compare_eviction_candidates(
+                &func,
+                &spilled,
+                (LogicalValue(cheap.0), local(1)),
+                (LogicalValue(costly.0), local(15)),
+            ),
+            Ordering::Less,
+            "a sufficiently long occupancy interval must outweigh a larger split cost"
+        );
+
+        let equal_cost = MFunction::new(
+            func.vregs.clone(),
+            vec![SpillDesc::transient(), SpillDesc::transient()],
+        );
+        assert_eq!(
+            compare_eviction_candidates(
+                &equal_cost,
+                &spilled,
+                (LogicalValue(cheap.0), local(2)),
+                (LogicalValue(costly.0), local(8)),
+            ),
+            Ordering::Less,
+            "equal target costs must reduce to furthest-next-use MIN"
+        );
     }
 
     #[test]

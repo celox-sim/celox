@@ -182,6 +182,232 @@ fn emit_sparse_chunk_copy(
     Ok(())
 }
 
+fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut tail = asm.create_label();
+    let mut below_four = asm.create_label();
+    let mut below_two = asm.create_label();
+    let mut done = asm.create_label();
+
+    asm.cmp(r11, 8)?;
+    asm.jb(tail)?;
+    asm.mov(rbp, qword_ptr(rsi))?;
+    asm.mov(qword_ptr(rdi), rbp)?;
+    asm.jmp(done)?;
+
+    asm.set_label(&mut tail)?;
+    asm.test(r11, 4)?;
+    asm.je(below_four)?;
+    asm.mov(ebp, dword_ptr(rsi))?;
+    asm.mov(dword_ptr(rdi), ebp)?;
+    asm.add(rsi, 4)?;
+    asm.add(rdi, 4)?;
+
+    asm.set_label(&mut below_four)?;
+    asm.test(r11, 2)?;
+    asm.je(below_two)?;
+    asm.mov(bp, word_ptr(rsi))?;
+    asm.mov(word_ptr(rdi), bp)?;
+    asm.add(rsi, 2)?;
+    asm.add(rdi, 2)?;
+
+    asm.set_label(&mut below_two)?;
+    asm.test(r11, 1)?;
+    asm.je(done)?;
+    asm.mov(bpl, byte_ptr(rsi))?;
+    asm.mov(byte_ptr(rdi), bpl)?;
+    asm.set_label(&mut done)?;
+    asm.nop()?;
+    Ok(())
+}
+
+fn emit_sparse_commit_worklist(
+    asm: &mut CodeAssembler,
+    descriptor_label: CodeLabel,
+    active_count_offset: i32,
+    active_flags_offset: i32,
+    active_list_offset: i32,
+    active_capacity: usize,
+) -> Result<(), IcedError> {
+    if active_capacity == 0 {
+        return Ok(());
+    }
+
+    // The pseudo has no MIR operands, so preserve all scratch registers once
+    // for the complete worklist rather than once per sparse region.
+    for reg in [
+        rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14,
+    ] {
+        asm.push(reg)?;
+    }
+
+    // r12 = active-list cursor, r13 = captured entry count.
+    asm.mov(
+        r13,
+        qword_ptr(mem_operand(BaseReg::SimState, active_count_offset)),
+    )?;
+    asm.mov(
+        qword_ptr(mem_operand(BaseReg::SimState, active_count_offset)),
+        0i32,
+    )?;
+    asm.xor(r12d, r12d)?;
+
+    let mut active_loop = asm.create_label();
+    let mut active_next = asm.create_label();
+    let mut active_done = asm.create_label();
+    asm.set_label(&mut active_loop)?;
+    asm.cmp(r12, r13)?;
+    asm.jae(active_done)?;
+    // Corrupt checkpoint metadata must not index beyond the fixed worklist.
+    asm.cmp(r12, active_capacity as i32)?;
+    asm.jae(active_done)?;
+
+    asm.mov(eax, dword_ptr(SIM_BASE + r12 * 4 + active_list_offset))?;
+    asm.cmp(rax, active_capacity as i32)?;
+    asm.jae(active_next)?;
+    asm.mov(byte_ptr(SIM_BASE + rax + active_flags_offset), 0i32)?;
+
+    // Descriptor rows contain eight u64 fields and are ordered by active id.
+    asm.shl(rax, 6)?;
+    asm.lea(rbx, ptr(descriptor_label))?;
+    asm.add(rbx, rax)?;
+
+    // A sparse value of at most one native chunk has exactly one dirty word
+    // and one summary bit.  Active-list membership already tells us which
+    // descriptor to visit, so scanning both bitmap levels is pure overhead.
+    let mut generic_summary = asm.create_label();
+    asm.cmp(qword_ptr(rbx + 16), 8i32)?;
+    asm.ja(generic_summary)?;
+    asm.cmp(qword_ptr(rbx + 32), 1i32)?;
+    asm.jne(generic_summary)?;
+
+    // Clear the fixed summary word and take the fixed dirty word. A zero dirty
+    // word is tolerated for restored/corrupt checkpoint metadata.
+    asm.mov(r10, qword_ptr(rbx + 40))?;
+    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+    asm.mov(r10, qword_ptr(rbx + 24))?;
+    asm.mov(r8, qword_ptr(SIM_BASE + r10))?;
+    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+    asm.test(r8, r8)?;
+    asm.je(active_next)?;
+
+    asm.mov(rsi, qword_ptr(rbx))?;
+    asm.add(rsi, SIM_BASE)?;
+    asm.mov(rdi, qword_ptr(rbx + 8))?;
+    asm.add(rdi, SIM_BASE)?;
+    asm.mov(r11, qword_ptr(rbx + 16))?;
+    emit_sparse_runtime_plane_copy(asm)?;
+
+    let mut single_plane_done = asm.create_label();
+    asm.cmp(qword_ptr(rbx + 56), 0i32)?;
+    asm.je(single_plane_done)?;
+    asm.mov(rsi, qword_ptr(rbx))?;
+    asm.add(rsi, qword_ptr(rbx + 16))?;
+    asm.add(rsi, SIM_BASE)?;
+    asm.mov(rdi, qword_ptr(rbx + 8))?;
+    asm.add(rdi, qword_ptr(rbx + 16))?;
+    asm.add(rdi, SIM_BASE)?;
+    emit_sparse_runtime_plane_copy(asm)?;
+    asm.set_label(&mut single_plane_done)?;
+    asm.jmp(active_next)?;
+
+    asm.set_label(&mut generic_summary)?;
+
+    // r14 = summary word index.
+    asm.xor(r14d, r14d)?;
+    let mut summary_loop = asm.create_label();
+    let mut summary_bits = asm.create_label();
+    let mut summary_next = asm.create_label();
+    asm.set_label(&mut summary_loop)?;
+    asm.cmp(r14, qword_ptr(rbx + 48))?;
+    asm.jae(active_next)?;
+
+    // r10 = absolute state offset of this summary word; rax = its bits.
+    asm.mov(r10, r14)?;
+    asm.shl(r10, 3)?;
+    asm.add(r10, qword_ptr(rbx + 40))?;
+    asm.mov(rax, qword_ptr(SIM_BASE + r10))?;
+    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+
+    asm.set_label(&mut summary_bits)?;
+    asm.test(rax, rax)?;
+    asm.je(summary_next)?;
+    asm.bsf(rcx, rax)?;
+    asm.btr(rax, rcx)?;
+
+    // r10 = dirty-word index, then the corresponding metadata address.
+    asm.mov(r10, r14)?;
+    asm.shl(r10, 6)?;
+    asm.add(r10, rcx)?;
+    asm.cmp(r10, qword_ptr(rbx + 32))?;
+    asm.jae(summary_bits)?;
+    asm.mov(r9, r10)?;
+    asm.shl(r9, 3)?;
+    asm.add(r9, qword_ptr(rbx + 24))?;
+    asm.mov(r8, qword_ptr(SIM_BASE + r9))?;
+    asm.mov(qword_ptr(SIM_BASE + r9), 0i32)?;
+
+    let mut dirty_loop = asm.create_label();
+    asm.set_label(&mut dirty_loop)?;
+    asm.test(r8, r8)?;
+    asm.je(summary_bits)?;
+    asm.bsf(rcx, r8)?;
+    asm.btr(r8, rcx)?;
+    // rdx = byte offset of the dirty data chunk.
+    asm.mov(rdx, r10)?;
+    asm.shl(rdx, 6)?;
+    asm.add(rdx, rcx)?;
+    asm.mov(r9, qword_ptr(rbx + 16))?;
+    asm.add(r9, 7)?;
+    asm.shr(r9, 3)?;
+    asm.cmp(rdx, r9)?;
+    asm.jae(dirty_loop)?;
+    asm.shl(rdx, 3)?;
+
+    asm.mov(rsi, qword_ptr(rbx))?;
+    asm.add(rsi, rdx)?;
+    asm.add(rsi, SIM_BASE)?;
+    asm.mov(rdi, qword_ptr(rbx + 8))?;
+    asm.add(rdi, rdx)?;
+    asm.add(rdi, SIM_BASE)?;
+    asm.mov(r11, qword_ptr(rbx + 16))?;
+    asm.sub(r11, rdx)?;
+    emit_sparse_runtime_plane_copy(asm)?;
+
+    let mut plane_done = asm.create_label();
+    asm.cmp(qword_ptr(rbx + 56), 0i32)?;
+    asm.je(plane_done)?;
+    // The second four-state plane starts byte_size bytes after the first.
+    // Reconstruct the pointers because a partial first-plane copy advances
+    // them by the copied 4/2-byte pieces.
+    asm.mov(rsi, qword_ptr(rbx))?;
+    asm.add(rsi, qword_ptr(rbx + 16))?;
+    asm.add(rsi, rdx)?;
+    asm.add(rsi, SIM_BASE)?;
+    asm.mov(rdi, qword_ptr(rbx + 8))?;
+    asm.add(rdi, qword_ptr(rbx + 16))?;
+    asm.add(rdi, rdx)?;
+    asm.add(rdi, SIM_BASE)?;
+    emit_sparse_runtime_plane_copy(asm)?;
+    asm.set_label(&mut plane_done)?;
+    asm.jmp(dirty_loop)?;
+
+    asm.set_label(&mut summary_next)?;
+    asm.inc(r14)?;
+    asm.jmp(summary_loop)?;
+
+    asm.set_label(&mut active_next)?;
+    asm.inc(r12)?;
+    asm.jmp(active_loop)?;
+    asm.set_label(&mut active_done)?;
+
+    for reg in [
+        r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax,
+    ] {
+        asm.pop(reg)?;
+    }
+    Ok(())
+}
+
 // ────────────────────────────────────────────────────────────────
 // Callee-saved register tracking
 // ────────────────────────────────────────────────────────────────
@@ -1814,6 +2040,58 @@ fn emit_inst(
             }
         }
 
+        MInst::SparseMarkActive {
+            active_index,
+            active_count_offset,
+            active_flags_offset,
+            active_list_offset,
+            active_capacity,
+        } => {
+            asm.push(rax)?;
+            let mut done = asm.create_label();
+            let flag = mem_operand(
+                BaseReg::SimState,
+                *active_flags_offset + *active_index as i32,
+            );
+            asm.cmp(byte_ptr(flag), 0i32)?;
+            asm.jne(done)?;
+            asm.mov(byte_ptr(flag), 1i32)?;
+            asm.mov(
+                rax,
+                qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
+            )?;
+            // This is unreachable for valid state because active bytes dedupe
+            // entries, but keep malformed checkpoint metadata memory-safe.
+            asm.cmp(rax, *active_capacity as i32)?;
+            asm.jae(done)?;
+            asm.mov(
+                dword_ptr(SIM_BASE + rax * 4 + *active_list_offset),
+                *active_index as i32,
+            )?;
+            asm.inc(rax)?;
+            asm.mov(
+                qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
+                rax,
+            )?;
+            asm.set_label(&mut done)?;
+            asm.pop(rax)?;
+        }
+
+        MInst::SparseCommitWorklist {
+            descriptor_table,
+            active_count_offset,
+            active_flags_offset,
+            active_list_offset,
+            active_capacity,
+        } => emit_sparse_commit_worklist(
+            asm,
+            constant_table_labels[descriptor_table.0],
+            *active_count_offset,
+            *active_flags_offset,
+            *active_list_offset,
+            *active_capacity,
+        )?,
+
         MInst::LoadPtr {
             dst,
             ptr,
@@ -3327,7 +3605,10 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::StoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. } => indexed_store += 1,
-                MInst::MemCopy { .. } | MInst::SparseCommit { .. } => memcopy += 1,
+                MInst::MemCopy { .. }
+                | MInst::SparseCommit { .. }
+                | MInst::SparseMarkActive { .. }
+                | MInst::SparseCommitWorklist { .. } => memcopy += 1,
                 MInst::Add { .. }
                 | MInst::Sub { .. }
                 | MInst::Mul { .. }
@@ -3911,6 +4192,156 @@ mod shift_encoding_tests {
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 40);
         assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn sparse_worklist_deduplicates_regions_and_commits_tail_bytes() {
+        const BYTE_SIZE: usize = 13;
+        const STABLE: usize = 0;
+        const SPARSE: usize = 32;
+        const DIRTY: usize = 64;
+        const SUMMARY: usize = 72;
+        const ACTIVE_COUNT: usize = 80;
+        const ACTIVE_FLAGS: usize = 88;
+        const ACTIVE_LIST: usize = 92;
+
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let descriptor = SparseCommitDescriptor {
+            src_offset: SPARSE as u64,
+            dst_offset: STABLE as u64,
+            byte_size: BYTE_SIZE as u64,
+            dirty_words_offset: DIRTY as u64,
+            dirty_word_count: 1,
+            summary_words_offset: SUMMARY as u64,
+            summary_word_count: 1,
+            four_state: 1,
+        };
+        let table = func.intern_constant_table(descriptor.words().to_vec());
+        let mut block = MBlock::new(BlockId(0));
+        for _ in 0..2 {
+            block.push(MInst::SparseMarkActive {
+                active_index: 0,
+                active_count_offset: ACTIVE_COUNT as i32,
+                active_flags_offset: ACTIVE_FLAGS as i32,
+                active_list_offset: ACTIVE_LIST as i32,
+                active_capacity: 1,
+            });
+        }
+        block.push(MInst::SparseCommitWorklist {
+            descriptor_table: table,
+            active_count_offset: ACTIVE_COUNT as i32,
+            active_flags_offset: ACTIVE_FLAGS as i32,
+            active_list_offset: ACTIVE_LIST as i32,
+            active_capacity: 1,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 128];
+        state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);
+        for index in 0..BYTE_SIZE * 2 {
+            state[SPARSE + index] = index as u8 ^ 0x6d;
+        }
+        state[DIRTY..DIRTY + 8].copy_from_slice(&3u64.to_le_bytes());
+        state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
+        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
+        state[ACTIVE_FLAGS] = 0;
+        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        let stable_sentinel = state[STABLE + BYTE_SIZE * 2];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            &state[STABLE..STABLE + BYTE_SIZE * 2],
+            &state[SPARSE..SPARSE + BYTE_SIZE * 2]
+        );
+        assert_eq!(state[STABLE + BYTE_SIZE * 2], stable_sentinel);
+        assert_eq!(
+            u64::from_le_bytes(state[DIRTY..DIRTY + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[SUMMARY..SUMMARY + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(state[ACTIVE_FLAGS], 0);
+    }
+
+    #[test]
+    fn sparse_worklist_fast_path_commits_single_chunk_four_state_tail() {
+        const BYTE_SIZE: usize = 5;
+        const STABLE: usize = 0;
+        const SPARSE: usize = 16;
+        const DIRTY: usize = 32;
+        const SUMMARY: usize = 40;
+        const ACTIVE_COUNT: usize = 48;
+        const ACTIVE_FLAGS: usize = 56;
+        const ACTIVE_LIST: usize = 60;
+
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let descriptor = SparseCommitDescriptor {
+            src_offset: SPARSE as u64,
+            dst_offset: STABLE as u64,
+            byte_size: BYTE_SIZE as u64,
+            dirty_words_offset: DIRTY as u64,
+            dirty_word_count: 1,
+            summary_words_offset: SUMMARY as u64,
+            summary_word_count: 1,
+            four_state: 1,
+        };
+        let table = func.intern_constant_table(descriptor.words().to_vec());
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::SparseMarkActive {
+            active_index: 0,
+            active_count_offset: ACTIVE_COUNT as i32,
+            active_flags_offset: ACTIVE_FLAGS as i32,
+            active_list_offset: ACTIVE_LIST as i32,
+            active_capacity: 1,
+        });
+        block.push(MInst::SparseCommitWorklist {
+            descriptor_table: table,
+            active_count_offset: ACTIVE_COUNT as i32,
+            active_flags_offset: ACTIVE_FLAGS as i32,
+            active_list_offset: ACTIVE_LIST as i32,
+            active_capacity: 1,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 80];
+        state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);
+        for index in 0..BYTE_SIZE * 2 {
+            state[SPARSE + index] = 0x31 + index as u8;
+        }
+        state[DIRTY..DIRTY + 8].copy_from_slice(&1u64.to_le_bytes());
+        state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
+        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
+        state[ACTIVE_FLAGS] = 0;
+        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        let sentinel = state[STABLE + BYTE_SIZE * 2];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            &state[STABLE..STABLE + BYTE_SIZE * 2],
+            &state[SPARSE..SPARSE + BYTE_SIZE * 2]
+        );
+        assert_eq!(state[STABLE + BYTE_SIZE * 2], sentinel);
+        assert_eq!(
+            u64::from_le_bytes(state[DIRTY..DIRTY + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[SUMMARY..SUMMARY + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(state[ACTIVE_FLAGS], 0);
     }
 
     #[test]

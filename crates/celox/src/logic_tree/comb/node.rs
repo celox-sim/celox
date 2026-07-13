@@ -527,10 +527,20 @@ impl<A: Hash + Eq + Clone> Default for SLTNodeArena<A> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SLTIndexKind {
+    /// An unpacked-array dimension.  `element_width` is the packed width of
+    /// one complete array element.
+    Unpacked { element_width: usize },
+    /// A packed dimension or bit/part select.
+    Packed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SLTIndex {
     pub node: NodeId,
     pub stride: usize,
+    pub kind: SLTIndexKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -918,6 +928,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                                 f,
                             )?,
                             stride: idx.stride,
+                            kind: idx.kind,
                         })
                     })
                     .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
@@ -1528,6 +1539,7 @@ mod tests {
                 index: vec![SLTIndex {
                     node: NodeId(99),
                     stride: 1,
+                    kind: super::SLTIndexKind::Packed,
                 }],
                 access: BitAccess::new(0, 0),
             }],

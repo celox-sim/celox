@@ -23,21 +23,16 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
         SIRInstruction::Unary(_, _, src) => {
             out.push(*src);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-            out.push(*off);
+        SIRInstruction::Load(_, _, offset, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-            out.push(*off);
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
             out.push(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-            out.push(*src);
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-            out.push(*off);
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);
@@ -71,15 +66,20 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
         SIRInstruction::Load(_, addr, SIROffset::Static(off), bits) => {
             Some((addr, Some(*off), *bits, false))
         }
-        SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), bits) => {
+        SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, bits) => {
             Some((addr, None, *bits, false))
         }
         SIRInstruction::Store(addr, SIROffset::Static(off), bits, _, _, _) => {
             Some((addr, Some(*off), *bits, true))
         }
-        SIRInstruction::Store(addr, SIROffset::Dynamic(_), bits, _, _, _) => {
-            Some((addr, None, *bits, true))
-        }
+        SIRInstruction::Store(
+            addr,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. },
+            bits,
+            _,
+            _,
+            _,
+        ) => Some((addr, None, *bits, true)),
         _ => None,
     }
 }
@@ -311,7 +311,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     .or_default()
                     .push((idx, Some(*off), *w));
             }
-            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), w) => {
+            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, w) => {
                 load_index
                     .entry(addr.clone())
                     .or_default()
@@ -646,8 +646,11 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                     });
             }
             SIRInstruction::Load(_, _, SIROffset::Dynamic(_), _)
+            | SIRInstruction::Load(_, _, SIROffset::Element { .. }, _)
             | SIRInstruction::Store(_, SIROffset::Dynamic(_), _, _, _, _)
-            | SIRInstruction::Commit(_, _, SIROffset::Dynamic(_), _, _) => {
+            | SIRInstruction::Store(_, SIROffset::Element { .. }, _, _, _, _)
+            | SIRInstruction::Commit(_, _, SIROffset::Dynamic(_), _, _)
+            | SIRInstruction::Commit(_, _, SIROffset::Element { .. }, _, _) => {
                 // Dynamic ranges are deliberately a global barrier. The address
                 // is known, but keeping this rule conservative avoids depending
                 // on alias properties not represented in SIR.
@@ -974,30 +977,57 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
                     *src = *r;
                 }
             }
-            SIRInstruction::Store(_, SIROffset::Dynamic(off_reg), _, src, _, _) => {
-                if let Some(r) = replacement_map.get(off_reg) {
-                    *off_reg = *r;
+            SIRInstruction::Store(_, offset, _, src, _, _) => {
+                for register in offset.dynamic_registers().into_iter().flatten() {
+                    if let Some(replacement) = replacement_map.get(&register) {
+                        match offset {
+                            SIROffset::Dynamic(current) if *current == register => {
+                                *current = *replacement;
+                            }
+                            SIROffset::Element {
+                                index,
+                                dynamic_bit_offset,
+                                ..
+                            } => {
+                                if *index == register {
+                                    *index = *replacement;
+                                }
+                                if dynamic_bit_offset.as_ref() == Some(&register) {
+                                    *dynamic_bit_offset = Some(*replacement);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 if let Some(r) = replacement_map.get(src) {
                     *src = *r;
                 }
             }
-            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-                if let Some(r) = replacement_map.get(src) {
-                    *src = *r;
+            SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
+                match offset {
+                    SIROffset::Static(_) => {}
+                    SIROffset::Dynamic(register) => {
+                        if let Some(replacement) = replacement_map.get(register) {
+                            *register = *replacement;
+                        }
+                    }
+                    SIROffset::Element {
+                        index,
+                        dynamic_bit_offset,
+                        ..
+                    } => {
+                        if let Some(replacement) = replacement_map.get(index) {
+                            *index = *replacement;
+                        }
+                        if let Some(dynamic) = dynamic_bit_offset
+                            && let Some(replacement) = replacement_map.get(dynamic)
+                        {
+                            *dynamic = *replacement;
+                        }
+                    }
                 }
             }
-            SIRInstruction::Load(_, _, SIROffset::Dynamic(off_reg), _) => {
-                if let Some(r) = replacement_map.get(off_reg) {
-                    *off_reg = *r;
-                }
-            }
-            SIRInstruction::Commit(_, _, SIROffset::Dynamic(off_reg), _, _) => {
-                if let Some(r) = replacement_map.get(off_reg) {
-                    *off_reg = *r;
-                }
-            }
-            SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
             SIRInstruction::Concat(_, args) => {
                 for arg in args {
                     if let Some(r) = replacement_map.get(arg) {

@@ -231,8 +231,20 @@ fn slice_biguint(value: &BigUint, lsb: usize, msb: usize) -> BigUint {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_bits_to_memory(mem: &mut [u8], dst_bit_offset: usize, bit_width: usize, src: &[u8]) {
+    write_bits_to_memory_from(mem, dst_bit_offset, bit_width, src, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_bits_to_memory_from(
+    mem: &mut [u8],
+    dst_bit_offset: usize,
+    bit_width: usize,
+    src: &[u8],
+    src_bit_offset: usize,
+) {
     for bit in 0..bit_width {
-        let src_bit = (src[bit / 8] >> (bit % 8)) & 1;
+        let src_bit_index = src_bit_offset + bit;
+        let src_bit = (src[src_bit_index / 8] >> (src_bit_index % 8)) & 1;
         let dst_idx = (dst_bit_offset + bit) / 8;
         let dst_mask = 1u8 << ((dst_bit_offset + bit) % 8);
         if src_bit == 0 {
@@ -240,6 +252,48 @@ fn write_bits_to_memory(mem: &mut [u8], dst_bit_offset: usize, bit_width: usize,
         } else {
             mem[dst_idx] |= dst_mask;
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_initial_run_to_plane(
+    mem: &mut [u8],
+    signal: SignalRef,
+    mask_plane: bool,
+    run: &InitialMemoryWriteRun,
+    src: &[u8],
+) {
+    let Some(array) = signal.array_layout else {
+        let plane_size = signal.width.div_ceil(8);
+        let plane_bit_offset =
+            (signal.offset + usize::from(mask_plane) * plane_size) * 8 + run.bit_offset;
+        write_bits_to_memory(mem, plane_bit_offset, run.bit_width, src);
+        return;
+    };
+
+    let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+    let mut consumed = 0usize;
+    while consumed < run.bit_width {
+        let logical_offset = run.bit_offset + consumed;
+        let element = logical_offset / array.element_width;
+        let intra_element = logical_offset % array.element_width;
+        let part_width = (run.bit_width - consumed).min(array.element_width - intra_element);
+        let destination_bit_offset =
+            (plane_offset + element * array.element_stride) * 8 + intra_element;
+
+        if consumed.is_multiple_of(8)
+            && destination_bit_offset.is_multiple_of(8)
+            && part_width.is_multiple_of(8)
+        {
+            let src_byte = consumed / 8;
+            let dst_byte = destination_bit_offset / 8;
+            let byte_width = part_width / 8;
+            mem[dst_byte..dst_byte + byte_width]
+                .copy_from_slice(&src[src_byte..src_byte + byte_width]);
+        } else {
+            write_bits_to_memory_from(mem, destination_bit_offset, part_width, src, consumed);
+        }
+        consumed += part_width;
     }
 }
 
@@ -559,6 +613,13 @@ impl<B: SimBackend> Simulator<B> {
 
         for run in runs {
             if run.bit_width == 0 {
+                continue;
+            }
+            if signal.array_layout.is_some() {
+                write_initial_run_to_plane(mem, signal, false, run, &run.value_bytes);
+                if write_mask {
+                    write_initial_run_to_plane(mem, signal, true, run, &run.mask_bytes);
+                }
                 continue;
             }
             if run.bit_offset % 8 == 0 && run.bit_width % 8 == 0 {

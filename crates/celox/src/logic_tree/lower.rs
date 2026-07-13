@@ -6,7 +6,7 @@ use crate::logic_tree::{
     NodeId, SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp,
 };
 use num_bigint::{BigInt, BigUint};
-use num_traits::Zero;
+use num_traits::{ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::hash::Hash;
 
@@ -2535,22 +2535,71 @@ impl SLTToSIRLowerer {
         let dest = builder.alloc_logic(width);
 
         if !index.is_empty() {
-            let off_reg = builder.alloc_bit(64, false);
-            builder.emit(SIRInstruction::Imm(
-                off_reg,
-                SIRValue::new(access.lsb as u64),
-            ));
+            // Analyzer-unrolled array accesses retain their index syntax even
+            // when every index expression is a compile-time constant.  Fold
+            // those accesses back to one logical static bit offset here.  In
+            // particular, this lets the native element-strided layout choose
+            // a direct address instead of materializing a fake dynamic index
+            // for every unrolled lane.
+            let static_offset = index.iter().try_fold(access.lsb, |offset, entry| {
+                let (value, mask) = try_const_eval(entry.node, arena)?;
+                if !mask.is_zero() {
+                    return None;
+                }
+                let value = value.to_usize()?;
+                offset.checked_add(value.checked_mul(entry.stride)?)
+            });
+            if let Some(static_offset) = static_offset {
+                builder.emit(SIRInstruction::Load(
+                    dest,
+                    id.clone(),
+                    SIROffset::Static(static_offset),
+                    width,
+                ));
+                return dest;
+            }
 
-            let mut total_dynamic = None;
+            let element_width = index.iter().find_map(|entry| match entry.kind {
+                crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width } => {
+                    Some(element_width)
+                }
+                crate::logic_tree::comb::SLTIndexKind::Packed => None,
+            });
+            let element_access = element_width.filter(|element_width| {
+                access.msb < *element_width
+                    && index.iter().all(|entry| match entry.kind {
+                        crate::logic_tree::comb::SLTIndexKind::Unpacked {
+                            element_width: width,
+                        } => width == *element_width && entry.stride % *element_width == 0,
+                        crate::logic_tree::comb::SLTIndexKind::Packed => {
+                            entry.stride < *element_width
+                        }
+                    })
+            });
+            let mut element_dynamic = None;
+            let mut packed_dynamic = None;
+            let mut logical_dynamic = None;
             for idx_entry in index {
                 let mut idx_val =
                     self.lower_inner(builder, idx_entry.node, arena, cache, env, env.is_none());
 
-                if idx_entry.stride > 1 {
+                let (stride, accumulator) = if let Some(element_width) = element_access {
+                    match idx_entry.kind {
+                        crate::logic_tree::comb::SLTIndexKind::Unpacked { .. } => {
+                            (idx_entry.stride / element_width, &mut element_dynamic)
+                        }
+                        crate::logic_tree::comb::SLTIndexKind::Packed => {
+                            (idx_entry.stride, &mut packed_dynamic)
+                        }
+                    }
+                } else {
+                    (idx_entry.stride, &mut logical_dynamic)
+                };
+                if stride > 1 {
                     let stride_reg = builder.alloc_bit(64, false);
                     builder.emit(SIRInstruction::Imm(
                         stride_reg,
-                        SIRValue::new(idx_entry.stride as u64),
+                        SIRValue::new(stride as u64),
                     ));
                     let stepped_idx = builder.alloc_bit(64, false);
                     builder.emit(SIRInstruction::Binary(
@@ -2562,37 +2611,48 @@ impl SLTToSIRLowerer {
                     idx_val = stepped_idx;
                 }
 
-                if let Some(acc) = total_dynamic {
+                if let Some(acc) = *accumulator {
                     let new_acc = builder.alloc_bit(64, false);
                     builder.emit(SIRInstruction::Binary(new_acc, acc, BinaryOp::Add, idx_val));
-                    total_dynamic = Some(new_acc);
+                    *accumulator = Some(new_acc);
                 } else {
-                    total_dynamic = Some(idx_val);
+                    *accumulator = Some(idx_val);
                 }
             }
 
-            if let Some(dynamic_off) = total_dynamic {
-                let final_off = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Binary(
-                    final_off,
-                    off_reg,
-                    BinaryOp::Add,
-                    dynamic_off,
-                ));
-                builder.emit(SIRInstruction::Load(
-                    dest,
-                    id.clone(),
-                    SIROffset::Dynamic(final_off),
-                    width,
-                ));
+            let offset = if let Some(element_width) = element_access {
+                if let Some(element_index) = element_dynamic {
+                    SIROffset::Element {
+                        index: element_index,
+                        element_width,
+                        bit_offset: access.lsb,
+                        dynamic_bit_offset: packed_dynamic,
+                    }
+                } else {
+                    unreachable!("an unpacked element access has an unpacked index")
+                }
+            } else if let Some(dynamic_off) = logical_dynamic {
+                if access.lsb == 0 {
+                    SIROffset::Dynamic(dynamic_off)
+                } else {
+                    let static_off = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Imm(
+                        static_off,
+                        SIRValue::new(access.lsb as u64),
+                    ));
+                    let final_off = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Binary(
+                        final_off,
+                        static_off,
+                        BinaryOp::Add,
+                        dynamic_off,
+                    ));
+                    SIROffset::Dynamic(final_off)
+                }
             } else {
-                builder.emit(SIRInstruction::Load(
-                    dest,
-                    id.clone(),
-                    SIROffset::Dynamic(off_reg),
-                    width,
-                ));
-            }
+                SIROffset::Static(access.lsb)
+            };
+            builder.emit(SIRInstruction::Load(dest, id.clone(), offset, width));
         } else {
             builder.emit(SIRInstruction::Load(
                 dest,
@@ -6005,6 +6065,32 @@ mod tests {
                                 .copied()
                                 .unwrap_or(0)
                                 as usize,
+                            SIROffset::Element {
+                                index,
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                            } => {
+                                let element = values[index]
+                                    .payload
+                                    .to_u64_digits()
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(0)
+                                    as usize;
+                                let dynamic_bit_offset = dynamic_bit_offset
+                                    .map(|register| {
+                                        values[&register]
+                                            .payload
+                                            .to_u64_digits()
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(0)
+                                            as usize
+                                    })
+                                    .unwrap_or(0);
+                                element * element_width + bit_offset + dynamic_bit_offset
+                            }
                         };
                         let source = memory
                             .get(address)
@@ -6126,6 +6212,7 @@ mod tests {
                 index: vec![crate::logic_tree::comb::SLTIndex {
                     node: loop_value,
                     stride,
+                    kind: crate::logic_tree::comb::SLTIndexKind::Packed,
                 }],
                 access: BitAccess::new(0, 0),
             })
@@ -8670,6 +8757,7 @@ mod tests {
                 index: vec![crate::logic_tree::comb::SLTIndex {
                     node: loop_index,
                     stride: 8,
+                    kind: crate::logic_tree::comb::SLTIndexKind::Packed,
                 }],
                 access: BitAccess::new(0, 255),
             })
@@ -8719,6 +8807,55 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(load_widths, vec![8]);
+    }
+
+    #[test]
+    fn constant_unpacked_index_lowers_to_a_direct_logical_offset() {
+        let mut arena = SLTNodeArena::new();
+        let index = constant(&mut arena, 3, 8);
+        let element = arena
+            .alloc(SLTNode::Input {
+                variable: 30,
+                signed: false,
+                index: vec![crate::logic_tree::comb::SLTIndex {
+                    node: index,
+                    stride: 14,
+                    kind: crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width: 14 },
+                }],
+                access: BitAccess::new(4, 7),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            element,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+
+        assert!(eu.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Load(_, 30, SIROffset::Static(46), 4)
+                )
+            })
+        }));
+        assert!(eu.blocks.values().all(|block| {
+            block.instructions.iter().all(|instruction| {
+                !matches!(
+                    instruction,
+                    SIRInstruction::Load(
+                        _,
+                        30,
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        _
+                    )
+                )
+            })
+        }));
     }
 
     #[test]

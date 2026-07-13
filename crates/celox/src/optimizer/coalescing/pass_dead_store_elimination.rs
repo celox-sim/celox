@@ -42,7 +42,12 @@ pub(crate) fn eliminate_dead_stores(
                     SIRInstruction::Load(_, addr, SIROffset::Static(_), _) => {
                         loaded_addrs.insert(addr.absolute_addr());
                     }
-                    SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), _) => {
+                    SIRInstruction::Load(
+                        _,
+                        addr,
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        _,
+                    ) => {
                         let key = addr.absolute_addr();
                         loaded_addrs.insert(key);
                         dynamic_addrs.insert(key);
@@ -50,7 +55,13 @@ pub(crate) fn eliminate_dead_stores(
                     SIRInstruction::Commit(src, _, SIROffset::Static(_), _, _) => {
                         loaded_addrs.insert(src.absolute_addr());
                     }
-                    SIRInstruction::Commit(src, _, SIROffset::Dynamic(_), _, _) => {
+                    SIRInstruction::Commit(
+                        src,
+                        _,
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        _,
+                        _,
+                    ) => {
                         let key = src.absolute_addr();
                         loaded_addrs.insert(key);
                         dynamic_addrs.insert(key);

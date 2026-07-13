@@ -354,22 +354,20 @@ fn instruction_uses(
     uses: &mut Vec<RegisterId>,
 ) {
     match instruction {
-        SIRInstruction::Imm(..) | SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::Imm(..) => {}
         SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
         SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
             uses.push(*source);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => uses.push(*offset),
+        SIRInstruction::Load(_, _, offset, _) => {
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
+        }
         SIRInstruction::Store(_, offset, _, source, _, _) => {
-            if let SIROffset::Dynamic(offset) = offset {
-                uses.push(*offset);
-            }
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
             uses.push(*source);
         }
         SIRInstruction::Commit(_, _, offset, _, _) => {
-            if let SIROffset::Dynamic(offset) = offset {
-                uses.push(*offset);
-            }
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Concat(_, arguments)
         | SIRInstruction::RuntimeEvent {

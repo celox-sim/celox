@@ -502,6 +502,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// Consumes self.
     fn into_sir(
         self,
+        layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> Result<
         (
             crate::ir::Program,
@@ -545,7 +546,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         // Build memory layout (consumes address_aliases for offset sharing)
         let layout_start = phase_timing.then(crate::timing::now);
-        program.build_layout(self.options.four_state);
+        program.build_layout_with_mode(self.options.four_state, layout_mode);
         if let Some(start) = layout_start {
             eprintln!("[phase-timing] build_layout: {:?}", start.elapsed());
         }
@@ -586,7 +587,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
         let phase_start = phase_timing.then(crate::timing::now);
 
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
         if let Some(s) = phase_start {
             eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
@@ -617,7 +619,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let sir_start = phase_timing.then(crate::timing::now);
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::ElementStrided)?;
         if let Some(start) = sir_start {
             eprintln!("[phase-timing] into_sir total: {:?}", start.elapsed());
         }
@@ -650,7 +653,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_wasm(
         self,
     ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
         let backend = crate::backend::wasm_runtime::WasmBackend::new(&program, &options)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = vcd_path {
@@ -720,7 +724,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Register testbench runtime-event sites before layout fixes the ring geometry.
             crate::testbench::register_runtime_event_sites(&mut program);
 
-            program.build_layout(self.options.four_state);
+            #[cfg(target_arch = "x86_64")]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+            #[cfg(not(target_arch = "x86_64"))]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            program.build_layout_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(
@@ -789,6 +797,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 fn run_test_with_sim<B: crate::backend::SimBackend>(
     mut sim: Simulator<B>,
 ) -> Result<crate::testbench::TestResult, SimulatorError> {
+    let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let testbench_start = phase_timing.then(crate::timing::now);
     let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
         SimulatorError::new(SimulatorErrorKind::Codegen(
             "no initial block found — this module is not a native testbench".into(),
@@ -797,7 +807,11 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
     let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
     tb_builder.build_event_map(&initial_stmts);
     let tb_stmts = tb_builder.convert(&initial_stmts);
-    Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
+    let result = crate::testbench::run_testbench(&mut sim, &tb_stmts);
+    if let Some(start) = testbench_start {
+        eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
+    }
+    Ok(result)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -853,7 +867,11 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.param_overrides,
             &self.options.optimize_options,
         )?;
-        program.build_layout(self.options.four_state);
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        program.build_layout_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             run_dead_store_elimination(

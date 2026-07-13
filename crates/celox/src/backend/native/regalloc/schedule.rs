@@ -261,8 +261,24 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         readers_since_write: Vec<usize>,
     }
     let mut memory_history = HashMap::<(BaseReg, i64), MemoryHistory>::new();
+    // An indexed read can alias any constant-address store, but indexed reads
+    // never conflict with one another.  Keep them inside the schedulable DAG
+    // and add only the conservative store edges they require.  This lets the
+    // pressure scheduler place generated array loads next to their consumers
+    // instead of treating every load as a region barrier.
+    let mut unknown_readers = Vec::<usize>::new();
     for (instruction, inst) in region.iter().enumerate() {
         let Some((base, start, bytes, is_write)) = constant_memory_access(inst) else {
+            if is_unknown_memory_read(inst) {
+                let prior_writers = memory_history
+                    .values()
+                    .filter_map(|history| history.last_writer)
+                    .collect::<BTreeSet<_>>();
+                for dependency in prior_writers {
+                    add_dependency(&mut dependencies, &mut users, instruction, dependency);
+                }
+                unknown_readers.push(instruction);
+            }
             continue;
         };
         let mut memory_dependencies = BTreeSet::new();
@@ -275,6 +291,9 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
             if is_write {
                 memory_dependencies.extend(history.readers_since_write.iter().copied());
             }
+        }
+        if is_write {
+            memory_dependencies.extend(unknown_readers.iter().copied());
         }
         for dependency in memory_dependencies {
             add_dependency(&mut dependencies, &mut users, instruction, dependency);
@@ -385,6 +404,10 @@ fn constant_memory_access(inst: &MInst) -> Option<(BaseReg, i64, u32, bool)> {
         } => Some((*base, i64::from(*offset), size.bytes(), true)),
         _ => None,
     }
+}
+
+fn is_unknown_memory_read(inst: &MInst) -> bool {
+    matches!(inst, MInst::LoadIndexed { .. })
 }
 
 fn dependency_order_valid(dependencies: &[Vec<usize>], order: &[usize]) -> bool {
@@ -546,6 +569,7 @@ fn is_schedulable_at(
                 | MInst::LoadImm { .. }
                 | MInst::LoadConstantTableAddr { .. }
                 | MInst::Load { .. }
+                | MInst::LoadIndexed { .. }
                 | MInst::Store { .. }
                 | MInst::Add { .. }
                 | MInst::Sub { .. }
@@ -867,6 +891,110 @@ mod tests {
         assert!(scheduled.dependency_verified);
         assert!(positions[0] < positions[2]);
         assert!(positions[1] < positions[2]);
+    }
+
+    #[test]
+    fn indexed_loads_are_scheduled_with_their_consumers() {
+        let index = VReg(0);
+        let loaded = [VReg(1), VReg(2), VReg(3), VReg(4)];
+        let masked = [VReg(5), VReg(6), VReg(7), VReg(8)];
+        let combined = [VReg(9), VReg(10), VReg(11)];
+        let mut region = vec![MInst::LoadImm {
+            dst: index,
+            value: 0,
+        }];
+        for (lane, &dst) in loaded.iter().enumerate() {
+            region.push(MInst::LoadIndexed {
+                dst,
+                base: BaseReg::SimState,
+                offset: (lane * 8) as i32,
+                index,
+                size: OpSize::S64,
+            });
+        }
+        for (&dst, &src) in masked.iter().zip(&loaded) {
+            region.push(MInst::AndImm { dst, src, imm: 1 });
+        }
+        region.extend([
+            MInst::Or {
+                dst: combined[0],
+                lhs: masked[0],
+                rhs: masked[1],
+            },
+            MInst::Or {
+                dst: combined[1],
+                lhs: masked[2],
+                rhs: masked[3],
+            },
+            MInst::Or {
+                dst: combined[2],
+                lhs: combined[0],
+                rhs: combined[1],
+            },
+        ]);
+
+        let scheduled = schedule_region(&region, BTreeSet::from([combined[2]]));
+
+        assert!(scheduled.dependency_verified);
+        assert!(
+            max_pressure(&scheduled.instructions, &BTreeSet::from([combined[2]]))
+                < max_pressure(&region, &BTreeSet::from([combined[2]])),
+            "commuting indexed reads must not keep every loaded lane live together"
+        );
+    }
+
+    #[test]
+    fn indexed_load_keeps_conservative_store_order() {
+        let stored_before = VReg(0);
+        let index = VReg(1);
+        let loaded = VReg(2);
+        let stored_after = VReg(3);
+        let region = vec![
+            MInst::LoadImm {
+                dst: stored_before,
+                value: 7,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: stored_before,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: index,
+                value: 0,
+            },
+            MInst::LoadIndexed {
+                dst: loaded,
+                base: BaseReg::SimState,
+                offset: 64,
+                index,
+                size: OpSize::S64,
+            },
+            MInst::AddImm {
+                dst: stored_after,
+                src: loaded,
+                imm: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 128,
+                src: stored_after,
+                size: OpSize::S64,
+            },
+        ];
+
+        let scheduled = schedule_region(&region, BTreeSet::new());
+        let positions = [1, 3, 5].map(|original| {
+            scheduled
+                .instructions
+                .iter()
+                .position(|candidate| candidate == &region[original])
+                .unwrap()
+        });
+
+        assert!(scheduled.dependency_verified);
+        assert!(positions[0] < positions[1] && positions[1] < positions[2]);
     }
 
     #[test]

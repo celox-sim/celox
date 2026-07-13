@@ -624,8 +624,21 @@ fn apply_aliases_to_terminator(
 }
 
 fn apply_alias_to_offset(offset: &mut SIROffset, aliases: &HashMap<RegisterId, RegisterId>) {
-    if let SIROffset::Dynamic(register) = offset {
-        *register = resolve_canonical(*register, aliases);
+    match offset {
+        SIROffset::Static(_) => {}
+        SIROffset::Dynamic(register) => {
+            *register = resolve_canonical(*register, aliases);
+        }
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            *index = resolve_canonical(*index, aliases);
+            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                *dynamic_bit_offset = resolve_canonical(*dynamic_bit_offset, aliases);
+            }
+        }
     }
 }
 

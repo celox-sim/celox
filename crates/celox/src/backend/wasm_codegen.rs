@@ -12,6 +12,8 @@ use wasm_encoder::{
     MemoryType, Module, TypeSection, ValType,
 };
 
+#[cfg(test)]
+use crate::backend::memory_layout::MemoryLayoutMode;
 use crate::{
     HashMap,
     backend::{
@@ -946,7 +948,7 @@ fn emit_regs_changed(
     old: &RegisterId,
     new: &RegisterId,
     four_state: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let old_reg = &locals.reg_map[old];
@@ -1094,9 +1096,9 @@ fn compile_slice(
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    let d = &locals.reg_map[dst];
+    let d = locals.reg_map[dst].clone();
     let s = locals.reg_map[src].clone();
-    emit_slice_chunks(d, &s, bit_offset, width, instrs);
+    emit_slice_chunks(&d, &s, bit_offset, width, instrs);
 
     if four_state {
         if let (Some(dst_mask), Some(src_mask)) = (d.mask_idx, s.mask_idx) {
@@ -3639,6 +3641,42 @@ fn compile_zero_count_chunk(
 // Memory operations
 // ============================================================
 
+fn compile_logical_bit_offset(
+    offset: &SIROffset,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> u32 {
+    let result = locals.alloc(1);
+    match offset {
+        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
+        SIROffset::Dynamic(reg) => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[index].value_idx));
+            if *element_width != 1 {
+                instrs.push(Instruction::I64Const(*element_width as i64));
+                instrs.push(Instruction::I64Mul);
+            }
+            if *bit_offset != 0 {
+                instrs.push(Instruction::I64Const(*bit_offset as i64));
+                instrs.push(Instruction::I64Add);
+            }
+            if let Some(dynamic) = dynamic_bit_offset {
+                instrs.push(Instruction::LocalGet(locals.reg_map[dynamic].value_idx));
+                instrs.push(Instruction::I64Add);
+            }
+        }
+    }
+    instrs.push(Instruction::LocalSet(result));
+    result
+}
+
 fn compile_load(
     dst: &RegisterId,
     addr: &RegionedAbsoluteAddr,
@@ -3646,10 +3684,10 @@ fn compile_load(
     op_width: usize,
     layout: &MemoryLayout,
     four_state: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    let d = &locals.reg_map[dst];
+    let d = locals.reg_map[dst].clone();
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
     let var_width = layout.widths[&abs];
@@ -3661,7 +3699,7 @@ fn compile_load(
             let bit_shift = bit_off % 8;
             let load_offset = base_offset + byte_off;
 
-            compile_load_at_offset(d, load_offset, bit_shift, op_width, instrs);
+            compile_load_at_offset(&d, load_offset, bit_shift, op_width, instrs);
 
             // 4-state: load mask
             if four_state {
@@ -3697,7 +3735,7 @@ fn compile_load(
             // Dynamic bit offset is in offset_reg.value_idx (i64).
             // byte_offset = base_offset + (dynamic_bits / 8)
             // bit_shift = dynamic_bits % 8
-            compile_load_dynamic(d, base_offset, offset_reg.value_idx, op_width, instrs);
+            compile_load_dynamic(&d, base_offset, offset_reg.value_idx, op_width, instrs);
 
             if four_state {
                 if let Some(mask_idx) = d.mask_idx {
@@ -3721,6 +3759,33 @@ fn compile_load(
                             instrs.push(Instruction::I64Const(0));
                             instrs.push(Instruction::LocalSet(mask_idx + c as u32));
                         }
+                    }
+                }
+            }
+        }
+        SIROffset::Element { .. } => {
+            let offset_local = compile_logical_bit_offset(offset, locals, instrs);
+            compile_load_dynamic(&d, base_offset, offset_local, op_width, instrs);
+
+            if four_state && let Some(mask_idx) = d.mask_idx {
+                let is_4state = layout.is_4states.get(&abs).copied().unwrap_or(false);
+                if is_4state {
+                    let mask_local = RegLocal {
+                        value_idx: mask_idx,
+                        num_chunks: d.num_chunks,
+                        mask_idx: None,
+                    };
+                    compile_load_dynamic(
+                        &mask_local,
+                        base_offset + var_byte_size,
+                        offset_local,
+                        op_width,
+                        instrs,
+                    );
+                } else {
+                    for c in 0..d.num_chunks {
+                        instrs.push(Instruction::I64Const(0));
+                        instrs.push(Instruction::LocalSet(mask_idx + c as u32));
                     }
                 }
             }
@@ -3913,12 +3978,8 @@ fn compile_prepare_sparse_store(
     let sparse_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
     let byte_size = get_byte_size(layout.widths[&abs]);
     let bit_offset = locals.alloc(1);
-    match offset {
-        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
-        SIROffset::Dynamic(reg) => {
-            instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
-        }
-    }
+    let logical_offset = compile_logical_bit_offset(offset, locals, instrs);
+    instrs.push(Instruction::LocalGet(logical_offset));
     instrs.push(Instruction::LocalSet(bit_offset));
     let start_chunk = locals.alloc(1);
     instrs.push(Instruction::LocalGet(bit_offset));
@@ -4150,8 +4211,8 @@ fn compile_store(
                 }
             }
         }
-        SIROffset::Dynamic(reg) => {
-            let offset_reg_value_idx = locals.reg_map[reg].value_idx;
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            let offset_reg_value_idx = compile_logical_bit_offset(offset, locals, instrs);
             compile_store_dynamic(
                 &s,
                 base_offset,
@@ -4235,7 +4296,7 @@ fn emit_load_store_value(
     op_width: usize,
     base_offset: usize,
     dst: &RegLocal,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) -> Option<()> {
     match offset {
@@ -4270,8 +4331,8 @@ fn emit_load_store_value(
                 }
             }
         }
-        SIROffset::Dynamic(reg) => {
-            let dyn_bit_offset_local = locals.reg_map[reg].value_idx;
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            let dyn_bit_offset_local = compile_logical_bit_offset(offset, locals, instrs);
             if op_width <= 64 {
                 compile_load_dynamic(dst, base_offset, dyn_bit_offset_local, op_width, instrs);
             } else {
@@ -4936,7 +4997,7 @@ fn compile_commit(
                 // TODO: implement bit-offset commit
             }
         }
-        SIROffset::Dynamic(_reg) => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
             // TODO: dynamic offset commit
         }
     }
@@ -5656,6 +5717,8 @@ mod bit_count_tests {
 
         MemoryLayout {
             four_state,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
             offsets,
             widths,
             is_4states,
@@ -5665,6 +5728,10 @@ mod bit_count_tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: working_base_offset,
             sparse_layouts: HashMap::default(),
+            sparse_active_count_offset: working_base_offset,
+            sparse_active_flags_offset: working_base_offset,
+            sparse_active_list_offset: working_base_offset,
+            sparse_active_capacity: 0,
             merged_total_size: 65_536,
             triggered_bits_offset: working_base_offset,
             triggered_bits_total_size: 0,

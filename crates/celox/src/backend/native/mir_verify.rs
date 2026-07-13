@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use super::mir::{BlockId, MFunction, MInst, VReg};
+use super::mir::{BlockId, MFunction, MInst, SparseCommitDescriptor, VReg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVerifyError {
@@ -324,6 +324,47 @@ fn verify_instruction_constraints(
                     func.constant_tables().len()
                 ),
             ))
+        }
+        MInst::SparseMarkActive {
+            active_index,
+            active_capacity,
+            ..
+        } if *active_capacity == 0 || *active_index as usize >= *active_capacity => {
+            Err(MirVerifyError::instruction(
+                "SPARSE.ACTIVE_INDEX_RANGE",
+                block,
+                index,
+                format!("active sparse index {active_index} is outside capacity {active_capacity}"),
+            ))
+        }
+        MInst::SparseCommitWorklist {
+            descriptor_table,
+            active_capacity,
+            ..
+        } => {
+            let expected_words = active_capacity
+                .checked_mul(SparseCommitDescriptor::WORDS)
+                .ok_or_else(|| {
+                    MirVerifyError::instruction(
+                        "SPARSE.DESCRIPTOR_TABLE_SIZE",
+                        block,
+                        index,
+                        "sparse descriptor table size overflows usize",
+                    )
+                })?;
+            let actual_words = func.constant_table(*descriptor_table).map(<[_]>::len);
+            if actual_words == Some(expected_words) {
+                Ok(())
+            } else {
+                Err(MirVerifyError::instruction(
+                    "SPARSE.DESCRIPTOR_TABLE_SIZE",
+                    block,
+                    index,
+                    format!(
+                        "{descriptor_table} has {actual_words:?} words, expected {expected_words}"
+                    ),
+                ))
+            }
         }
         _ => Ok(()),
     }

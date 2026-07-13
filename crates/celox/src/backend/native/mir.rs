@@ -390,6 +390,37 @@ pub enum CmpKind {
     GeS,
 }
 
+/// One immutable row consumed by the sparse-region worklist commit loop.
+/// Rows are stored as eight u64 values in a function-local constant table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SparseCommitDescriptor {
+    pub src_offset: u64,
+    pub dst_offset: u64,
+    pub byte_size: u64,
+    pub dirty_words_offset: u64,
+    pub dirty_word_count: u64,
+    pub summary_words_offset: u64,
+    pub summary_word_count: u64,
+    pub four_state: u64,
+}
+
+impl SparseCommitDescriptor {
+    pub const WORDS: usize = 8;
+
+    pub fn words(self) -> [u64; Self::WORDS] {
+        [
+            self.src_offset,
+            self.dst_offset,
+            self.byte_size,
+            self.dirty_words_offset,
+            self.dirty_word_count,
+            self.summary_words_offset,
+            self.summary_word_count,
+            self.four_state,
+        ]
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // MIR instructions
 // ────────────────────────────────────────────────────────────────
@@ -509,6 +540,24 @@ pub enum MInst {
         summary_words_offset: i32,
         summary_word_count: usize,
         four_state: bool,
+    },
+    /// Add one sparse region to the fixed-capacity active-region worklist.
+    /// The active byte makes repeated stores to the same region idempotent.
+    SparseMarkActive {
+        active_index: u32,
+        active_count_offset: i32,
+        active_flags_offset: i32,
+        active_list_offset: i32,
+        active_capacity: usize,
+    },
+    /// Drain active sparse regions and commit their dirty chunks through one
+    /// shared generated loop. Descriptor rows are indexed by active_index.
+    SparseCommitWorklist {
+        descriptor_table: ConstantTableId,
+        active_count_offset: i32,
+        active_flags_offset: i32,
+        active_list_offset: i32,
+        active_capacity: usize,
     },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
@@ -752,6 +801,17 @@ impl fmt::Display for MInst {
                 f,
                 "sparse_commit [sim + {dst_offset}], [sim + {src_offset}], bytes={byte_size}, dirty_words={dirty_word_count}, summary_words={summary_word_count}, four_state={four_state}"
             ),
+            MInst::SparseMarkActive { active_index, .. } => {
+                write!(f, "sparse_mark_active region={active_index}")
+            }
+            MInst::SparseCommitWorklist {
+                descriptor_table,
+                active_capacity,
+                ..
+            } => write!(
+                f,
+                "sparse_commit_worklist table={descriptor_table}, capacity={active_capacity}"
+            ),
             MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
             MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
             MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
@@ -942,6 +1002,8 @@ impl MInst {
             | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::MemCopy { .. }
             | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
+            | MInst::SparseCommitWorklist { .. }
             | MInst::Branch { .. }
             | MInst::Jump { .. }
             | MInst::Return
@@ -958,7 +1020,9 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
-            | MInst::SparseCommit { .. } => Uses::none(),
+            | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
+            | MInst::SparseCommitWorklist { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1251,6 +1315,8 @@ impl MInst {
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
             | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
+            | MInst::SparseCommitWorklist { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}

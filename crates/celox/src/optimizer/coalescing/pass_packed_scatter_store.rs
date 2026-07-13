@@ -14,7 +14,43 @@ use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
 
-pub(super) struct PackedScatterStorePass;
+#[derive(Default)]
+pub(super) struct PackedScatterStorePass {
+    unpacked_element_widths: HashMap<AbsoluteAddr, usize>,
+}
+
+impl PackedScatterStorePass {
+    pub(super) fn for_program(program: &Program) -> Self {
+        let mut unpacked_element_widths = HashMap::default();
+        for (&instance_id, &module_id) in &program.instance_module {
+            for info in program.module_variables[&module_id].values() {
+                if info.array_dims.is_empty() {
+                    continue;
+                }
+                let Some(element_count) = info
+                    .array_dims
+                    .iter()
+                    .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+                else {
+                    continue;
+                };
+                if element_count == 0 || info.width % element_count != 0 {
+                    continue;
+                }
+                unpacked_element_widths.insert(
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id: info.id,
+                    },
+                    info.width / element_count,
+                );
+            }
+        }
+        Self {
+            unpacked_element_widths,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct DefSite {
@@ -100,7 +136,7 @@ impl ExecutionUnitPass for PackedScatterStorePass {
         // budget.
         let mut pending_dce = false;
         loop {
-            if let Some(plan) = find_best_plan(eu) {
+            if let Some(plan) = find_best_plan(eu, &self.unpacked_element_widths) {
                 apply_plan(eu, plan);
                 pending_dce = true;
                 continue;
@@ -115,7 +151,10 @@ impl ExecutionUnitPass for PackedScatterStorePass {
     }
 }
 
-fn find_best_plan(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<ScatterPlan> {
+fn find_best_plan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
+) -> Option<ScatterPlan> {
     let defs = definition_sites(eu);
     let uses = use_counts(eu);
     let mut blocks = eu.blocks.keys().copied().collect::<Vec<_>>();
@@ -125,7 +164,14 @@ fn find_best_plan(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<ScatterPla
     for block_id in blocks {
         let block = &eu.blocks[&block_id];
         for store_index in 0..block.instructions.len() {
-            let Some(plan) = plan_store(eu, block, store_index, &defs, &uses) else {
+            let Some(plan) = plan_store(
+                eu,
+                block,
+                store_index,
+                &defs,
+                &uses,
+                unpacked_element_widths,
+            ) else {
                 continue;
             };
             let replace = best.as_ref().is_none_or(|current: &ScatterPlan| {
@@ -148,6 +194,7 @@ fn plan_store(
     store_index: usize,
     defs: &HashMap<RegisterId, DefSite>,
     uses: &HashMap<RegisterId, usize>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) -> Option<ScatterPlan> {
     let SIRInstruction::Store(
         _,
@@ -258,6 +305,31 @@ fn plan_store(
     {
         return None;
     }
+
+    // An unpacked array is not a packed bit vector in SystemVerilog. Recover
+    // a dynamic update only when the matched lanes are exactly its declared
+    // elements; then the selector is an element index. A smaller lane would
+    // flatten the unpacked/packed boundary and a larger lane would span
+    // elements, neither of which SIROffset::Dynamic is allowed to express.
+    let array_element_width = addresses
+        .iter()
+        .filter_map(|address| {
+            unpacked_element_widths
+                .get(&address.absolute_addr())
+                .copied()
+        })
+        .next();
+    if let Some(element_width) = array_element_width
+        && (element_width != lane_width
+            || destination_start % element_width != 0
+            || addresses.iter().any(|address| {
+                unpacked_element_widths
+                    .get(&address.absolute_addr())
+                    .is_some_and(|&candidate| candidate != element_width)
+            }))
+    {
+        return None;
+    }
     if let Some(gate) = gate
         && !matches!(
             eu.register_map.get(&gate),
@@ -354,6 +426,7 @@ fn plan_store(
         value,
         gate,
         &peeled_keys,
+        unpacked_element_widths,
     )?;
     let new_blocks = if rewrite.condition.is_some() {
         let max_block = eu.blocks.keys().map(|block| block.0).max().unwrap_or(0);
@@ -751,6 +824,7 @@ fn build_rewrite(
     value: RegisterId,
     gate: Option<RegisterId>,
     peeled_keys: &[u64],
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) -> Option<Rewrite> {
     let mut next = eu
         .register_map
@@ -794,8 +868,16 @@ fn build_rewrite(
         head.push(SIRInstruction::Unary(widened, UnaryOp::Ident, selector));
         widened
     };
-    let scaled = if lane_width == 1 {
-        selector64
+    let has_scalar_destination = addresses
+        .iter()
+        .any(|address| !unpacked_element_widths.contains_key(&address.absolute_addr()));
+    let has_array_destination = addresses
+        .iter()
+        .any(|address| unpacked_element_widths.contains_key(&address.absolute_addr()));
+    let scaled = if !has_scalar_destination {
+        None
+    } else if lane_width == 1 {
+        Some(selector64)
     } else {
         let scale = alloc(RegisterType::Bit {
             width: 64,
@@ -815,7 +897,7 @@ fn build_rewrite(
             BinaryOp::Mul,
             scale,
         ));
-        scaled
+        Some(scaled)
     };
     let lane_width_u64 = u64::try_from(lane_width).ok()?;
     let key_origin = first_key.checked_mul(lane_width_u64)?;
@@ -825,7 +907,9 @@ fn build_rewrite(
     } else {
         (BinaryOp::Sub, key_origin - destination_origin)
     };
-    let offset = if bias == 0 {
+    let offset = if !has_scalar_destination {
+        None
+    } else if bias == 0 {
         scaled
     } else {
         let base_offset = alloc(RegisterType::Bit {
@@ -837,8 +921,42 @@ fn build_rewrite(
             width: 64,
             signed: false,
         })?;
-        head.push(SIRInstruction::Binary(offset, scaled, bias_op, base_offset));
-        offset
+        head.push(SIRInstruction::Binary(
+            offset,
+            scaled?,
+            bias_op,
+            base_offset,
+        ));
+        Some(offset)
+    };
+    let element_index = if !has_array_destination {
+        None
+    } else {
+        let destination_element = destination_start.checked_div(lane_width)?;
+        let first_key = usize::try_from(first_key).ok()?;
+        let (index_op, index_bias) = if destination_element >= first_key {
+            (BinaryOp::Add, destination_element - first_key)
+        } else {
+            (BinaryOp::Sub, first_key - destination_element)
+        };
+        if index_bias == 0 {
+            Some(selector64)
+        } else {
+            let bias = alloc(RegisterType::Bit {
+                width: 64,
+                signed: false,
+            })?;
+            head.push(SIRInstruction::Imm(
+                bias,
+                SIRValue::new(u64::try_from(index_bias).ok()?),
+            ));
+            let index = alloc(RegisterType::Bit {
+                width: 64,
+                signed: false,
+            })?;
+            head.push(SIRInstruction::Binary(index, selector64, index_op, bias));
+            Some(index)
+        }
     };
 
     let selector_constant_type = match eu.register_map.get(&selector)? {
@@ -927,16 +1045,29 @@ fn build_rewrite(
     let dynamic = addresses
         .iter()
         .map(|address| {
-            SIRInstruction::Store(
+            let offset = if let Some(&element_width) =
+                unpacked_element_widths.get(&address.absolute_addr())
+            {
+                let index = element_index?;
+                SIROffset::Element {
+                    index,
+                    element_width,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                }
+            } else {
+                SIROffset::Dynamic(offset?)
+            };
+            Some(SIRInstruction::Store(
                 *address,
-                SIROffset::Dynamic(offset),
+                offset,
                 lane_width,
                 value,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     let update = if condition.is_some() {
         dynamic
     } else {
@@ -1223,14 +1354,18 @@ fn instruction_uses(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<R
         SIRInstruction::Imm(..) => Vec::new(),
         SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
         SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => vec![*source],
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => vec![*offset],
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => Vec::new(),
-        SIRInstruction::Store(_, SIROffset::Dynamic(offset), _, source, _, _) => {
-            vec![*offset, *source]
+        SIRInstruction::Load(_, _, offset, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, source, _, _) => vec![*source],
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(offset), _, _) => vec![*offset],
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => Vec::new(),
+        SIRInstruction::Store(_, offset, _, source, _, _) => offset
+            .dynamic_registers()
+            .into_iter()
+            .flatten()
+            .chain(std::iter::once(*source))
+            .collect(),
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
+        }
         SIRInstruction::Concat(_, parts)
         | SIRInstruction::RuntimeEvent { args: parts, .. }
         | SIRInstruction::CombCaptureEvent { args: parts, .. } => parts.clone(),
@@ -1583,6 +1718,18 @@ mod tests {
                         let offset = match offset {
                             SIROffset::Static(offset) => *offset,
                             SIROffset::Dynamic(offset) => registers[offset].to_usize().unwrap(),
+                            SIROffset::Element {
+                                index,
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                            } => {
+                                registers[index].to_usize().unwrap() * element_width
+                                    + bit_offset
+                                    + dynamic_bit_offset
+                                        .map(|register| registers[&register].to_usize().unwrap())
+                                        .unwrap_or(0)
+                            }
                         };
                         let memory = memories.entry(*address).or_insert_with(BigUint::zero);
                         let field_mask = low_mask(*width) << offset;
@@ -1652,7 +1799,7 @@ mod tests {
             .filter_map(def_reg)
             .collect::<HashSet<_>>();
         let mut optimized = fixture.eu;
-        PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+        PackedScatterStorePass::default().run(&mut optimized, &PassOptions::default());
         optimized.verify();
 
         let stores = optimized
@@ -1739,12 +1886,80 @@ mod tests {
         }
 
         let once = format!("{}", optimized);
-        PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+        PackedScatterStorePass::default().run(&mut optimized, &PassOptions::default());
         assert_eq!(
             format!("{}", optimized),
             once,
             "the pass must be idempotent"
         );
+    }
+
+    #[test]
+    fn unpacked_array_rewrite_preserves_element_selection() {
+        let fixture = fixture(&canonical_keys(), Vec::new(), false);
+        let original = fixture.eu.clone();
+        let mut optimized = fixture.eu;
+        let mut pass = PackedScatterStorePass::default();
+        pass.unpacked_element_widths
+            .insert(address().absolute_addr(), LANE_WIDTH);
+        pass.run(&mut optimized, &PassOptions::default());
+        optimized.verify();
+
+        assert!(optimized.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(
+                        _,
+                        SIROffset::Element {
+                            element_width: LANE_WIDTH,
+                            bit_offset: 0,
+                            dynamic_bit_offset: None,
+                            ..
+                        },
+                        LANE_WIDTH,
+                        _,
+                        _,
+                        _,
+                    )
+                )
+            })
+        }));
+        assert!(optimized.blocks.values().all(|block| {
+            block.instructions.iter().all(|instruction| {
+                !matches!(
+                    instruction,
+                    SIRInstruction::Store(_, SIROffset::Dynamic(_), ..)
+                )
+            })
+        }));
+
+        for selector in 0..32u64 {
+            let inputs = [
+                (fixture.base, packed_pattern(1)),
+                (fixture.selector, BigUint::from(selector)),
+                (fixture.value, BigUint::from(0x2a_u8)),
+                (fixture.gate, BigUint::one()),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+            assert_eq!(
+                execute(&optimized, &inputs, packed_pattern(11)),
+                execute(&original, &inputs, packed_pattern(11)),
+                "selector={selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn unpacked_array_rewrite_rejects_packed_lane_width() {
+        let mut fixture = fixture(&canonical_keys(), Vec::new(), false);
+        let before = format!("{}", fixture.eu);
+        let mut pass = PackedScatterStorePass::default();
+        pass.unpacked_element_widths
+            .insert(address().absolute_addr(), LANE_WIDTH * 2);
+        pass.run(&mut fixture.eu, &PassOptions::default());
+        assert_eq!(format!("{}", fixture.eu), before);
     }
 
     #[test]
@@ -1757,7 +1972,7 @@ mod tests {
             fixture.eu.verify();
             let original = fixture.eu.clone();
             let mut optimized = fixture.eu.clone();
-            PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+            PackedScatterStorePass::default().run(&mut optimized, &PassOptions::default());
             optimized.verify();
 
             let store_groups = optimized
@@ -1806,7 +2021,7 @@ mod tests {
             }
 
             let once = format!("{optimized}");
-            PackedScatterStorePass.run(&mut optimized, &PassOptions::default());
+            PackedScatterStorePass::default().run(&mut optimized, &PassOptions::default());
             assert_eq!(format!("{optimized}"), once);
         }
     }
@@ -1840,7 +2055,7 @@ mod tests {
             triggered,
         ] {
             let before = format!("{}", fixture.eu);
-            PackedScatterStorePass.run(&mut fixture.eu, &PassOptions::default());
+            PackedScatterStorePass::default().run(&mut fixture.eu, &PassOptions::default());
             assert_eq!(format!("{}", fixture.eu), before);
             fixture.eu.verify();
         }
@@ -1911,7 +2126,7 @@ mod tests {
         for mut fixture in [interrupted, different_offset, different_width] {
             fixture.eu.verify();
             let before = format!("{}", fixture.eu);
-            PackedScatterStorePass.run(&mut fixture.eu, &PassOptions::default());
+            PackedScatterStorePass::default().run(&mut fixture.eu, &PassOptions::default());
             assert_eq!(format!("{}", fixture.eu), before);
             fixture.eu.verify();
         }
@@ -1923,7 +2138,7 @@ mod tests {
         let before = format!("{}", fixture.eu);
         let mut options = PassOptions::default();
         options.four_state = true;
-        PackedScatterStorePass.run(&mut fixture.eu, &options);
+        PackedScatterStorePass::default().run(&mut fixture.eu, &options);
         assert_eq!(format!("{}", fixture.eu), before);
         fixture.eu.verify();
     }
@@ -1975,7 +2190,7 @@ mod tests {
             register_map: builder.registers,
         };
         eu.verify();
-        PackedScatterStorePass.run(&mut eu, &PassOptions::default());
+        PackedScatterStorePass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
         let (static_stores, dynamic_stores) = eu
             .blocks
@@ -1997,7 +2212,7 @@ mod tests {
             })
         }));
         let once = format!("{}", eu);
-        PackedScatterStorePass.run(&mut eu, &PassOptions::default());
+        PackedScatterStorePass::default().run(&mut eu, &PassOptions::default());
         assert_eq!(format!("{}", eu), once);
     }
 
@@ -2040,7 +2255,7 @@ mod tests {
 
         for mut fixture in [block_overflow, native_block_overflow, register_overflow] {
             let before = format!("{}", fixture.eu);
-            PackedScatterStorePass.run(&mut fixture.eu, &PassOptions::default());
+            PackedScatterStorePass::default().run(&mut fixture.eu, &PassOptions::default());
             assert_eq!(format!("{}", fixture.eu), before);
             fixture.eu.verify();
         }

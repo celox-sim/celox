@@ -10,7 +10,7 @@ use std::sync::Arc;
 use bit_set::BitSet;
 use num_bigint::BigUint;
 
-use crate::ir::{AbsoluteAddr, Program, SignalRef};
+use crate::ir::{AbsoluteAddr, Program, SignalArrayLayout, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
@@ -307,8 +307,7 @@ fn compile_program(
         for (addr, &offset) in &layout.offsets {
             let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
             if is_4state {
-                let width = layout.widths[addr];
-                let allocated_size = get_byte_size(width);
+                let allocated_size = layout.plane_size(addr);
                 four_state_inits.push((offset, allocated_size));
             }
         }
@@ -316,8 +315,7 @@ fn compile_program(
             let offset = layout.working_base_offset + rel_offset;
             let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
             if is_4state {
-                let width = layout.widths[addr];
-                let allocated_size = get_byte_size(width);
+                let allocated_size = layout.plane_size(addr);
                 four_state_inits.push((offset, allocated_size));
             }
         }
@@ -433,6 +431,60 @@ impl NativeBackend {
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
+    fn read_signal_plane(&self, signal: SignalRef, mask_plane: bool) -> BigUint {
+        let bytes = self.mem_bytes();
+        let Some(array) = signal.array_layout else {
+            let byte_size = get_byte_size(signal.width);
+            let plane_offset = signal.offset + usize::from(mask_plane) * byte_size;
+            let mut value = BigUint::from_bytes_le(&bytes[plane_offset..plane_offset + byte_size]);
+            if signal.width % 8 != 0 {
+                value &= (BigUint::from(1u8) << signal.width) - BigUint::from(1u8);
+            }
+            return value;
+        };
+
+        let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+        let element_bytes = get_byte_size(array.element_width);
+        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
+        let mut value = BigUint::from(0u8);
+        for element in 0..array.element_count {
+            let start = plane_offset + element * array.element_stride;
+            let element_value =
+                BigUint::from_bytes_le(&bytes[start..start + element_bytes]) & &element_mask;
+            value |= element_value << (element * array.element_width);
+        }
+        value
+    }
+
+    fn write_signal_plane(&mut self, signal: SignalRef, mask_plane: bool, value: &BigUint) {
+        let Some(array) = signal.array_layout else {
+            let byte_size = get_byte_size(signal.width);
+            let plane_offset = signal.offset + usize::from(mask_plane) * byte_size;
+            let bytes = self.mem_bytes_mut();
+            bytes[plane_offset..plane_offset + byte_size].fill(0);
+            let value_bytes = value.to_bytes_le();
+            let copy_len = value_bytes.len().min(byte_size);
+            bytes[plane_offset..plane_offset + copy_len].copy_from_slice(&value_bytes[..copy_len]);
+            if signal.width % 8 != 0 && byte_size != 0 {
+                bytes[plane_offset + byte_size - 1] &= (1u8 << (signal.width % 8)) - 1;
+            }
+            return;
+        };
+
+        let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+        let element_bytes = get_byte_size(array.element_width);
+        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
+        let bytes = self.mem_bytes_mut();
+        bytes[plane_offset..plane_offset + array.plane_size].fill(0);
+        for element in 0..array.element_count {
+            let element_value = (value >> (element * array.element_width)) & &element_mask;
+            let value_bytes = element_value.to_bytes_le();
+            let copy_len = value_bytes.len().min(element_bytes);
+            let start = plane_offset + element * array.element_stride;
+            bytes[start..start + copy_len].copy_from_slice(&value_bytes[..copy_len]);
+        }
+    }
+
     fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
@@ -468,10 +520,20 @@ impl super::super::SimBackend for NativeBackend {
         let offset = layout.offsets.get(addr).copied().unwrap_or(0);
         let width = layout.widths.get(addr).copied().unwrap_or(0);
         let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
+        let array_layout = layout
+            .unpacked_arrays
+            .get(addr)
+            .map(|array| SignalArrayLayout {
+                element_width: array.element_width,
+                element_count: array.element_count,
+                element_stride: array.element_stride,
+                plane_size: array.plane_size,
+            });
         SignalRef {
             offset,
             width,
             is_4state,
+            array_layout,
         }
     }
 
@@ -502,6 +564,16 @@ impl super::super::SimBackend for NativeBackend {
 
         assert!(provided_size <= allocated_size);
 
+        if signal.array_layout.is_some() {
+            let value_bytes =
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, provided_size) };
+            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
+            if clear_mask {
+                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+            }
+            return;
+        }
+
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
@@ -528,55 +600,38 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
-        let bs = get_byte_size(signal.width);
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
-        let bytes = self.mem_bytes_mut();
-        let val_bytes = val.to_bytes_le();
-        let copy_len = val_bytes.len().min(bs);
-        bytes[signal.offset..signal.offset + bs].fill(0);
-        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
+        self.write_signal_plane(signal, false, &val);
         if clear_mask {
-            bytes[signal.offset + bs..signal.offset + bs + bs].fill(0);
+            self.write_signal_plane(signal, true, &BigUint::from(0u8));
         }
     }
 
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
-        let bs = get_byte_size(signal.width);
         let write_mask = self.compiled.options.four_state && signal.is_4state;
-        let bytes = self.mem_bytes_mut();
-
-        // Write value
-        let val_bytes = val.to_bytes_le();
-        let copy_len = val_bytes.len().min(bs);
-        bytes[signal.offset..signal.offset + bs].fill(0);
-        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
-
-        // Write mask (immediately after value)
+        self.write_signal_plane(signal, false, &val);
         if write_mask {
-            let mask_offset = signal.offset + bs;
-            let mask_bytes = mask.to_bytes_le();
-            let mask_copy_len = mask_bytes.len().min(bs);
-            bytes[mask_offset..mask_offset + bs].fill(0);
-            bytes[mask_offset..mask_offset + mask_copy_len]
-                .copy_from_slice(&mask_bytes[..mask_copy_len]);
+            self.write_signal_plane(signal, true, &mask);
         }
     }
 
     fn get(&self, signal: SignalRef) -> BigUint {
-        let bs = get_byte_size(signal.width);
-        let bytes = self.mem_bytes();
-        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
-        // Mask to actual width to avoid upper-bit garbage
-        let extra_bits = bs * 8 - signal.width;
-        if extra_bits > 0 {
-            val &= (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
-        }
-        val
+        self.read_signal_plane(signal, false)
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
         let bs = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
+        if signal.array_layout.is_some() {
+            let mut val = T::default();
+            let value = self.read_signal_plane(signal, false).to_bytes_le();
+            let val_bytes = unsafe {
+                std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, provided_size)
+            };
+            let copy_len = value.len().min(val_bytes.len());
+            val_bytes[..copy_len].copy_from_slice(&value[..copy_len]);
+            return val;
+        }
         let ptr = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         if provided_size <= bs {
             return unsafe { std::ptr::read_unaligned(ptr as *const T) };
@@ -592,25 +647,12 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
-        let bs = get_byte_size(signal.width);
-        let bytes = self.mem_bytes();
-        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
-
-        let mut mask = if self.compiled.options.four_state && signal.is_4state {
-            let mask_offset = signal.offset + bs;
-            BigUint::from_bytes_le(&bytes[mask_offset..mask_offset + bs])
+        let val = self.read_signal_plane(signal, false);
+        let mask = if self.compiled.options.four_state && signal.is_4state {
+            self.read_signal_plane(signal, true)
         } else {
             BigUint::from(0u32)
         };
-
-        // Mask off extra bits beyond signal width
-        let extra_bits = bs * 8 - signal.width;
-        if extra_bits > 0 {
-            let width_mask = (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
-            val &= &width_mask;
-            mask &= &width_mask;
-        }
-
         (val, mask)
     }
 

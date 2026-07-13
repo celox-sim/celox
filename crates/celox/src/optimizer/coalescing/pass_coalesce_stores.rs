@@ -65,7 +65,14 @@ fn coalesce_block(
                 seal_group(&mut groups, src, &mut sealed_groups);
             }
             // A Store with Dynamic offset could alias any static offset
-            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _) => {
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                _,
+                _,
+                _,
+                _,
+            ) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
             _ => {}

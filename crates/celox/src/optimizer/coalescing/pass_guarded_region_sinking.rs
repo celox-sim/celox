@@ -914,6 +914,17 @@ fn clone_pure_instruction(
             match offset {
                 SIROffset::Static(offset) => SIROffset::Static(*offset),
                 SIROffset::Dynamic(offset) => SIROffset::Dynamic(mapped(*offset)),
+                SIROffset::Element {
+                    index,
+                    element_width,
+                    bit_offset,
+                    dynamic_bit_offset,
+                } => SIROffset::Element {
+                    index: mapped(*index),
+                    element_width: *element_width,
+                    bit_offset: *bit_offset,
+                    dynamic_bit_offset: dynamic_bit_offset.map(mapped),
+                },
             },
             *width,
         ),
@@ -989,7 +1000,11 @@ fn plan_block(
                 .register_map
                 .get(&false_value)
                 .is_some_and(|ty| ty.width() >= *width)
-            && !matches!(offset, SIROffset::Dynamic(dynamic) if *dynamic == result)
+            && !offset
+                .dynamic_registers()
+                .into_iter()
+                .flatten()
+                .any(|dynamic| dynamic == result)
         {
             distributed.push(DistributedStore {
                 index,
@@ -1134,13 +1149,15 @@ fn plan_block(
         {
             return None;
         }
-        if let SIRInstruction::Store(_, SIROffset::Dynamic(offset), _, _, _, _) =
-            &block.instructions[store.index]
-            && local_defs
-                .get(offset)
-                .is_some_and(|index| moved.contains(index) || removable_muxes.contains(index))
-        {
-            return None;
+        if let SIRInstruction::Store(_, offset, _, _, _, _) = &block.instructions[store.index] {
+            for offset in offset.dynamic_registers().into_iter().flatten() {
+                if local_defs
+                    .get(&offset)
+                    .is_some_and(|index| moved.contains(index) || removable_muxes.contains(index))
+                {
+                    return None;
+                }
+            }
         }
     }
 
@@ -1430,14 +1447,18 @@ fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<Register
         SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
             vec![*source]
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => vec![*offset],
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => Vec::new(),
-        SIRInstruction::Store(_, SIROffset::Dynamic(offset), _, source, _, _) => {
-            vec![*offset, *source]
+        SIRInstruction::Load(_, _, offset, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, source, _, _) => vec![*source],
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(offset), _, _) => vec![*offset],
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => Vec::new(),
+        SIRInstruction::Store(_, offset, _, source, _, _) => offset
+            .dynamic_registers()
+            .into_iter()
+            .flatten()
+            .chain(std::iter::once(*source))
+            .collect(),
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            offset.dynamic_registers().into_iter().flatten().collect()
+        }
         SIRInstruction::Concat(_, args)
         | SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => args.clone(),
@@ -1858,6 +1879,18 @@ mod tests {
                         let offset = match offset {
                             SIROffset::Static(offset) => *offset,
                             SIROffset::Dynamic(offset) => registers[offset] as usize,
+                            SIROffset::Element {
+                                index,
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                            } => {
+                                registers[index] as usize * element_width
+                                    + bit_offset
+                                    + dynamic_bit_offset
+                                        .map(|register| registers[&register] as usize)
+                                        .unwrap_or(0)
+                            }
                         };
                         registers.insert(*dst, memory.get(&(*addr, offset)).copied().unwrap_or(0));
                     }

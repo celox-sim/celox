@@ -430,7 +430,7 @@ fn verify_instruction_types<A>(
                     ),
                 ));
             }
-            verify_offset(eu, block, index, offset)?;
+            verify_offset(eu, block, index, offset, *bits)?;
         }
         SIRInstruction::Store(_, offset, 0, _, triggers, _) => {
             if triggers.is_empty() || !matches!(offset, SIROffset::Static(_)) {
@@ -455,11 +455,11 @@ fn verify_instruction_types<A>(
                     ),
                 ));
             }
-            verify_offset(eu, block, index, offset)?;
+            verify_offset(eu, block, index, offset, *bits)?;
         }
         SIRInstruction::Commit(_, _, offset, bits, _) => {
             non_zero_width(block, index, *bits, "TYPE.COMMIT_NON_ZERO")?;
-            verify_offset(eu, block, index, offset)?;
+            verify_offset(eu, block, index, offset, *bits)?;
         }
         SIRInstruction::Concat(dst, args) => {
             if args.is_empty() {
@@ -552,9 +552,50 @@ fn verify_offset<A>(
     block: BlockId,
     index: usize,
     offset: &SIROffset,
+    access_width: usize,
 ) -> Result<(), SirVerifyError> {
-    if let SIROffset::Dynamic(reg) = offset {
-        register_type(eu, block, Some(index), *reg)?;
+    match offset {
+        SIROffset::Static(_) => {}
+        SIROffset::Dynamic(reg) => {
+            register_type(eu, block, Some(index), *reg)?;
+        }
+        SIROffset::Element {
+            index: element_index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            register_type(eu, block, Some(index), *element_index)?;
+            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                register_type(eu, block, Some(index), *dynamic_bit_offset)?;
+            }
+            if *element_width == 0 {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_WIDTH_NON_ZERO",
+                    block,
+                    index,
+                    "unpacked-array element width is zero",
+                ));
+            }
+            let Some(access_end) = bit_offset.checked_add(access_width) else {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_ACCESS_IN_BOUNDS",
+                    block,
+                    index,
+                    "element access range overflows usize",
+                ));
+            };
+            if access_end > *element_width {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_ACCESS_IN_BOUNDS",
+                    block,
+                    index,
+                    format!(
+                        "element access [{bit_offset}..{access_end}) exceeds element width {element_width}"
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -690,21 +731,20 @@ fn instruction_def<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
 fn instruction_uses<A>(inst: &SIRInstruction<A>) -> Vec<RegisterId> {
     let mut uses = Vec::new();
     match inst {
-        SIRInstruction::Imm(..) | SIRInstruction::Commit(..) => {}
+        SIRInstruction::Imm(..) => {}
         SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
         SIRInstruction::Unary(_, _, src) => uses.push(*src),
         SIRInstruction::Load(_, _, offset, _) => {
-            if let SIROffset::Dynamic(reg) = offset {
-                uses.push(*reg);
-            }
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Store(_, offset, bits, src, _, _) => {
             if *bits != 0 {
-                if let SIROffset::Dynamic(reg) = offset {
-                    uses.push(*reg);
-                }
+                uses.extend(offset.dynamic_registers().into_iter().flatten());
                 uses.push(*src);
             }
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Concat(_, args)
         | SIRInstruction::RuntimeEvent { args, .. }

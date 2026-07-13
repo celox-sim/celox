@@ -2841,6 +2841,7 @@ mod tests {
                     serde_json::from_value(serde_json::json!({
                         "node": loop_index,
                         "stride": 8,
+                        "kind": "Packed",
                     }))
                     .unwrap(),
                 ],

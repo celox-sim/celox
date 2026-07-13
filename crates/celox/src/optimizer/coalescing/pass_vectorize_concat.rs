@@ -135,16 +135,16 @@ fn push_instruction_uses(
         SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, ..) => {
             worklist.push(*source);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(offset), _) => worklist.push(*offset),
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
+        SIRInstruction::Load(_, _, offset, _) => {
+            worklist.extend(offset.dynamic_registers().into_iter().flatten());
+        }
         SIRInstruction::Store(_, offset, _, source, _, _) => {
             worklist.push(*source);
-            if let SIROffset::Dynamic(offset) = offset {
-                worklist.push(*offset);
-            }
+            worklist.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(offset), _, _) => worklist.push(*offset),
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            worklist.extend(offset.dynamic_registers().into_iter().flatten());
+        }
         SIRInstruction::Concat(_, args)
         | SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => {
@@ -551,7 +551,16 @@ fn lane_unary_shape(
 
 #[derive(Clone)]
 enum LanePackKind {
-    Leaf,
+    /// A lane vector that the ordinary Concat rewrite can lower to a word
+    /// extract in the next fixed-point iteration.
+    ExtractLeaf,
+    /// The same one-bit value in every lane.  The ordinary sign-extension
+    /// rewrite lowers this to three word operations in the next iteration.
+    BroadcastLeaf,
+    /// An otherwise opaque vector of one-bit values.  Keeping the scalar
+    /// producers and packing their results can still be profitable when it
+    /// exposes a substantially larger word-level boolean DAG above them.
+    OpaqueLeaf,
     Unary {
         inner: Vec<RegisterId>,
         op: UnaryOp,
@@ -597,7 +606,6 @@ fn analyze_lane_pack(
     let root = root.to_vec();
     let mut visiting = HashSet::default();
     let mut stack = vec![LaneAnalysisWork::Enter(root.clone())];
-    let mut credit_exhausted = false;
 
     while let Some(work) = stack.pop() {
         match work {
@@ -611,18 +619,6 @@ fn analyze_lane_pack(
                     memo.insert(key, LanePackKind::NotPackable);
                     continue;
                 }
-                let Some(credit) = key.iter().copied().find(|register| {
-                    definition_credits.contains(register) && !claimed_definitions.contains(register)
-                }) else {
-                    // Failed candidates keep all earlier claims. Therefore a
-                    // hostile set of roots cannot repeatedly re-explore the
-                    // same synchronous product.
-                    credit_exhausted = true;
-                    break;
-                };
-                claimed_definitions.insert(credit);
-                visiting.insert(key.clone());
-
                 if is_vectorizable_bit_extract_concat(
                     &key,
                     key.len(),
@@ -630,9 +626,35 @@ fn analyze_lane_pack(
                     defs,
                     written_addresses,
                 ) {
-                    visiting.remove(&key);
-                    memo.insert(key, LanePackKind::Leaf);
-                } else if let Some((inner, op)) = lane_unary_shape(&key, register_map, defs) {
+                    memo.insert(key, LanePackKind::ExtractLeaf);
+                    continue;
+                }
+
+                let unary = lane_unary_shape(&key, register_map, defs);
+                let binary = lane_binary_shape(&key, register_map, defs);
+                if unary.is_none() && binary.is_none() {
+                    if key.windows(2).all(|pair| pair[0] == pair[1]) {
+                        memo.insert(key, LanePackKind::BroadcastLeaf);
+                    } else {
+                        memo.insert(key, LanePackKind::OpaqueLeaf);
+                    }
+                    continue;
+                }
+
+                let Some(credit) = key.iter().copied().find(|register| {
+                    definition_credits.contains(register) && !claimed_definitions.contains(register)
+                }) else {
+                    // Stop a misaligned synchronous product at an opaque
+                    // boundary when it has consumed its structural budget.
+                    // This remains bounded by input definitions while still
+                    // allowing a profitable already-analyzed prefix to pack.
+                    memo.insert(key, LanePackKind::OpaqueLeaf);
+                    continue;
+                };
+                claimed_definitions.insert(credit);
+                visiting.insert(key.clone());
+
+                if let Some((inner, op)) = unary {
                     stack.push(LaneAnalysisWork::Exit(
                         key,
                         LanePackKind::Unary {
@@ -641,7 +663,7 @@ fn analyze_lane_pack(
                         },
                     ));
                     stack.push(LaneAnalysisWork::Enter(inner));
-                } else if let Some((lhs, rhs, op)) = lane_binary_shape(&key, register_map, defs) {
+                } else if let Some((lhs, rhs, op)) = binary {
                     stack.push(LaneAnalysisWork::Exit(
                         key,
                         LanePackKind::Binary {
@@ -654,8 +676,7 @@ fn analyze_lane_pack(
                     stack.push(LaneAnalysisWork::Enter(rhs));
                     stack.push(LaneAnalysisWork::Enter(lhs));
                 } else {
-                    visiting.remove(&key);
-                    memo.insert(key, LanePackKind::NotPackable);
+                    unreachable!("lane shape was checked above")
                 }
             }
             LaneAnalysisWork::Exit(key, candidate) => {
@@ -667,7 +688,9 @@ fn analyze_lane_pack(
                         memo.get(lhs).is_some_and(LanePackKind::is_packable)
                             && memo.get(rhs).is_some_and(LanePackKind::is_packable)
                     }
-                    LanePackKind::Leaf => true,
+                    LanePackKind::ExtractLeaf
+                    | LanePackKind::BroadcastLeaf
+                    | LanePackKind::OpaqueLeaf => true,
                     LanePackKind::NotPackable => false,
                 };
                 visiting.remove(&key);
@@ -683,10 +706,6 @@ fn analyze_lane_pack(
         }
     }
 
-    if credit_exhausted {
-        memo.insert(root, LanePackKind::NotPackable);
-        return false;
-    }
     memo.get(&root).is_some_and(LanePackKind::is_packable)
 }
 
@@ -729,12 +748,12 @@ fn guaranteed_dead_definition_count(
         .collect::<HashSet<_>>();
     let leaf_registers = postorder
         .iter()
-        .filter(|key| matches!(analysis.get(*key), Some(LanePackKind::Leaf)))
+        .filter(|key| matches!(analysis.get(*key), Some(LanePackKind::ExtractLeaf)))
         .flat_map(|key| key.iter().copied())
         .collect::<HashSet<_>>();
     let leaf_key_count = postorder
         .iter()
-        .filter(|key| matches!(analysis.get(*key), Some(LanePackKind::Leaf)))
+        .filter(|key| matches!(analysis.get(*key), Some(LanePackKind::ExtractLeaf)))
         .count();
 
     let mut removed_uses = HashMap::<RegisterId, usize>::default();
@@ -815,7 +834,9 @@ fn materialize_lane_pack(
                 }
                 stack.push(LanePlanWork::Exit(key.clone()));
                 match analysis.get(&key)? {
-                    LanePackKind::Leaf => {}
+                    LanePackKind::ExtractLeaf
+                    | LanePackKind::BroadcastLeaf
+                    | LanePackKind::OpaqueLeaf => {}
                     LanePackKind::Unary { inner, .. } => {
                         stack.push(LanePlanWork::Enter(inner.clone()));
                     }
@@ -836,7 +857,9 @@ fn materialize_lane_pack(
     let mut locally_available = HashSet::default();
     for key in &postorder {
         let valid = match analysis.get(key) {
-            Some(LanePackKind::Leaf) => true,
+            Some(
+                LanePackKind::ExtractLeaf | LanePackKind::BroadcastLeaf | LanePackKind::OpaqueLeaf,
+            ) => true,
             Some(LanePackKind::Unary { inner, .. }) => {
                 packed_vectors.contains_key(inner) || locally_available.contains(inner)
             }
@@ -860,11 +883,19 @@ fn materialize_lane_pack(
     let mut final_instruction_count = 0usize;
     for key in &postorder {
         let cost = match analysis.get(key) {
-            Some(LanePackKind::Leaf) => {
+            Some(LanePackKind::ExtractLeaf) => {
                 // SignExtend has precedence over bit-extract lowering and
                 // emits three instructions, so include that conservative
                 // alternative even when the bit-extract form is cheaper.
                 bit_extract_pack_instruction_count(key, width, defs)?.max(3)
+            }
+            Some(LanePackKind::BroadcastLeaf) => 3,
+            Some(LanePackKind::OpaqueLeaf) => {
+                // Native narrow Concat emits one shift and one OR for every
+                // lane after the least-significant lane, plus a final move.
+                // Charge that actual lowering cost rather than treating an
+                // opaque Concat as a single operation.
+                key.len().saturating_mul(2).saturating_sub(1)
             }
             Some(LanePackKind::Unary { .. } | LanePackKind::Binary { .. }) => 1,
             Some(LanePackKind::NotPackable) | None => return None,
@@ -873,7 +904,13 @@ fn materialize_lane_pack(
     }
     let dead_definitions =
         guaranteed_dead_definition_count(&root, &postorder, analysis, defs, use_counts);
-    if final_instruction_count > dead_definitions.saturating_add(1) {
+    // The old root is itself a narrow Concat of one-bit lanes.  Native
+    // lowering emits shift+OR for every lane after the least-significant one
+    // and a final move, so compare against that real cost rather than one SIR
+    // instruction.  Otherwise profitable plans near the boundary are
+    // systematically rejected (32 lanes were undercounted by 62 operations).
+    let replaced_root_cost = root.len().saturating_mul(2).saturating_sub(1);
+    if final_instruction_count > dead_definitions.saturating_add(replaced_root_cost) {
         return None;
     }
 
@@ -891,7 +928,9 @@ fn materialize_lane_pack(
             .get(&key)
             .expect("validated lane-pack key must have analysis")
         {
-            LanePackKind::Leaf => SIRInstruction::Concat(output, key.clone()),
+            LanePackKind::ExtractLeaf | LanePackKind::BroadcastLeaf | LanePackKind::OpaqueLeaf => {
+                SIRInstruction::Concat(output, key.clone())
+            }
             LanePackKind::Unary { inner, op } => {
                 SIRInstruction::Unary(output, *op, packed_vectors[inner])
             }
@@ -1219,19 +1258,22 @@ fn vectorize_concats(
             lane_definition_credits,
             claimed_lane_definitions,
             &mut lane_analysis,
-        ) && !matches!(lane_analysis.get(args), Some(LanePackKind::Leaf))
-            && let Some(new_instructions) = materialize_lane_pack(
-                args,
-                *dst,
-                concat_width,
-                &lane_analysis,
-                defs,
-                register_use_counts,
-                &mut packed_vectors,
-                register_map,
-                next_reg,
+        ) && !matches!(
+            lane_analysis.get(args),
+            Some(
+                LanePackKind::ExtractLeaf | LanePackKind::BroadcastLeaf | LanePackKind::OpaqueLeaf
             )
-        {
+        ) && let Some(new_instructions) = materialize_lane_pack(
+            args,
+            *dst,
+            concat_width,
+            &lane_analysis,
+            defs,
+            register_use_counts,
+            &mut packed_vectors,
+            register_map,
+            next_reg,
+        ) {
             replacements.push(Replacement::LaneDag {
                 inst_idx: idx,
                 instructions: new_instructions,
@@ -1950,6 +1992,106 @@ mod tests {
         assert!(instructions.iter().any(|inst| {
             matches!(inst, SIRInstruction::Binary(dst, _, BinaryOp::And, _) if *dst == result)
         }));
+    }
+
+    #[test]
+    fn packs_profitable_boolean_dag_above_opaque_comparisons() {
+        const LANES: usize = 8;
+        const DEPTH: usize = 12;
+
+        let bit = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        let common = RegisterId(0);
+        register_map.insert(common, bit(1));
+        for lane in 0..LANES {
+            register_map.insert(RegisterId(1 + lane * 2), bit(8));
+            register_map.insert(RegisterId(2 + lane * 2), bit(8));
+        }
+
+        let mut next_reg = 1 + LANES * 2;
+        let mut instructions = Vec::new();
+        let mut lane_results = Vec::new();
+        for lane in 0..LANES {
+            let compare = RegisterId(next_reg);
+            next_reg += 1;
+            register_map.insert(compare, bit(1));
+            instructions.push(SIRInstruction::Binary(
+                compare,
+                RegisterId(1 + lane * 2),
+                BinaryOp::Eq,
+                RegisterId(2 + lane * 2),
+            ));
+
+            let mut value = compare;
+            for depth in 0..DEPTH {
+                let next = RegisterId(next_reg);
+                next_reg += 1;
+                register_map.insert(next, bit(1));
+                instructions.push(SIRInstruction::Binary(
+                    next,
+                    value,
+                    if depth % 2 == 0 {
+                        BinaryOp::LogicAnd
+                    } else {
+                        BinaryOp::LogicOr
+                    },
+                    common,
+                ));
+                value = next;
+            }
+            lane_results.push(value);
+        }
+
+        lane_results.reverse();
+        let result = RegisterId(next_reg);
+        register_map.insert(result, bit(LANES));
+        instructions.push(SIRInstruction::Concat(result, lane_results));
+        instructions.push(SIRInstruction::RuntimeEvent {
+            site_id: 0,
+            args: vec![result],
+        });
+
+        let mut eu = make_eu(instructions, register_map);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().params =
+            (0..1 + LANES * 2).map(RegisterId).collect();
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        eu.verify();
+
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Eq, _)))
+                .count(),
+            LANES
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    SIRInstruction::Binary(
+                        _,
+                        _,
+                        BinaryOp::And | BinaryOp::Or | BinaryOp::LogicAnd | BinaryOp::LogicOr,
+                        _
+                    )
+                ))
+                .count(),
+            DEPTH,
+            "{instructions:#?}"
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Concat(..)))
+                .count(),
+            1,
+            "only the profitable opaque comparison pack should remain"
+        );
     }
 
     #[test]

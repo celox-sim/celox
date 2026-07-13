@@ -1395,7 +1395,6 @@ fn recover_group(
         // than replacing it with a counted loop.
         return Ok(None);
     }
-
     let (entry_guard, guard_sources) = if let Some(guard) = guard {
         guard
     } else {
@@ -4937,6 +4936,7 @@ mod tests {
                 index: vec![super::super::SLTIndex {
                     node: loop_input,
                     stride: 1,
+                    kind: super::super::SLTIndexKind::Packed,
                 }],
                 access: BitAccess::new(0, 3),
             })

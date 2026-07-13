@@ -141,7 +141,7 @@ impl DirectStableStoreHazards {
 fn instruction_range(offset: &SIROffset, bits: usize) -> (usize, usize) {
     match offset {
         SIROffset::Static(start) => (*start, start.saturating_add(bits)),
-        SIROffset::Dynamic(_) => (0, usize::MAX),
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => (0, usize::MAX),
     }
 }
 
@@ -278,10 +278,20 @@ pub(crate) fn inline_commit_forwarding_with_hazards(
                     {
                         found_stores.push((si, *store_off, *store_bits));
                     }
-                    SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _)
-                    | SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), _)
-                        if *addr == src_addr =>
-                    {
+                    SIRInstruction::Store(
+                        addr,
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        _,
+                        _,
+                        _,
+                        _,
+                    )
+                    | SIRInstruction::Load(
+                        _,
+                        addr,
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                        _,
+                    ) if *addr == src_addr => {
                         safe = false;
                         break;
                     }

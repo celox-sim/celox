@@ -84,6 +84,49 @@ fn expression_has_side_effect(expr: &Expression) -> bool {
     }
 }
 
+fn add_offset_term<A>(
+    accumulator: &mut Option<RegisterId>,
+    term: RegisterId,
+    builder: &mut SIRBuilder<A>,
+) {
+    if let Some(current) = *accumulator {
+        let next = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Binary(next, current, BinaryOp::Add, term));
+        *accumulator = Some(next);
+    } else {
+        *accumulator = Some(term);
+    }
+}
+
+fn add_offset_constant<A>(
+    accumulator: &mut Option<RegisterId>,
+    value: u64,
+    builder: &mut SIRBuilder<A>,
+) {
+    if value == 0 {
+        return;
+    }
+    let constant = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(constant, SIRValue::new(value)));
+    add_offset_term(accumulator, constant, builder);
+}
+
+fn scale_offset<A>(value: RegisterId, scale: usize, builder: &mut SIRBuilder<A>) -> RegisterId {
+    if scale == 1 {
+        return value;
+    }
+    let scale_reg = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(scale_reg, SIRValue::new(scale as u64)));
+    let result = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(
+        result,
+        value,
+        BinaryOp::Mul,
+        scale_reg,
+    ));
+    result
+}
+
 impl<'a> FfParser<'a> {
     fn eval_type_select(
         &self,
@@ -513,54 +556,59 @@ impl<'a> FfParser<'a> {
 
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
-        // 1. Calculate strides for all dimensions (array + width)
-        let (_, strides, _) =
+        // Keep unpacked-array indexing separate from packed bit selection.
+        // Backends may give array elements a physical stride different from
+        // their logical packed width, so combining both here loses essential
+        // source-type information.
+        let (_, strides, total_width) =
             crate::parser::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
-
-        // 2. Offset calculation (Static + Dynamic)
-        let mut static_offset: u64 = 0;
-        let mut dynamic_offset_reg: Option<RegisterId> = None;
-
-        let mut add_dynamic_term = |term_reg: RegisterId, builder: &mut SIRBuilder<A>| {
-            if let Some(curr) = dynamic_offset_reg {
-                let next = builder.alloc_bit(64, false);
-                builder.emit(SIRInstruction::Binary(next, curr, BinaryOp::Add, term_reg));
-                dynamic_offset_reg = Some(next);
-            } else {
-                dynamic_offset_reg = Some(term_reg);
-            }
+        let geometry =
+            crate::parser::bitaccess::select_geometry(self.module, var_id, index, select)?;
+        let array_dimension_count = self.module.variables[&var_id].r#type.array.iter().count();
+        let element_width = if array_dimension_count == 0 {
+            total_width
+        } else {
+            strides[array_dimension_count - 1]
         };
-
-        // 3. Array index part (VarIndex)
+        let mut static_element_index = 0u64;
+        let mut dynamic_element_index = None;
+        let mut static_bit_offset = 0u64;
+        let mut dynamic_bit_offset = None;
         let mut dummy_targets: Vec<VarAtomBase<A>> = Vec::new();
 
         for (i, expr) in index.0.iter().enumerate() {
             let stride = strides[i];
-            if let Some(c) = self.get_constant_value(expr) {
-                static_offset += c * (stride as u64);
+            let is_unpacked = i < array_dimension_count;
+            let scale = if is_unpacked {
+                stride / element_width
             } else {
-                // Dynamic term
+                stride
+            };
+            if let Some(c) = self.get_constant_value(expr) {
+                if is_unpacked {
+                    static_element_index += c * scale as u64;
+                } else {
+                    static_bit_offset += c * scale as u64;
+                }
+            } else {
                 let term_reg = self.emit_arith_term(
                     expr,
                     &mut dummy_targets,
-                    stride,
+                    scale,
                     domain,
                     convert,
                     sources,
                     ir_builder,
                 )?;
-                add_dynamic_term(term_reg, ir_builder);
+                if is_unpacked {
+                    add_offset_term(&mut dynamic_element_index, term_reg, ir_builder);
+                } else {
+                    add_offset_term(&mut dynamic_bit_offset, term_reg, ir_builder);
+                }
             }
         }
 
-        // 4. Bit select / Final dimension array part (VarSelect)
-        // Offset stride lookup by the number of array indices already consumed
         let stride_offset = index.0.len();
-
-        // For Colon selects (e.g. [31:0]), the last element of select.0
-        // is the MSB anchor—not a dimension index.
-        // Exclude it from the dynamic offset and instead handle the
-        // bit range LSB separately (matching the comb path's dim_limit logic).
         let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
         let select_dim_limit = if is_colon_select {
             select.0.len().saturating_sub(1)
@@ -571,93 +619,120 @@ impl<'a> FfParser<'a> {
         let select_len = select.0.len();
         for (i, expr) in select.0.iter().enumerate() {
             if i >= select_dim_limit {
-                // This is the MSB anchor of a Colon select — skip it.
-                // The LSB is handled below.
                 break;
             }
-            // Case: final element and slice (Option exists)
-            if i == select_len - 1
+            let selected_expr = if i == select_len - 1
                 && let Some((op, end_expr)) = &select.1
             {
-                // Get LSB expression using VarSelectOp::eval_expr
                 let (_, lsb_expr) = op.eval_expr(expr, end_expr);
-
-                let stride = if stride_offset + i < strides.len() {
-                    strides[stride_offset + i]
+                lsb_expr
+            } else {
+                expr.clone()
+            };
+            let dimension = stride_offset + i;
+            let stride = strides.get(dimension).copied().unwrap_or(1);
+            let is_unpacked = dimension < array_dimension_count;
+            let scale = if is_unpacked {
+                stride / element_width
+            } else {
+                stride
+            };
+            if let Some(c) = self.get_constant_value(&selected_expr) {
+                if is_unpacked {
+                    static_element_index += c * scale as u64;
                 } else {
-                    1
-                };
-                if let Some(c) = self.get_constant_value(&lsb_expr) {
-                    static_offset += c * (stride as u64);
-                } else {
-                    let term_reg = self.emit_arith_term(
-                        &lsb_expr,
-                        &mut dummy_targets,
-                        stride,
-                        domain,
-                        convert,
-                        sources,
-                        ir_builder,
-                    )?;
-                    add_dynamic_term(term_reg, ir_builder);
+                    static_bit_offset += c * scale as u64;
                 }
             } else {
-                // Normal index (array dimension or single bit select)
-                let stride = if stride_offset + i < strides.len() {
-                    strides[stride_offset + i]
+                let term_reg = self.emit_arith_term(
+                    &selected_expr,
+                    &mut dummy_targets,
+                    scale,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+                if is_unpacked {
+                    add_offset_term(&mut dynamic_element_index, term_reg, ir_builder);
                 } else {
-                    1
-                };
-
-                if let Some(c) = self.get_constant_value(expr) {
-                    static_offset += c * (stride as u64);
-                } else {
-                    let term_reg = self.emit_arith_term(
-                        expr,
-                        &mut dummy_targets,
-                        stride,
-                        domain,
-                        convert,
-                        sources,
-                        ir_builder,
-                    )?;
-                    add_dynamic_term(term_reg, ir_builder);
+                    add_offset_term(&mut dynamic_bit_offset, term_reg, ir_builder);
                 }
             }
         }
 
-        // For Colon selects, add the LSB as a static offset
         if let Some((VarSelectOp::Colon, range_expr)) = &select.1 {
-            let weight = strides
-                .get(stride_offset + select_dim_limit)
-                .copied()
-                .unwrap_or(1);
+            let dimension = stride_offset + select_dim_limit;
+            let stride = strides.get(dimension).copied().unwrap_or(1);
+            let is_unpacked = dimension < array_dimension_count;
+            let scale = if is_unpacked {
+                stride / element_width
+            } else {
+                stride
+            };
             if let Some(lsb_val) = crate::parser::bitaccess::eval_constexpr(range_expr)
                 .map(|v| v.to_u64_digits().first().copied().unwrap_or(0))
             {
-                static_offset += lsb_val * (weight as u64);
+                if is_unpacked {
+                    static_element_index += lsb_val * scale as u64;
+                } else {
+                    static_bit_offset += lsb_val * scale as u64;
+                }
             }
         }
 
-        if let Some(dyn_reg) = dynamic_offset_reg {
-            if static_offset == 0 {
-                Ok(SIROffset::Dynamic(dyn_reg))
-            } else {
-                // Combine dynamic + static
-                let s_reg = ir_builder.alloc_bit(64, false);
-                ir_builder.emit(SIRInstruction::Imm(s_reg, SIRValue::new(static_offset)));
-                let total_reg = ir_builder.alloc_bit(64, false);
-                ir_builder.emit(SIRInstruction::Binary(
-                    total_reg,
-                    dyn_reg,
-                    BinaryOp::Add,
-                    s_reg,
-                ));
-                Ok(SIROffset::Dynamic(total_reg))
-            }
-        } else {
-            Ok(SIROffset::Static(static_offset as usize))
+        let selected_width = geometry.selected_width;
+        let element_range_is_valid = array_dimension_count != 0
+            && geometry.dimension_count >= array_dimension_count
+            && static_bit_offset as usize + selected_width <= element_width;
+        if dynamic_element_index.is_some() {
+            add_offset_constant(&mut dynamic_element_index, static_element_index, ir_builder);
         }
+        if element_range_is_valid
+            && (dynamic_element_index.is_some() || dynamic_bit_offset.is_some())
+        {
+            let element_index = if let Some(element_index) = dynamic_element_index {
+                element_index
+            } else {
+                let element_index = ir_builder.alloc_bit(64, false);
+                ir_builder.emit(SIRInstruction::Imm(
+                    element_index,
+                    SIRValue::new(static_element_index),
+                ));
+                element_index
+            };
+            return Ok(SIROffset::Element {
+                index: element_index,
+                element_width,
+                bit_offset: static_bit_offset as usize,
+                dynamic_bit_offset,
+            });
+        }
+
+        if let Some(element_index) = dynamic_element_index {
+            let logical_element_offset = scale_offset(element_index, element_width, ir_builder);
+            add_offset_term(&mut dynamic_bit_offset, logical_element_offset, ir_builder);
+        }
+
+        if dynamic_bit_offset.is_some() {
+            let static_logical_offset = if dynamic_element_index.is_some() {
+                static_bit_offset
+            } else {
+                static_element_index
+                    .saturating_mul(element_width as u64)
+                    .saturating_add(static_bit_offset)
+            };
+            add_offset_constant(&mut dynamic_bit_offset, static_logical_offset, ir_builder);
+        }
+
+        Ok(match dynamic_bit_offset {
+            Some(offset) => SIROffset::Dynamic(offset),
+            None => SIROffset::Static(
+                (static_element_index as usize)
+                    .saturating_mul(element_width)
+                    .saturating_add(static_bit_offset as usize),
+            ),
+        })
     }
 
     /// Helper: returns (expr * stride)
@@ -726,6 +801,24 @@ impl<'a> FfParser<'a> {
                     SIROffset::Dynamic(offset) => {
                         self.emit_register_dynamic_slice(value, offset, width, ir_builder)
                     }
+                    SIROffset::Element {
+                        index,
+                        element_width,
+                        bit_offset,
+                        dynamic_bit_offset,
+                    } => {
+                        let mut logical = Some(scale_offset(index, element_width, ir_builder));
+                        add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
+                        if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                            add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
+                        }
+                        self.emit_register_dynamic_slice(
+                            value,
+                            logical.expect("scaled element index is present"),
+                            width,
+                            ir_builder,
+                        )
+                    }
                 }
             };
             self.stack.push_back(selected);
@@ -745,7 +838,6 @@ impl<'a> FfParser<'a> {
 
         let offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
-
         let load_region = if self.local_working_vars.contains(&var_id) {
             WORKING_REGION
         } else {

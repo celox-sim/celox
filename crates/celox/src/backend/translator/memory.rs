@@ -29,7 +29,54 @@ fn max_bit_shift(offset: &SIROffset) -> usize {
     match offset {
         SIROffset::Static(bit_offset) => bit_offset & 7,
         SIROffset::Dynamic(_) => 7,
+        SIROffset::Element {
+            element_width,
+            bit_offset,
+            ..
+        } => {
+            if element_width % 8 == 0 {
+                bit_offset & 7
+            } else {
+                7
+            }
+        }
     }
+}
+
+fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value {
+    match offset {
+        SIROffset::Static(value) => state.builder.ins().iconst(types::I64, *value as i64),
+        SIROffset::Dynamic(reg) => {
+            let value = state.regs[reg].first_value(state.builder);
+            cast_type(state.builder, value, types::I64)
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            let index = state.regs[index].first_value(state.builder);
+            let index = cast_type(state.builder, index, types::I64);
+            let scaled = state.builder.ins().imul_imm(index, *element_width as i64);
+            let with_static = state.builder.ins().iadd_imm(scaled, *bit_offset as i64);
+            if let Some(dynamic) = dynamic_bit_offset {
+                let dynamic = state.regs[dynamic].first_value(state.builder);
+                let dynamic = cast_type(state.builder, dynamic, types::I64);
+                state.builder.ins().iadd(with_static, dynamic)
+            } else {
+                with_static
+            }
+        }
+    }
+}
+
+fn packed_byte_and_shift(state: &mut TranslationState, offset: &SIROffset) -> (Value, Value) {
+    let total_bit_offset = logical_bit_offset(state, offset);
+    (
+        state.builder.ins().ushr_imm(total_bit_offset, 3),
+        state.builder.ins().band_imm(total_bit_offset, 7),
+    )
 }
 
 impl SIRTranslator {
@@ -253,13 +300,7 @@ impl SIRTranslator {
         let sparse_base =
             (self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]) as i64;
         let byte_size = get_byte_size(self.layout.widths[&abs]) as i64;
-        let bit_offset = match offset {
-            SIROffset::Static(value) => state.builder.ins().iconst(types::I64, *value as i64),
-            SIROffset::Dynamic(reg) => {
-                let value = state.regs[reg].first_value(state.builder);
-                cast_type(state.builder, value, types::I64)
-            }
-        };
+        let bit_offset = logical_bit_offset(state, offset);
         let start_chunk = state.builder.ins().ushr_imm(bit_offset, 6);
         let end_bit = state
             .builder
@@ -467,26 +508,7 @@ impl SIRTranslator {
             }
         }
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         // Physical read-start byte address
         let final_addr = state
@@ -644,26 +666,7 @@ impl SIRTranslator {
         };
         let mem_base = state.mem_ptr;
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         // Physical write-start byte address
         let final_addr = state
@@ -1109,26 +1112,7 @@ impl SIRTranslator {
             return;
         }
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         let src_final_addr = state
             .builder
@@ -1663,11 +1647,8 @@ impl SIRTranslator {
                     state.builder.ins().band_imm(shifted, mask as i64)
                 }
             }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                let total_bit_offset = logical_bit_offset(state, offset);
                 let shifted = state.builder.ins().ushr(pre_loaded, total_bit_offset);
                 let mask_val = state.builder.ins().iconst(types::I64, mask as i64);
                 state.builder.ins().band(shifted, mask_val)
@@ -1690,26 +1671,7 @@ impl SIRTranslator {
             )
         };
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         let actual_final_addr = state
             .builder

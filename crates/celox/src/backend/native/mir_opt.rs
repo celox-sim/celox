@@ -22,6 +22,7 @@ pub fn optimize(func: &mut MFunction) {
     }
     if func.vregs.count() > 40 {
         // High-pressure: full pipeline
+        pass!("fold_proven_comparisons", fold_proven_comparisons(func));
         for _ in 0..2 {
             pass!("constant_fold", constant_fold(func));
             pass!("constant_dedup", constant_dedup(func));
@@ -38,6 +39,12 @@ pub fn optimize(func: &mut MFunction) {
             pass!("dead_code_eliminate", dead_code_eliminate(func));
         }
         pass!("lower_to_imm_forms", lower_to_imm_forms(func));
+        pass!(
+            "fold_boolean_normalizations",
+            fold_boolean_normalizations(func)
+        );
+        pass!("redundant_mask_eliminate", redundant_mask_eliminate(func));
+        pass!("copy_propagate", copy_propagate(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
         pass!("fuse_compare_selects", fuse_compare_selects(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
@@ -63,6 +70,7 @@ pub fn optimize(func: &mut MFunction) {
         pass!("dead_code_eliminate", dead_code_eliminate(func));
     } else {
         // Low-pressure: lightweight but complete pipeline
+        pass!("fold_proven_comparisons", fold_proven_comparisons(func));
         pass!("constant_fold", constant_fold(func));
         pass!("constant_dedup", constant_dedup(func));
         pass!("copy_propagate", copy_propagate(func));
@@ -92,6 +100,12 @@ pub fn optimize(func: &mut MFunction) {
         pass!("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
         pass!("lower_to_imm_forms", lower_to_imm_forms(func));
+        pass!(
+            "fold_boolean_normalizations",
+            fold_boolean_normalizations(func)
+        );
+        pass!("redundant_mask_eliminate", redundant_mask_eliminate(func));
+        pass!("copy_propagate", copy_propagate(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
         pass!("fuse_compare_selects", fuse_compare_selects(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
@@ -103,6 +117,195 @@ pub fn optimize(func: &mut MFunction) {
             panic!("after MIR optimizer: {error}");
         }
     }
+}
+
+/// Fold comparisons whose result follows from a conservative unsigned upper
+/// bound. Legalization expresses an x86 variable-shift guard as
+/// `count < 64 ? raw_shift : 0`; bit-offset lowering commonly defines count as
+/// `offset & 7`, so retaining that guard is unnecessary. Bounds here are
+/// intentionally limited to operations that cannot underestimate a value.
+fn fold_proven_comparisons(func: &mut MFunction) {
+    let mut defs = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(dst) = inst.def() {
+                defs.insert(dst, inst.clone());
+            }
+        }
+    }
+    let mut upper_bounds = HashMap::new();
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let replacement = match inst {
+                MInst::CmpImmSelect {
+                    dst,
+                    lhs,
+                    imm,
+                    kind: CmpKind::LtU,
+                    true_val,
+                    ..
+                } if *imm > 0
+                    && unsigned_upper_bound(
+                        *lhs,
+                        &defs,
+                        &mut upper_bounds,
+                        &mut HashSet::new(),
+                    )
+                    .is_some_and(|bound| bound < *imm as u64) =>
+                {
+                    Some(MInst::Mov {
+                        dst: *dst,
+                        src: *true_val,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *inst = replacement;
+            }
+        }
+    }
+}
+
+/// `ToTwoState` and boolean lowering can leave `cmp.ne boolean, 0` after the
+/// comparison itself has already normalized the value to zero or one. These
+/// become visible especially after immediate-form lowering, so remove them
+/// late and let copy propagation collapse the resulting aliases.
+fn fold_boolean_normalizations(func: &mut MFunction) {
+    let mut defs = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(dst) = inst.def() {
+                defs.insert(dst, inst.clone());
+            }
+        }
+    }
+    let mut upper_bounds = HashMap::new();
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let replacement = match inst {
+                MInst::CmpImm {
+                    dst,
+                    lhs,
+                    imm: 0,
+                    kind: CmpKind::Ne,
+                } if unsigned_upper_bound(*lhs, &defs, &mut upper_bounds, &mut HashSet::new())
+                    .is_some_and(|bound| bound <= 1) =>
+                {
+                    Some(MInst::Mov {
+                        dst: *dst,
+                        src: *lhs,
+                    })
+                }
+                MInst::Cmp {
+                    dst,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::Ne,
+                } if unsigned_upper_bound(*rhs, &defs, &mut upper_bounds, &mut HashSet::new())
+                    == Some(0)
+                    && unsigned_upper_bound(
+                        *lhs,
+                        &defs,
+                        &mut upper_bounds,
+                        &mut HashSet::new(),
+                    )
+                    .is_some_and(|bound| bound <= 1) =>
+                {
+                    Some(MInst::Mov {
+                        dst: *dst,
+                        src: *lhs,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *inst = replacement;
+            }
+        }
+    }
+}
+
+fn unsigned_upper_bound(
+    reg: VReg,
+    defs: &HashMap<VReg, MInst>,
+    memo: &mut HashMap<VReg, Option<u64>>,
+    visiting: &mut HashSet<VReg>,
+) -> Option<u64> {
+    if let Some(bound) = memo.get(&reg) {
+        return *bound;
+    }
+    if !visiting.insert(reg) {
+        return None;
+    }
+    let bound = match defs.get(&reg)? {
+        MInst::LoadImm { value, .. } => Some(*value),
+        MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => Some(match size {
+            OpSize::S8 => u8::MAX as u64,
+            OpSize::S16 => u16::MAX as u64,
+            OpSize::S32 => u32::MAX as u64,
+            OpSize::S64 => u64::MAX,
+        }),
+        MInst::Mov { src, .. } => unsigned_upper_bound(*src, defs, memo, visiting),
+        MInst::AndImm { src, imm, .. } => Some(
+            unsigned_upper_bound(*src, defs, memo, visiting)
+                .unwrap_or(u64::MAX)
+                .min(*imm),
+        ),
+        MInst::And { lhs, rhs, .. } => {
+            match (
+                unsigned_upper_bound(*lhs, defs, memo, visiting),
+                unsigned_upper_bound(*rhs, defs, memo, visiting),
+            ) {
+                (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+                (Some(bound), None) | (None, Some(bound)) => Some(bound),
+                (None, None) => None,
+            }
+        }
+        MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
+            match (
+                unsigned_upper_bound(*lhs, defs, memo, visiting),
+                unsigned_upper_bound(*rhs, defs, memo, visiting),
+            ) {
+                (Some(lhs), Some(rhs)) if lhs <= 1 && rhs <= 1 => Some(1),
+                _ => None,
+            }
+        }
+        MInst::ShrImm { src, imm, .. } => {
+            unsigned_upper_bound(*src, defs, memo, visiting).map(|bound| bound >> *imm)
+        }
+        MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
+        MInst::Select {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpImmSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::GuardedCmpSelect {
+            true_val,
+            false_val,
+            ..
+        } => match (
+            unsigned_upper_bound(*true_val, defs, memo, visiting),
+            unsigned_upper_bound(*false_val, defs, memo, visiting),
+        ) {
+            (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
+            _ => None,
+        },
+        _ => None,
+    };
+    visiting.remove(&reg);
+    memo.insert(reg, bound);
+    bound
 }
 
 /// Run peepholes that are safe after register allocation.
@@ -965,7 +1168,9 @@ fn memory_write(inst: &MInst) -> MemoryWrite {
             offset: *dst_offset,
             byte_len: *byte_len,
         },
-        MInst::SparseCommit { .. } => MemoryWrite::Unknown {
+        MInst::SparseCommit { .. }
+        | MInst::SparseMarkActive { .. }
+        | MInst::SparseCommitWorklist { .. } => MemoryWrite::Unknown {
             base: Some(BaseReg::SimState),
         },
         MInst::StoreIndexed { base, .. } => MemoryWrite::Unknown { base: Some(*base) },
@@ -1006,6 +1211,7 @@ fn global_gvn(func: &mut MFunction) {
 
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
+    let live_in = compute_gvn_live_in(func, &block_id_to_idx, &succs);
 
     // Build dominator tree children
     let mut dom_children: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
@@ -1022,11 +1228,13 @@ fn global_gvn(func: &mut MFunction) {
     let vreg_count = func.vregs.count() as usize;
     let mut value_numbers = (0..func.vregs.count()).collect::<Vec<ValueNumber>>();
     let mut value_leaders = (0..func.vregs.count()).map(VReg).collect::<Vec<_>>();
+    let mut leader_blocks = vec![None; vreg_count];
     debug_assert_eq!(value_numbers.len(), vreg_count);
 
     let mut value_table: HashMap<GvnKey, ValueNumber> = HashMap::new();
     let mut active_load_keys: HashSet<GvnKey> = HashSet::new();
     let mut table_changes: Vec<(GvnKey, Option<ValueNumber>)> = Vec::new();
+    let mut leader_changes: Vec<(ValueNumber, VReg, Option<usize>)> = Vec::new();
     let mut replacements: Vec<(usize, usize, MInst)> = Vec::new(); // (block_idx, inst_idx, new_inst)
 
     // Dominator-scoped GVN. Every table mutation, including load invalidation
@@ -1038,12 +1246,16 @@ fn global_gvn(func: &mut MFunction) {
         func: &MFunction,
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
+        leader_blocks: &mut [Option<usize>],
+        live_in: &[HashSet<VReg>],
         value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
+        leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
         let checkpoint = table_changes.len();
+        let leader_checkpoint = leader_changes.len();
         let block = &func.blocks[node];
 
         process_gvn_block(
@@ -1051,9 +1263,12 @@ fn global_gvn(func: &mut MFunction) {
             block,
             value_numbers,
             value_leaders,
+            leader_blocks,
+            &live_in[node],
             value_table,
             active_load_keys,
             table_changes,
+            leader_changes,
             replacements,
         );
 
@@ -1064,11 +1279,20 @@ fn global_gvn(func: &mut MFunction) {
                 func,
                 value_numbers,
                 value_leaders,
+                leader_blocks,
+                live_in,
                 value_table,
                 active_load_keys,
                 table_changes,
+                leader_changes,
                 replacements,
             );
+        }
+
+        while leader_changes.len() > leader_checkpoint {
+            let (number, leader, leader_block) = leader_changes.pop().unwrap();
+            value_leaders[number as usize] = leader;
+            leader_blocks[number as usize] = leader_block;
         }
 
         while table_changes.len() > checkpoint {
@@ -1092,9 +1316,12 @@ fn global_gvn(func: &mut MFunction) {
         block: &MBlock,
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
+        leader_blocks: &mut [Option<usize>],
+        live_in: &HashSet<VReg>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
+        leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
         for inst_idx in 0..block.insts.len() {
@@ -1156,12 +1383,29 @@ fn global_gvn(func: &mut MFunction) {
                 if let Some(&number) = value_table.get(&key) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
-                    if dst != leader {
+                    let leader_block = leader_blocks[number as usize];
+                    let reuse_does_not_extend_live_range =
+                        leader_block == Some(node) || live_in.contains(&leader);
+                    if dst != leader && reuse_does_not_extend_live_range {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
+                    } else if dst != leader {
+                        // The expression is available, but reusing its original
+                        // leader would keep that VReg alive solely for this CSE.
+                        // Keep the recomputation and make it the nearest leader
+                        // for the current dominator subtree instead.
+                        leader_changes.push((number, leader, leader_block));
+                        value_leaders[number as usize] = dst;
+                        leader_blocks[number as usize] = Some(node);
                     }
                 } else {
                     let number = value_numbers[dst.0 as usize];
+                    leader_changes.push((
+                        number,
+                        value_leaders[number as usize],
+                        leader_blocks[number as usize],
+                    ));
                     value_leaders[number as usize] = dst;
+                    leader_blocks[number as usize] = Some(node);
                     let previous = value_table.insert(key.clone(), number);
                     debug_assert!(previous.is_none());
                     if matches!(key, GvnKey::Load(..)) {
@@ -1179,19 +1423,89 @@ fn global_gvn(func: &mut MFunction) {
         func,
         &mut value_numbers,
         &mut value_leaders,
+        &mut leader_blocks,
+        &live_in,
         &mut value_table,
         &mut active_load_keys,
         &mut table_changes,
+        &mut leader_changes,
         &mut replacements,
     );
     debug_assert!(value_table.is_empty());
     debug_assert!(active_load_keys.is_empty());
     debug_assert!(table_changes.is_empty());
+    debug_assert!(leader_changes.is_empty());
 
     // Apply replacements
     for (bi, inst_idx, new_inst) in replacements {
         func.blocks[bi].insts[inst_idx] = new_inst;
     }
+}
+
+/// Compute conventional SSA liveness at each block entry for GVN's
+/// profitability check. Phi sources are uses on predecessor edges; phi
+/// destinations are definitions at the successor entry.
+fn compute_gvn_live_in(
+    func: &MFunction,
+    block_id_to_idx: &HashMap<BlockId, usize>,
+    succs: &[Vec<usize>],
+) -> Vec<HashSet<VReg>> {
+    let block_count = func.blocks.len();
+    let mut uses = vec![HashSet::new(); block_count];
+    let mut defs = vec![HashSet::new(); block_count];
+
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        defs[block_index].extend(block.phis.iter().map(|phi| phi.dst));
+        for inst in &block.insts {
+            for used in inst.uses() {
+                if !defs[block_index].contains(&used) {
+                    uses[block_index].insert(used);
+                }
+            }
+            if let Some(defined) = inst.def() {
+                defs[block_index].insert(defined);
+            }
+        }
+    }
+
+    let mut live_in = vec![HashSet::new(); block_count];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block_index in (0..block_count).rev() {
+            let block_id = func.blocks[block_index].id;
+            let mut live_out = HashSet::new();
+            for &successor in &succs[block_index] {
+                live_out.extend(live_in[successor].iter().copied());
+                for phi in &func.blocks[successor].phis {
+                    if let Some((_, source)) = phi
+                        .sources
+                        .iter()
+                        .find(|(predecessor, _)| *predecessor == block_id)
+                    {
+                        live_out.insert(*source);
+                    }
+                }
+            }
+            let mut next = uses[block_index].clone();
+            next.extend(
+                live_out
+                    .into_iter()
+                    .filter(|value| !defs[block_index].contains(value)),
+            );
+            if next != live_in[block_index] {
+                live_in[block_index] = next;
+                changed = true;
+            }
+        }
+    }
+
+    debug_assert!(
+        func.blocks
+            .iter()
+            .all(|block| block_id_to_idx.contains_key(&block.id))
+    );
+    live_in
 }
 
 /// Compute immediate dominators using the iterative algorithm.
@@ -3392,6 +3706,106 @@ mod tests {
     }
 
     #[test]
+    fn folds_only_proven_in_range_variable_shift_guards() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 7,
+                },
+                MInst::Shr {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 0,
+                },
+                MInst::CmpImmSelect {
+                    dst: VReg(4),
+                    lhs: VReg(1),
+                    imm: 64,
+                    kind: CmpKind::LtU,
+                    true_val: VReg(2),
+                    false_val: VReg(3),
+                },
+                MInst::AndImm {
+                    dst: VReg(5),
+                    src: VReg(0),
+                    imm: 127,
+                },
+                MInst::CmpImmSelect {
+                    dst: VReg(6),
+                    lhs: VReg(5),
+                    imm: 64,
+                    kind: CmpKind::LtU,
+                    true_val: VReg(2),
+                    false_val: VReg(3),
+                },
+                MInst::Return,
+            ],
+            7,
+        );
+
+        fold_proven_comparisons(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[4],
+            MInst::Mov { src: VReg(2), .. }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[6],
+            MInst::CmpImmSelect { .. }
+        ));
+    }
+
+    #[test]
+    fn folds_repeated_boolean_normalization_after_immediate_lowering() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm: 7,
+                    kind: CmpKind::LtU,
+                },
+                MInst::CmpImm {
+                    dst: VReg(2),
+                    lhs: VReg(1),
+                    imm: 0,
+                    kind: CmpKind::Ne,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        fold_boolean_normalizations(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(1)
+            }
+        ));
+    }
+
+    #[test]
     fn fuses_single_use_cmp_select() {
         let mut func = make_func(
             vec![
@@ -4999,6 +5413,121 @@ mod tests {
     }
 
     #[test]
+    fn global_gvn_does_not_extend_a_leader_only_for_cross_block_cse() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..4).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 3,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 5,
+            },
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.insts = vec![
+            MInst::Add {
+                dst: VReg(3),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(3),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(successor);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(
+            func.blocks[1].insts[0],
+            MInst::Add { dst: VReg(3), .. }
+        ));
+    }
+
+    #[test]
+    fn global_gvn_reuses_a_cross_block_leader_that_is_already_live() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..4).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 3,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 5,
+            },
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.insts = vec![
+            MInst::Add {
+                dst: VReg(3),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(3),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(successor);
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[1].insts[0],
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            }
+        );
+    }
+
+    #[test]
     fn global_gvn_does_not_reuse_a_sibling_expression() {
         let mut vregs = VRegAllocator::new();
         for _ in 0..3 {
@@ -5253,6 +5782,15 @@ mod tests {
                 base: BaseReg::SimState,
                 offset: 88,
                 src: VReg(3),
+                size: OpSize::S64,
+            },
+            // Keep the entry load independently live in this child. This
+            // isolates the scoped-memory assertion from GVN's rule against
+            // extending a leader solely for cross-block CSE.
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 96,
+                src: VReg(0),
                 size: OpSize::S64,
             },
             MInst::Return,

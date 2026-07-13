@@ -417,6 +417,8 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::MemCopy { .. }
         | MInst::SparseCommit { .. }
+        | MInst::SparseMarkActive { .. }
+        | MInst::SparseCommitWorklist { .. }
         | MInst::Branch { .. }
         | MInst::Jump { .. }
         | MInst::Return
