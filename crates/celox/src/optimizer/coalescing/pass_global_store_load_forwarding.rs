@@ -380,7 +380,12 @@ fn append_edge_arguments(
 #[cfg(test)]
 fn forward_global_static_slots(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
     let no_promotions = HashSet::default();
-    rewrite_global_static_slots(eu, STABLE_REGION, PromotionPolicy::Exact(&no_promotions))
+    rewrite_global_static_slots(
+        eu,
+        STABLE_REGION,
+        PromotionPolicy::Exact(&no_promotions),
+        &HashMap::default(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -392,6 +397,7 @@ fn rewrite_global_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     region: u32,
     promotion: PromotionPolicy<'_>,
+    fallback_definitions: &HashMap<RegisterId, SlotKey>,
 ) -> bool {
     let Some(cfg) = Cfg::new(eu) else {
         return false;
@@ -461,11 +467,17 @@ fn rewrite_global_static_slots(
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ReachingValue {
+        Register(RegisterId),
+        StableFallback,
+    }
+
     enum Visit {
         Enter(usize),
         Exit(Vec<usize>),
     }
-    let mut values = vec![Vec::<RegisterId>::new(); candidates.len()];
+    let mut values = vec![Vec::<ReachingValue>::new(); candidates.len()];
     let mut aliases = HashMap::<RegisterId, RegisterId>::default();
     let mut visits = vec![Visit::Enter(0)];
     let mut changed = false;
@@ -483,7 +495,7 @@ fn rewrite_global_static_slots(
                     .iter()
                     .zip(&phi_registers[block_index])
                 {
-                    values[slot].push(register);
+                    values[slot].push(ReachingValue::Register(register));
                     pushed_slots.push(slot);
                 }
 
@@ -504,19 +516,41 @@ fn rewrite_global_static_slots(
                                 bit_offset,
                                 width,
                             };
+                            if let Some(seed_key) = fallback_definitions.get(&destination)
+                                && let Some(&slot) = slot_index.get(seed_key)
+                                && candidates[slot].promote
+                            {
+                                changed = true;
+                                continue;
+                            }
                             if let Some(&slot) = slot_index.get(&key) {
-                                if let Some(&value) = values[slot].last() {
-                                    aliases.insert(destination, value);
-                                    changed = true;
-                                } else {
-                                    values[slot].push(destination);
-                                    pushed_slots.push(slot);
-                                    instructions.push(SIRInstruction::Load(
-                                        destination,
-                                        addr,
-                                        SIROffset::Static(bit_offset),
-                                        width,
-                                    ));
+                                match values[slot].last().copied() {
+                                    Some(ReachingValue::Register(value)) => {
+                                        aliases.insert(destination, value);
+                                        changed = true;
+                                    }
+                                    Some(ReachingValue::StableFallback) => {
+                                        let mut stable = addr;
+                                        stable.region = STABLE_REGION;
+                                        values[slot].push(ReachingValue::Register(destination));
+                                        pushed_slots.push(slot);
+                                        instructions.push(SIRInstruction::Load(
+                                            destination,
+                                            stable,
+                                            SIROffset::Static(bit_offset),
+                                            width,
+                                        ));
+                                    }
+                                    None => {
+                                        values[slot].push(ReachingValue::Register(destination));
+                                        pushed_slots.push(slot);
+                                        instructions.push(SIRInstruction::Load(
+                                            destination,
+                                            addr,
+                                            SIROffset::Static(bit_offset),
+                                            width,
+                                        ));
+                                    }
                                 }
                             } else {
                                 instructions.push(SIRInstruction::Load(
@@ -541,7 +575,14 @@ fn rewrite_global_static_slots(
                                 width,
                             };
                             if let Some(&slot) = slot_index.get(&key) {
-                                values[slot].push(source);
+                                let value = if candidates[slot].promote
+                                    && fallback_definitions.get(&source) == Some(&key)
+                                {
+                                    ReachingValue::StableFallback
+                                } else {
+                                    ReachingValue::Register(source)
+                                };
+                                values[slot].push(value);
                                 pushed_slots.push(slot);
                                 if candidates[slot].promote {
                                     changed = true;
@@ -565,24 +606,29 @@ fn rewrite_global_static_slots(
                 for &successor in &cfg.successors[block_index] {
                     let mut arguments = Vec::with_capacity(phi_slots[successor].len());
                     for &slot in &phi_slots[successor] {
-                        let value = if let Some(&value) = values[slot].last() {
-                            value
-                        } else {
-                            let candidate = &candidates[slot];
-                            let register = alloc_register(
-                                &mut eu.register_map,
-                                &mut next_register,
-                                &candidate.ty,
-                            );
-                            instructions.push(SIRInstruction::Load(
-                                register,
-                                candidate.key.addr,
-                                SIROffset::Static(candidate.key.bit_offset),
-                                candidate.key.width,
-                            ));
-                            values[slot].push(register);
-                            pushed_slots.push(slot);
-                            register
+                        let value = match values[slot].last().copied() {
+                            Some(ReachingValue::Register(value)) => value,
+                            current => {
+                                let candidate = &candidates[slot];
+                                let register = alloc_register(
+                                    &mut eu.register_map,
+                                    &mut next_register,
+                                    &candidate.ty,
+                                );
+                                let mut address = candidate.key.addr;
+                                if matches!(current, Some(ReachingValue::StableFallback)) {
+                                    address.region = STABLE_REGION;
+                                }
+                                instructions.push(SIRInstruction::Load(
+                                    register,
+                                    address,
+                                    SIROffset::Static(candidate.key.bit_offset),
+                                    candidate.key.width,
+                                ));
+                                values[slot].push(ReachingValue::Register(register));
+                                pushed_slots.push(slot);
+                                register
+                            }
                         };
                         arguments.push(value);
                     }
@@ -751,6 +797,7 @@ pub(crate) fn promote_eval_apply_working_round_trips(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
+    let mut fallback_definitions = HashMap::default();
     for block in eu.blocks.values_mut() {
         let old_instructions = std::mem::take(&mut block.instructions);
         let mut instructions = Vec::with_capacity(old_instructions.len());
@@ -777,6 +824,7 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     };
                     let register =
                         alloc_register(&mut eu.register_map, &mut next_register, &eligible[&key]);
+                    fallback_definitions.insert(register, key);
                     instructions.push(SIRInstruction::Load(
                         register,
                         source,
@@ -835,7 +883,12 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     }
 
     let slots = eligible.keys().copied().collect::<HashSet<_>>();
-    let changed = rewrite_global_static_slots(eu, WORKING_REGION, PromotionPolicy::Exact(&slots));
+    let changed = rewrite_global_static_slots(
+        eu,
+        WORKING_REGION,
+        PromotionPolicy::Exact(&slots),
+        &fallback_definitions,
+    );
     if changed {
         sink_phi_writebacks_to_predecessors(eu);
     }
@@ -1349,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn promotes_eval_apply_working_round_trip_to_one_load_and_writeback() {
+    fn promotes_eval_apply_working_round_trip_without_an_unused_seed_load() {
         let stable = address(0);
         let mut working = stable;
         working.region = WORKING_REGION;
@@ -1388,6 +1441,12 @@ mod tests {
                             if address.region == WORKING_REGION
                     ) && !matches!(instruction, SIRInstruction::Commit(..))
                 })
+        );
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Load(..)))
         );
         assert!(matches!(
             eu.blocks[&BlockId(0)].instructions.last(),
@@ -1465,8 +1524,10 @@ mod tests {
         ));
         assert!(matches!(
             eu.blocks[&BlockId(2)].instructions.as_slice(),
-            [SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(2), _, _)]
-                if *address == stable
+            [
+                SIRInstruction::Load(source, load_address, SIROffset::Static(0), 8),
+                SIRInstruction::Store(store_address, SIROffset::Static(0), 8, stored, _, _),
+            ] if *load_address == stable && *store_address == stable && source == stored
         ));
     }
 

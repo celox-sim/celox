@@ -3,8 +3,10 @@
 //! Braun--Hack spill-home formation coalesces every phi congruence class into
 //! one logical value. That is sound only in conventional SSA, where two
 //! distinct members of the same class never interfere. [`normalize_to_cssa`]
-//! implements Sreedhar Method I. [`verify_cssa`] deliberately checks actual
-//! edge-sensitive liveness instead of accepting the Method-I syntax as proof.
+//! first proves whether the input already has that property and leaves it
+//! unchanged when it does. Interfering phi webs are repaired with Sreedhar
+//! Method I. [`verify_cssa`] deliberately checks actual edge-sensitive
+//! liveness instead of accepting the Method-I syntax as proof.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -242,7 +244,8 @@ impl fmt::Display for CssaError {
 
 impl std::error::Error for CssaError {}
 
-/// Rewrite every existing phi using Sreedhar Method I.
+/// Preserve an already-conventional function, otherwise rewrite its existing
+/// phis using Sreedhar Method I.
 ///
 /// ```text
 /// d = phi(pred_i: s_i)
@@ -268,6 +271,28 @@ pub(super) fn normalize_to_cssa(
             "normalized CFG dimensions do not match the MIR function",
         ));
     }
+    let value_count = func.vregs.count() as usize;
+    if func.spill_descs.len() != value_count
+        || (!func.value_widths.is_empty() && func.value_widths.len() != value_count)
+    {
+        return Err(CssaError::function(
+            "CSSA.SIDETABLE_APPEND_POSITION",
+            format!(
+                "VReg allocator has {value_count} values but spill/value-width side tables have {}/{} entries",
+                func.spill_descs.len(),
+                func.value_widths.len()
+            ),
+        ));
+    }
+
+    // CSSA is a semantic liveness property, not a required syntactic shape.
+    // Most strict-SSA phis already satisfy it. In that common case Method I
+    // would add two copy layers per phi without establishing any new fact.
+    let original_info = CssaInfo::from_function(func)?;
+    let interfering = find_interfering_classes(func, cfg, &original_info)?;
+    if interfering.is_empty() {
+        return Ok(original_info);
+    }
 
     let mut edge_copies = vec![Vec::<MInst>::new(); func.blocks.len()];
     for block_index in 0..func.blocks.len() {
@@ -280,6 +305,10 @@ pub(super) fn normalize_to_cssa(
         let mut rewritten_phis = Vec::with_capacity(original_phis.len());
         let mut entry_copies = Vec::with_capacity(original_phis.len());
         for phi in original_phis {
+            if !interfering.contains(&original_info.class(phi.dst)) {
+                rewritten_phis.push(phi);
+                continue;
+            }
             let original_destination = phi.dst;
             let fresh_destination = alloc_snapshot(func, original_destination, block_id)?;
             let mut fresh_sources = Vec::with_capacity(phi.sources.len());
@@ -607,6 +636,63 @@ struct LiveClasses<'a> {
     member_for_class: HashMap<CssaClass, VReg>,
 }
 
+/// Find every non-conventional phi congruence in one liveness pass. Keeping
+/// this separate from the fail-fast verifier lets normalization repair only
+/// the affected phi webs without rescanning the function per class.
+fn find_interfering_classes(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    info: &CssaInfo,
+) -> Result<HashSet<CssaClass>, CssaError> {
+    verify_partition(func, info)?;
+    if cfg.predecessors.len() != func.blocks.len()
+        || cfg.successors.len() != func.blocks.len()
+        || cfg.block_index.len() != func.blocks.len()
+    {
+        return Err(CssaError::function(
+            "CSSA.CFG_MATCHES_FUNCTION",
+            "normalized CFG dimensions do not match the MIR function",
+        ));
+    }
+
+    let liveness = compute_boundary_liveness(func, cfg, info)?;
+    let mut interfering = HashSet::default();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        let mut live = LiveClasses::new(info);
+        for &value in &liveness.live_out[block_index] {
+            live.add_collecting(value, &mut interfering);
+        }
+        for inst in block.insts.iter().rev() {
+            if let Some(definition) = inst.def() {
+                live.remove(definition);
+            }
+            for value in inst.uses() {
+                live.add_collecting(value, &mut interfering);
+            }
+        }
+        for phi in &block.phis {
+            live.remove(phi.dst);
+        }
+        if live.values != liveness.live_in[block_index] {
+            let mut mismatched_values = live
+                .values
+                .symmetric_difference(&liveness.live_in[block_index])
+                .copied()
+                .collect::<Vec<_>>();
+            mismatched_values.sort_unstable();
+            return Err(CssaError::new(
+                "CSSA.LIVENESS_ENTRY_MATCH",
+                Some(block.id),
+                Some(0),
+                None,
+                mismatched_values,
+                "streaming instruction liveness disagrees with boundary liveness",
+            ));
+        }
+    }
+    Ok(interfering)
+}
+
 impl<'a> LiveClasses<'a> {
     fn new(info: &'a CssaInfo) -> Self {
         Self {
@@ -638,6 +724,26 @@ impl<'a> LiveClasses<'a> {
             self.member_for_class.insert(class, value);
         }
         Ok(())
+    }
+
+    fn add_collecting(&mut self, value: VReg, interfering: &mut HashSet<CssaClass>) {
+        let class = self.info.class(value);
+        if !self.info.is_nontrivial(class) || !self.values.insert(value) {
+            return;
+        }
+        if interfering.contains(&class) {
+            return;
+        }
+        if self
+            .member_for_class
+            .get(&class)
+            .is_some_and(|&other| other != value)
+        {
+            interfering.insert(class);
+            self.member_for_class.remove(&class);
+        } else {
+            self.member_for_class.insert(class, value);
+        }
     }
 
     fn remove(&mut self, value: VReg) {
@@ -719,30 +825,18 @@ mod tests {
     }
 
     #[test]
-    fn method_i_inserts_fresh_edge_and_entry_copies() {
+    fn already_conventional_ssa_is_not_rewritten() {
         let (mut func, left, right, original_destination) = diamond_with_phi(false);
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let old_count = func.vregs.count();
 
         let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
-        assert_eq!(func.vregs.count(), old_count + 3);
+        assert_eq!(func.vregs.count(), old_count);
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
         let phi = &join.phis[0];
-        assert_ne!(phi.dst, original_destination);
-        assert!(matches!(
-            join.insts.first(),
-            Some(MInst::Mov { dst, src })
-                if *dst == original_destination && *src == phi.dst
-        ));
-        for (predecessor, source_copy) in &phi.sources {
-            let predecessor = &func.blocks[cfg.block_index[predecessor]];
-            assert!(matches!(
-                predecessor.insts.as_slice(),
-                [.., MInst::Mov { dst, src }, MInst::Jump { target: BlockId(3) }]
-                    if dst == source_copy && (*src == left || *src == right)
-            ));
-        }
+        assert_eq!(phi.dst, original_destination);
+        assert_eq!(phi.sources, vec![(BlockId(1), left), (BlockId(2), right)]);
         let members = info.members(info.class(phi.dst)).collect::<HashSet<_>>();
         assert_eq!(info.nontrivial_classes().count(), 1);
         assert_eq!(
@@ -753,9 +847,9 @@ mod tests {
                 .chain(std::iter::once(phi.dst))
                 .collect()
         );
-        assert!(!members.contains(&left));
-        assert!(!members.contains(&right));
-        assert!(!members.contains(&original_destination));
+        assert!(members.contains(&left));
+        assert!(members.contains(&right));
+        assert!(members.contains(&original_destination));
         func.verify();
         verify_cssa(&func, &cfg, &info).unwrap();
     }
@@ -794,28 +888,88 @@ mod tests {
     fn method_i_repairs_interfering_phi_congruence() {
         let (mut func, _, _, _) = diamond_with_phi(true);
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let old_count = func.vregs.count();
 
         let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
+        assert_eq!(func.vregs.count(), old_count + 3);
+        func.verify();
+        verify_cssa(&func, &cfg, &info).unwrap();
+    }
+
+    #[test]
+    fn method_i_rewrites_only_interfering_phi_classes() {
+        let (mut func, _, _, _) = diamond_with_phi(true);
+        let safe_left = func.vregs.alloc();
+        let safe_right = func.vregs.alloc();
+        let safe_merged = func.vregs.alloc();
+        let safe_result = func.vregs.alloc();
+        func.spill_descs
+            .extend((0..4).map(|_| SpillDesc::transient()));
+        func.blocks[0].insts.insert(
+            2,
+            MInst::LoadImm {
+                dst: safe_left,
+                value: 30,
+            },
+        );
+        func.blocks[2].insts.insert(
+            1,
+            MInst::LoadImm {
+                dst: safe_right,
+                value: 40,
+            },
+        );
+        func.blocks[3].phis.push(PhiNode {
+            dst: safe_merged,
+            sources: vec![(BlockId(1), safe_left), (BlockId(2), safe_right)],
+        });
+        let return_index = func.blocks[3].insts.len() - 1;
+        func.blocks[3].insts.insert(
+            return_index,
+            MInst::Mov {
+                dst: safe_result,
+                src: safe_merged,
+            },
+        );
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let old_count = func.vregs.count();
+
+        let info = normalize_to_cssa(&mut func, &cfg).unwrap();
+
+        assert_eq!(func.vregs.count(), old_count + 3);
+        let join = &func.blocks[cfg.block_index[&BlockId(3)]];
+        assert!(join.phis.iter().any(|phi| {
+            phi.dst == safe_merged
+                && phi.sources == vec![(BlockId(1), safe_left), (BlockId(2), safe_right)]
+        }));
         func.verify();
         verify_cssa(&func, &cfg, &info).unwrap();
     }
 
     #[test]
     fn normalization_reports_vreg_exhaustion_without_panicking() {
-        let (mut func, _, _, _) = diamond_with_phi(false);
-        let cfg = super::super::cfg::normalize(&mut func).unwrap();
-        func.vregs.set_next_for_test(u32::MAX);
+        let mut vregs = VRegAllocator::new();
+        vregs.set_next_for_test(u32::MAX);
+        let mut spill_descs = Vec::new();
+        let mut value_widths = Vec::new();
 
-        let error = normalize_to_cssa(&mut func, &cfg).unwrap_err();
+        let error = alloc_snapshot_from_parts(
+            &mut vregs,
+            &mut spill_descs,
+            &mut value_widths,
+            VReg(0),
+            BlockId(0),
+        )
+        .unwrap_err();
 
         assert_eq!(error.rule, "CSSA.VREG_EXHAUSTED");
-        assert_eq!(func.vregs.count(), u32::MAX);
+        assert_eq!(vregs.count(), u32::MAX);
     }
 
     #[test]
     fn normalization_reports_side_table_misalignment() {
-        let (mut func, _, _, _) = diamond_with_phi(false);
+        let (mut func, _, _, _) = diamond_with_phi(true);
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         func.spill_descs.pop();
 
@@ -826,7 +980,7 @@ mod tests {
 
     #[test]
     fn normalization_reports_missing_edge_block_terminator() {
-        let (mut func, _, _, _) = diamond_with_phi(false);
+        let (mut func, _, _, _) = diamond_with_phi(true);
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let join = cfg.block_index[&BlockId(3)];
         let predecessor = cfg.block_index[&func.blocks[join].phis[0].sources[0].0];
