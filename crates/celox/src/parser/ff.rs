@@ -21,6 +21,7 @@ use veryl_analyzer::ir::{
     ForStatement, IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
     SystemFunctionInput, SystemFunctionKind, TypeKind, VarId,
 };
+use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
 
@@ -228,6 +229,7 @@ pub struct FfParser<'a> {
     dynamic_defined_vars: HashSet<VarId>,
     dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
+    local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<crate::ir::BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
@@ -245,13 +247,23 @@ enum ControlFlow {
 
 impl<'a> FfParser<'a> {
     pub fn new(module: &'a Module, config: BuildConfig) -> Self {
+        let local_working_vars = module
+            .variables
+            .iter()
+            .filter_map(|(id, variable)| {
+                (variable.affiliation == Affiliation::AlwaysFf
+                    && variable.kind != veryl_analyzer::ir::VarKind::Let)
+                    .then_some(*id)
+            })
+            .collect();
         Self {
             module,
             stack: VecDeque::new(),
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
             dynamic_write_vars: HashSet::default(),
-            local_working_vars: HashSet::default(),
+            local_working_vars,
+            local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
@@ -2085,6 +2097,7 @@ impl<'a> FfParser<'a> {
         self.defined_ranges.clear();
         self.dynamic_defined_vars.clear();
         self.dynamic_write_vars.clear();
+        self.local_let_values.clear();
         self.reset = decls[0].reset.clone();
 
         let mut targets = Vec::new();

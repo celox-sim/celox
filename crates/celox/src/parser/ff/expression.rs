@@ -19,9 +19,10 @@ use num_traits::Zero;
 
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, AssignStatement, Expression, Factor, Op,
-    SystemFunctionCall, SystemFunctionKind, Type, ValueVariant, VarId, VarIndex, VarSelect,
-    VarSelectOp,
+    SystemFunctionCall, SystemFunctionKind, Type, ValueVariant, VarId, VarIndex, VarKind,
+    VarSelect, VarSelectOp,
 };
+use veryl_analyzer::symbol::Affiliation;
 
 fn expression_has_side_effect(expr: &Expression) -> bool {
     let input_has_side_effect =
@@ -215,6 +216,44 @@ impl<'a> FfParser<'a> {
             ));
             sliced_reg
         }
+    }
+
+    fn emit_register_dynamic_slice<A>(
+        &mut self,
+        src_reg: RegisterId,
+        offset_reg: RegisterId,
+        width: usize,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        let src_width = ir_builder.register(&src_reg).width();
+        let shifted = ir_builder.alloc_logic(src_width);
+        ir_builder.emit(SIRInstruction::Binary(
+            shifted,
+            src_reg,
+            BinaryOp::Shr,
+            offset_reg,
+        ));
+        if width == src_width {
+            return shifted;
+        }
+
+        let mask = ir_builder.alloc_bit(width, false);
+        ir_builder.emit(SIRInstruction::Imm(
+            mask,
+            SIRValue::new((BigUint::from(1u64) << width) - BigUint::from(1u64)),
+        ));
+        let selected = if ir_builder.register(&src_reg).is_signed() {
+            ir_builder.alloc_bit(width, true)
+        } else {
+            ir_builder.alloc_logic(width)
+        };
+        ir_builder.emit(SIRInstruction::Binary(
+            selected,
+            shifted,
+            BinaryOp::And,
+            mask,
+        ));
+        selected
     }
 
     fn materialize_bound_function_access<A>(
@@ -667,6 +706,32 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        let is_local_let = {
+            let variable = &self.module.variables[&var_id];
+            variable.affiliation == Affiliation::AlwaysFf && variable.kind == VarKind::Let
+        };
+        if is_local_let && let Some(&value) = self.local_let_values.get(&var_id) {
+            let width = get_access_width(self.module, var_id, index, select)?;
+            let selected = if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+                value
+            } else {
+                match self
+                    .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
+                {
+                    SIROffset::Static(lsb) => self.emit_register_slice(
+                        value,
+                        BitAccess::new(lsb, lsb + width - 1),
+                        ir_builder,
+                    ),
+                    SIROffset::Dynamic(offset) => {
+                        self.emit_register_dynamic_slice(value, offset, width, ir_builder)
+                    }
+                }
+            };
+            self.stack.push_back(selected);
+            return Ok(());
+        }
+
         // Use get_access_width for the actual element width (correct for dynamic indices).
         // eval_var_select returns the full-level range for dynamic indices, which is too
         // wide for Load/Store instructions.
@@ -723,15 +788,14 @@ impl<'a> FfParser<'a> {
     ) -> Result<(), ParserError> {
         let src_reg = self.stack.pop_back().expect("invalid ir");
 
-        let offset = self.emit_offset_calc(
-            dst.id,
-            &dst.index,
-            &dst.select,
-            domain,
-            convert,
-            sources,
-            ir_builder,
-        )?;
+        let is_direct_local_let = {
+            let variable = &self.module.variables[&dst.id];
+            variable.affiliation == Affiliation::AlwaysFf
+                && variable.kind == VarKind::Let
+                && dst.index.0.is_empty()
+                && dst.select.0.is_empty()
+                && dst.select.1.is_none()
+        };
         // Use get_access_width for actual element width (correct for dynamic array indices).
         let target_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
         let target_type = &self.module.variables[&dst.id].r#type;
@@ -748,6 +812,20 @@ impl<'a> FfParser<'a> {
         } else {
             src_reg
         };
+        if is_direct_local_let {
+            self.local_let_values.insert(dst.id, src_reg);
+            return Ok(());
+        }
+
+        let offset = self.emit_offset_calc(
+            dst.id,
+            &dst.index,
+            &dst.select,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
         ir_builder.emit(SIRInstruction::Store(
             convert(dst.id, domain.region()),
             offset,

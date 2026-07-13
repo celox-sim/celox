@@ -177,4 +177,320 @@ module Top (
         assert_eq!(sim.get(qa), 5u8.into());
         assert_eq!(sim.get(qb), 6u8.into());
     }
+
+    fn test_always_ff_let_bindings_are_visible_immediately(sim) {
+        @setup { let code = r#"
+module Top (
+    clk: input  clock,
+    x  : input  logic<8>,
+    q  : output logic<8>,
+) {
+    always_ff (clk) {
+        let a: logic<8> = x + 8'd1;
+        let b: logic<8> = a + 8'd1;
+        q = b;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let x = sim.signal("x");
+        let q = sim.signal("q");
+
+        sim.modify(|io| io.set(x, 0x35u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get(q),
+            0x37u8.into(),
+            "always_ff let bindings must use blocking procedural-local semantics",
+        );
+
+        sim.modify(|io| io.set(x, 0x80u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0x82u8.into());
+    }
+
+    fn test_wide_dynamic_ff_checkpoint_round_trip(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    restore: input  logic,
+    idx    : input  logic<5>,
+    d0     : input  logic<64>,
+    d1     : input  logic<64>,
+    d2     : input  logic<64>,
+    q0     : output logic<64>,
+    q1     : output logic<64>,
+    q2     : output logic<64>,
+) {
+    var checkpoint: logic<192> [32];
+
+    always_ff (clk) {
+        if capture {
+            checkpoint[idx] = {d2, d1, d0};
+        }
+        if restore {
+            q0 = checkpoint[idx][63:0];
+            q1 = checkpoint[idx][127:64];
+            q2 = checkpoint[idx][191:128];
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let capture = sim.signal("capture");
+        let restore = sim.signal("restore");
+        let idx = sim.signal("idx");
+        let d0 = sim.signal("d0");
+        let d1 = sim.signal("d1");
+        let d2 = sim.signal("d2");
+        let q0 = sim.signal("q0");
+        let q1 = sim.signal("q1");
+        let q2 = sim.signal("q2");
+
+        for (index, words) in [
+            (0u8, [0x0123_4567_89ab_cdefu64, 0xfedc_ba98_7654_3210, 0x55aa_00ff_cc33_9669]),
+            (1u8, [0x8000_0000_0000_0001u64, 0x7fff_ffff_ffff_fffe, 0xdead_beef_cafe_babe]),
+            (31u8, [0x1111_2222_3333_4444u64, 0x5555_6666_7777_8888, 0x9999_aaaa_bbbb_cccc]),
+        ] {
+            sim.modify(|io| {
+                io.set(idx, index);
+                io.set(d0, words[0]);
+                io.set(d1, words[1]);
+                io.set(d2, words[2]);
+                io.set(capture, 1u8);
+                io.set(restore, 0u8);
+            }).unwrap();
+            sim.tick(clk).unwrap();
+
+            sim.modify(|io| {
+                io.set(capture, 0u8);
+                io.set(restore, 1u8);
+            }).unwrap();
+            sim.tick(clk).unwrap();
+
+            assert_eq!(sim.get(q0), words[0].into(), "checkpoint[{index}] low word");
+            assert_eq!(sim.get(q1), words[1].into(), "checkpoint[{index}] middle word");
+            assert_eq!(sim.get(q2), words[2].into(), "checkpoint[{index}] high word");
+        }
+    }
+
+    fn test_packed_rat_checkpoint_round_trip(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    restore: input  logic,
+    idx    : input  logic<5>,
+    x3_map : input  logic<6>,
+    q0     : output logic<6>,
+    q3     : output logic<6>,
+    q31    : output logic<6>,
+) {
+    var map   : logic<6> [32];
+    var packed_map: logic<192>;
+    var checkpoint: logic<192> [32];
+
+    always_comb {
+        for r in 0..32 {
+            map[r] = r as 6;
+        }
+        map[3] = x3_map;
+        for r in 0..32 {
+            packed_map[r * 6 +: 6] = map[r];
+        }
+    }
+
+    always_ff (clk) {
+        if capture {
+            checkpoint[idx] = packed_map;
+        }
+        if restore {
+            q0  = checkpoint[idx][0  * 6 +: 6];
+            q3  = checkpoint[idx][3  * 6 +: 6];
+            q31 = checkpoint[idx][31 * 6 +: 6];
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let capture = sim.signal("capture");
+        let restore = sim.signal("restore");
+        let idx = sim.signal("idx");
+        let x3_map = sim.signal("x3_map");
+        let q0 = sim.signal("q0");
+        let q3 = sim.signal("q3");
+        let q31 = sim.signal("q31");
+
+        sim.modify(|io| {
+            io.set(capture, 1u8);
+            io.set(restore, 0u8);
+            io.set(idx, 17u8);
+            io.set(x3_map, 7u8);
+        }).unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| {
+            io.set(capture, 0u8);
+            io.set(restore, 1u8);
+        }).unwrap();
+        sim.tick(clk).unwrap();
+
+        assert_eq!(sim.get(q0), 0u8.into());
+        assert_eq!(sim.get(q3), 7u8.into());
+        assert_eq!(sim.get(q31), 31u8.into());
+    }
+
+    fn test_dynamic_ff_array_partial_squash_preserves_head_and_branch(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    clk        : input  clock,
+    set_en     : input  logic,
+    set_idx    : input  logic<5>,
+    squash_en  : input  logic,
+    head_idx   : input  logic<5>,
+    squash_idx : input  logic<5>,
+    probe_idx  : input  logic<5>,
+    probe_valid: output logic,
+) {
+    var valid: logic [32];
+
+    always_ff (clk) {
+        if set_en {
+            valid[set_idx] = 1'b1;
+        }
+        if squash_en {
+            let squash_age: logic<5> = squash_idx - head_idx;
+            for i in 0..32 {
+                let age: logic<5> = (i as 5) - head_idx;
+                if age >: squash_age {
+                    valid[i] = 1'b0;
+                }
+            }
+        }
+    }
+
+    assign probe_valid = valid[probe_idx];
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let set_en = sim.signal("set_en");
+        let set_idx = sim.signal("set_idx");
+        let squash_en = sim.signal("squash_en");
+        let head_idx = sim.signal("head_idx");
+        let squash_idx = sim.signal("squash_idx");
+        let probe_idx = sim.signal("probe_idx");
+        let probe_valid = sim.signal("probe_valid");
+
+        for index in 0u8..32 {
+            sim.modify(|io| {
+                io.set(set_en, 1u8);
+                io.set(set_idx, index);
+                io.set(squash_en, 0u8);
+            }).unwrap();
+            sim.tick(clk).unwrap();
+        }
+
+        sim.modify(|io| {
+            io.set(set_en, 0u8);
+            io.set(squash_en, 1u8);
+            io.set(head_idx, 18u8);
+            io.set(squash_idx, 21u8);
+        }).unwrap();
+        sim.tick(clk).unwrap();
+
+        for index in [18u8, 19, 20, 21] {
+            sim.modify(|io| io.set(probe_idx, index)).unwrap();
+            assert_eq!(
+                sim.get(probe_valid),
+                1u8.into(),
+                "partial squash cleared preserved ROB slot {index}",
+            );
+        }
+        for index in (22u8..32).chain(0u8..18) {
+            sim.modify(|io| io.set(probe_idx, index)).unwrap();
+            assert_eq!(
+                sim.get(probe_valid),
+                0u8.into(),
+                "partial squash retained younger ROB slot {index}",
+            );
+        }
+    }
+
+    fn test_line_write_loop_updates_large_sparse_ff_array(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    clk  : input  clock,
+    wen  : input  logic,
+    waddr: input  logic<64>,
+    data0: input  logic<64>,
+    strb0: input  logic<8>,
+    q    : output logic<32>,
+) {
+    var mem  : logic<32> [1048576];
+    var wdata: logic<64> [8];
+    var wstrb: logic<8>  [8];
+    always_comb {
+        for i in 0..8 {
+            wdata[i] = 0;
+            wstrb[i] = 0;
+        }
+        wdata[0] = data0;
+        wstrb[0] = strb0;
+    }
+    always_ff (clk) {
+        if wen {
+            for l in 0..8 {
+                if wstrb[l] != 0 {
+                    let w_lo : logic<20> = {waddr[21:6], l as 3, 1'b0};
+                    let w_hi : logic<20> = {waddr[21:6], l as 3, 1'b1};
+                    let w_old: logic<64> = {mem[w_hi], mem[w_lo]};
+                    let w_new: logic<64> = {
+                        if wstrb[l][7] ? wdata[l][63:56] : w_old[63:56],
+                        if wstrb[l][6] ? wdata[l][55:48] : w_old[55:48],
+                        if wstrb[l][5] ? wdata[l][47:40] : w_old[47:40],
+                        if wstrb[l][4] ? wdata[l][39:32] : w_old[39:32],
+                        if wstrb[l][3] ? wdata[l][31:24] : w_old[31:24],
+                        if wstrb[l][2] ? wdata[l][23:16] : w_old[23:16],
+                        if wstrb[l][1] ? wdata[l][15:8]  : w_old[15:8],
+                        if wstrb[l][0] ? wdata[l][7:0]   : w_old[7:0]
+                    };
+                    mem[w_lo] = w_new[31:0];
+                    mem[w_hi] = w_new[63:32];
+                }
+            }
+        }
+    }
+    assign q = mem[20'd1024];
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let wen = sim.signal("wen");
+        let waddr = sim.signal("waddr");
+        let data0 = sim.signal("data0");
+        let strb0 = sim.signal("strb0");
+        let q = sim.signal("q");
+        sim.modify(|io| {
+            io.set(wen, 1u8);
+            io.set(waddr, 0x0400_0000_8000_1000u64);
+            io.set(data0, 1u64);
+            io.set(strb0, 0x0fu8);
+        }).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 1u32.into(), "merged line was not committed");
+    }
+
 }

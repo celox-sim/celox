@@ -2909,6 +2909,98 @@ fn prepare_sparse_store(
     }
 }
 
+fn emit_aligned_dynamic_wide_store(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    base_offset: i32,
+    byte_offset: VReg,
+    width: usize,
+    chunks: &[(VReg, usize)],
+) {
+    let mut bit_pos = 0usize;
+    let mut remaining = width;
+
+    for &(chunk, chunk_width) in chunks {
+        if remaining == 0 {
+            break;
+        }
+        let logical_width = chunk_width.min(remaining);
+        debug_assert!(bit_pos.is_multiple_of(8));
+
+        let whole_bytes = logical_width / 8;
+        let mut copied = 0usize;
+        for bytes in [8usize, 4, 2, 1] {
+            while copied + bytes <= whole_bytes {
+                let consumed_bits = copied * 8;
+                let src = if consumed_bits == 0 {
+                    chunk
+                } else {
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShrImm {
+                        dst: shifted,
+                        src: chunk,
+                        imm: consumed_bits as u8,
+                    });
+                    shifted
+                };
+                block.push(MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: base_offset + ((bit_pos / 8) + copied) as i32,
+                    index: byte_offset,
+                    src,
+                    size: match bytes {
+                        8 => OpSize::S64,
+                        4 => OpSize::S32,
+                        2 => OpSize::S16,
+                        1 => OpSize::S8,
+                        _ => unreachable!(),
+                    },
+                });
+                copied += bytes;
+            }
+        }
+
+        let tail_bits = logical_width % 8;
+        if tail_bits != 0 {
+            let consumed_bits = whole_bytes * 8;
+            let src = if consumed_bits == 0 {
+                chunk
+            } else {
+                let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::ShrImm {
+                    dst: shifted,
+                    src: chunk,
+                    imm: consumed_bits as u8,
+                });
+                shifted
+            };
+            let offset = base_offset + ((bit_pos / 8) + whole_bytes) as i32;
+            let old = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::LoadIndexed {
+                dst: old,
+                base: BaseReg::SimState,
+                offset,
+                index: byte_offset,
+                size: OpSize::S8,
+            });
+            let new = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_bfi(block, new, old, src, 0, mask_for_width(tail_bits));
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset,
+                index: byte_offset,
+                src: new,
+                size: OpSize::S8,
+            });
+        }
+
+        bit_pos += logical_width;
+        remaining -= logical_width;
+    }
+
+    debug_assert_eq!(remaining, 0, "wide source does not cover store width");
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -3939,7 +4031,17 @@ fn lower_instruction(
                             src: offset_vreg,
                             imm: 3,
                         });
-                        if low_zero_bits_reg(ctx, *offset_reg) >= 3
+                        if *width_bits > 64 && low_zero_bits_reg(ctx, *offset_reg) >= 3 {
+                            let chunks = ctx.get_wide_chunks(src_reg, block);
+                            emit_aligned_dynamic_wide_store(
+                                ctx,
+                                block,
+                                base_off,
+                                byte_off,
+                                *width_bits,
+                                &chunks,
+                            );
+                        } else if low_zero_bits_reg(ctx, *offset_reg) >= 3
                             && let Some(store_size) = OpSize::from_bits(*width_bits)
                         {
                             let store_src = if *width_bits < 64 {
@@ -4234,7 +4336,26 @@ fn lower_instruction(
                                 src: offset_vreg,
                                 imm: 3,
                             });
-                            if low_zero_bits_reg(ctx, *offset_reg) >= 3
+                            if *width_bits > 64 && low_zero_bits_reg(ctx, *offset_reg) >= 3 {
+                                let n_chunks = width_bits.div_ceil(64);
+                                let mask_vregs =
+                                    get_wide_mask_chunks(ctx, block, src_reg, n_chunks);
+                                let mask_chunks = mask_vregs
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, chunk)| {
+                                        (chunk, (*width_bits - index * 64).min(64))
+                                    })
+                                    .collect::<Vec<_>>();
+                                emit_aligned_dynamic_wide_store(
+                                    ctx,
+                                    block,
+                                    mask_base_off,
+                                    m_byte_off,
+                                    *width_bits,
+                                    &mask_chunks,
+                                );
+                            } else if low_zero_bits_reg(ctx, *offset_reg) >= 3
                                 && let Some(store_size) = OpSize::from_bits(*width_bits)
                             {
                                 let store_src = if *width_bits < 64 {
