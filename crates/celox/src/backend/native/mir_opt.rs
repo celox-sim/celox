@@ -110,11 +110,44 @@ pub fn optimize(func: &mut MFunction) {
         pass!("fuse_compare_selects", fuse_compare_selects(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
     }
+    // The last algebraic/GVN iteration can expose a constant through a copy or
+    // create a constant-valued immediate operation.  Close that pipeline here
+    // instead of handing the resulting artificial long live ranges to
+    // register allocation.
+    pass!("final_copy_propagate", copy_propagate(func));
+    pass!("final_constant_fold", constant_fold(func));
+    pass!("final_lower_to_imm_forms", lower_to_imm_forms(func));
+    pass!("final_dead_code_eliminate", dead_code_eliminate(func));
     pass!("simplify_cfg", simplify_cfg(func));
+    // CFG simplification concatenates linear blocks.  Re-place constants only
+    // after that concatenation, otherwise a block-local constant can acquire a
+    // very long artificial live range in the merged block.
+    pass!("final_sink_loads", sink_loads(func));
+    pass!(
+        "refresh_constant_spill_descs",
+        refresh_constant_spill_descs(func)
+    );
     pass!("compute_value_widths", compute_value_widths(func));
     if cfg!(debug_assertions) || std::env::var_os("CELOX_MIR_VERIFY").is_some() {
         if let Err(error) = func.verify_result() {
             panic!("after MIR optimizer: {error}");
+        }
+    }
+}
+
+/// Keep allocation metadata in sync with constants created by MIR rewrites.
+///
+/// ISel attaches `Remat` descriptors to constants it creates directly, but
+/// constant folding and algebraic simplification can turn a transient value
+/// into a `LoadImm`.  Leaving the old `Stack` descriptor on that destination
+/// makes register allocation emit a real spill for a value that should simply
+/// be reconstructed at its use.
+fn refresh_constant_spill_descs(func: &mut MFunction) {
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let MInst::LoadImm { dst, value } = inst {
+                func.spill_descs[dst.0 as usize] = SpillDesc::remat(*value);
+            }
         }
     }
 }
@@ -450,6 +483,76 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
             src: *lhs,
             imm: value as u8,
         }),
+        MInst::LoadIndexed {
+            dst,
+            base,
+            offset,
+            index,
+            size,
+        } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| offset.checked_add(index))
+            .map(|offset| MInst::Load {
+                dst: *dst,
+                base: *base,
+                offset,
+                size: *size,
+            }),
+        MInst::StoreIndexed {
+            base,
+            offset,
+            index,
+            src,
+            size,
+        } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| offset.checked_add(index))
+            .map(|offset| MInst::Store {
+                base: *base,
+                offset,
+                src: *src,
+                size: *size,
+            }),
+        MInst::LoadPtrIndexed {
+            dst,
+            ptr,
+            offset,
+            index,
+            size,
+        } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| offset.checked_add(index))
+            .map(|offset| MInst::LoadPtr {
+                dst: *dst,
+                ptr: *ptr,
+                offset,
+                size: *size,
+            }),
+        MInst::StorePtrIndexed {
+            ptr,
+            offset,
+            index,
+            src,
+            size,
+        } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| offset.checked_add(index))
+            .map(|offset| MInst::StorePtr {
+                ptr: *ptr,
+                offset,
+                src: *src,
+                size: *size,
+            }),
+        MInst::ReleaseStorePtrIndexed {
+            ptr,
+            offset,
+            index,
+            src,
+            size,
+        } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| offset.checked_add(index))
+            .map(|offset| MInst::ReleaseStorePtr {
+                ptr: *ptr,
+                offset,
+                src: *src,
+                size: *size,
+            }),
         _ => None,
     }
 }
@@ -1211,7 +1314,20 @@ fn global_gvn(func: &mut MFunction) {
 
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
-    let live_in = compute_gvn_live_in(func, &block_id_to_idx, &succs);
+    let (_, live_out) = compute_gvn_liveness(func, &block_id_to_idx, &succs);
+    let last_uses = func
+        .blocks
+        .iter()
+        .map(|block| {
+            let mut uses = HashMap::new();
+            for (instruction, inst) in block.insts.iter().enumerate() {
+                for value in inst.uses() {
+                    uses.insert(value, instruction);
+                }
+            }
+            uses
+        })
+        .collect::<Vec<_>>();
 
     // Build dominator tree children
     let mut dom_children: Vec<Vec<usize>> = vec![Vec::new(); num_blocks];
@@ -1247,7 +1363,8 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_in: &[HashSet<VReg>],
+        live_out: &[HashSet<VReg>],
+        last_uses: &[HashMap<VReg, usize>],
         value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
@@ -1264,7 +1381,8 @@ fn global_gvn(func: &mut MFunction) {
             value_numbers,
             value_leaders,
             leader_blocks,
-            &live_in[node],
+            &live_out[node],
+            &last_uses[node],
             value_table,
             active_load_keys,
             table_changes,
@@ -1280,7 +1398,8 @@ fn global_gvn(func: &mut MFunction) {
                 value_numbers,
                 value_leaders,
                 leader_blocks,
-                live_in,
+                live_out,
+                last_uses,
                 value_table,
                 active_load_keys,
                 table_changes,
@@ -1317,7 +1436,8 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_in: &HashSet<VReg>,
+        live_out: &HashSet<VReg>,
+        last_uses: &HashMap<VReg, usize>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
@@ -1384,8 +1504,10 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let reuse_does_not_extend_live_range =
-                        leader_block == Some(node) || live_in.contains(&leader);
+                    let reuse_does_not_extend_live_range = live_out.contains(&leader)
+                        || last_uses
+                            .get(&leader)
+                            .is_some_and(|last_use| *last_use >= inst_idx);
                     if dst != leader && reuse_does_not_extend_live_range {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
                     } else if dst != leader {
@@ -1424,7 +1546,8 @@ fn global_gvn(func: &mut MFunction) {
         &mut value_numbers,
         &mut value_leaders,
         &mut leader_blocks,
-        &live_in,
+        &live_out,
+        &last_uses,
         &mut value_table,
         &mut active_load_keys,
         &mut table_changes,
@@ -1442,14 +1565,14 @@ fn global_gvn(func: &mut MFunction) {
     }
 }
 
-/// Compute conventional SSA liveness at each block entry for GVN's
+/// Compute conventional SSA block-entry and block-exit liveness for GVN's
 /// profitability check. Phi sources are uses on predecessor edges; phi
 /// destinations are definitions at the successor entry.
-fn compute_gvn_live_in(
+fn compute_gvn_liveness(
     func: &MFunction,
     block_id_to_idx: &HashMap<BlockId, usize>,
     succs: &[Vec<usize>],
-) -> Vec<HashSet<VReg>> {
+) -> (Vec<HashSet<VReg>>, Vec<HashSet<VReg>>) {
     let block_count = func.blocks.len();
     let mut uses = vec![HashSet::new(); block_count];
     let mut defs = vec![HashSet::new(); block_count];
@@ -1500,12 +1623,28 @@ fn compute_gvn_live_in(
         }
     }
 
+    let mut live_out = vec![HashSet::new(); block_count];
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for &successor in &succs[block_index] {
+            live_out[block_index].extend(live_in[successor].iter().copied());
+            for phi in &func.blocks[successor].phis {
+                if let Some((_, source)) = phi
+                    .sources
+                    .iter()
+                    .find(|(predecessor, _)| *predecessor == block.id)
+                {
+                    live_out[block_index].insert(*source);
+                }
+            }
+        }
+    }
+
     debug_assert!(
         func.blocks
             .iter()
             .all(|block| block_id_to_idx.contains_key(&block.id))
     );
-    live_in
+    (live_in, live_out)
 }
 
 /// Compute immediate dominators using the iterative algorithm.
@@ -3694,6 +3833,46 @@ mod tests {
     }
 
     #[test]
+    fn folded_constants_are_marked_rematerializable() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 3,
+                },
+                MInst::ShlImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        optimize(&mut func);
+
+        let constant = func.blocks[0]
+            .insts
+            .iter()
+            .find_map(|inst| match inst {
+                MInst::LoadImm { dst, value: 12 } => Some(*dst),
+                _ => None,
+            })
+            .expect("the shift of a known constant must fold");
+        assert!(matches!(
+            func.spill_desc(constant).map(|desc| &desc.kind),
+            Some(SpillKind::Remat { value: 12 })
+        ));
+    }
+
+    #[test]
     fn dominators_do_not_depend_on_block_storage_order() {
         // Storage order is entry, join, left, right; reverse postorder is
         // entry, right, left, join.
@@ -4251,6 +4430,55 @@ mod tests {
                 dst: VReg(3),
                 src: VReg(4),
                 imm: 7,
+            }
+        ));
+    }
+
+    #[test]
+    fn lower_to_imm_forms_folds_constant_memory_indices() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 24,
+                },
+                MInst::LoadIndexed {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    index: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    index: VReg(0),
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        lower_to_imm_forms(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 40,
+                size: OpSize::S64,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 56,
+                src: VReg(2),
+                size: OpSize::S64,
             }
         ));
     }
@@ -5169,10 +5397,9 @@ mod tests {
         assert!(
             insts.iter().any(|inst| matches!(
                 inst,
-                MInst::ShrImm {
+                MInst::LoadImm {
                     dst: _,
-                    src: VReg(0),
-                    imm: 8,
+                    value: 0x34,
                 }
             )),
             "{insts:#?}"
@@ -5383,6 +5610,14 @@ mod tests {
                     lhs: VReg(1),
                     rhs: VReg(0),
                 },
+                // Keep the first leader naturally live at the repeated
+                // expression, so reusing it does not lengthen its lifetime.
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
                 MInst::Store {
                     base: BaseReg::SimState,
                     offset: 0,
@@ -5410,6 +5645,53 @@ mod tests {
                 src: VReg(2),
             }
         );
+    }
+
+    #[test]
+    fn global_gvn_recomputes_a_dead_same_block_leader() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 3,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 5,
+                },
+                MInst::Add {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Add {
+                    dst: VReg(3),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        global_gvn(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[4],
+            MInst::Add { dst: VReg(3), .. }
+        ));
     }
 
     #[test]
@@ -5633,6 +5915,12 @@ mod tests {
                     offset: 16,
                     size: OpSize::S64,
                 },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
                 MInst::Return,
             ],
             2,
@@ -5658,6 +5946,12 @@ mod tests {
                     dst: VReg(1),
                     base: BaseReg::SimState,
                     offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(0),
                     size: OpSize::S64,
                 },
                 MInst::Return,
@@ -5699,6 +5993,12 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 96,
                     src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 104,
+                    src: VReg(0),
                     size: OpSize::S64,
                 },
                 MInst::Return,
