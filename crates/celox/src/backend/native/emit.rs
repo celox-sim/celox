@@ -1087,10 +1087,14 @@ fn emit_planned(
                 let is_cmp = pre.def() == Some(*cond)
                     && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
                 if is_cmp {
-                    let used_elsewhere = block.insts[..block.insts.len() - 2]
-                        .iter()
-                        .any(|i| i.uses().contains(cond));
-                    if !used_elsewhere { Some(*cond) } else { None }
+                    // A condition can remain live through a successor phi even
+                    // when Branch is its only use in this block.  In that case
+                    // setcc must still materialize the SSA value for the edge.
+                    if use_counts.get(cond).copied() == Some(1) {
+                        Some(*cond)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -3907,6 +3911,65 @@ mod shift_encoding_tests {
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 40);
         assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn compare_branch_fusion_preserves_condition_used_after_the_branch() {
+        let mut vregs = VRegAllocator::new();
+        let zero = vregs.alloc();
+        let alternative = vregs.alloc();
+        let condition = vregs.alloc();
+        let merged = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        entry.push(MInst::LoadImm {
+            dst: alternative,
+            value: 7,
+        });
+        entry.push(MInst::CmpImm {
+            dst: condition,
+            lhs: zero,
+            imm: 0,
+            kind: CmpKind::Eq,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.push(MInst::Jump { target: BlockId(3) });
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), condition), (BlockId(2), alternative)],
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: merged,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, true_block, false_block, join];
+        func.verify();
+
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 8];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(u64::from_le_bytes(state), 1);
     }
 
     fn execute_variable_shift_boundaries(use_bmi2: bool) {

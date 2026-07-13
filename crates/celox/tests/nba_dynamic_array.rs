@@ -1,4 +1,4 @@
-use celox::Simulator;
+use celox::{BigUint, Simulator};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -277,6 +277,106 @@ module Top (
             assert_eq!(sim.get(q0), words[0].into(), "checkpoint[{index}] low word");
             assert_eq!(sim.get(q1), words[1].into(), "checkpoint[{index}] middle word");
             assert_eq!(sim.get(q2), words[2].into(), "checkpoint[{index}] high word");
+        }
+    }
+
+    fn test_unaligned_309_bit_dynamic_ff_round_trip(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    capture2: input logic,
+    restore: input  logic,
+    idx    : input  logic<3>,
+    idx2   : input  logic<3>,
+    d      : input  logic<309>,
+    d2     : input  logic<309>,
+    q      : output logic<309>,
+) {
+    var entries: logic<309> [8];
+
+    always_ff (clk) {
+        if capture {
+            entries[idx] = d;
+        }
+        if capture2 {
+            entries[idx2] = d2;
+        }
+        if restore {
+            q = entries[idx];
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let capture = sim.signal("capture");
+        let capture2 = sim.signal("capture2");
+        let restore = sim.signal("restore");
+        let idx = sim.signal("idx");
+        let idx2 = sim.signal("idx2");
+        let d = sim.signal("d");
+        let d2 = sim.signal("d2");
+        let q = sim.signal("q");
+
+        for (index, value) in [0u8, 1, 2, 7].into_iter().map(|index| {
+            let value = (BigUint::from(1u8) << 308usize)
+                | (BigUint::from(1u8) << (244usize + index as usize))
+                | (BigUint::from(1u8) << 64usize)
+                | BigUint::from(0x135u16 + index as u16);
+            (index, value)
+        }) {
+            sim.modify(|io| {
+                io.set(idx, index);
+                io.set_wide(d, value.clone());
+                io.set(capture, 1u8);
+                io.set(capture2, 0u8);
+                io.set(restore, 0u8);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+
+            sim.modify(|io| {
+                io.set(capture, 0u8);
+                io.set(restore, 1u8);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+
+            assert_eq!(sim.get(q), value, "entries[{index}] must round-trip exactly");
+        }
+
+        let first = (BigUint::from(1u8) << 308usize)
+            | (BigUint::from(0x8000_0000u64) << 244usize)
+            | BigUint::from(0x55u8);
+        let second = (BigUint::from(1u8) << 307usize)
+            | (BigUint::from(0x2000_0000u64) << 244usize)
+            | BigUint::from(0xaau8);
+        sim.modify(|io| {
+            io.set(idx, 1u8);
+            io.set(idx2, 2u8);
+            io.set_wide(d, first.clone());
+            io.set_wide(d2, second.clone());
+            io.set(capture, 1u8);
+            io.set(capture2, 1u8);
+            io.set(restore, 0u8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+
+        for (index, expected) in [(1u8, first), (2u8, second)] {
+            sim.modify(|io| {
+                io.set(idx, index);
+                io.set(capture, 0u8);
+                io.set(capture2, 0u8);
+                io.set(restore, 1u8);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(q), expected, "adjacent entries[{index}] must not overlap");
         }
     }
 
