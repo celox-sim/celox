@@ -724,97 +724,211 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
 // maintaining a scoped hash table. Entries from a dominator are visible
 // to all dominated blocks, enabling cross-block redundancy elimination.
 
-/// Key for GVN: opcode discriminant + operands (sorted for commutative ops).
-#[derive(Hash, PartialEq, Eq, Clone)]
+type ValueNumber = u32;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum GvnOpcode {
+    Add,
+    Sub,
+    Mul,
+    UMulHi,
+    And,
+    Or,
+    Xor,
+    Shr,
+    Shl,
+    Sar,
+    AndImm,
+    OrImm,
+    ShrImm,
+    ShlImm,
+    SarImm,
+    AddImm,
+    SubImm,
+    UDiv,
+    URem,
+    SDiv,
+    SRem,
+    BitNot,
+    Neg,
+    Popcnt,
+    BsrOr,
+    Pext,
+    Pdep,
+}
+
+/// An expression over value numbers, not source VRegs.  Two different VRegs
+/// that GVN has already proven equal therefore form the same later expression.
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 enum GvnKey {
+    Constant(u64),
     ConstantTable(ConstantTableId),
-    BinRR(u8, VReg, VReg),
-    BinRI(u8, VReg, u64),
-    ShiftI(u8, VReg, u8),
-    Unary(u8, VReg),
-    Cmp(u8, VReg, VReg, u8),
-    CmpI(u8, VReg, i32, u8),
-    AddI(VReg, i32),
-    SubI(VReg, i32),
-    Load(u8, i32, u8), // base(SimState=0,Stack=1), offset, size
+    Binary(GvnOpcode, ValueNumber, ValueNumber),
+    BinaryImmU64(GvnOpcode, ValueNumber, u64),
+    BinaryImmI32(GvnOpcode, ValueNumber, i32),
+    ShiftImm(GvnOpcode, ValueNumber, u8),
+    Unary(GvnOpcode, ValueNumber),
+    Cmp(ValueNumber, ValueNumber, CmpKind),
+    CmpImm(ValueNumber, i32, CmpKind),
+    Select(ValueNumber, ValueNumber, ValueNumber),
+    CmpSelect(ValueNumber, ValueNumber, CmpKind, ValueNumber, ValueNumber),
+    CmpImmSelect(ValueNumber, i32, CmpKind, ValueNumber, ValueNumber),
+    GuardedCmpSelect(
+        ValueNumber,
+        ValueNumber,
+        ValueNumber,
+        CmpKind,
+        ValueNumber,
+        ValueNumber,
+    ),
+    Load(BaseReg, i32, OpSize),
 }
 
-const GVN_ADD: u8 = 1;
-const GVN_SUB: u8 = 2;
-const GVN_MUL: u8 = 3;
-const GVN_AND: u8 = 4;
-const GVN_OR: u8 = 5;
-const GVN_XOR: u8 = 6;
-const GVN_SHR: u8 = 7;
-const GVN_SHL: u8 = 8;
-const GVN_SAR: u8 = 9;
-const GVN_AND_IMM: u8 = 10;
-const GVN_OR_IMM: u8 = 11;
-const GVN_SHR_IMM: u8 = 12;
-const GVN_SHL_IMM: u8 = 13;
-const GVN_SAR_IMM: u8 = 14;
-const GVN_NOT: u8 = 15;
-const GVN_NEG: u8 = 16;
-const GVN_POPCNT: u8 = 17;
-const GVN_CMP: u8 = 18;
-const GVN_PEXT: u8 = 19;
-const GVN_PDEP: u8 = 20;
-const GVN_BSR: u8 = 21;
-const GVN_BSR_OR: u8 = 22;
-
-fn gvn_is_commutative(op: u8) -> bool {
-    matches!(op, GVN_ADD | GVN_MUL | GVN_AND | GVN_OR | GVN_XOR)
+fn gvn_is_commutative(op: GvnOpcode) -> bool {
+    matches!(
+        op,
+        GvnOpcode::Add
+            | GvnOpcode::Mul
+            | GvnOpcode::UMulHi
+            | GvnOpcode::And
+            | GvnOpcode::Or
+            | GvnOpcode::Xor
+    )
 }
 
-fn gvn_key(inst: &MInst) -> Option<GvnKey> {
+fn gvn_value(value_numbers: &[ValueNumber], vreg: VReg) -> ValueNumber {
+    value_numbers[vreg.0 as usize]
+}
+
+fn gvn_key(inst: &MInst, value_numbers: &[ValueNumber]) -> Option<GvnKey> {
+    let value = |vreg| gvn_value(value_numbers, vreg);
+    let binary = |op, lhs, rhs| gvn_binary(op, value(lhs), value(rhs));
     match inst {
+        MInst::LoadImm { value, .. } => Some(GvnKey::Constant(*value)),
         MInst::LoadConstantTableAddr { table, .. } => Some(GvnKey::ConstantTable(*table)),
-        MInst::Add { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_ADD, *lhs, *rhs)),
-        MInst::Sub { lhs, rhs, .. } => Some(GvnKey::BinRR(GVN_SUB, *lhs, *rhs)),
-        MInst::Mul { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_MUL, *lhs, *rhs)),
-        MInst::And { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_AND, *lhs, *rhs)),
-        MInst::Or { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_OR, *lhs, *rhs)),
-        MInst::Xor { lhs, rhs, .. } => Some(gvn_bin_rr(GVN_XOR, *lhs, *rhs)),
-        MInst::Shr { lhs, rhs, .. } => Some(GvnKey::BinRR(GVN_SHR, *lhs, *rhs)),
-        MInst::Shl { lhs, rhs, .. } => Some(GvnKey::BinRR(GVN_SHL, *lhs, *rhs)),
-        MInst::Sar { lhs, rhs, .. } => Some(GvnKey::BinRR(GVN_SAR, *lhs, *rhs)),
-        MInst::AndImm { src, imm, .. } => Some(GvnKey::BinRI(GVN_AND_IMM, *src, *imm)),
-        MInst::OrImm { src, imm, .. } => Some(GvnKey::BinRI(GVN_OR_IMM, *src, *imm)),
-        MInst::ShrImm { src, imm, .. } => Some(GvnKey::ShiftI(GVN_SHR_IMM, *src, *imm)),
-        MInst::ShlImm { src, imm, .. } => Some(GvnKey::ShiftI(GVN_SHL_IMM, *src, *imm)),
-        MInst::SarImm { src, imm, .. } => Some(GvnKey::ShiftI(GVN_SAR_IMM, *src, *imm)),
-        MInst::BitNot { src, .. } => Some(GvnKey::Unary(GVN_NOT, *src)),
-        MInst::Neg { src, .. } => Some(GvnKey::Unary(GVN_NEG, *src)),
-        MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GVN_POPCNT, *src)),
-        MInst::Bsr { src, .. } => Some(GvnKey::Unary(GVN_BSR, *src)),
+        MInst::Add { lhs, rhs, .. } => Some(binary(GvnOpcode::Add, *lhs, *rhs)),
+        MInst::Sub { lhs, rhs, .. } => Some(binary(GvnOpcode::Sub, *lhs, *rhs)),
+        MInst::Mul { lhs, rhs, .. } => Some(binary(GvnOpcode::Mul, *lhs, *rhs)),
+        MInst::UMulHi { lhs, rhs, .. } => Some(binary(GvnOpcode::UMulHi, *lhs, *rhs)),
+        MInst::And { lhs, rhs, .. } => Some(binary(GvnOpcode::And, *lhs, *rhs)),
+        MInst::Or { lhs, rhs, .. } => Some(binary(GvnOpcode::Or, *lhs, *rhs)),
+        MInst::Xor { lhs, rhs, .. } => Some(binary(GvnOpcode::Xor, *lhs, *rhs)),
+        MInst::Shr { lhs, rhs, .. } => Some(binary(GvnOpcode::Shr, *lhs, *rhs)),
+        MInst::Shl { lhs, rhs, .. } => Some(binary(GvnOpcode::Shl, *lhs, *rhs)),
+        MInst::Sar { lhs, rhs, .. } => Some(binary(GvnOpcode::Sar, *lhs, *rhs)),
+        MInst::UDiv { lhs, rhs, .. } => Some(binary(GvnOpcode::UDiv, *lhs, *rhs)),
+        MInst::URem { lhs, rhs, .. } => Some(binary(GvnOpcode::URem, *lhs, *rhs)),
+        MInst::SDiv { lhs, rhs, .. } => Some(binary(GvnOpcode::SDiv, *lhs, *rhs)),
+        MInst::SRem { lhs, rhs, .. } => Some(binary(GvnOpcode::SRem, *lhs, *rhs)),
+        MInst::AndImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmU64(GvnOpcode::AndImm, value(*src), *imm))
+        }
+        MInst::OrImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmU64(GvnOpcode::OrImm, value(*src), *imm))
+        }
+        MInst::ShrImm { src, imm, .. } => {
+            Some(GvnKey::ShiftImm(GvnOpcode::ShrImm, value(*src), *imm))
+        }
+        MInst::ShlImm { src, imm, .. } => {
+            Some(GvnKey::ShiftImm(GvnOpcode::ShlImm, value(*src), *imm))
+        }
+        MInst::SarImm { src, imm, .. } => {
+            Some(GvnKey::ShiftImm(GvnOpcode::SarImm, value(*src), *imm))
+        }
+        MInst::AddImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::AddImm, value(*src), *imm))
+        }
+        MInst::SubImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::SubImm, value(*src), *imm))
+        }
+        MInst::BitNot { src, .. } => Some(GvnKey::Unary(GvnOpcode::BitNot, value(*src))),
+        MInst::Neg { src, .. } => Some(GvnKey::Unary(GvnOpcode::Neg, value(*src))),
+        MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GvnOpcode::Popcnt, value(*src))),
+        // Bsr has an unspecified result for zero, so it has no reusable value.
+        MInst::Bsr { .. } => None,
         MInst::BsrOr {
             src, zero_value, ..
-        } => Some(GvnKey::BinRI(GVN_BSR_OR, *src, *zero_value as u64)),
-        MInst::Pext { src, mask, .. } => Some(GvnKey::BinRR(GVN_PEXT, *src, *mask)),
-        MInst::Pdep { src, mask, .. } => Some(GvnKey::BinRR(GVN_PDEP, *src, *mask)),
-        MInst::Cmp { lhs, rhs, kind, .. } => Some(GvnKey::Cmp(GVN_CMP, *lhs, *rhs, *kind as u8)),
-        MInst::CmpImm { lhs, imm, kind, .. } => {
-            Some(GvnKey::CmpI(GVN_CMP, *lhs, *imm, *kind as u8))
+        } => Some(GvnKey::BinaryImmU64(
+            GvnOpcode::BsrOr,
+            value(*src),
+            u64::from(*zero_value),
+        )),
+        MInst::Pext { src, mask, .. } => Some(binary(GvnOpcode::Pext, *src, *mask)),
+        MInst::Pdep { src, mask, .. } => Some(binary(GvnOpcode::Pdep, *src, *mask)),
+        MInst::Cmp { lhs, rhs, kind, .. } => {
+            let (mut lhs, mut rhs) = (value(*lhs), value(*rhs));
+            if matches!(kind, CmpKind::Eq | CmpKind::Ne) && rhs < lhs {
+                std::mem::swap(&mut lhs, &mut rhs);
+            }
+            Some(GvnKey::Cmp(lhs, rhs, *kind))
         }
-        MInst::AddImm { src, imm, .. } => Some(GvnKey::AddI(*src, *imm)),
-        MInst::SubImm { src, imm, .. } => Some(GvnKey::SubI(*src, *imm)),
-        // Loads from SimState with fixed offset can be CSE'd (no aliasing stores between)
-        MInst::Load {
-            base: BaseReg::SimState,
-            offset,
-            size,
+        MInst::CmpImm { lhs, imm, kind, .. } => Some(GvnKey::CmpImm(value(*lhs), *imm, *kind)),
+        MInst::Select {
+            cond,
+            true_val,
+            false_val,
             ..
-        } => Some(GvnKey::Load(0, *offset, *size as u8)),
+        } => Some(GvnKey::Select(
+            value(*cond),
+            value(*true_val),
+            value(*false_val),
+        )),
+        MInst::CmpSelect {
+            lhs,
+            rhs,
+            kind,
+            true_val,
+            false_val,
+            ..
+        } => Some(GvnKey::CmpSelect(
+            value(*lhs),
+            value(*rhs),
+            *kind,
+            value(*true_val),
+            value(*false_val),
+        )),
+        MInst::CmpImmSelect {
+            lhs,
+            imm,
+            kind,
+            true_val,
+            false_val,
+            ..
+        } => Some(GvnKey::CmpImmSelect(
+            value(*lhs),
+            *imm,
+            *kind,
+            value(*true_val),
+            value(*false_val),
+        )),
+        MInst::GuardedCmpSelect {
+            guard,
+            lhs,
+            rhs,
+            kind,
+            true_val,
+            false_val,
+            ..
+        } => Some(GvnKey::GuardedCmpSelect(
+            value(*guard),
+            value(*lhs),
+            value(*rhs),
+            *kind,
+            value(*true_val),
+            value(*false_val),
+        )),
+        MInst::Load {
+            base, offset, size, ..
+        } => Some(GvnKey::Load(*base, *offset, *size)),
         _ => None,
     }
 }
 
-fn gvn_bin_rr(op: u8, lhs: VReg, rhs: VReg) -> GvnKey {
+fn gvn_binary(op: GvnOpcode, mut lhs: ValueNumber, mut rhs: ValueNumber) -> GvnKey {
     if gvn_is_commutative(op) && rhs < lhs {
-        GvnKey::BinRR(op, rhs, lhs)
-    } else {
-        GvnKey::BinRR(op, lhs, rhs)
+        std::mem::swap(&mut lhs, &mut rhs);
     }
+    GvnKey::Binary(op, lhs, rhs)
 }
 
 #[derive(Clone, Copy)]
@@ -901,9 +1015,18 @@ fn global_gvn(func: &mut MFunction) {
         }
     }
 
-    let mut value_table: HashMap<GvnKey, VReg> = HashMap::new();
+    // Every VReg starts in its own value class.  Processing a copy or a
+    // redundant expression merges the destination into an existing class.
+    // Keeping this separate from the scoped expression table is what makes
+    // this value numbering rather than an operand-identical CSE pass.
+    let vreg_count = func.vregs.count() as usize;
+    let mut value_numbers = (0..func.vregs.count()).collect::<Vec<ValueNumber>>();
+    let mut value_leaders = (0..func.vregs.count()).map(VReg).collect::<Vec<_>>();
+    debug_assert_eq!(value_numbers.len(), vreg_count);
+
+    let mut value_table: HashMap<GvnKey, ValueNumber> = HashMap::new();
     let mut active_load_keys: HashSet<GvnKey> = HashSet::new();
-    let mut table_changes: Vec<(GvnKey, Option<VReg>)> = Vec::new();
+    let mut table_changes: Vec<(GvnKey, Option<ValueNumber>)> = Vec::new();
     let mut replacements: Vec<(usize, usize, MInst)> = Vec::new(); // (block_idx, inst_idx, new_inst)
 
     // Dominator-scoped GVN. Every table mutation, including load invalidation
@@ -913,9 +1036,11 @@ fn global_gvn(func: &mut MFunction) {
         node: usize,
         dom_children: &[Vec<usize>],
         func: &MFunction,
-        value_table: &mut HashMap<GvnKey, VReg>,
+        value_numbers: &mut [ValueNumber],
+        value_leaders: &mut [VReg],
+        value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
-        table_changes: &mut Vec<(GvnKey, Option<VReg>)>,
+        table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
         let checkpoint = table_changes.len();
@@ -924,6 +1049,8 @@ fn global_gvn(func: &mut MFunction) {
         process_gvn_block(
             node,
             block,
+            value_numbers,
+            value_leaders,
             value_table,
             active_load_keys,
             table_changes,
@@ -935,6 +1062,8 @@ fn global_gvn(func: &mut MFunction) {
                 child,
                 dom_children,
                 func,
+                value_numbers,
+                value_leaders,
                 value_table,
                 active_load_keys,
                 table_changes,
@@ -961,9 +1090,11 @@ fn global_gvn(func: &mut MFunction) {
     fn process_gvn_block(
         node: usize,
         block: &MBlock,
-        value_table: &mut HashMap<GvnKey, VReg>,
+        value_numbers: &mut [ValueNumber],
+        value_leaders: &mut [VReg],
+        value_table: &mut HashMap<GvnKey, ValueNumber>,
         active_load_keys: &mut HashSet<GvnKey>,
-        table_changes: &mut Vec<(GvnKey, Option<VReg>)>,
+        table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
     ) {
         for inst_idx in 0..block.insts.len() {
@@ -981,34 +1112,20 @@ fn global_gvn(func: &mut MFunction) {
                         };
                         match write {
                             MemoryWrite::None => false,
-                            MemoryWrite::Unknown { base } => base.is_none_or(|base| {
-                                *load_base
-                                    == match base {
-                                        BaseReg::SimState => 0u8,
-                                        BaseReg::StackFrame => 1u8,
-                                    }
-                            }),
+                            MemoryWrite::Unknown { base } => {
+                                base.is_none_or(|base| *load_base == base)
+                            }
                             MemoryWrite::Static {
                                 base,
                                 offset,
                                 byte_len,
                             } => {
-                                let base = match base {
-                                    BaseReg::SimState => 0u8,
-                                    BaseReg::StackFrame => 1u8,
-                                };
                                 if *load_base != base {
                                     return false;
                                 }
-                                let load_byte_len = match *load_size {
-                                    0 => 1,
-                                    1 => 2,
-                                    2 => 4,
-                                    _ => 8,
-                                };
                                 byte_ranges_may_overlap(
                                     *load_offset,
-                                    load_byte_len,
+                                    load_size.bytes() as usize,
                                     offset,
                                     byte_len,
                                 )
@@ -1026,14 +1143,26 @@ fn global_gvn(func: &mut MFunction) {
                 }
             }
 
-            if let Some(key) = gvn_key(inst) {
-                if let Some(&prev) = value_table.get(&key) {
-                    let dst = inst.def().unwrap();
-                    if dst != prev {
-                        replacements.push((node, inst_idx, MInst::Mov { dst, src: prev }));
+            if let MInst::Mov { dst, src } = inst {
+                let number = gvn_value(value_numbers, *src);
+                value_numbers[dst.0 as usize] = number;
+                continue;
+            }
+
+            if let Some(key) = gvn_key(inst, value_numbers) {
+                let dst = inst
+                    .def()
+                    .expect("every value-numbered MIR instruction must define a VReg");
+                if let Some(&number) = value_table.get(&key) {
+                    let leader = value_leaders[number as usize];
+                    value_numbers[dst.0 as usize] = number;
+                    if dst != leader {
+                        replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
                     }
-                } else if let Some(dst) = inst.def() {
-                    let previous = value_table.insert(key.clone(), dst);
+                } else {
+                    let number = value_numbers[dst.0 as usize];
+                    value_leaders[number as usize] = dst;
+                    let previous = value_table.insert(key.clone(), number);
                     debug_assert!(previous.is_none());
                     if matches!(key, GvnKey::Load(..)) {
                         active_load_keys.insert(key.clone());
@@ -1048,6 +1177,8 @@ fn global_gvn(func: &mut MFunction) {
         0,
         &dom_children,
         func,
+        &mut value_numbers,
+        &mut value_leaders,
         &mut value_table,
         &mut active_load_keys,
         &mut table_changes,
@@ -4811,6 +4942,207 @@ mod tests {
                 size: OpSize::S64,
             }
         ));
+    }
+
+    #[test]
+    fn global_gvn_numbers_values_instead_of_raw_vregs() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 7,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::Add {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(0),
+                },
+                // v1 and v0 have the same value number.  This expression must
+                // therefore match v2 in this GVN invocation, without relying
+                // on a later copy-propagation pass.
+                MInst::Add {
+                    dst: VReg(3),
+                    lhs: VReg(1),
+                    rhs: VReg(0),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts[1],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        );
+        assert_eq!(
+            func.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            }
+        );
+    }
+
+    #[test]
+    fn global_gvn_does_not_reuse_a_sibling_expression() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..3 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..3).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        func.push_block(entry);
+
+        let mut left = MBlock::new(BlockId(1));
+        left.insts = vec![
+            MInst::Add {
+                dst: VReg(1),
+                lhs: VReg(0),
+                rhs: VReg(0),
+            },
+            MInst::Return,
+        ];
+        func.push_block(left);
+
+        let mut right = MBlock::new(BlockId(2));
+        right.insts = vec![
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(0),
+            },
+            MInst::Return,
+        ];
+        func.push_block(right);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[1].insts[0], MInst::Add { .. }));
+        assert!(matches!(func.blocks[2].insts[0], MInst::Add { .. }));
+    }
+
+    #[test]
+    fn global_gvn_does_not_reuse_bsr_with_unspecified_zero_result() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0,
+                },
+                MInst::Bsr {
+                    dst: VReg(1),
+                    src: VReg(0),
+                },
+                MInst::Bsr {
+                    dst: VReg(2),
+                    src: VReg(0),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[1], MInst::Bsr { .. }));
+        assert!(matches!(func.blocks[0].insts[2], MInst::Bsr { .. }));
+    }
+
+    #[test]
+    fn global_gvn_invalidates_loads_at_exact_byte_boundaries() {
+        let mut overlapping = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 23,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+        global_gvn(&mut overlapping);
+        assert!(matches!(overlapping.blocks[0].insts[2], MInst::Load { .. }));
+
+        let mut adjacent = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+        global_gvn(&mut adjacent);
+        assert_eq!(
+            adjacent.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        );
     }
 
     #[test]
