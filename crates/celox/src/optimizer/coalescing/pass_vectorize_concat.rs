@@ -371,6 +371,15 @@ enum Replacement {
         width: usize,
         prefix_width: usize,
     },
+    /// Replace a repeated one-bit value with a word-wide all-ones/zero select.
+    /// This is the exact two-state broadcast semantics and avoids
+    /// manufacturing a sign extension through two shifts.
+    Broadcast {
+        inst_idx: usize,
+        dst: RegisterId,
+        bit: RegisterId,
+        width: usize,
+    },
     /// Replace a recursively isomorphic lane DAG with a bottom-up vector DAG.
     /// The sequence is already in SSA dominance order.
     LaneDag {
@@ -1230,13 +1239,24 @@ fn vectorize_concats(
         if let Some((low, _low_width, prefix_width)) =
             find_sign_extend(args, concat_width, register_map, defs)
         {
-            replacements.push(Replacement::SignExtend {
-                inst_idx: idx,
-                dst: *dst,
-                low,
-                width: concat_width,
-                prefix_width,
-            });
+            if args.iter().all(|arg| *arg == low)
+                && register_map.get(&low).is_some_and(|ty| ty.width() == 1)
+            {
+                replacements.push(Replacement::Broadcast {
+                    inst_idx: idx,
+                    dst: *dst,
+                    bit: low,
+                    width: concat_width,
+                });
+            } else {
+                replacements.push(Replacement::SignExtend {
+                    inst_idx: idx,
+                    dst: *dst,
+                    low,
+                    width: concat_width,
+                    prefix_width,
+                });
+            }
             packed_vectors.insert(key, *dst);
             continue;
         }
@@ -1576,6 +1596,24 @@ fn vectorize_concats(
                     ],
                 );
             }
+            Replacement::Broadcast {
+                inst_idx,
+                dst,
+                bit,
+                width,
+            } => {
+                let zero = alloc_unsigned_reg(next_reg, register_map, width);
+                let ones = alloc_unsigned_reg(next_reg, register_map, width);
+                let ones_value = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                instructions.splice(
+                    inst_idx..=inst_idx,
+                    [
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Imm(ones, SIRValue::new(ones_value)),
+                        SIRInstruction::Mux(dst, bit, ones, zero),
+                    ],
+                );
+            }
             Replacement::LaneDag {
                 inst_idx,
                 instructions: new_instructions,
@@ -1810,6 +1848,49 @@ mod tests {
         assert!(block.instructions.iter().any(|inst| matches!(
             inst,
             SIRInstruction::Binary(RegisterId(2), _, BinaryOp::Sar, _)
+        )));
+    }
+
+    #[test]
+    fn broadcast_bit_uses_word_select_instead_of_shift_sign_extension() {
+        const WIDTH: usize = 32;
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: WIDTH,
+                signed: false,
+            },
+        );
+        let instructions = vec![
+            SIRInstruction::Concat(RegisterId(1), vec![RegisterId(0); WIDTH]),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(1)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        eu.verify();
+
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Mux(RegisterId(1), RegisterId(0), _, _)
+        )));
+        assert!(!instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(_, _, BinaryOp::Shl | BinaryOp::Sar, _)
+                | SIRInstruction::Concat(..)
         )));
     }
 
