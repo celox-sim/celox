@@ -24,13 +24,13 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
     b1:
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
+    b2:
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
+      Jump(b3)
     b3:
       Commit(src=a (region=1), dst=a (region=0), offset=0, bits=8)
       Commit(src=b (region=1), dst=b (region=0), offset=0, bits=8)
       Return
-    b2:
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
-      Jump(b3)
 Trigger Group: rst (AbsoluteAddr(inst0, var1))
   Execution Unit 0:
     Entry Block: 0
@@ -52,13 +52,13 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
     b1:
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
+    b2:
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
+      Jump(b3)
     b3:
       Commit(src=a (region=1), dst=a (region=0), offset=0, bits=8)
       Commit(src=b (region=1), dst=b (region=0), offset=0, bits=8)
       Return
-    b2:
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
-      Jump(b3)
 
 === Evaluation Flip-Flops (eval_only_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var0))
@@ -82,11 +82,11 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
     b1:
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
     b2:
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
+    b3:
+      Return
 Trigger Group: rst (AbsoluteAddr(inst0, var1))
   Execution Unit 0:
     Entry Block: 0
@@ -108,11 +108,11 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
     b1:
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
     b2:
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
+    b3:
+      Return
 
 === Application Flip-Flops (apply_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var0))

@@ -50,8 +50,6 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 3)
       Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 3)
       Jump(b3)
-    b3:
-      Return
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
       r16 = Load(addr=cnt (region=0), offset=32, bits=32)
@@ -85,6 +83,8 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r42 = r40 Add r14
       Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 42)
       Jump(b3)
+    b3:
+      Return
 Trigger Group: rst (AbsoluteAddr(inst0, var2))
   Execution Unit 0:
     Entry Block: 0
@@ -132,8 +132,6 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 3)
       Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 3)
       Jump(b3)
-    b3:
-      Return
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
       r16 = Load(addr=cnt (region=0), offset=32, bits=32)
@@ -167,6 +165,8 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r42 = r40 Add r14
       Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 42)
       Jump(b3)
+    b3:
+      Return
 
 === Evaluation Flip-Flops (eval_only_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var1))
@@ -217,8 +217,6 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 3)
       Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 3)
       Jump(b3)
-    b3:
-      Return
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
       r16 = Load(addr=cnt (region=0), offset=32, bits=32)
@@ -252,6 +250,8 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r42 = r40 Add r14
       Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 42)
       Jump(b3)
+    b3:
+      Return
 Trigger Group: rst (AbsoluteAddr(inst0, var2))
   Execution Unit 0:
     Entry Block: 0
@@ -300,8 +300,6 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 3)
       Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 3)
       Jump(b3)
-    b3:
-      Return
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
       r16 = Load(addr=cnt (region=0), offset=32, bits=32)
@@ -335,6 +333,8 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r42 = r40 Add r14
       Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 42)
       Jump(b3)
+    b3:
+      Return
 
 === Application Flip-Flops (apply_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var1))

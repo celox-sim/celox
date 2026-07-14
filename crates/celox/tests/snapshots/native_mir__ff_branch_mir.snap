@@ -32,12 +32,12 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 35], v6
   jmp bb3
-bb3:
-  ret
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 35], v5
   jmp bb3
+bb3:
+  ret
 
 Execution Unit eval_apply_ffs[0] (after regalloc):
 bb0:
@@ -50,14 +50,14 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 35], v6
   jmp bb3
-bb3:
-  ret
 bb5:
   jmp bb2
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 35], v5
   jmp bb3
+bb3:
+  ret
   Register assignment:
     v0 -> rax
     v4 -> rax
@@ -91,12 +91,12 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 35], v6
   jmp bb3
-bb3:
-  ret
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 35], v5
   jmp bb3
+bb3:
+  ret
 
 Execution Unit eval_apply_ffs[0] (after regalloc):
 bb0:
@@ -109,14 +109,14 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 35], v6
   jmp bb3
-bb3:
-  ret
 bb5:
   jmp bb2
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 35], v5
   jmp bb3
+bb3:
+  ret
   Register assignment:
     v0 -> rax
     v4 -> rax
@@ -155,12 +155,12 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 40], v6
   jmp bb3
-bb3:
-  ret
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 40], v5
   jmp bb3
+bb3:
+  ret
 
 Execution Unit eval_only_ffs[0] (after regalloc):
 bb0:
@@ -178,14 +178,14 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 40], v6
   jmp bb3
-bb3:
-  ret
 bb5:
   jmp bb2
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 40], v5
   jmp bb3
+bb3:
+  ret
   Register assignment:
     v0 -> rax
     v4 -> rax
@@ -233,12 +233,12 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 40], v6
   jmp bb3
-bb3:
-  ret
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 40], v5
   jmp bb3
+bb3:
+  ret
 
 Execution Unit eval_only_ffs[0] (after regalloc):
 bb0:
@@ -256,14 +256,14 @@ bb1:
   v6 = imm 0x0
   store.i8 [sim + 40], v6
   jmp bb3
-bb3:
-  ret
 bb5:
   jmp bb2
 bb2:
   v5 = load.i8 [sim + 33]
   store.i8 [sim + 40], v5
   jmp bb3
+bb3:
+  ret
   Register assignment:
     v0 -> rax
     v4 -> rax

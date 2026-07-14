@@ -125,6 +125,25 @@ where
         }
     }
 
+    let mut discovery_position = vec![usize::MAX; ids.len()];
+    for (position, &block) in discovery_order.iter().enumerate() {
+        discovery_position[block] = position;
+    }
+
+    // A normal merge is best printed after all of its sibling arms: T, F, M.
+    // Loop headers also have multiple predecessors, but one of those edges is
+    // a backedge from a block they dominate; keep those headers at the front
+    // so a loop remains readable and reachable in the traversal.
+    let is_merge = (0..ids.len())
+        .map(|block| {
+            predecessors[block].len() > 1
+                && !predecessors[block]
+                    .iter()
+                    .copied()
+                    .any(|predecessor| dominates_index(block, predecessor, &idom))
+        })
+        .collect::<Vec<_>>();
+
     let mut children = vec![Vec::new(); ids.len()];
     for &block in &discovery_order {
         if block == entry_index {
@@ -133,6 +152,9 @@ where
         if let Some(parent) = idom[block] {
             children[parent].push(block);
         }
+    }
+    for siblings in &mut children {
+        siblings.sort_unstable_by_key(|&block| (is_merge[block], discovery_position[block]));
     }
 
     let mut order = Vec::with_capacity(ids.len());
@@ -150,6 +172,21 @@ where
             .map(|(index, _)| index),
     );
     order.into_iter().map(|index| ids[index]).collect()
+}
+
+fn dominates_index(dominator: usize, mut block: usize, idom: &[Option<usize>]) -> bool {
+    loop {
+        if dominator == block {
+            return true;
+        }
+        let Some(parent) = idom[block] else {
+            return false;
+        };
+        if parent == block {
+            return false;
+        }
+        block = parent;
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +226,18 @@ mod tests {
             _ => Vec::new(),
         });
 
-        assert_eq!(order, vec![0, 3, 2, 4, 1]);
+        assert_eq!(order, vec![0, 3, 1, 2, 4]);
+    }
+
+    #[test]
+    fn keeps_loop_headers_before_their_backedge_body() {
+        let order = dominance_order(0, 0..4, |block| match block {
+            0 => vec![1],
+            1 => vec![2, 3],
+            2 => vec![1],
+            _ => Vec::new(),
+        });
+
+        assert_eq!(order, vec![0, 1, 2, 3]);
     }
 }
