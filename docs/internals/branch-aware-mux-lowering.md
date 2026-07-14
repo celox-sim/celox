@@ -17,7 +17,7 @@ decision-region pipeline.
    the mux branchless instead of duplicating CSE work.  This is where
    case/decoder control should normally be preserved, before eager lowering has
    lengthened all arm live ranges.
-2. **`BranchifyMux` is a legacy cleanup transform.**  It considers muxes that remain
+2. **`BranchifyMux` is a post-lowering cleanup transform.** It considers muxes that remain
    after lowering and SIR optimization.  It may sink only pure, single-use arm
    definitions.  Shared definitions remain in the head block.  The transform
    uses the exact set of definitions that its legality repair will move when
@@ -29,12 +29,12 @@ cannot branchify it a second time.  The cleanup pass exists for opportunities
 that only become visible after SIR simplification, not as a replacement for
 source-DAG lowering.
 
-At the verified decision-region production switch, `BranchifyMux` is retired
-from the production pass registry/API. It cannot run before or after the new
-one-shot Gate/Decision selection and placement. A future select-to-control
-optimization must use a verified `DecisionRewritePlan` that proves semantic
-equivalence to the original mux; generic SIR CFG/SSA verification is not such
-a proof.
+`BranchifyMux` is deliberately limited to locally proved, two-state regions.
+It does not claim that every Mux should become a branch: four-state Muxes,
+shared arm DAGs, impure operations, and transformations whose expected cost is
+not positive remain dataflow. A future whole-DAG decision-region optimization
+must use a verified rewrite plan rather than treating generic CFG/SSA
+verification as a semantic proof.
 
 ## Local expected-cost decision
 

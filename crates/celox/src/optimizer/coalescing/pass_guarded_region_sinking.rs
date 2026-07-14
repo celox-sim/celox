@@ -1517,7 +1517,7 @@ fn collect_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId,
     result
 }
 
-fn predecessor_map<A>(eu: &ExecutionUnit<A>) -> BTreeMap<BlockId, BTreeSet<BlockId>> {
+pub(super) fn predecessor_map<A>(eu: &ExecutionUnit<A>) -> BTreeMap<BlockId, BTreeSet<BlockId>> {
     let mut predecessors = eu
         .blocks
         .keys()
@@ -1546,14 +1546,14 @@ fn successors(terminator: &SIRTerminator) -> Vec<BlockId> {
     }
 }
 
-struct Dominators {
+pub(super) struct Dominators {
     index: HashMap<BlockId, usize>,
     enter: Vec<usize>,
     exit: Vec<usize>,
 }
 
 impl Dominators {
-    fn compute<A>(
+    pub(super) fn compute<A>(
         eu: &ExecutionUnit<A>,
         predecessors: &BTreeMap<BlockId, BTreeSet<BlockId>>,
     ) -> Self {
@@ -1649,7 +1649,7 @@ impl Dominators {
         Self { index, enter, exit }
     }
 
-    fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+    pub(super) fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
         let (Some(&dominator), Some(&block)) = (self.index.get(&dominator), self.index.get(&block))
         else {
             return false;

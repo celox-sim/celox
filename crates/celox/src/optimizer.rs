@@ -104,14 +104,14 @@ pub enum OptLevel {
     /// No SIR optimizations except [`SirPass::TailCallSplit`].
     /// Cranelift: `fast_compile()`. DSE: Off.
     O0,
-    /// Production-default SIR optimizations enabled. Experimental passes such
-    /// as [`SirPass::BranchifyMux`] require an explicit override.
+    /// Production-default SIR optimizations enabled, including conservative
+    /// two-state control-flow recovery for profitable Mux regions.
     /// Cranelift: Speed / Backtracking. DSE: Off.
     #[default]
     O1,
-    /// Production-default SIR optimizations + DSE(`PreserveTopPorts`).
-    /// Experimental passes such as [`SirPass::BranchifyMux`] require an
-    /// explicit override.
+    /// Production-default SIR optimizations + DSE(`PreserveTopPorts`),
+    /// including conservative two-state control-flow recovery for profitable
+    /// Mux regions.
     /// Cranelift: Speed / Backtracking.
     O2,
 }
@@ -121,7 +121,7 @@ impl OptLevel {
     pub fn default_enabled(self, pass: SirPass) -> bool {
         match self {
             OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
-            OptLevel::O1 | OptLevel::O2 => !matches!(pass, SirPass::BranchifyMux),
+            OptLevel::O1 | OptLevel::O2 => true,
         }
     }
 
@@ -158,6 +158,7 @@ impl OptLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SirPass {
     StoreLoadForwarding,
+    ControlFlowSimplify,
     HoistCommonBranchLoads,
     BitExtractPeephole,
     OptimizeBlocks,
@@ -182,6 +183,7 @@ impl SirPass {
     /// All pass variants in definition order.
     pub const ALL: &[SirPass] = &[
         SirPass::StoreLoadForwarding,
+        SirPass::ControlFlowSimplify,
         SirPass::HoistCommonBranchLoads,
         SirPass::BitExtractPeephole,
         SirPass::OptimizeBlocks,
@@ -206,6 +208,7 @@ impl SirPass {
     pub fn as_str(self) -> &'static str {
         match self {
             SirPass::StoreLoadForwarding => "store_load_forwarding",
+            SirPass::ControlFlowSimplify => "control_flow_simplify",
             SirPass::HoistCommonBranchLoads => "hoist_common_branch_loads",
             SirPass::BitExtractPeephole => "bit_extract_peephole",
             SirPass::OptimizeBlocks => "optimize_blocks",
@@ -231,6 +234,7 @@ impl SirPass {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "store_load_forwarding" => Some(SirPass::StoreLoadForwarding),
+            "control_flow_simplify" => Some(SirPass::ControlFlowSimplify),
             "hoist_common_branch_loads" => Some(SirPass::HoistCommonBranchLoads),
             "bit_extract_peephole" => Some(SirPass::BitExtractPeephole),
             "optimize_blocks" => Some(SirPass::OptimizeBlocks),
@@ -263,13 +267,9 @@ impl SirPass {
 /// ```
 /// use celox::{OptLevel, SirPass, OptimizeOptions};
 ///
-/// // Production defaults enabled
+/// // Production defaults enabled, including BranchifyMux.
 /// let opts = OptimizeOptions::default();
 /// assert!(opts.is_enabled(SirPass::Gvn));
-/// assert!(!opts.is_enabled(SirPass::BranchifyMux));
-///
-/// // Experimental passes are explicit opt-ins.
-/// let opts = opts.enable(SirPass::BranchifyMux);
 /// assert!(opts.is_enabled(SirPass::BranchifyMux));
 ///
 /// // O0 with one pass selectively enabled
@@ -302,7 +302,6 @@ impl OptimizeOptions {
     }
 
     /// All production-default passes enabled (equivalent to `OptLevel::O1`).
-    /// Experimental passes still require [`Self::enable`].
     pub fn all() -> Self {
         Self::new(OptLevel::O1)
     }
@@ -415,15 +414,16 @@ mod tests {
     use super::{OptLevel, OptimizeOptions, SirPass};
 
     #[test]
-    fn branchify_is_not_enabled_by_optimization_presets() {
-        assert!(!OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::BranchifyMux));
-        assert!(!OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::BranchifyMux));
-        assert!(!OptimizeOptions::all().is_enabled(SirPass::BranchifyMux));
+    fn branchify_is_enabled_by_optimization_presets() {
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::BranchifyMux));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::BranchifyMux));
+        assert!(OptimizeOptions::all().is_enabled(SirPass::BranchifyMux));
     }
 
     #[test]
-    fn branchify_remains_an_explicit_opt_in() {
-        let options = OptimizeOptions::new(OptLevel::O2).enable(SirPass::BranchifyMux);
-        assert!(options.is_enabled(SirPass::BranchifyMux));
+    fn control_flow_simplify_is_a_production_default() {
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::ControlFlowSimplify));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::ControlFlowSimplify));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::ControlFlowSimplify));
     }
 }

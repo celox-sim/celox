@@ -11,6 +11,7 @@ mod pass_branchify_mux;
 mod pass_coalesce_stores;
 mod pass_commit_sinking;
 mod pass_concat_folding;
+mod pass_control_flow_simplify;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
@@ -78,6 +79,7 @@ use pass_branchify_mux::BranchifyMuxPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
+use pass_control_flow_simplify::ControlFlowSimplifyPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
@@ -398,6 +400,9 @@ fn optimize_with_options(
     if on(SirPass::StoreLoadForwarding) {
         ff_passes.add_pass(StoreLoadForwardingPass);
     }
+    if on(SirPass::ControlFlowSimplify) {
+        ff_passes.add_pass(ControlFlowSimplifyPass);
+    }
     if on(SirPass::Gvn) {
         ff_passes.add_pass(GvnPass);
     }
@@ -455,6 +460,9 @@ fn optimize_with_options(
     if on(SirPass::StoreLoadForwarding) {
         eval_only_passes.add_pass(StoreLoadForwardingPass);
     }
+    if on(SirPass::ControlFlowSimplify) {
+        eval_only_passes.add_pass(ControlFlowSimplifyPass);
+    }
     if on(SirPass::Gvn) {
         eval_only_passes.add_pass(GvnPass);
     }
@@ -493,6 +501,9 @@ fn optimize_with_options(
     let mut apply_passes = ExecutionUnitPassManager::new();
     if on(SirPass::StoreLoadForwarding) {
         apply_passes.add_pass(StoreLoadForwardingPass);
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        apply_passes.add_pass(ControlFlowSimplifyPass);
     }
     if on(SirPass::HoistCommonBranchLoads) {
         apply_passes.add_pass(HoistCommonBranchLoadsPass);
@@ -536,6 +547,9 @@ fn optimize_with_options(
         if on(SirPass::PartialForward) {
             comb_passes.add_pass(PartialForwardPass);
         }
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        comb_passes.add_pass(ControlFlowSimplifyPass);
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass);
@@ -628,6 +642,17 @@ fn optimize_with_options(
         let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, &options);
+        }
+    }
+    // The preceding comb passes can expose new pure arm regions (notably after
+    // priority recovery and sparse dispatch). Re-run the same verified local
+    // CFG transform at the final SIR boundary so those regions do not fall
+    // through to branchless native selects merely because they were created by
+    // a later pass. BranchifyMux is monotone: it only removes profitable Mux
+    // definitions and its worklist terminates on the finite input EU.
+    if on(SirPass::BranchifyMux) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, &options);
         }
     }
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {

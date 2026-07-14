@@ -39,25 +39,34 @@ During scheduling, consecutive DAG nodes targeting the same variable at the same
 ### 2.7 Global Value Numbering (GVN)
 Deduplicates SIR instructions with identical operands and eliminates dead code. Controlled by `SirPass::Gvn`.
 
-### 2.8 Concat Folding
+### 2.8 CFG Simplification and Sparse Conditional Constant Propagation
+Analyzes executable CFG edges and SSA block arguments with a finite lattice
+(`Unknown`, exact constant, `Overdefined`). It folds only proven constant
+branches and Muxes, removes unreachable blocks, and sweeps the dead pure/load
+dataflow disconnected by those rewrites. Dominance facts are also used to
+remove a Mux arm when the containing block is reachable only through a proven
+branch edge. Unknown and four-state values remain conservative. Controlled by
+`SirPass::ControlFlowSimplify` and enabled by the O1/O2 presets.
+
+### 2.9 Concat Folding
 Folds redundant `Concat` operations — e.g., when a `Concat` reassembles slices of the same register in their original order, the Concat is eliminated. Controlled by `SirPass::ConcatFolding`.
 
-### 2.9 XOR Chain Folding
+### 2.10 XOR Chain Folding
 Detects and folds XOR reduction chains into more efficient patterns. Controlled by `SirPass::XorChainFolding`.
 
-### 2.10 Vectorize Concat
+### 2.11 Vectorize Concat
 Vectorizes `Concat` patterns in combinational blocks — recognizes repeated similar operations across bit ranges and replaces them with wider operations. Controlled by `SirPass::VectorizeConcat`.
 
-### 2.11 Split Coalesced Stores
+### 2.12 Split Coalesced Stores
 Splits wide coalesced stores back into narrower ones after the reschedule pass, when the split form is more efficient for the backend. Controlled by `SirPass::SplitCoalescedStores`.
 
-### 2.12 Partial Forward
+### 2.13 Partial Forward
 Partial store-load forwarding in combinational blocks. When a store covers part of a subsequent load's range, forwards the known portion and narrows the load. Controlled by `SirPass::PartialForward`.
 
-### 2.13 Identity Store Bypass
+### 2.14 Identity Store Bypass
 Detects identity copies (Store→Load roundtrips where the value is unchanged) and registers the source and destination as address aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies. Controlled by `SirPass::IdentityStoreBypass`.
 
-### 2.14 Branch-Aware Mux Lowering
+### 2.15 Branch-Aware Mux Lowering
 
 In 2-state mode, Celox may preserve an expensive mux as control flow so that
 the unselected expression is not evaluated. Cost-directed SLT lowering is the
@@ -67,7 +76,7 @@ test rather than a transformation-count or CFG-size cap. See
 [Branch-aware mux lowering](./branch-aware-mux-lowering.md) for the relationship,
 cost equation, legality rules, and runtime acceptance gate.
 
-### 2.15 Tail-Call Splitting
+### 2.16 Tail-Call Splitting
 Cranelift uses a 24-bit instruction index internally, limiting a single function to approximately 16M CLIF instructions. Large combinational designs (e.g., wide-bus arithmetic, many coalesced execution units) can exceed this limit.
 
 When the estimated CLIF instruction count for `eval_comb` exceeds the threshold (currently 8M, a 50% safety margin), the optimizer splits it into a chain of smaller functions connected by Cranelift's `return_call` (tail-call) instruction, which avoids stack growth.
@@ -82,11 +91,12 @@ This pass runs even when all SIR passes are disabled (`OptimizeOptions::none()`)
 
 ## Per-Pass Control
 
-Each SIR optimization pass can be individually enabled or disabled via the `SirPass` enum and `OptimizeOptions`. `OptLevel::O0` enables only `TailCallSplit`; `OptLevel::O1` (default) and `O2` enable the 18 production-default passes. `BranchifyMux` remains available as an explicit 2-state opt-in while its end-to-end runtime gate is evaluated.
+Each SIR optimization pass can be individually enabled or disabled via the `SirPass` enum and `OptimizeOptions`. `OptLevel::O0` enables only `TailCallSplit`; `OptLevel::O1` (default) and `O2` enable the 20 production-default passes. `BranchifyMux` is enabled by those presets and remains individually controllable for A/B runs.
 
 | `SirPass` variant | Pass(es) |
 |---|---|
 | `StoreLoadForwarding` | Load/Store Coalescing, Redundant Load Elimination (2.1, 2.2) |
+| `ControlFlowSimplify` | Sparse Conditional Constant Propagation, CFG cleanup, dominance-based Mux simplification (2.8) |
 | `HoistCommonBranchLoads` | Branch-shared load hoisting |
 | `BitExtractPeephole` | `(value >> shift) & mask` → direct ranged load |
 | `OptimizeBlocks` | Dead block removal, block merging |
@@ -103,8 +113,8 @@ Each SIR optimization pass can be individually enabled or disabled via the `SirP
 | `SplitCoalescedStores` | Split Coalesced Stores (2.11) |
 | `PartialForward` | Partial Forward (2.12) |
 | `IdentityStoreBypass` | Identity Store Bypass (2.13) |
-| `BranchifyMux` | Post-lowering branch-aware mux cleanup (2.14); explicit opt-in |
-| `TailCallSplit` | Tail-Call Splitting (2.15) — enabled even at O0 |
+| `BranchifyMux` | Post-lowering branch-aware mux cleanup (2.15) |
+| `TailCallSplit` | Tail-Call Splitting (2.16) — enabled even at O0 |
 
 ## 3. Machine Layer (MIR) Optimizations — Native Backend
 

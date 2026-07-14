@@ -13,8 +13,8 @@ Celox uses a GCC-style optimization model: **preset levels** set defaults, and *
 | Level | SIR Passes | DSE | Cranelift |
 |---|---|---|---|
 | `O0` | TailCallSplit only | Off | `fast_compile()` |
-| `O1` (default) | 18 production-default passes | Off | Speed / Backtracking |
-| `O2` | 18 production-default passes | PreserveTopPorts | Speed / Backtracking |
+| `O1` (default) | 20 production-default passes | Off | Speed / Backtracking |
+| `O2` | 20 production-default passes | PreserveTopPorts | Speed / Backtracking |
 
 ## Quick Start
 
