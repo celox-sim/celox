@@ -2,27 +2,28 @@
 source: crates/celox/tests/native_mir.rs
 expression: output
 ---
+=== MIR (all native execution units) ===
 === MIR (eval_comb) ===
-Execution Unit 0 (before regalloc):
+Execution Unit eval_comb[0] (before regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v4 = load.i32 [sim + 40]
   v7 = add v0, v4
   v2 = and v7, 0xffffffff
-  v3 = and v2, 0x1
+  v3 = and v7, 0x1
   store.i32 [sim + 36], v3
   v5 = or v2, 0x2
   store.i32 [sim + 44], v5
   ret
 
-Execution Unit 0 (after regalloc):
+Execution Unit eval_comb[0] (after regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v4 = load.i32 [sim + 40]
   v7 = add v0, v4
-  v2 = and v7, 0xffffffff
-  v3 = and v2, 0x1
+  v3 = and v7, 0x1
   store.i32 [sim + 36], v3
+  v2 = and v7, 0xffffffff
   v5 = or v2, 0x2
   store.i32 [sim + 44], v5
   ret
@@ -40,10 +41,10 @@ bb0:
   0x00000009  mov eax,[r15+20h]
   0x0000000d  mov edx,[r15+28h]
   0x00000011  add rax,rdx
-  0x00000014  and eax,0FFFFFFFFh
-  0x00000019  mov edx,eax
-  0x0000001b  and edx,1
-  0x0000001e  mov [r15+24h],edx
+  0x00000014  mov edx,eax
+  0x00000016  and edx,1
+  0x00000019  mov [r15+24h],edx
+  0x0000001d  and eax,0FFFFFFFFh
   0x00000022  or rax,2
   0x00000028  mov [r15+2Ch],eax
   0x0000002c  xor eax,eax

@@ -5,7 +5,7 @@
 //! only in [`SpillDesc`] side-tables so the register allocator can make
 //! cost-aware spill decisions without knowing about bit layouts.
 
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use crate::ir::RegionedAbsoluteAddr;
 
@@ -930,7 +930,21 @@ impl fmt::Display for OpSize {
 
 impl fmt::Display for MFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for block in &self.blocks {
+        let block_indices = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.id, index))
+            .collect::<HashMap<_, _>>();
+        let order = crate::cfg_order::dominance_order(0usize, 0..self.blocks.len(), |index| {
+            self.blocks[index]
+                .successors()
+                .into_iter()
+                .filter_map(|id| block_indices.get(&id).copied())
+                .collect()
+        });
+        for index in order {
+            let block = &self.blocks[index];
             writeln!(f, "{}:", block.id)?;
             for phi in &block.phis {
                 let srcs: Vec<String> = phi

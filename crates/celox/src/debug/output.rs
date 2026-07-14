@@ -1,6 +1,10 @@
 use crate::HashMap;
 /// Module for outputting SIR and SLT from Veryl source code
-use crate::ir::{ModuleId, Program, RegionedAbsoluteAddr, SIRInstruction, SimModule};
+use crate::cfg_order::dominance_order;
+use crate::ir::{
+    ExecutionUnit, ModuleId, Program, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
+    SIRTerminator, SimModule,
+};
 
 use crate::debug::CompilationTrace;
 use veryl_parser::resource_table;
@@ -87,10 +91,10 @@ pub fn format_program(program: &Program) -> String {
                     }
                 }
             }
-            let mut blocks: Vec<_> = eu.blocks.values().collect();
-            blocks.sort_unstable_by_key(|e| e.id.0);
-            for block in &blocks {
+            for block_id in sir_dominance_order(eu) {
+                let block = &eu.blocks[&block_id];
                 output.push_str(&format!("    b{}:\n", block.id.0));
+                append_sir_block_params(&mut output, &block.params, "      ");
                 for inst in &block.instructions {
                     output.push_str(&format!("      {}\n", format_instruction(inst, program)));
                 }
@@ -124,10 +128,10 @@ pub fn format_program(program: &Program) -> String {
                     }
                 }
             }
-            let mut blocks: Vec<_> = eu.blocks.values().collect();
-            blocks.sort_unstable_by_key(|e| e.id.0);
-            for block in &blocks {
+            for block_id in sir_dominance_order(eu) {
+                let block = &eu.blocks[&block_id];
                 output.push_str(&format!("    b{}:\n", block.id.0));
+                append_sir_block_params(&mut output, &block.params, "      ");
                 for inst in &block.instructions {
                     output.push_str(&format!("      {}\n", format_instruction(inst, program)));
                 }
@@ -161,10 +165,10 @@ pub fn format_program(program: &Program) -> String {
                     }
                 }
             }
-            let mut blocks: Vec<_> = eu.blocks.values().collect();
-            blocks.sort_unstable_by_key(|e| e.id.0);
-            for block in &blocks {
+            for block_id in sir_dominance_order(eu) {
+                let block = &eu.blocks[&block_id];
                 output.push_str(&format!("    b{}:\n", block.id.0));
+                append_sir_block_params(&mut output, &block.params, "      ");
                 for inst in &block.instructions {
                     output.push_str(&format!("      {}\n", format_instruction(inst, program)));
                 }
@@ -192,10 +196,10 @@ pub fn format_program(program: &Program) -> String {
                 }
             }
         }
-        let mut blocks: Vec<_> = eu.blocks.values().collect();
-        blocks.sort_unstable_by_key(|e| e.id.0);
-        for block in &blocks {
+        for block_id in sir_dominance_order(eu) {
+            let block = &eu.blocks[&block_id];
             output.push_str(&format!("  b{}:\n", block.id.0));
+            append_sir_block_params(&mut output, &block.params, "    ");
             for inst in &block.instructions {
                 output.push_str(&format!("    {}\n", format_instruction(inst, program)));
             }
@@ -204,6 +208,37 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output
+}
+
+fn append_sir_block_params(output: &mut String, params: &[RegisterId], indent: &str) {
+    if params.is_empty() {
+        return;
+    }
+    output.push_str(indent);
+    output.push_str("params: [");
+    for (index, param) in params.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&format!("r{}", param.0));
+    }
+    output.push_str("]\n");
+}
+
+fn sir_dominance_order<A>(eu: &ExecutionUnit<A>) -> Vec<crate::ir::BlockId> {
+    dominance_order(
+        eu.entry_block_id,
+        eu.blocks.keys().copied(),
+        |block_id| match &eu.blocks[&block_id].terminator {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        },
+    )
 }
 
 fn format_regioned_addr(addr: &RegionedAbsoluteAddr, program: &Program) -> String {

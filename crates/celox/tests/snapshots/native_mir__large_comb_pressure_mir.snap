@@ -2,8 +2,9 @@
 source: crates/celox/tests/native_mir.rs
 expression: output
 ---
+=== MIR (all native execution units) ===
 === MIR (eval_comb) ===
-Execution Unit 0 (before regalloc):
+Execution Unit eval_comb[0] (before regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v10 = load.i32 [sim + 88]
@@ -107,7 +108,7 @@ bb0:
   store.i32 [sim + 144], v41
   ret
 
-Execution Unit 0 (after regalloc):
+Execution Unit eval_comb[0] (after regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v10 = load.i32 [sim + 88]

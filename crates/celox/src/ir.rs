@@ -723,10 +723,21 @@ impl<A: Display> Display for ExecutionUnit<A> {
             }
         }
         writeln!(f, "  }}")?;
-        let mut block_ids: Vec<_> = self.blocks.keys().collect();
-        block_ids.sort();
-        for id in block_ids {
-            let block = &self.blocks[id];
+        let block_order = crate::cfg_order::dominance_order(
+            self.entry_block_id,
+            self.blocks.keys().copied(),
+            |id| match &self.blocks[&id].terminator {
+                SIRTerminator::Jump(target, _) => vec![*target],
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => vec![true_block.0, false_block.0],
+                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+            },
+        );
+        for id in block_order {
+            let block = &self.blocks[&id];
             writeln!(f, "{}", block)?;
         }
         writeln!(f, "}}")

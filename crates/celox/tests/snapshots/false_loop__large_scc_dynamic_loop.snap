@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/false_loop.rs
-assertion_line: 486
 expression: sir_output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -115,6 +114,7 @@ Execution Unit 0:
     r1 = SIRValue(0x3)
     Jump(b1 [r0])
   b1:
+    params: [r2]
     r3 = r2 LtU r1
     Branch(r3 ? b2 : b4)
   b2:

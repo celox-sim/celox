@@ -1,4 +1,5 @@
 mod backend;
+mod cfg_order;
 mod context_width;
 mod debug;
 #[cfg(not(target_arch = "wasm32"))]

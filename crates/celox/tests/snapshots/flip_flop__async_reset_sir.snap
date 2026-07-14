@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/flip_flop.rs
-assertion_line: 2205
 expression: sir_output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -24,12 +23,12 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r4 = r2 And r3
       Store(addr=q (region=0), offset=0, bits=8, src_reg = 4)
       Jump(b3)
+    b3:
+      Return
     b2:
       r5 = Load(addr=d (region=0), offset=0, bits=8)
       Store(addr=q (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
 Trigger Group: rst (AbsoluteAddr(inst0, var1))
   Execution Unit 0:
     Entry Block: 0
@@ -50,12 +49,12 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r4 = r2 And r3
       Store(addr=q (region=0), offset=0, bits=8, src_reg = 4)
       Jump(b3)
+    b3:
+      Return
     b2:
       r5 = Load(addr=d (region=0), offset=0, bits=8)
       Store(addr=q (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
 
 === Evaluation Flip-Flops (eval_only_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var0))
@@ -79,12 +78,12 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r4 = r2 And r3
       Store(addr=q (region=1), offset=0, bits=8, src_reg = 4)
       Jump(b3)
+    b3:
+      Return
     b2:
       r5 = Load(addr=d (region=0), offset=0, bits=8)
       Store(addr=q (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
 Trigger Group: rst (AbsoluteAddr(inst0, var1))
   Execution Unit 0:
     Entry Block: 0
@@ -106,12 +105,12 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r4 = r2 And r3
       Store(addr=q (region=1), offset=0, bits=8, src_reg = 4)
       Jump(b3)
+    b3:
+      Return
     b2:
       r5 = Load(addr=d (region=0), offset=0, bits=8)
       Store(addr=q (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
-    b3:
-      Return
 
 === Application Flip-Flops (apply_ffs) ===
 Trigger Group: clk (AbsoluteAddr(inst0, var0))
