@@ -1074,7 +1074,13 @@ impl<'a> ISelContext<'a> {
         chunks
     }
 
-    /// Store wide chunks for a SIR register in the wide_regs map.
+    /// Store chunks for a SIR register.
+    ///
+    /// A register whose declared SIR width fits in one machine word must stay
+    /// scalar even when it was produced by an operation with wide operands.
+    /// Keeping a one-chunk entry in `wide_regs` makes later width-sensitive
+    /// operations (notably arithmetic shifts) use the 64-bit wide lowering
+    /// instead of the register's declared width.
     fn set_wide_chunks(&mut self, reg: RegisterId, mut chunks: Vec<(VReg, usize)>) {
         let width = self.sir_width(&reg);
         let expected_chunks = Self::num_chunks(width).max(1);
@@ -1087,7 +1093,11 @@ impl<'a> ISelContext<'a> {
             // and other narrow consumers still see a defined VReg.
             self.reg_map.set(reg, chunk0);
         }
-        self.wide_regs.insert(reg, chunks);
+        if width <= 64 {
+            self.wide_regs.remove(&reg);
+        } else {
+            self.wide_regs.insert(reg, chunks);
+        }
     }
 
     /// Get chunk `i` from a wide value, or emit a zero constant if missing.
@@ -5669,6 +5679,8 @@ fn lower_instruction(
             let d_width = ctx.sir_width(dst);
             let lhs_width = ctx.sir_width(lhs);
             let rhs_width = ctx.sir_width(rhs);
+            debug_assert!(lhs_width > 64 || !ctx.wide_regs.contains_key(lhs));
+            debug_assert!(rhs_width > 64 || !ctx.wide_regs.contains_key(rhs));
 
             // Wide (>64-bit) binary operations: dispatch to multi-word handler.
             // For comparisons/logic, the result may be narrow (1 bit) but the
@@ -5681,17 +5693,6 @@ fn lower_instruction(
                 }
                 return;
             }
-            // Also check if operands have wide chunks (may have been loaded wide
-            // even if sir_width reports ≤64 due to optimizer width changes).
-            if ctx.wide_regs.contains_key(lhs) || ctx.wide_regs.contains_key(rhs) {
-                lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
-                if ctx.four_state {
-                    lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
-                    normalize_wide_value(ctx, block, *dst);
-                }
-                return;
-            }
-
             // Constant folding: if both operands are known constants, compute result
             let lhs_const = ctx.consts.get(lhs).copied();
             let rhs_const = ctx.consts.get(rhs).copied();
@@ -6332,7 +6333,8 @@ fn lower_instruction(
         SIRInstruction::Unary(dst, op, src) => {
             let d_width = ctx.sir_width(dst);
             let src_width = ctx.sir_width(src);
-            if d_width > 64 || src_width > 64 || ctx.wide_regs.contains_key(src) {
+            debug_assert!(src_width > 64 || !ctx.wide_regs.contains_key(src));
+            if d_width > 64 || src_width > 64 {
                 lower_wide_unary(ctx, block, *dst, op, *src);
                 if ctx.four_state {
                     lower_wide_unary_mask(ctx, block, *dst, op, *src, d_width, src_width);
@@ -8587,6 +8589,18 @@ fn lower_wide_runtime_shift(
     _is_sar: bool,
 ) {
     let src_chunks = ctx.get_wide_chunks(lhs, block);
+    let dst_chunks = lower_wide_runtime_shift_chunks(ctx, block, &src_chunks, rhs, n_chunks, dir);
+    ctx.set_wide_chunks(dst, dst_chunks);
+}
+
+fn lower_wide_runtime_shift_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src_chunks: &[(VReg, usize)],
+    rhs: &RegisterId,
+    n_chunks: usize,
+    dir: ShiftDir,
+) -> Vec<(VReg, usize)> {
     let n_src = src_chunks.len();
     let amount_vreg = ctx.reg_map.get(*rhs);
 
@@ -8830,7 +8844,7 @@ fn lower_wide_runtime_shift(
 
         dst_chunks.push((result, 64));
     }
-    ctx.set_wide_chunks(dst, dst_chunks);
+    dst_chunks
 }
 
 /// Reduce a wide value to a boolean (any chunk non-zero → 1, else 0).
@@ -10448,6 +10462,20 @@ fn normalize_wide_value(ctx: &mut ISelContext, block: &mut MBlock, dst: Register
         return;
     };
 
+    if ctx.sir_width(&dst) <= 64 {
+        let value = ctx.reg_map.get(dst);
+        let normalized = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: normalized,
+            lhs: value,
+            rhs: mask_chunks[0],
+        });
+        ctx.reg_map.set(dst, normalized);
+        ctx.wide_regs.remove(&dst);
+        ctx.wide_masks.remove(&dst);
+        return;
+    }
+
     if let Some(val_chunks) = ctx.wide_regs.get(&dst).cloned() {
         let mut new_chunks = Vec::with_capacity(val_chunks.len());
         for (i, &(vc, width)) in val_chunks.iter().enumerate() {
@@ -10951,40 +10979,21 @@ fn lower_wide_binary_mask(
                 ctx.set_mask(dst, final_chunks[0].0);
                 ctx.wide_masks.insert(dst, final_chunks);
             } else {
-                // Runtime shift: apply the same shift to mask chunks.
-                // Temporarily inject mask chunks as wide_regs for a pseudo register,
-                // call lower_wide_runtime_shift, then extract result.
-                // Use pseudo RegisterIds just past the existing range
-                let next_id = ctx.reg_map.map.len();
-                let mask_pseudo_lhs = RegisterId(next_id);
-                let mask_pseudo_dst = RegisterId(next_id + 1);
+                // Runtime shift: apply the same chunk operation to the masks.
                 let mask_chunks_wide: Vec<(VReg, usize)> =
                     lm_chunks.iter().map(|&v| (v, 64usize)).collect();
-                ctx.wide_regs.insert(mask_pseudo_lhs, mask_chunks_wide);
-                // pseudo_dst needs a scalar VReg in reg_map
-                let pd_vreg = ctx.alloc_vreg(SpillDesc::transient());
-                ctx.reg_map.map.resize(next_id + 2, None);
-                ctx.reg_map.map[mask_pseudo_dst.0] = Some(pd_vreg);
-
                 let dir = match op {
                     BinaryOp::Shl => ShiftDir::Left,
                     _ => ShiftDir::Right,
                 };
-                lower_wide_runtime_shift(
+                let shifted_mask_chunks = lower_wide_runtime_shift_chunks(
                     ctx,
                     block,
-                    mask_pseudo_dst,
-                    &mask_pseudo_lhs,
+                    &mask_chunks_wide,
                     &rhs,
                     n_chunks,
                     dir,
-                    false,
                 );
-
-                // Extract shifted mask chunks
-                let shifted_mask_chunks =
-                    ctx.wide_regs.remove(&mask_pseudo_dst).unwrap_or_default();
-                ctx.wide_regs.remove(&mask_pseudo_lhs);
 
                 // Apply shift-has-X override
                 let all_x_v = ctx.alloc_vreg(SpillDesc::remat(u64::MAX));
@@ -12909,6 +12918,156 @@ mod tests {
                 "ctz width={source_width} value={value:#x}"
             );
         }
+    }
+
+    #[test]
+    fn narrow_result_of_wide_shift_uses_declared_width_afterwards() {
+        let input_var = VarId::default();
+        let output_var = VarId::from_raw(1);
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: input_var,
+        };
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+
+        let wide = RegisterId(0);
+        let bit_index = RegisterId(1);
+        let gate = RegisterId(2);
+        let sign_index = RegisterId(3);
+        let shifted = RegisterId(4);
+        let extended = RegisterId(5);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(wide, input_addr, SIROffset::Static(0), 128),
+                        SIRInstruction::Imm(bit_index, SIRValue::new(127u8)),
+                        SIRInstruction::Binary(gate, wide, BinaryOp::Shr, bit_index),
+                        SIRInstruction::Imm(sign_index, SIRValue::new(31u8)),
+                        SIRInstruction::Binary(shifted, gate, BinaryOp::Shl, sign_index),
+                        SIRInstruction::Binary(extended, shifted, BinaryOp::Sar, sign_index),
+                        SIRInstruction::Store(
+                            output_addr,
+                            SIROffset::Static(0),
+                            32,
+                            extended,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    wide,
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                ),
+                (
+                    bit_index,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    gate,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (
+                    sign_index,
+                    RegisterType::Bit {
+                        width: 6,
+                        signed: false,
+                    },
+                ),
+                (
+                    shifted,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    extended,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let layout = MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: [(input_abs, 0), (output_abs, 16)].into_iter().collect(),
+            widths: [(input_abs, 128), (output_abs, 32)].into_iter().collect(),
+            is_4states: [(input_abs, false), (output_abs, false)]
+                .into_iter()
+                .collect(),
+            total_size: 24,
+            working_offsets: HashMap::default(),
+            working_base_offset: 24,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 24,
+            sparse_layouts: HashMap::default(),
+            sparse_active_count_offset: 24,
+            sparse_active_flags_offset: 24,
+            sparse_active_list_offset: 24,
+            sparse_active_capacity: 0,
+            merged_total_size: 24,
+            triggered_bits_offset: 24,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 24,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        };
+
+        let mut function = lower_execution_unit(&eu, &layout, false);
+        function.verify();
+        mir_legalize::legalize(&mut function);
+        function.verify();
+        mir_opt::optimize(&mut function);
+        function.verify();
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; 24];
+        state[15] = 0x80;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[16..20], &u32::MAX.to_le_bytes());
     }
 
     #[test]
