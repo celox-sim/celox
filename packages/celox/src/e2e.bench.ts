@@ -29,11 +29,27 @@ const __benchDir = dirname(fileURLToPath(import.meta.url));
 function resolveVerylStd(): string {
 	const cargoHome = process.env.CARGO_HOME ?? resolve(homedir(), ".cargo");
 	const registrySrc = resolve(cargoHome, "registry/src");
+	const lockfile = readFileSync(
+		resolve(__benchDir, "../../../Cargo.lock"),
+		"utf8",
+	);
+	const version = lockfile.match(
+		/^\[\[package\]\]\nname = "veryl-std"\nversion = "([^"]+)"/m,
+	)?.[1];
+	const packageName = version ? `veryl-std-${version}` : undefined;
 	for (const registry of readdirSync(registrySrc)) {
-		const source = resolve(registrySrc, registry, "veryl-std-0.20.0/veryl/src");
-		if (existsSync(source)) return source;
+		const packages = readdirSync(resolve(registrySrc, registry))
+			.filter((entry) =>
+				packageName ? entry === packageName : entry.startsWith("veryl-std-"),
+			)
+			.sort()
+			.reverse();
+		for (const pkg of packages) {
+			const source = resolve(registrySrc, registry, pkg, "veryl/src");
+			if (existsSync(source)) return source;
+		}
 	}
-	throw new Error("veryl-std 0.20.0 source not found; run cargo fetch first");
+	throw new Error("veryl-std source not found; run cargo fetch first");
 }
 
 const VERYL_STD = resolveVerylStd();
