@@ -46,7 +46,7 @@ importers:
         version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.4)(lightningcss@1.32.0)(postcss@8.5.16)(search-insights@2.17.3)(typescript@6.0.3)
       vue-chartjs:
         specifier: ^5.3.0
-        version: 5.3.3(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3))
+        version: 5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3))
 
   crates/celox-napi:
     devDependencies:
@@ -2240,8 +2240,8 @@ packages:
       jsdom:
         optional: true
 
-  vue-chartjs@5.3.3:
-    resolution: {integrity: sha512-jqxtL8KZ6YJ5NTv6XzrzLS7osyegOi28UGNZW0h9OkDL7Sh1396ht4Dorh04aKrl2LiSalQ84WtqiG0RIJb0tA==}
+  vue-chartjs@5.3.4:
+    resolution: {integrity: sha512-x3Fqob8RQvrTdssfi9ecsCzEkFOd8JPmNwSkSQzdfKj/uBsRJs/Y88cZcZIEcPsTVfMGwMo4MOoihoDG2DoE/g==}
     peerDependencies:
       chart.js: ^4.1.1
       vue: ^3.0.0-0 || ^2.7.0
@@ -4140,7 +4140,7 @@ snapshots:
     transitivePeerDependencies:
       - msw
 
-  vue-chartjs@5.3.3(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3)):
+  vue-chartjs@5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3)):
     dependencies:
       chart.js: 4.5.1
       vue: 3.5.29(typescript@6.0.3)
