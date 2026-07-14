@@ -219,7 +219,7 @@ pub fn lower_execution_unit(
         four_state,
         mask_map,
         known_bits: crate::HashMap::default(),
-        wide_masks: WideRegMap::default(),
+        wide_masks: WideMaskMap::default(),
         trigger_only_seen: HashSet::default(),
         sparse_descriptor_table,
         trace_regs,
@@ -241,7 +241,7 @@ pub fn lower_execution_unit(
                     let vreg = ctx.alloc_vreg(SpillDesc::transient());
                     chunks.push((vreg, chunk_width));
                 }
-                ctx.wide_regs.insert(param_reg, chunks);
+                ctx.set_wide_chunks(param_reg, chunks);
             }
             if four_state {
                 if !ctx.wide_masks.contains_key(&param_reg) {
@@ -415,6 +415,9 @@ pub fn lower_execution_unit(
                 mblock = MBlock::new(cont_block_id);
             } else {
                 lower_instruction(&mut ctx, &mut mblock, inst, sir_block, &sir_defs);
+            }
+            if cfg!(debug_assertions) {
+                ctx.verify_wide_values();
             }
 
             // Track known bit width for redundant mask elimination.
@@ -714,10 +717,39 @@ fn mask_for_width(width: usize) -> u64 {
     }
 }
 
-/// Tracks wide (>64-bit) register values as multiple 64-bit chunks.
-/// Key: SIR RegisterId, Value: chunks in LSB-first order (vreg, width_bits).
-/// Used for Concat results and multi-word arithmetic (Shl/And/Or/BitNot on >64-bit values).
-type WideRegMap = crate::HashMap<RegisterId, Vec<(VReg, usize)>>;
+/// Wide value representations owned by ISel.
+///
+/// Insertion is intentionally private to `ISelContext::set_wide_chunks`; all
+/// other users can only query or remove a representation.  This keeps the
+/// declared SIR width and the native representation synchronized.
+#[derive(Default)]
+struct WideRegMap {
+    chunks: crate::HashMap<RegisterId, Vec<(VReg, usize)>>,
+}
+
+impl WideRegMap {
+    fn get(&self, reg: &RegisterId) -> Option<&Vec<(VReg, usize)>> {
+        self.chunks.get(reg)
+    }
+
+    fn contains_key(&self, reg: &RegisterId) -> bool {
+        self.chunks.contains_key(reg)
+    }
+
+    fn remove(&mut self, reg: &RegisterId) -> Option<Vec<(VReg, usize)>> {
+        self.chunks.remove(reg)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&RegisterId, &Vec<(VReg, usize)>)> {
+        self.chunks.iter()
+    }
+
+    fn replace(&mut self, reg: RegisterId, chunks: Vec<(VReg, usize)>) {
+        self.chunks.insert(reg, chunks);
+    }
+}
+
+type WideMaskMap = crate::HashMap<RegisterId, Vec<(VReg, usize)>>;
 
 /// Tracks known constant values for SIR registers (for constant folding in ISel).
 type ConstMap = crate::HashMap<RegisterId, u64>;
@@ -747,7 +779,7 @@ struct ISelContext<'a> {
     /// bits can be elided. Populated by Load (movzx), Cmp (0/1), AndImm, etc.
     known_bits: crate::HashMap<VReg, usize>,
     /// Wide mask chunks (parallel to wide_regs).
-    wide_masks: WideRegMap,
+    wide_masks: WideMaskMap,
     /// Width=0 trigger-only stores do not write memory. Within one MIR block,
     /// rechecking the same physical byte for the same trigger id is redundant
     /// until a real Store/Commit may change memory.
@@ -1096,7 +1128,40 @@ impl<'a> ISelContext<'a> {
         if width <= 64 {
             self.wide_regs.remove(&reg);
         } else {
-            self.wide_regs.insert(reg, chunks);
+            self.wide_regs.replace(reg, chunks);
+        }
+    }
+
+    /// Check the representation invariant for value chunks.
+    ///
+    /// `wide_regs` is deliberately a value-only map: every entry must have a
+    /// real SIR type wider than one machine word.  Narrow results of wide
+    /// operations are kept in `reg_map` and must never be allowed to re-enter
+    /// this map through a direct insertion.
+    fn verify_wide_values(&self) {
+        for (reg, chunks) in self.wide_regs.iter() {
+            let width = self.sir_width(reg);
+            assert!(
+                width > 64,
+                "narrow SIR register r{} has a wide native representation (width={width})",
+                reg.0
+            );
+            let expected_chunks = Self::num_chunks(width);
+            assert_eq!(
+                chunks.len(),
+                expected_chunks,
+                "wide SIR register r{} has {} chunks, expected {expected_chunks}",
+                reg.0,
+                chunks.len()
+            );
+            for (index, (_, chunk_width)) in chunks.iter().enumerate() {
+                let expected_width = width.saturating_sub(index * 64).min(64);
+                assert_eq!(
+                    *chunk_width, expected_width,
+                    "wide SIR register r{} chunk {index} has width {chunk_width}, expected {expected_width}",
+                    reg.0
+                );
+            }
         }
     }
 
@@ -4130,7 +4195,7 @@ fn lower_instruction(
                         );
                         ctx.emit_alias_mov(block, vreg, chunks[0].0);
                         if *width_bits > 64 {
-                            ctx.wide_regs.insert(*dst, chunks);
+                            ctx.set_wide_chunks(*dst, chunks);
                         }
 
                         if ctx.is_4state_var(addr) {
@@ -4182,7 +4247,7 @@ fn lower_instruction(
                         // Also store chunk[0] in reg_map scalar slot for
                         // fallback paths that read the scalar VReg.
                         ctx.emit_alias_mov(block, vreg, chunks[0].0);
-                        ctx.wide_regs.insert(*dst, chunks);
+                        ctx.set_wide_chunks(*dst, chunks);
 
                         // 4-state: load wide mask chunks
                         if ctx.is_4state_var(addr) {
