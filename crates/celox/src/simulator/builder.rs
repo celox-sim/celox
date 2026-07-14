@@ -733,35 +733,15 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             #[cfg(target_arch = "x86_64")]
             if self.options.trace.mir {
-                use crate::backend::native::{emit, isel, mir_opt, regalloc};
                 let layout = program
                     .layout
                     .as_ref()
                     .expect("layout must be built before MIR trace");
-                let mut mir_output = String::new();
-
-                mir_output.push_str("=== MIR (eval_comb) ===\n");
-                for (idx, eu) in program.eval_comb.iter().enumerate() {
-                    let mut mfunc = isel::lower_execution_unit(eu, layout, self.options.four_state);
-                    crate::backend::native::mir_legalize::legalize(&mut mfunc);
-                    mir_opt::optimize(&mut mfunc);
-                    mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
-                    mir_output.push_str(&format!("{mfunc}\n"));
-                    let ra = regalloc::run_regalloc(&mut mfunc)
-                        .map_err(|error| SimulatorError::from(error.to_string()))?;
-                    mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
-                    mir_output.push_str(&format!("{mfunc}"));
-                    mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in ra.assignment.sorted_entries() {
-                        mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
-                    }
-                    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
-                        mir_output.push_str("  x86-64 disassembly:\n");
-                        mir_output.push_str(&emit::disassemble(&result.code, 0));
-                    }
-                    mir_output.push('\n');
-                }
-                trace.mir = Some(mir_output);
+                trace.mir = Some(format_native_mir(
+                    &program,
+                    layout,
+                    self.options.four_state,
+                )?);
             }
 
             #[cfg(target_arch = "x86_64")]
@@ -784,6 +764,81 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             trace,
         }
     }
+}
+
+/// Format every native MIR execution unit in the compiled Program.
+///
+/// This is deliberately behind the explicit `trace_mir` option.  The normal
+/// build path does not stringify or duplicate MIR.  Keep the group order and
+/// trigger labels here in sync with the native backend's three FF maps.
+#[cfg(target_arch = "x86_64")]
+fn format_native_mir(
+    program: &Program,
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+) -> Result<String, SimulatorError> {
+    let mut output = String::new();
+    output.push_str("=== MIR (all native execution units) ===\n");
+
+    output.push_str("=== MIR (eval_comb) ===\n");
+    for (idx, eu) in program.eval_comb.iter().enumerate() {
+        append_native_mir_unit(&mut output, "eval_comb", idx, eu, layout, four_state)?;
+    }
+
+    for (group, groups) in [
+        ("eval_apply_ffs", &program.eval_apply_ffs),
+        ("eval_only_ffs", &program.eval_only_ffs),
+        ("apply_ffs", &program.apply_ffs),
+    ] {
+        let mut entries = groups.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(addr, _)| **addr);
+        for (addr, units) in entries {
+            output.push_str(&format!(
+                "=== MIR ({group}) Trigger: {} ===\n",
+                program.get_path(addr)
+            ));
+            for (idx, eu) in units.iter().enumerate() {
+                append_native_mir_unit(&mut output, group, idx, eu, layout, four_state)?;
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn append_native_mir_unit(
+    output: &mut String,
+    group: &str,
+    index: usize,
+    eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+) -> Result<(), SimulatorError> {
+    use crate::backend::native::{emit, isel, mir_opt, regalloc};
+
+    let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
+    crate::backend::native::mir_legalize::legalize(&mut mfunc);
+    mir_opt::optimize(&mut mfunc);
+    output.push_str(&format!(
+        "Execution Unit {group}[{index}] (before regalloc):\n{mfunc}\n"
+    ));
+    let label = format!("trace_{group}_{index}");
+    let ra = regalloc::run_regalloc_with_label(&mut mfunc, &label)
+        .map_err(|error| SimulatorError::from(error.to_string()))?;
+    output.push_str(&format!(
+        "Execution Unit {group}[{index}] (after regalloc):\n{mfunc}"
+    ));
+    output.push_str("  Register assignment:\n");
+    for (vreg, preg) in ra.assignment.sorted_entries() {
+        output.push_str(&format!("    {vreg} -> {preg}\n"));
+    }
+    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
+        output.push_str("  x86-64 disassembly:\n");
+        output.push_str(&emit::disassemble(&result.code, 0));
+    }
+    output.push('\n');
+    Ok(())
 }
 
 fn run_test_with_sim<B: crate::backend::SimBackend>(

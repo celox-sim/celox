@@ -17,6 +17,7 @@ struct Options {
     backend: Backend,
     four_state: bool,
     compile_only: bool,
+    dump_ir_dir: Option<PathBuf>,
     pass_overrides: Vec<(bool, SirPass)>,
 }
 
@@ -70,6 +71,44 @@ fn run() -> Result<(), Box<dyn Error>> {
             builder.disable_pass(pass)
         };
     }
+    if let Some(output_dir) = opts.dump_ir_dir {
+        if matches!(opts.backend, Backend::Cranelift) {
+            return Err("--dump-ir-dir is only supported with --backend native".into());
+        }
+        fs::create_dir_all(&output_dir)?;
+        let trace_result = builder
+            .trace_post_optimized_sir()
+            .trace_mir()
+            .build_with_trace();
+        let sir = trace_result
+            .trace
+            .format_post_optimized_sir()
+            .ok_or("post-optimized SIR trace was not captured")?;
+        let mir = trace_result.trace.mir.ok_or("MIR trace was not captured")?;
+        let sir_path = output_dir.join("post_optimized.sir");
+        let mir_path = output_dir.join("mir.txt");
+        fs::write(&sir_path, &sir)?;
+        fs::write(&mir_path, &mir)?;
+        eprintln!(
+            "wrote post-optimized SIR ({} bytes) to {}",
+            sir.len(),
+            sir_path.display()
+        );
+        eprintln!(
+            "wrote full native MIR ({} bytes) to {}",
+            mir.len(),
+            mir_path.display()
+        );
+        trace_result
+            .res
+            .map_err(|error| format!("Celox build failed: {error:?}"))?;
+        println!(
+            "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
+            opts.test,
+            start.elapsed().as_nanos()
+        );
+        return Ok(());
+    }
     if opts.compile_only {
         match opts.backend {
             Backend::Native => {
@@ -122,6 +161,7 @@ fn parse_args() -> Result<Options, String> {
     let mut backend = Backend::Native;
     let mut four_state = false;
     let mut compile_only = false;
+    let mut dump_ir_dir = None;
     let mut pass_overrides = Vec::new();
     let mut args = env::args().skip(1);
 
@@ -166,6 +206,12 @@ fn parse_args() -> Result<Options, String> {
             }
             "--four-state" => four_state = true,
             "--compile-only" => compile_only = true,
+            "--dump-ir-dir" => {
+                dump_ir_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--dump-ir-dir requires a directory".to_string()
+                    })?));
+            }
             other if project.is_none() => project = Some(PathBuf::from(other)),
             other if test.is_none() => test = Some(other.to_string()),
             other => return Err(format!("unexpected argument: {other}")),
@@ -180,6 +226,7 @@ fn parse_args() -> Result<Options, String> {
         backend,
         four_state,
         compile_only,
+        dump_ir_dir,
         pass_overrides,
     })
 }
@@ -214,7 +261,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--dump-ir-dir <dir>]"
 }
 
 fn load_sources(
