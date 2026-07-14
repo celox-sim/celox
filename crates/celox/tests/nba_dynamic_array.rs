@@ -6,6 +6,66 @@ mod test_utils;
 
 all_backends! {
 
+    fn test_child_dynamic_ff_read_reaches_parent_after_same_edge_enable(sim) {
+        @setup { let code = r#"
+module Cache (
+    clk  : input  clock,
+    wen  : input  logic,
+    index: input  logic<3>,
+    din  : input  logic<64>,
+    probe: input  logic<3>,
+    rdata0: output logic<64>,
+    rdata1: output logic<64>,
+) {
+    var mem: logic<64> [8];
+    always_ff (clk) {
+        if wen {
+            mem[index] = din;
+        }
+    }
+    assign rdata0 = mem[probe];
+    assign rdata1 = mem[probe];
+}
+
+module Top (
+    clk  : input  clock,
+    arm  : input  logic,
+    wen  : input  logic,
+    index: input  logic<3>,
+    din  : input  logic<64>,
+    probe: input  logic<3>,
+    q    : output logic<64>,
+) {
+    var active: logic;
+    var rdata0: logic<64>;
+    var rdata1: logic<64>;
+    inst cache: Cache (clk, wen, index, din, probe, rdata0, rdata1);
+    always_ff (clk) {
+        active = arm;
+    }
+    assign q = if active ? rdata1 : rdata0;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let clk = sim.event("clk");
+        let arm = sim.signal("arm");
+        let wen = sim.signal("wen");
+        let index = sim.signal("index");
+        let din = sim.signal("din");
+        let probe = sim.signal("probe");
+        let q = sim.signal("q");
+        sim.modify(|io| {
+            io.set(arm, 1u8);
+            io.set(wen, 1u8);
+            io.set(index, 3u8);
+            io.set(probe, 3u8);
+            io.set(din, 0xdead_beef_1234_5678u64);
+        }).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0xdead_beef_1234_5678u64.into());
+    }
+
     fn test_static_ff_writes_are_applied_after_all_rhs_evaluation(sim) {
         @setup { let code = r#"
 module Top (
@@ -536,7 +596,10 @@ module Top (
     waddr: input  logic<64>,
     data0: input  logic<64>,
     strb0: input  logic<8>,
-    q    : output logic<32>,
+    probe: input  logic<20>,
+    q_lo : output logic<32>,
+    q_hi : output logic<32>,
+    q_dynamic: output logic<32>,
 ) {
     var mem  : logic<32> [1048576];
     var wdata: logic<64> [8];
@@ -572,7 +635,9 @@ module Top (
             }
         }
     }
-    assign q = mem[20'd1024];
+    assign q_lo = mem[20'd1024];
+    assign q_hi = mem[20'd1025];
+    assign q_dynamic = mem[probe];
 }
 "#; }
         @build Simulator::builder(code, "Top");
@@ -582,15 +647,29 @@ module Top (
         let waddr = sim.signal("waddr");
         let data0 = sim.signal("data0");
         let strb0 = sim.signal("strb0");
-        let q = sim.signal("q");
+        let probe = sim.signal("probe");
+        let q_lo = sim.signal("q_lo");
+        let q_hi = sim.signal("q_hi");
+        let q_dynamic = sim.signal("q_dynamic");
         sim.modify(|io| {
             io.set(wen, 1u8);
             io.set(waddr, 0x0400_0000_8000_1000u64);
             io.set(data0, 1u64);
             io.set(strb0, 0x0fu8);
+            io.set_wide(probe, BigUint::from(1024u32));
         }).unwrap();
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get(q), 1u32.into(), "merged line was not committed");
+        assert_eq!(sim.get(q_lo), 1u32.into(), "low word was not committed");
+        assert_eq!(sim.get(q_dynamic), 1u32.into(), "dynamic low read was not invalidated");
+
+        sim.modify(|io| {
+            io.set(data0, 0xaabb_ccdd_0000_0000u64);
+            io.set(strb0, 0xf0u8);
+            io.set_wide(probe, BigUint::from(1025u32));
+        }).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q_hi), 0xaabb_ccddu32.into(), "high word was not committed");
+        assert_eq!(sim.get(q_dynamic), 0xaabb_ccddu32.into(), "dynamic high read was not invalidated");
     }
 
 }
