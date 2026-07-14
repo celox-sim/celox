@@ -834,19 +834,19 @@ run_one() {
             ;;
         veryl-cc)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test --test "$test" --backend cc \
+                "$RESOLVED_VERYL_BIN" test --include-ignored --test "$test" --backend cc \
                 "${source_files[@]}"
             process_status="$?"
             ;;
         veryl-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test --test "$test" --backend cranelift \
+                "$RESOLVED_VERYL_BIN" test --include-ignored --test "$test" --backend cranelift \
                 "${source_files[@]}"
             process_status="$?"
             ;;
         veryl-interpret)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test --test "$test" --backend interpret \
+                "$RESOLVED_VERYL_BIN" test --include-ignored --test "$test" --backend interpret \
                 "${source_files[@]}"
             process_status="$?"
             ;;
