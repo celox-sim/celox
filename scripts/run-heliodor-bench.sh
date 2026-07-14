@@ -313,7 +313,7 @@ validate_gate_celox_config() {
     fi
 }
 
-validate_gate_veryl_completion() {
+validate_veryl_completion() {
     local log="$1"
     local expected_test="$2"
     local expected_success="[INFO ]    Succeeded test ($expected_test)"
@@ -607,14 +607,6 @@ list_tests() {
         | sort
 }
 
-veryl_ignored_flag() {
-    if "$RESOLVED_VERYL_BIN" test --help 2>&1 | rg -q -- '--ignored'; then
-        printf '%s\n' '--ignored'
-    else
-        printf '%s\n' '--include-ignored'
-    fi
-}
-
 runner_enabled() {
     local needle="$1"
     local runner
@@ -794,7 +786,7 @@ record_baseline() {
 run_one() {
     local runner="$1"
     local test="$2"
-    local stamp log process_status start end process_elapsed ignored_flag timeout_sec
+    local stamp log process_status start end process_elapsed timeout_sec
     local semantic_status reported_elapsed full_elapsed result_valid
     local -a source_files celox_args
     collect_test_source_files "$test" source_files || return "$?"
@@ -811,11 +803,6 @@ run_one() {
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
     timeout_sec="$(timeout_sec_for "$runner" "$test")"
-    ignored_flag=""
-    case "$runner" in
-        veryl-*) ignored_flag="$(veryl_ignored_flag)" ;;
-    esac
-
     if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
         if [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]]; then
             echo "== $runner :: $test (compile-only, safety timeout ${timeout_sec}s) =="
@@ -847,19 +834,19 @@ run_one() {
             ;;
         veryl-cc)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cc \
+                "$RESOLVED_VERYL_BIN" test --test "$test" --backend cc \
                 "${source_files[@]}"
             process_status="$?"
             ;;
         veryl-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend cranelift \
+                "$RESOLVED_VERYL_BIN" test --test "$test" --backend cranelift \
                 "${source_files[@]}"
             process_status="$?"
             ;;
         veryl-interpret)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$RESOLVED_VERYL_BIN" test "$ignored_flag" --test "$test" --backend interpret \
+                "$RESOLVED_VERYL_BIN" test --test "$test" --backend interpret \
                 "${source_files[@]}"
             process_status="$?"
             ;;
@@ -895,10 +882,11 @@ run_one() {
             fi
             ;;
         veryl-*)
-            if [[ "$process_status" == 0 ]]; then
+            if [[ "$process_status" == 0 ]] && validate_veryl_completion "$log" "$test"; then
                 semantic_status="pass"
             else
                 semantic_status="fail"
+                result_valid=0
             fi
             ;;
     esac
@@ -1172,7 +1160,7 @@ validate_gate_results() {
                     echo "error: Veryl gate row has an unexpected reported elapsed value" >&2
                     return 1
                 }
-                validate_gate_veryl_completion "$log" "$GATE_TEST" || return "$?"
+                validate_veryl_completion "$log" "$GATE_TEST" || return "$?"
                 GATE_VERYL_ELAPSED_NS="$process_elapsed"
                 ;;
             celox)
