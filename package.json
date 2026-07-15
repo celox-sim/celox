@@ -18,16 +18,6 @@
     "docs:build": "pnpm run docs:api && vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },
-  "pnpm": {
-    "overrides": {
-      "@celox-sim/celox": "workspace:*",
-      "@celox-sim/celox-napi": "workspace:*",
-      "@celox-sim/vite-plugin": "workspace:*"
-    },
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
-  },
   "devDependencies": {
     "@biomejs/biome": "^2.4.5",
     "@emnapi/core": "^1.9.1",

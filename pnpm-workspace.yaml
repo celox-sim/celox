@@ -1,6 +1,10 @@
 packages:
   - "packages/*"
   - "crates/celox-napi"
+overrides:
+  "@celox-sim/celox": "workspace:*"
+  "@celox-sim/celox-napi": "workspace:*"
+  "@celox-sim/vite-plugin": "workspace:*"
 allowBuilds:
   esbuild: true
   lefthook: true
