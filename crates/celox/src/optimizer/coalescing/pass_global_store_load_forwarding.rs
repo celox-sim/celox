@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
+use crate::ir::cfg::{SirCfg, terminator_successors};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
 
@@ -50,164 +51,6 @@ struct SlotPlan {
     ty: RegisterType,
     phi_blocks: Vec<usize>,
     promote: bool,
-}
-
-struct Cfg {
-    block_ids: Vec<BlockId>,
-    index: HashMap<BlockId, usize>,
-    predecessors: Vec<Vec<usize>>,
-    successors: Vec<Vec<usize>>,
-    dom_children: Vec<Vec<usize>>,
-    dominance_frontier: Vec<Vec<usize>>,
-}
-
-impl Cfg {
-    fn new(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<Self> {
-        fn visit(
-            eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-            block_id: BlockId,
-            seen: &mut HashSet<BlockId>,
-            postorder: &mut Vec<BlockId>,
-        ) {
-            if !seen.insert(block_id) {
-                return;
-            }
-            let mut successors = terminator_successors(&eu.blocks[&block_id].terminator);
-            successors.sort_unstable();
-            for successor in successors {
-                visit(eu, successor, seen, postorder);
-            }
-            postorder.push(block_id);
-        }
-
-        let mut seen = HashSet::default();
-        let mut block_ids = Vec::new();
-        visit(eu, eu.entry_block_id, &mut seen, &mut block_ids);
-        if seen.len() != eu.blocks.len() {
-            return None;
-        }
-        block_ids.reverse();
-        let index = block_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut successors = vec![Vec::new(); block_ids.len()];
-        let mut predecessors = vec![Vec::new(); block_ids.len()];
-        for (block_index, block_id) in block_ids.iter().copied().enumerate() {
-            for successor in terminator_successors(&eu.blocks[&block_id].terminator) {
-                let &successor_index = index.get(&successor)?;
-                successors[block_index].push(successor_index);
-                predecessors[successor_index].push(block_index);
-            }
-        }
-        for edges in successors.iter_mut().chain(&mut predecessors) {
-            edges.sort_unstable();
-            edges.dedup();
-        }
-
-        let mut immediate_dominator = vec![None; block_ids.len()];
-        immediate_dominator[0] = Some(0);
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for block in 1..block_ids.len() {
-                let mut defined_predecessors = predecessors[block]
-                    .iter()
-                    .copied()
-                    .filter(|predecessor| immediate_dominator[*predecessor].is_some());
-                let Some(mut new_idom) = defined_predecessors.next() else {
-                    continue;
-                };
-                for predecessor in defined_predecessors {
-                    new_idom = intersect_dominators(predecessor, new_idom, &immediate_dominator);
-                }
-                if immediate_dominator[block] != Some(new_idom) {
-                    immediate_dominator[block] = Some(new_idom);
-                    changed = true;
-                }
-            }
-        }
-        if immediate_dominator.iter().any(Option::is_none) {
-            return None;
-        }
-
-        let mut dom_children = vec![Vec::new(); block_ids.len()];
-        for block in 1..block_ids.len() {
-            dom_children[immediate_dominator[block]?].push(block);
-        }
-        for children in &mut dom_children {
-            children.sort_unstable();
-        }
-
-        let mut dominance_frontier = vec![HashSet::default(); block_ids.len()];
-        for block in 0..block_ids.len() {
-            if predecessors[block].len() < 2 {
-                continue;
-            }
-            let idom = immediate_dominator[block]?;
-            for &predecessor in &predecessors[block] {
-                let mut runner = predecessor;
-                while runner != idom {
-                    dominance_frontier[runner].insert(block);
-                    let next = immediate_dominator[runner]?;
-                    if next == runner {
-                        return None;
-                    }
-                    runner = next;
-                }
-            }
-        }
-        let mut dominance_frontier = dominance_frontier
-            .into_iter()
-            .map(|frontier| {
-                let mut frontier = frontier.into_iter().collect::<Vec<_>>();
-                frontier.sort_unstable();
-                frontier
-            })
-            .collect::<Vec<_>>();
-        for frontier in &mut dominance_frontier {
-            frontier.dedup();
-        }
-
-        Some(Self {
-            block_ids,
-            index,
-            predecessors,
-            successors,
-            dom_children,
-            dominance_frontier,
-        })
-    }
-}
-
-fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
-    match terminator {
-        SIRTerminator::Jump(target, _) => vec![*target],
-        SIRTerminator::Branch {
-            true_block,
-            false_block,
-            ..
-        } => vec![true_block.0, false_block.0],
-        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-    }
-}
-
-fn intersect_dominators(
-    mut left: usize,
-    mut right: usize,
-    immediate_dominator: &[Option<usize>],
-) -> usize {
-    while left != right {
-        while left > right {
-            left = immediate_dominator[left].expect("dominator predecessor is defined");
-        }
-        while right > left {
-            right = immediate_dominator[right].expect("dominator predecessor is defined");
-        }
-    }
-    left
 }
 
 fn collect_address_facts(
@@ -308,7 +151,7 @@ fn collect_address_facts(
 }
 
 fn live_in_blocks(
-    cfg: &Cfg,
+    cfg: &SirCfg,
     def_blocks: &HashSet<BlockId>,
     upward_use_blocks: &HashSet<BlockId>,
 ) -> Vec<bool> {
@@ -336,7 +179,7 @@ fn live_in_blocks(
     live_in
 }
 
-fn phi_blocks_for_slot(cfg: &Cfg, facts: &AddressFacts) -> Vec<usize> {
+fn phi_blocks_for_slot(cfg: &SirCfg, facts: &AddressFacts) -> Vec<usize> {
     let live_in = live_in_blocks(cfg, &facts.def_blocks, &facts.upward_use_blocks);
     let definition_indices = facts
         .def_blocks
@@ -450,7 +293,7 @@ fn rewrite_global_static_slots(
     fallback_definitions: &HashMap<RegisterId, SlotKey>,
     eligible_load_blocks: Option<&HashSet<BlockId>>,
 ) -> bool {
-    let Some(cfg) = Cfg::new(eu) else {
+    let Ok(cfg) = SirCfg::analyze(eu) else {
         return false;
     };
     let facts = collect_address_facts(eu, region, eligible_load_blocks);
@@ -1080,7 +923,7 @@ fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAd
     }
 
     let mut changed = false;
-    while let Some(cfg) = Cfg::new(eu) {
+    while let Ok(cfg) = SirCfg::analyze(eu) {
         let use_counts = count_register_uses(eu);
         let mut rewrite = None;
 

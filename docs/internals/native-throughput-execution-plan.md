@@ -172,7 +172,26 @@ Acceptance:
 - optimized SIR is unchanged for the migration fixtures;
 - common tests and full Heliodor Linux boot pass.
 
-Status: **not started**.
+Result:
+
+- added deterministic iterative reachable-CFG construction, Lengauer--Tarjan
+  dominators, virtual-exit post-dominators, dominance/post-dominance frontiers,
+  control dependence, SCC classification, and natural-loop discovery;
+- migrated global store/load forwarding from its recursive private CFG and
+  iterative dominator implementation to the shared analysis without changing
+  its rewrite policy;
+- focused tests: 9 shared-CFG fixtures (including a 20,000-block chain, an
+  8,192-block wide CFG, and 760 generated differential graphs) and all 11
+  global store/load forwarding fixtures passed;
+- common tests: 645 library tests, 60 native-testbench tests, and 6 counter
+  tests passed; the documented upstream/Veryl cases remained ignored;
+- non-LTO full run: `233.042 s` process time and `232.912 s` runner-reported
+  time, using the same generated-code semantics and pinned Heliodor revision as
+  Step 0; and
+- completion: `reboot: Power down`, `cy=9ab960 x3=aa pass=1`, and
+  `CELOX_TEST_RESULT ... status=pass`.
+
+Status: **complete**.
 
 ## Step 2: Phase-aware StateSSA and mem2reg
 
@@ -322,8 +341,8 @@ Status: **not started**.
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
 |---|---|---|---|---|---:|---|
-| 0 | this plan commit | VitePress build passed | documentation-only step | pass: `cy=9ab960 x3=aa pass=1` | 229.855 s | complete |
-| 1 | pending | pending | pending | pending | pending | not started |
+| 0 | `8f908ca2` | VitePress build passed | documentation-only step | pass: `cy=9ab960 x3=aa pass=1` | 229.855 s | complete |
+| 1 | this step commit | CFG 9/9; forwarding 11/11 | lib 645/645; native 60/60; counter 6/6 | pass: `cy=9ab960 x3=aa pass=1` | 233.042 s | complete |
 | 2 | pending | pending | pending | pending | pending | not started |
 | 3 | pending | pending | pending | pending | pending | not started |
 | 4 | pending | pending | pending | pending | pending | not started |
