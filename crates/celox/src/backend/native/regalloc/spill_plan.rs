@@ -376,10 +376,21 @@ impl EdgeTranslations {
     }
 }
 
+#[cfg(test)]
 pub(super) fn plan(
     func: &MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
+    registers: usize,
+) -> Result<SpillPlan, SpillPlanError> {
+    plan_with_recipe_costs(func, cfg, next_use, &[], registers)
+}
+
+pub(super) fn plan_with_recipe_costs(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    recipe_costs: &[Option<u16>],
     registers: usize,
 ) -> Result<SpillPlan, SpillPlanError> {
     let logical = LogicalValues::build(func);
@@ -479,6 +490,7 @@ pub(super) fn plan(
             limit(
                 func,
                 next_use,
+                recipe_costs,
                 &mut result,
                 block,
                 instruction,
@@ -504,6 +516,7 @@ pub(super) fn plan(
                 limit_live_through_clobber(
                     func,
                     next_use,
+                    recipe_costs,
                     &mut result,
                     block,
                     instruction,
@@ -531,6 +544,7 @@ pub(super) fn plan(
                     limit(
                         func,
                         next_use,
+                        recipe_costs,
                         &mut result,
                         block,
                         instruction,
@@ -598,6 +612,7 @@ pub(super) fn plan(
 fn limit_live_through_clobber(
     func: &MFunction,
     next_use: &NextUseAnalysis,
+    recipe_costs: &[Option<u16>],
     plan: &mut SpillPlan,
     block: usize,
     instruction: usize,
@@ -624,6 +639,7 @@ fn limit_live_through_clobber(
         let Some(victim) = live_through.iter().copied().max_by(|left, right| {
             compare_eviction_candidates(
                 func,
+                recipe_costs,
                 spilled,
                 (
                     *left,
@@ -767,6 +783,7 @@ fn init_loop_region(
 fn limit(
     func: &MFunction,
     next_use: &NextUseAnalysis,
+    recipe_costs: &[Option<u16>],
     plan: &mut SpillPlan,
     block: usize,
     point_instruction: usize,
@@ -784,6 +801,7 @@ fn limit(
             .max_by(|left, right| {
                 compare_eviction_candidates(
                     func,
+                    recipe_costs,
                     spilled,
                     (
                         *left,
@@ -847,6 +865,7 @@ fn limit(
 /// and the denominator is the register occupancy until that use.
 fn compare_eviction_candidates(
     func: &MFunction,
+    recipe_costs: &[Option<u16>],
     spilled: &BTreeSet<LogicalValue>,
     left: (LogicalValue, NextUseDistance),
     right: (LogicalValue, NextUseDistance),
@@ -865,8 +884,8 @@ fn compare_eviction_candidates(
                 instructions: right_instructions,
             },
         ) => left_exits.cmp(&right_exits).then_with(|| {
-            let left_cost = eviction_cost(func, spilled, left.0) as u128;
-            let right_cost = eviction_cost(func, spilled, right.0) as u128;
+            let left_cost = eviction_cost(func, recipe_costs, spilled, left.0) as u128;
+            let right_cost = eviction_cost(func, recipe_costs, spilled, right.0) as u128;
             let left_span = left_instructions as u128 + 1;
             let right_span = right_instructions as u128 + 1;
             // Lower avoided-cost density is the better eviction candidate.
@@ -880,7 +899,15 @@ fn compare_eviction_candidates(
     }
 }
 
-fn eviction_cost(func: &MFunction, spilled: &BTreeSet<LogicalValue>, value: LogicalValue) -> u16 {
+fn eviction_cost(
+    func: &MFunction,
+    recipe_costs: &[Option<u16>],
+    spilled: &BTreeSet<LogicalValue>,
+    value: LogicalValue,
+) -> u16 {
+    if let Some(cost) = recipe_costs.get(value.0 as usize).copied().flatten() {
+        return cost;
+    }
     let Some(desc) = func.spill_desc(VReg(value.0)) else {
         // A missing descriptor is rejected by MIR verification before this
         // phase.  Keep this helper total so malformed input remains a
@@ -1276,6 +1303,7 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
+                &[],
                 &spilled,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(1)),
@@ -1286,6 +1314,7 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
+                &[],
                 &spilled,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(15)),
@@ -1301,12 +1330,24 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &equal_cost,
+                &[],
                 &spilled,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(8)),
             ),
             Ordering::Less,
             "equal target costs must reduce to furthest-next-use MIN"
+        );
+        assert_eq!(
+            compare_eviction_candidates(
+                &equal_cost,
+                &[Some(1), None],
+                &spilled,
+                (LogicalValue(cheap.0), local(2)),
+                (LogicalValue(costly.0), local(2)),
+            ),
+            Ordering::Greater,
+            "an exact reload recipe must override the stale transient descriptor cost"
         );
     }
 

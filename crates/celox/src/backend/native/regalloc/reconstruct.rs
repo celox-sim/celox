@@ -8,10 +8,15 @@ use crate::backend::native::mir::{
 
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
-use super::spill_plan::{LogicalValue, PlannedOp, SpillHome, SpillPlan};
+use super::reload::{
+    ExpectedMaterializedReload, PointUse, PureStep, ReloadRecipeAnalysis, ResolvedBase,
+    ResolvedRecipe,
+};
+use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillPlan};
 
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
+    pub recipe_reloads: Vec<ExpectedMaterializedReload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +46,7 @@ impl ReconstructError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum MaterializedOp {
     Spill {
         value: LogicalValue,
@@ -51,7 +56,14 @@ enum MaterializedOp {
         value: LogicalValue,
         home: SpillHome,
         fresh: VReg,
+        recipe: Option<PreparedRecipe>,
     },
+}
+
+#[derive(Clone)]
+struct PreparedRecipe {
+    expected: ResolvedRecipe,
+    instructions: Vec<MInst>,
 }
 
 pub(super) fn reconstruct(
@@ -59,9 +71,11 @@ pub(super) fn reconstruct(
     cfg: &NormalizedCfg,
     plan: &SpillPlan,
     _next_use: &NextUseAnalysis,
+    reload_recipes: &ReloadRecipeAnalysis,
 ) -> Result<ReconstructionResult, ReconstructError> {
-    let stack_offsets = stack_layout(func, plan)?;
-    verify_reload_homes(func, plan, &stack_offsets)?;
+    let recipe_homes = recipe_only_homes(func, plan, reload_recipes)?;
+    let stack_offsets = stack_layout(func, plan, &recipe_homes)?;
+    verify_reload_homes(func, plan, &stack_offsets, &recipe_homes)?;
     let original_vregs = func.vregs.count() as usize;
     let mut logical_for_vreg = (0..original_vregs)
         .map(|index| plan.logical.of(VReg(index as u32)))
@@ -89,6 +103,9 @@ pub(super) fn reconstruct(
             .retain(|phi| !spilled_phis.contains(&plan.logical.of(phi.dst)));
         for phi in removed {
             let home = plan.homes.of_vreg(phi.dst);
+            if recipe_homes.contains(&home) {
+                continue;
+            }
             for (predecessor, source) in phi.sources {
                 let Some(&predecessor) = cfg.block_index.get(&predecessor) else {
                     return Err(ReconstructError::new(
@@ -127,6 +144,7 @@ pub(super) fn reconstruct(
                 "spill-plan point names a block outside normalized CFG",
             ));
         };
+        let recipe = reload_recipe_at_point(reload_recipes, point, operation, &recipe_homes)?;
         materialize_operation(
             func,
             plan,
@@ -137,9 +155,10 @@ pub(super) fn reconstruct(
             &mut insertions,
             &mut reload_blocks,
             &mut reload_definitions,
+            recipe,
         )?;
     }
-    for (&(predecessor, _successor), operations) in &plan.edge_ops {
+    for (&(predecessor, successor), operations) in &plan.edge_ops {
         let Some(predecessor_block) = func.blocks.get(predecessor) else {
             return Err(ReconstructError::new(
                 "RECONSTRUCT.EDGE_PREDECESSOR_EXISTS",
@@ -159,6 +178,15 @@ pub(super) fn reconstruct(
             ));
         };
         for &operation in operations {
+            let recipe = reload_recipe_on_edge(
+                func,
+                reload_recipes,
+                predecessor,
+                successor,
+                instruction,
+                operation,
+                &recipe_homes,
+            )?;
             materialize_operation(
                 func,
                 plan,
@@ -169,6 +197,7 @@ pub(super) fn reconstruct(
                 &mut insertions,
                 &mut reload_blocks,
                 &mut reload_definitions,
+                recipe,
             )?;
         }
     }
@@ -242,6 +271,7 @@ pub(super) fn reconstruct(
         children[idom].push(block);
     }
     let mut stacks = HashMap::<LogicalValue, Vec<VReg>>::new();
+    let mut recipe_reloads = Vec::<ExpectedMaterializedReload>::new();
     rename_block(
         0,
         func,
@@ -253,9 +283,11 @@ pub(super) fn reconstruct(
         &logical_for_vreg,
         &mut insertions,
         &mut stacks,
+        &recipe_homes,
+        &mut recipe_reloads,
     )?;
     eliminate_dead_phis(func);
-    eliminate_dead_reloads(func, &reload_definitions);
+    eliminate_dead_reloads(func, &reload_definitions, &mut recipe_reloads);
 
     let frame_size = u32::try_from(stack_offsets.len())
         .ok()
@@ -269,7 +301,168 @@ pub(super) fn reconstruct(
                 "spill frame size exceeds u32",
             )
         })?;
-    Ok(ReconstructionResult { frame_size })
+    Ok(ReconstructionResult {
+        frame_size,
+        recipe_reloads,
+    })
+}
+
+fn recipe_only_homes(
+    func: &MFunction,
+    plan: &SpillPlan,
+    analysis: &ReloadRecipeAnalysis,
+) -> Result<BTreeSet<SpillHome>, ReconstructError> {
+    let mut candidates = BTreeSet::<SpillHome>::new();
+    let mut rejected = BTreeSet::<SpillHome>::new();
+    for &(point, operation) in &plan.point_ops {
+        match operation {
+            PlannedOp::Reload { value, home } => {
+                candidates.insert(home);
+                if available_recipe_at_point(analysis, point, value).is_none() {
+                    rejected.insert(home);
+                }
+            }
+            PlannedOp::SpillPhi { .. } => {}
+            PlannedOp::Spill { .. } => {}
+        }
+    }
+    for (&(predecessor, successor), operations) in &plan.edge_ops {
+        let Some(predecessor_block) = func.blocks.get(predecessor) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.EDGE_PREDECESSOR_EXISTS",
+                None,
+                None,
+                Vec::new(),
+                format!("edge operation predecessor index {predecessor} is outside function"),
+            ));
+        };
+        let Some(_successor_block) = func.blocks.get(successor) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.EDGE_SUCCESSOR_EXISTS",
+                Some(predecessor_block.id),
+                None,
+                Vec::new(),
+                format!("edge operation successor index {successor} is outside function"),
+            ));
+        };
+        let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.EDGE_PREDECESSOR_TERMINATED",
+                Some(predecessor_block.id),
+                None,
+                Vec::new(),
+                "edge operation predecessor block is empty",
+            ));
+        };
+        for &operation in operations {
+            match operation {
+                PlannedOp::Reload { value, home } => {
+                    candidates.insert(home);
+                    if available_recipe_before_terminator(
+                        analysis,
+                        predecessor_block.id,
+                        instruction,
+                        value,
+                    )
+                    .is_none()
+                    {
+                        rejected.insert(home);
+                    }
+                }
+                PlannedOp::SpillPhi { .. } => {}
+                PlannedOp::Spill { .. } => {}
+            }
+        }
+    }
+    // A phi congruence class may use SimState itself as the merged home.  It
+    // is safe to omit its SpillPhi and edge stores only when every concrete
+    // reload selected by the planner has an exact recipe at that point.
+    candidates.retain(|home| !rejected.contains(home));
+    Ok(candidates)
+}
+
+fn available_recipe_at_point(
+    analysis: &ReloadRecipeAnalysis,
+    point: ProgramPoint,
+    value: LogicalValue,
+) -> Option<&ResolvedRecipe> {
+    let query = PointUse {
+        block: point.block,
+        instruction: point.instruction,
+        value: VReg(value.0),
+    };
+    analysis.resolved_recipe_at_point(query)
+}
+
+fn available_recipe_before_terminator(
+    analysis: &ReloadRecipeAnalysis,
+    predecessor: BlockId,
+    instruction: usize,
+    value: LogicalValue,
+) -> Option<&ResolvedRecipe> {
+    let query = PointUse {
+        block: predecessor,
+        instruction,
+        value: VReg(value.0),
+    };
+    analysis.resolved_recipe_at_point(query)
+}
+
+fn reload_recipe_at_point(
+    analysis: &ReloadRecipeAnalysis,
+    point: ProgramPoint,
+    operation: PlannedOp,
+    recipe_homes: &BTreeSet<SpillHome>,
+) -> Result<Option<ResolvedRecipe>, ReconstructError> {
+    let PlannedOp::Reload { value, home } = operation else {
+        return Ok(None);
+    };
+    if !recipe_homes.contains(&home) {
+        return Ok(None);
+    }
+    available_recipe_at_point(analysis, point, value)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| {
+            ReconstructError::new(
+                "RECONSTRUCT.POINT_RECIPE_STABLE",
+                Some(point.block),
+                Some(point.instruction),
+                vec![VReg(value.0)],
+                "spill-planner state recipe disappeared before reconstruction",
+            )
+        })
+}
+
+fn reload_recipe_on_edge(
+    func: &MFunction,
+    analysis: &ReloadRecipeAnalysis,
+    predecessor: usize,
+    successor: usize,
+    instruction: usize,
+    operation: PlannedOp,
+    recipe_homes: &BTreeSet<SpillHome>,
+) -> Result<Option<ResolvedRecipe>, ReconstructError> {
+    let PlannedOp::Reload { value, home } = operation else {
+        return Ok(None);
+    };
+    if !recipe_homes.contains(&home) {
+        return Ok(None);
+    }
+    let predecessor_id = func.blocks[predecessor].id;
+    let successor_id = func.blocks[successor].id;
+    available_recipe_before_terminator(analysis, predecessor_id, instruction, value)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| {
+            ReconstructError::new(
+                "RECONSTRUCT.EDGE_RECIPE_STABLE",
+                Some(predecessor_id),
+                None,
+                vec![VReg(value.0)],
+                format!("state recipe disappeared on edge {predecessor_id} -> {successor_id}"),
+            )
+        })
 }
 
 /// Remove phi webs which no longer reach an instruction after SSA renaming.
@@ -322,35 +515,70 @@ fn eliminate_dead_phis(func: &mut MFunction) -> usize {
             .sum::<usize>()
 }
 
-fn eliminate_dead_reloads(func: &mut MFunction, reloads: &BTreeSet<VReg>) -> usize {
-    let used = func
-        .blocks
-        .iter()
-        .flat_map(|block| {
-            block.insts.iter().flat_map(MInst::uses).chain(
-                block
-                    .phis
-                    .iter()
-                    .flat_map(|phi| phi.sources.iter().map(|(_, source)| *source)),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    let mut removed = 0;
+fn eliminate_dead_reloads(
+    func: &mut MFunction,
+    reloads: &BTreeSet<VReg>,
+    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+) -> BTreeSet<VReg> {
+    let value_count = func.vregs.count() as usize;
+    let mut use_counts = vec![0usize; value_count];
+    let mut definitions = HashMap::<VReg, (usize, usize)>::new();
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        for phi in &mir_block.phis {
+            for &(_, source) in &phi.sources {
+                use_counts[source.0 as usize] += 1;
+            }
+        }
+        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+            for source in inst.uses() {
+                use_counts[source.0 as usize] += 1;
+            }
+            if let Some(definition) = inst.def()
+                && reloads.contains(&definition)
+            {
+                definitions.insert(definition, (block, instruction));
+            }
+        }
+    }
+    let mut queue = definitions
+        .keys()
+        .copied()
+        .filter(|value| use_counts[value.0 as usize] == 0)
+        .collect::<VecDeque<_>>();
+    let mut removed = BTreeSet::new();
+    while let Some(definition) = queue.pop_front() {
+        if !removed.insert(definition) {
+            continue;
+        }
+        let (block, instruction) = definitions[&definition];
+        for source in func.blocks[block].insts[instruction].uses() {
+            let count = &mut use_counts[source.0 as usize];
+            debug_assert_ne!(*count, 0);
+            *count = count.saturating_sub(1);
+            if *count == 0 && definitions.contains_key(&source) {
+                queue.push_back(source);
+            }
+        }
+    }
     for block in &mut func.blocks {
         block.insts.retain(|instruction| {
-            let dead_reload = instruction.def().is_some_and(|definition| {
-                reloads.contains(&definition) && !used.contains(&definition)
-            });
-            removed += usize::from(dead_reload);
-            !dead_reload
+            instruction
+                .def()
+                .is_none_or(|definition| !removed.contains(&definition))
         });
     }
+    // These definitions were intentionally erased, so they no longer denote
+    // materialized reloads in final MIR.  Retain every other expectation: a
+    // definition missing for any other reason must still fail the independent
+    // verifier instead of being hidden here.
+    recipe_reloads.retain(|reload| !removed.contains(&reload.reload));
     removed
 }
 
 fn stack_layout(
     func: &MFunction,
     plan: &SpillPlan,
+    recipe_homes: &BTreeSet<SpillHome>,
 ) -> Result<HashMap<SpillHome, i32>, ReconstructError> {
     let homes = plan
         .point_ops
@@ -358,10 +586,10 @@ fn stack_layout(
         .map(|(_, operation)| *operation)
         .chain(plan.edge_ops.values().flatten().copied())
         .filter_map(|operation| match operation {
-            PlannedOp::Spill { home, .. } => {
-                (!is_rematerializable(func, plan, home)).then_some(home)
-            }
-            PlannedOp::SpillPhi { home, .. } => Some(home),
+            PlannedOp::Spill { home, .. } => (!is_rematerializable(func, plan, home)
+                && !recipe_homes.contains(&home))
+            .then_some(home),
+            PlannedOp::SpillPhi { home, .. } => (!recipe_homes.contains(&home)).then_some(home),
             PlannedOp::Reload { .. } => None,
         })
         .collect::<BTreeSet<_>>();
@@ -388,10 +616,12 @@ fn verify_reload_homes(
     func: &MFunction,
     plan: &SpillPlan,
     stack_offsets: &HashMap<SpillHome, i32>,
+    recipe_homes: &BTreeSet<SpillHome>,
 ) -> Result<(), ReconstructError> {
     for &(point, operation) in &plan.point_ops {
         if let PlannedOp::Reload { value, home } = operation
             && rematerialized_logical_value(func, value).is_none()
+            && !recipe_homes.contains(&home)
         {
             if !stack_offsets.contains_key(&home) {
                 return Err(ReconstructError::new(
@@ -411,6 +641,7 @@ fn verify_reload_homes(
         for &operation in operations {
             if let PlannedOp::Reload { value, home } = operation
                 && rematerialized_logical_value(func, value).is_none()
+                && !recipe_homes.contains(&home)
             {
                 if !stack_offsets.contains_key(&home) {
                     let block = func.blocks.get(edge.0).map(|block| block.id);
@@ -503,16 +734,31 @@ fn materialize_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     reload_definitions: &mut BTreeSet<VReg>,
+    recipe: Option<ResolvedRecipe>,
 ) -> Result<(), ReconstructError> {
     let operation = match operation {
         PlannedOp::Spill { value, home } | PlannedOp::SpillPhi { value, home } => {
             MaterializedOp::Spill { value, home }
         }
         PlannedOp::Reload { value, home } => {
-            let fresh = alloc_fresh(func, logical_for_vreg, value)?;
+            let (fresh, recipe) = if let Some(recipe) = recipe {
+                let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, value, recipe)?;
+                for definition in prepared.instructions.iter().filter_map(MInst::def) {
+                    reload_definitions.insert(definition);
+                }
+                (fresh, Some(prepared))
+            } else {
+                let fresh = alloc_fresh(func, logical_for_vreg, value)?;
+                reload_definitions.insert(fresh);
+                (fresh, None)
+            };
             reload_blocks.entry(value).or_default().insert(block);
-            reload_definitions.insert(fresh);
-            MaterializedOp::Reload { value, home, fresh }
+            MaterializedOp::Reload {
+                value,
+                home,
+                fresh,
+                recipe,
+            }
         }
     };
     let _ = plan;
@@ -521,6 +767,89 @@ fn materialize_operation(
         .or_default()
         .push(operation);
     Ok(())
+}
+
+fn prepare_recipe(
+    func: &mut MFunction,
+    logical_for_vreg: &mut Vec<LogicalValue>,
+    logical: LogicalValue,
+    expected: ResolvedRecipe,
+) -> Result<(VReg, PreparedRecipe), ReconstructError> {
+    let mut instructions = Vec::with_capacity(expected.steps.len() + 1);
+    let mut current = alloc_fresh(func, logical_for_vreg, logical)?;
+    instructions.push(match &expected.base {
+        ResolvedBase::Constant(value) => MInst::LoadImm {
+            dst: current,
+            value: *value,
+        },
+        ResolvedBase::State(state) => MInst::Load {
+            dst: current,
+            base: BaseReg::SimState,
+            offset: state.load.offset,
+            size: state.load.size,
+        },
+    });
+    for &step in &expected.steps {
+        let destination = alloc_fresh(func, logical_for_vreg, logical)?;
+        instructions.push(materialize_pure_step(step, destination, current));
+        current = destination;
+    }
+    Ok((
+        current,
+        PreparedRecipe {
+            expected,
+            instructions,
+        },
+    ))
+}
+
+fn materialize_pure_step(step: PureStep, dst: VReg, source: VReg) -> MInst {
+    match step {
+        PureStep::Copy64 => MInst::Mov { dst, src: source },
+        PureStep::Copy32 => MInst::Mov32 { dst, src: source },
+        PureStep::AndImm64 { immediate } => MInst::AndImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::AndImm32 { immediate } => MInst::AndImm32 {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::OrImm64 { immediate } => MInst::OrImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::ShrImm64 { immediate } => MInst::ShrImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::ShlImm64 { immediate } => MInst::ShlImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::SarImm64 { immediate } => MInst::SarImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::AddImm64 { immediate } => MInst::AddImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::SubImm64 { immediate } => MInst::SubImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::BitNot64 => MInst::BitNot { dst, src: source },
+        PureStep::Neg64 => MInst::Neg { dst, src: source },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,6 +864,8 @@ fn rename_block(
     logical_for_vreg: &[LogicalValue],
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
+    recipe_homes: &BTreeSet<SpillHome>,
+    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
 ) -> Result<(), ReconstructError> {
     enum Event {
         Enter(usize),
@@ -587,6 +918,8 @@ fn rename_block(
                         stacks,
                         &mut pushed,
                         &mut rewritten,
+                        recipe_homes,
+                        recipe_reloads,
                     )?;
                     let uses = inst.uses().into_iter().collect::<BTreeSet<_>>();
                     for original_use in uses {
@@ -664,6 +997,8 @@ fn emit_insertions(
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
     pushed: &mut Vec<LogicalValue>,
     output: &mut Vec<MInst>,
+    recipe_homes: &BTreeSet<SpillHome>,
+    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
 ) -> Result<(), ReconstructError> {
     let mut operations = insertions.remove(&(block, instruction)).unwrap_or_default();
     // A SpillPlan program point is parallel.  When materialized serially,
@@ -678,7 +1013,7 @@ fn emit_insertions(
                 value: logical,
                 home,
             } => {
-                if is_rematerializable(func, plan, home) {
+                if is_rematerializable(func, plan, home) || recipe_homes.contains(&home) {
                     continue;
                 }
                 let Some(source) = stacks
@@ -714,8 +1049,36 @@ fn emit_insertions(
                 value: logical,
                 home,
                 fresh,
+                recipe,
             } => {
-                let reload = if let Some(value) = rematerialized_logical_value(func, logical) {
+                let reload = if let Some(recipe) = recipe {
+                    let Some(definition) = recipe.instructions.last().and_then(MInst::def) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RECIPE_FINAL_DEFINITION",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(logical.0), fresh],
+                            "prepared reload recipe has no final MIR definition",
+                        ));
+                    };
+                    if definition != fresh {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RECIPE_FINAL_IDENTITY",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(logical.0), fresh, definition],
+                            "prepared reload recipe final definition changed before emission",
+                        ));
+                    }
+                    recipe_reloads.push(ExpectedMaterializedReload {
+                        reload: fresh,
+                        expected: recipe.expected,
+                    });
+                    output.extend(recipe.instructions);
+                    stacks.entry(logical).or_default().push(fresh);
+                    pushed.push(logical);
+                    continue;
+                } else if let Some(value) = rematerialized_logical_value(func, logical) {
                     MInst::LoadImm { dst: fresh, value }
                 } else {
                     let Some(&offset) = stack_offsets.get(&home) else {
@@ -906,12 +1269,34 @@ mod tests {
         block.push(MInst::Return);
         func.push_block(block);
 
+        let mut recipe_reloads = vec![
+            ExpectedMaterializedReload {
+                reload: dead,
+                expected: ResolvedRecipe {
+                    base: ResolvedBase::Constant(0),
+                    steps: Vec::new(),
+                },
+            },
+            ExpectedMaterializedReload {
+                reload: live,
+                expected: ResolvedRecipe {
+                    base: ResolvedBase::Constant(1),
+                    steps: Vec::new(),
+                },
+            },
+        ];
         assert_eq!(
-            eliminate_dead_reloads(&mut func, &BTreeSet::from([dead, live])),
-            1
+            eliminate_dead_reloads(
+                &mut func,
+                &BTreeSet::from([dead, live]),
+                &mut recipe_reloads,
+            ),
+            BTreeSet::from([dead])
         );
         assert_eq!(func.blocks[0].insts.len(), 3);
         assert_eq!(func.blocks[0].insts[0].def(), Some(live));
+        assert_eq!(recipe_reloads.len(), 1);
+        assert_eq!(recipe_reloads[0].reload, live);
     }
 
     #[test]
@@ -956,6 +1341,8 @@ mod tests {
         let reconstruction_phis = HashMap::from([((successor, LogicalValue(original.0)), fresh)]);
         let mut children = vec![Vec::new(); func.blocks.len()];
         children[0].push(successor);
+        let recipe_homes = BTreeSet::new();
+        let mut recipe_reloads = Vec::new();
 
         let error = rename_block(
             0,
@@ -968,10 +1355,463 @@ mod tests {
             &logical_for_vreg,
             &mut HashMap::new(),
             &mut HashMap::new(),
+            &recipe_homes,
+            &mut recipe_reloads,
         )
         .unwrap_err();
 
         assert_eq!(error.rule, "RECONSTRUCT.PHI_REPRESENTATIVE_EXISTS");
         assert_eq!(error.block, Some(BlockId(1)));
+    }
+
+    fn planner_recipe_fixture(overwrite_home: bool) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let pressure = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 80,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: pressure,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        if overwrite_home {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: pressure,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 96,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        func
+    }
+
+    fn global_state_recipe_fixture(with_pure_step: bool) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        let state = vregs.alloc();
+        let derived = with_pure_step.then(|| vregs.alloc());
+        let pressure = vregs.alloc();
+        let second_pressure = with_pure_step.then(|| vregs.alloc());
+        let mut func = MFunction::new(
+            vregs,
+            vec![SpillDesc::transient(); if with_pure_step { 4 } else { 2 }],
+        );
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: state,
+            base: BaseReg::SimState,
+            offset: 80,
+            size: OpSize::S64,
+        });
+        if let Some(derived) = derived {
+            block.push(MInst::ShrImm {
+                dst: derived,
+                src: state,
+                imm: 3,
+            });
+        }
+        block.push(MInst::Load {
+            dst: pressure,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        if let Some(second_pressure) = second_pressure {
+            block.push(MInst::Load {
+                dst: second_pressure,
+                base: BaseReg::StackFrame,
+                offset: 8,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 96,
+                src: pressure,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 104,
+                src: second_pressure,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 112,
+            src: derived.unwrap_or(state),
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        func
+    }
+
+    fn reconstruct_with_registers(
+        mut func: MFunction,
+        registers: usize,
+    ) -> (MFunction, ReconstructionResult) {
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let planning_recipes = super::super::reload::analyze_for_planning(&func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        next_use.verify(&func, &cfg).unwrap();
+        let recipe_costs = planning_recipes.global_materialization_costs().unwrap();
+        let plan = super::super::spill_plan::plan_with_recipe_costs(
+            &func,
+            &cfg,
+            &next_use,
+            &recipe_costs,
+            registers,
+        )
+        .unwrap();
+        plan.verify(&func, &cfg, registers).unwrap();
+        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
+        let requested_points = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let recipes =
+            super::super::reload::analyze_with_queries(&func, &cfg, &requested_points).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        super::super::reload::verify_expected_materialized_reloads(
+            &func,
+            &cfg,
+            &result.recipe_reloads,
+        )
+        .unwrap();
+        (func, result)
+    }
+
+    fn reconstruct_with_one_register(func: MFunction) -> (MFunction, ReconstructionResult) {
+        reconstruct_with_registers(func, 1)
+    }
+
+    #[test]
+    fn planner_reload_uses_valid_state_home_without_a_stack_slot() {
+        let (func, result) = reconstruct_with_one_register(planner_recipe_fixture(false));
+
+        assert_eq!(result.frame_size, 0);
+        assert_eq!(result.recipe_reloads.len(), 1);
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Load {
+                base: BaseReg::SimState,
+                offset: 80,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().all(|inst| !matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn planner_uses_memory_phi_home_without_spilling_register_phi() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let left_value = vregs.alloc();
+        let right_value = vregs.alloc();
+        let merged = vregs.alloc();
+        let pressure = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: left_value,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: left_value,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Load {
+            dst: right_value,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: right_value,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), left_value), (BlockId(2), right_value)],
+        });
+        join.push(MInst::Load {
+            dst: pressure,
+            base: BaseReg::StackFrame,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 80,
+            src: pressure,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 88,
+            src: merged,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+
+        let (func, result) = reconstruct_with_one_register(func);
+
+        assert_eq!(result.frame_size, 0);
+        assert!(!result.recipe_reloads.is_empty());
+        assert!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|inst| {
+                    !matches!(
+                        inst,
+                        MInst::Store {
+                            base: BaseReg::StackFrame,
+                            ..
+                        }
+                    )
+                })
+        );
+        assert!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| {
+                    matches!(
+                        inst,
+                        MInst::Load {
+                            base: BaseReg::SimState,
+                            offset: 40,
+                            size: OpSize::S64,
+                            ..
+                        }
+                    )
+                })
+        );
+    }
+
+    #[test]
+    fn planner_reload_falls_back_to_stack_after_state_home_is_overwritten() {
+        let (func, result) = reconstruct_with_one_register(planner_recipe_fixture(true));
+
+        assert_eq!(result.frame_size, 8);
+        assert!(result.recipe_reloads.is_empty());
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn planner_materializes_a_global_state_recipe_only_at_the_reload() {
+        let (func, result) = reconstruct_with_one_register(global_state_recipe_fixture(false));
+
+        assert_eq!(result.frame_size, 0);
+        assert_eq!(result.recipe_reloads.len(), 1);
+        assert_eq!(
+            result.recipe_reloads[0].expected.steps,
+            Vec::<PureStep>::new()
+        );
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Load {
+                        base: BaseReg::SimState,
+                        offset: 80,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn planner_materializes_a_pure_recipe_with_exact_machine_width() {
+        let (func, result) = reconstruct_with_registers(global_state_recipe_fixture(true), 2);
+
+        assert_eq!(result.frame_size, 0);
+        assert_eq!(result.recipe_reloads.len(), 1);
+        assert_eq!(
+            result.recipe_reloads[0].expected.steps,
+            vec![PureStep::ShrImm64 { immediate: 3 }]
+        );
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::ShrImm { imm: 3, .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn planner_edge_reload_uses_the_predecessor_state_home() {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let condition = vregs.alloc();
+        let pressure_left = vregs.alloc();
+        let pressure_right = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 80,
+            src: stored,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: pressure_left,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Load {
+            dst: pressure_right,
+            base: BaseReg::StackFrame,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 96,
+            src: pressure_left,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 104,
+            src: pressure_right,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 112,
+            src: stored,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+        func.verify();
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let plan = super::super::spill_plan::plan(&func, &cfg, &next_use, 2).unwrap();
+        plan.verify(&func, &cfg, 2).unwrap();
+        assert!(
+            plan.edge_ops.values().flatten().any(|operation| matches!(
+                operation,
+                PlannedOp::Reload { value, .. } if *value == LogicalValue(stored.0)
+            )),
+            "{plan:#?}"
+        );
+        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        assert!(!requested.is_empty());
+        let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        super::super::reload::verify_expected_materialized_reloads(
+            &func,
+            &cfg,
+            &result.recipe_reloads,
+        )
+        .unwrap();
+
+        assert_eq!(result.frame_size, 0);
+        assert!(!result.recipe_reloads.is_empty());
+        assert!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|inst| {
+                    !matches!(
+                        inst,
+                        MInst::Store {
+                            base: BaseReg::StackFrame,
+                            ..
+                        }
+                    )
+                })
+        );
     }
 }

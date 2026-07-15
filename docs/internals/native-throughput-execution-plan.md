@@ -288,19 +288,20 @@ Execution slices:
    This ties the regression to unsplit state-backed live ranges rather than
    CSSA (47 ms) or CFG normalization (55 ms). All 101 allocator tests passed
    after the timing boundaries were added.
-2. **3b -- reload recipes and validity proof (in progress).** Replace the
+2. **3b -- reload recipes and validity proof (complete).** Replace the
    overloaded spill descriptor with explicit constant, state-version, pure
    recomputation, and stack recipes. State recipes use physical MIR load shape
-   plus a MemorySSA version; an independent verifier rejects every reload not
-   dominated by that still-current version.
-3. **3c -- allocator-owned split placement (pending).** Select recipes at
+   plus a byte-granular MemorySSA version; an independent reconstruction of
+   the final MIR rejects every reload whose exact machine load or reaching
+   memory version changed.
+3. **3c -- allocator-owned split placement (complete).** Select recipes at
    actual pressure points and reconstruct strict SSA at instruction, CFG-edge,
    and loop boundaries. Keep state-backed values out of global next-use maps
    once their live ranges have been split, and run post-split cleanup.
-4. **3d -- retire the old split pass and enable forwarding (pending).** Delete
-   `mir_opt::split_live_ranges` and its VReg/gap thresholds, enable cross-phase
-   stable forwarding, and require unchanged sorter thresholds plus the common
-   and Linux gates.
+4. **3d -- retire the old split pass and evaluate forwarding (complete).**
+   Delete `mir_opt::split_live_ranges` and its VReg/gap thresholds, evaluate
+   cross-phase stable forwarding with identical generated-code paths, and
+   retain it only if the sorter and full Linux gates improve.
 
 Deliverables:
 
@@ -336,9 +337,49 @@ Acceptance:
   controls correctness;
 - allocation and all verifier phases terminate on the Heliodor function;
 - common tests and full Heliodor Linux boot pass;
-- runtime must not regress before broader StateSSA forwarding is enabled.
+- runtime must not regress; a broader StateSSA forwarding mode which fails the
+  full-run gate remains disabled.
 
-Status: **not started**.
+Result:
+
+- replaced the old spill descriptor decision with explicit constant,
+  state-version, pure-machine-operation, and stack recipes. The planner uses a
+  linear recipe-shape scan; after it chooses split points, byte-granular
+  MemorySSA is built only for the values and exact points/edges it requested;
+- gave MemorySSA entry, write, and phi versions structural identities so an
+  unrelated tracked byte or inserted reload cannot renumber a valid recipe.
+  A sparse/full differential fixture proves the same requested-point recipes
+  before and after unrelated and partially overlapping writes;
+- reconstructs strict SSA at selected instruction and edge reloads, uses exact
+  post-store state homes including matching register/MemorySSA phis, and
+  recursively removes dead reload/phi chains. Narrow stores are homes only
+  when MIR semantics prove the value is already zero-extended to that machine
+  width;
+- independently rebuilds sparse MemorySSA over the final MIR and rejects a
+  materialized reload if its physical load shape, pure-operation chain, or
+  reaching state version differs. Demand-driven proof reduced the forwarding
+  diagnostic's Heliodor compile-only time from `218.210 s` with all-use
+  MemorySSA to `79.316 s` without changing its final MIR;
+- deleted the threshold-based MIR live-range splitter. An unconditional split
+  at every state-store home was also evaluated and rejected: it shortened the
+  spill frame but increased executed state reloads and total code;
+- evaluated cross-phase forwarding with the same source and testbench. It
+  reduced some SIM/stack loads, but increased stack stores and the spill frame
+  on the Heliodor fused function. The paired full/compile-only runs imply an
+  execution portion of about `183.73 s` with forwarding versus `163.53 s`
+  without it; total full-run time was `263.045 s` versus `233.427 s`.
+  Therefore the mode remains disabled rather than being called an improvement;
+- focused allocator tests: 129/129 passed. Common and extended gates passed:
+  `cargo fmt --all -- --check`, `cargo check -p celox`, 688/688 library tests,
+  60 native-testbench tests, 9 native/Cranelift/Wasm counter tests, and all 7
+  sorter scaling tests; documented upstream/Veryl cases remained ignored; and
+- final non-LTO full run: `232.008 s` process time and `231.895 s`
+  runner-reported time, with one native/O2/two-state/full-execution
+  configuration on clean Heliodor commit `7ad830fc`. The log contains
+  `reboot: Power down`, `cy=9ab960 x3=aa pass=1`, and the final pass record in
+  `target/heliodor/results/20260715T123014Z_celox_test_soc_linux_boot.log`.
+
+Status: **complete**.
 
 ## Step 4: Whole-region mux control and placement
 
@@ -408,9 +449,9 @@ Status: **not started**.
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
 |---|---|---|---|---|---:|---|
 | 0 | `8f908ca2` | VitePress build passed | documentation-only step | pass: `cy=9ab960 x3=aa pass=1` | 229.855 s | complete |
-| 1 | this step commit | CFG 9/9; forwarding 11/11 | lib 645/645; native 60/60; counter 6/6 | pass: `cy=9ab960 x3=aa pass=1` | 233.042 s | complete |
-| 2 | pending | pending | pending | pending | pending | not started |
-| 3 | pending | pending | pending | pending | pending | not started |
+| 1 | `e3dfa119` | CFG 9/9; forwarding 11/11 | lib 645/645; native 60/60; counter 6/6 | pass: `cy=9ab960 x3=aa pass=1` | 233.042 s | complete |
+| 2 | `75bf2636` | StateSSA 7/7; promotion 18/18 | lib 661/661; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.172 s | complete |
+| 3 | pending | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
 | 4 | pending | pending | pending | pending | pending | not started |
 | 5 | pending | pending | pending | pending | pending | not started |
 

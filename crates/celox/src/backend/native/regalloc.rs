@@ -17,6 +17,7 @@ mod legalize;
 mod next_use;
 mod pressure;
 mod reconstruct;
+mod reload;
 mod schedule;
 mod spill_plan;
 #[cfg(test)]
@@ -155,6 +156,17 @@ fn next_use_error(phase: &'static str, error: next_use::NextUseError) -> Regallo
         error.block,
         error.instruction,
         error.values,
+        error.message,
+    )
+}
+
+fn reload_recipe_error(phase: &'static str, error: reload::ReloadRecipeError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.value.into_iter().collect(),
         error.message,
     )
 }
@@ -328,6 +340,15 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
+    let reload_recipe_start = timing.then(crate::timing::now);
+    let planning_recipes = reload::analyze_for_planning(func)
+        .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
+    if let Some(start) = reload_recipe_start {
+        eprintln!(
+            "[regalloc-timing] label={label} reload_recipe_plan_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
     let next_use_start = timing.then(crate::timing::now);
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
@@ -348,7 +369,7 @@ fn run_regalloc_in_place(
         );
     }
     let alloc_start = timing.then(crate::timing::now);
-    let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
+    let allocation = ssa::allocate(func, &normalized_cfg, &next_use, &planning_recipes)?;
     let assignment = allocation.assignment;
     let spill_frame_size = allocation.spill_frame_size;
     if let Some(start) = alloc_start {

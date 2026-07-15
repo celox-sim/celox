@@ -1,10 +1,14 @@
 //! Verified non-iterative SSA register-allocation pipeline.
 
+use std::collections::BTreeSet;
+
 use crate::backend::native::mir::{MFunction, VReg};
 
 use super::assignment::AssignmentMap;
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
+use super::reload::{PlanningRecipes, PointUse};
+use super::spill_plan::{PlannedOp, SpillPlan};
 
 pub(super) struct Allocation {
     pub assignment: AssignmentMap,
@@ -17,11 +21,22 @@ pub(super) fn allocate(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
 ) -> Result<Allocation, super::RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let phase = timing.then(crate::timing::now);
-    let plan = super::spill_plan::plan(func, cfg, next_use, super::NUM_REGS).map_err(|error| {
+    let recipe_costs = planning_recipes
+        .global_materialization_costs()
+        .map_err(|error| super::reload_recipe_error("spill-planner recipe costs", error))?;
+    let plan = super::spill_plan::plan_with_recipe_costs(
+        func,
+        cfg,
+        next_use,
+        &recipe_costs,
+        super::NUM_REGS,
+    )
+    .map_err(|error| {
         super::RegallocError::new(
             "spill planning",
             error.rule,
@@ -67,18 +82,38 @@ pub(super) fn allocate(
         );
     }
 
+    // Edge coupling operations are chosen by the spill planner, so their
+    // materialization points do not exist as MIR uses during the first recipe
+    // analysis.  Query the exact insertion point (immediately before the
+    // predecessor terminator) only after the complete plan is available.
+    let phase = timing.then(crate::timing::now);
+    let requested_points = planner_reload_queries(func, &plan)?;
+    let reload_recipes = super::reload::analyze_with_queries(func, cfg, &requested_points)
+        .map_err(|error| {
+            super::reload_recipe_error("spill-planner reload-recipe analysis", error)
+        })?;
+    if let Some(start) = phase {
+        eprintln!(
+            "[regalloc-timing] ssa planner_reload_recipe_analyze_verify queries={} elapsed={:?}",
+            requested_points.len(),
+            start.elapsed()
+        );
+    }
+
     let phase = timing.then(crate::timing::now);
     let reconstruction =
-        super::reconstruct::reconstruct(func, cfg, &plan, next_use).map_err(|error| {
-            super::RegallocError::new(
-                "SSA reconstruction",
-                error.rule,
-                error.block,
-                error.instruction,
-                error.values,
-                error.message,
-            )
-        })?;
+        super::reconstruct::reconstruct(func, cfg, &plan, next_use, &reload_recipes).map_err(
+            |error| {
+                super::RegallocError::new(
+                    "SSA reconstruction",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            },
+        )?;
     if let Some(start) = phase {
         eprintln!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} elapsed={:?}",
@@ -94,6 +129,10 @@ pub(super) fn allocate(
     func.verify_result().map_err(|error| {
         super::RegallocError::mir("SSA reconstruction structural verification", error)
     })?;
+    super::reload::verify_expected_materialized_reloads(func, cfg, &reconstruction.recipe_reloads)
+        .map_err(|error| {
+            super::reload_recipe_error("spill-planner reload-recipe verification", error)
+        })?;
 
     // Prove the spill result itself fits the machine before Perm boundaries
     // introduce fresh representatives.  This keeps pressure correctness
@@ -175,4 +214,60 @@ pub(super) fn allocate(
         assignment: coloring.assignment,
         spill_frame_size: reconstruction.frame_size,
     })
+}
+
+pub(super) fn planner_reload_queries(
+    func: &MFunction,
+    plan: &SpillPlan,
+) -> Result<BTreeSet<PointUse>, super::RegallocError> {
+    let mut requested = BTreeSet::new();
+    for &(point, operation) in &plan.point_ops {
+        let PlannedOp::Reload { value, .. } = operation else {
+            continue;
+        };
+        requested.insert(PointUse {
+            block: point.block,
+            instruction: point.instruction,
+            value: VReg(value.0),
+        });
+    }
+    for (&(predecessor, _successor), operations) in &plan.edge_ops {
+        if !operations
+            .iter()
+            .any(|operation| matches!(operation, PlannedOp::Reload { .. }))
+        {
+            continue;
+        }
+        let Some(block) = func.blocks.get(predecessor) else {
+            return Err(super::RegallocError::new(
+                "spill-planner reload-recipe analysis",
+                "RELOAD_RECIPE.EDGE_PREDECESSOR_EXISTS",
+                None,
+                None,
+                Vec::new(),
+                format!("edge operation predecessor index {predecessor} is outside function"),
+            ));
+        };
+        let Some(instruction) = block.insts.len().checked_sub(1) else {
+            return Err(super::RegallocError::new(
+                "spill-planner reload-recipe analysis",
+                "RELOAD_RECIPE.EDGE_PREDECESSOR_TERMINATED",
+                Some(block.id),
+                None,
+                Vec::new(),
+                "edge operation predecessor block is empty",
+            ));
+        };
+        for operation in operations {
+            let PlannedOp::Reload { value, .. } = operation else {
+                continue;
+            };
+            requested.insert(PointUse {
+                block: block.id,
+                instruction,
+                value: VReg(value.0),
+            });
+        }
+    }
+    Ok(requested)
 }
