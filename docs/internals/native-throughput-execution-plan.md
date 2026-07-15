@@ -410,10 +410,12 @@ Execution slices:
    connected value DAG into its latest legal existing control region, using
    the eventual placement of instruction users and predecessor-edge placement
    for block arguments.
-6. **4c2b2 -- grouped multi-output regions (pending).** Extend region
-   recognition beyond one contiguous Mux result spine to grouped outputs,
-   while retaining explicit MemorySSA and effect-domain restrictions.
-7. **4d -- generated-code and full-run evaluation (in progress).** Prove that
+6. **4c2b2 -- grouped multi-output regions (evaluated and rejected).** Extend
+   region recognition beyond one contiguous Mux result spine to grouped
+   outputs, while retaining explicit MemorySSA and effect-domain restrictions.
+   The implementation was correct but failed the full-runtime retention gate,
+   so it is not present in the retained tree.
+7. **4d -- generated-code and full-run evaluation (complete).** Prove that
    untaken pure work is absent from executed paths, run the common and Linux
    gates after each retained 4c slice, and retain placement only if full
    runtime improves.
@@ -645,7 +647,47 @@ it does not claim that whole-region placement is implemented.
   `cy=9ab960 x3=aa pass=1`, and the final pass result in
   `target/heliodor/results/20260715T215231Z_celox_test_soc_linux_boot.log`.
 
-Status: **in progress (4a--4c2b1 complete; 4c2b2 pending)**.
+4c2b2 evaluation:
+
+- implemented maximal structured diamond-chain recognition for repeated
+  predicates, including inverted boolean aliases. The trial fused every arm's
+  outputs atomically into one final merge and retained Store/effect order;
+- allowed a state read to cross the removed intermediate merge only when its
+  exact StateSSA fragment and MemorySSA version matched the corresponding
+  predecessor edge. Aliasing reads, changed versions, cycles, branch arguments,
+  intermediate dependencies, and moved observable effects were rejected;
+- included the live-in extension of all final merge parameters in the static
+  placement cost and preflighted both disjoint chains and the one safe adjacent
+  final-merge/source composition before mutation;
+- verified the intended rewrite directly in the complete Heliodor post-SIR.
+  Both `amo_b_ze/se` and `amo_old_ze/se` became two-parameter final merges with
+  their Stores in original order, and each pair retained only one branch on
+  `r28596`;
+- focused tests passed 46/46 and the trial common gates passed with 719/719
+  library tests, 60 native-testbench passes, and 9 native/Cranelift/Wasm
+  counter passes. Two traces around the first full run matched byte for byte;
+  their pre-SIR, post-SIR, and MIR SHA-256 values were respectively
+  `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`,
+  `d1248ebd29a63f767264caa609c65ec1c5fb74bcf32ceb9e65cb8c9e14479aea`,
+  and `7e091f1c4e7d50259b2c71a1a09eac025dec39ab23cb5b3358a15a3cce595185`;
+- both clean pinned Heliodor runs completed correctly at the identical
+  `cy=9ab960 x3=aa pass=1` marker, but took `184.120 s` and `190.775 s` process
+  time. The logs are
+  `target/heliodor/results/20260715T223006Z_celox_test_soc_linux_boot.log` and
+  `target/heliodor/results/20260715T223508Z_celox_test_soc_linux_boot.log`;
+  therefore the trial failed the runtime gate against retained 4c2b1 and was
+  reverted in full; and
+- after the revert, the focused branchification tests passed 41/41 and the
+  common gates returned to 714/714 library tests, 60 native-testbench passes,
+  and 9 native/Cranelift/Wasm counter passes. The worktree and rebuilt non-LTO
+  runner now contain the retained 4c2b1 implementation only.
+
+The failed trial shows that reducing source-level branch count alone is not a
+sufficient objective: extending two output values through the combined arms
+can worsen the downstream live ranges and native layout. Step 4 therefore ends
+at 4c2b1 instead of retaining a structurally cleaner but slower CFG.
+
+Status: **complete (4a--4c2b1 retained; 4c2b2 evaluated and rejected)**.
 
 ## Step 5: End-to-end qualification
 
@@ -656,8 +698,8 @@ After all retained steps:
 - run the full pinned Heliodor Linux test at least twice with `heliodor-dev`;
 - run a same-input `veryl-cc` comparison without using Celox LTO;
 - confirm the same semantic completion and simulated-cycle marker;
-- record median full-process wall time without treating it as a statistical
-  correctness argument; and
+- record each full-process wall time directly without turning repeated runs
+  into a statistical correctness argument; and
 - update the stale status/baseline sections of the native JIT and Heliodor
   documents.
 
@@ -679,8 +721,9 @@ Status: **not started**.
 | 4a | `f213119a` | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
 | 4b | `47006336` | placement 9/9; StateSSA 7/7 | lib 701/701; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 204.925 s | complete |
 | 4c1 | `6bff0569` | branchify 35/35 | lib 708/708; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 201.262 s | complete |
-| 4c2a | this commit | branchify 37/37 | lib 710/710; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.531 s | complete |
-| 4c2b--4d | pending | pending | pending | pending | pending | in progress |
+| 4c2a | `f11ac186` | branchify 37/37 | lib 710/710; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.531 s | complete |
+| 4c2b1--4d | `8e1ec0b9` | branchify 41/41 | lib 714/714; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.378 s | complete |
+| 4c2b2 trial | rejected (no commit) | branchify 46/46 | lib 719/719; native 60/60; counter 9/9 | pass twice: `cy=9ab960 x3=aa pass=1` | 184.120 s; 190.775 s | reverted |
 | 5 | pending | pending | pending | pending | pending | not started |
 
 ## Related design records
