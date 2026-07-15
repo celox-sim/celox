@@ -202,6 +202,60 @@ fn fingerprint_ff_units(
     hasher.finish()
 }
 
+struct NativeCompileTask<'a> {
+    fingerprint: u64,
+    units: &'a [crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    label: &'static str,
+    compile_comb_prefix: bool,
+}
+
+fn collect_ff_compile_tasks<'a>(sir: &'a Program) -> Vec<NativeCompileTask<'a>> {
+    let mut tasks = Vec::new();
+    let mut seen = HashMap::<u64, usize>::default();
+    collect_ff_compile_tasks_from(
+        &sir.eval_apply_ffs,
+        "eval_apply_ff",
+        true,
+        &mut seen,
+        &mut tasks,
+    );
+    collect_ff_compile_tasks_from(
+        &sir.eval_only_ffs,
+        "eval_only_ff",
+        false,
+        &mut seen,
+        &mut tasks,
+    );
+    collect_ff_compile_tasks_from(&sir.apply_ffs, "apply_ff", false, &mut seen, &mut tasks);
+    tasks
+}
+
+fn collect_ff_compile_tasks_from<'a>(
+    ff_map: &'a HashMap<
+        AbsoluteAddr,
+        Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
+    >,
+    label: &'static str,
+    compile_comb_prefix: bool,
+    seen: &mut HashMap<u64, usize>,
+    tasks: &mut Vec<NativeCompileTask<'a>>,
+) {
+    for units in ff_map.values() {
+        let fingerprint = fingerprint_ff_units(units);
+        if let Some(&index) = seen.get(&fingerprint) {
+            tasks[index].compile_comb_prefix |= compile_comb_prefix;
+            continue;
+        }
+        seen.insert(fingerprint, tasks.len());
+        tasks.push(NativeCompileTask {
+            fingerprint,
+            units,
+            label,
+            compile_comb_prefix,
+        });
+    }
+}
+
 fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
@@ -210,11 +264,65 @@ fn compile_program(
         .layout
         .as_ref()
         .expect("layout must be built before backend");
-    let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
+    let compile_tasks = collect_ff_compile_tasks(sir);
+    let (comb_jit, mut compiled_ff_codes, mut compiled_comb_apply_codes) = std::thread::scope(
+        |scope| {
+            let four_state = options.four_state;
+            let comb_handle =
+                scope.spawn(move || compile_units(&sir.eval_comb, layout, four_state, "eval_comb"));
+            let mut ff_handles = Vec::with_capacity(compile_tasks.len());
+            let mut comb_apply_handles = Vec::new();
+            for task in &compile_tasks {
+                let units = task.units;
+                let label = task.label;
+                ff_handles.push((
+                    task.fingerprint,
+                    scope.spawn(move || compile_units(units, layout, four_state, label)),
+                ));
+                if task.compile_comb_prefix {
+                    let units = task.units;
+                    comb_apply_handles.push((
+                        task.fingerprint,
+                        scope.spawn(move || {
+                            compile_comb_eval_apply_units(
+                                &sir.eval_comb,
+                                units,
+                                layout,
+                                four_state,
+                                "eval_comb_apply_ff",
+                            )
+                        }),
+                    ));
+                }
+            }
 
-    // Compile eval_comb
-    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state, "eval_comb")?;
+            let comb_jit = comb_handle
+                .join()
+                .map_err(|_| codegen_err("native eval_comb compile thread panicked".into()))??;
+            let mut ff_codes = HashMap::default();
+            for (fingerprint, handle) in ff_handles {
+                let code = handle.join().map_err(|_| {
+                    codegen_err(format!(
+                        "native FF compile thread panicked for fingerprint {fingerprint:016x}"
+                    ))
+                })??;
+                ff_codes.insert(fingerprint, code);
+            }
+            let mut comb_apply_codes = HashMap::default();
+            for (fingerprint, handle) in comb_apply_handles {
+                let code = handle.join().map_err(|_| {
+                    codegen_err(format!(
+                        "native comb/apply compile thread panicked for fingerprint {fingerprint:016x}"
+                    ))
+                })??;
+                comb_apply_codes.insert(fingerprint, code);
+            }
+            Ok::<_, SimulatorError>((comb_jit, ff_codes, comb_apply_codes))
+        },
+    )?;
     let comb_func = comb_jit.fn_ptr;
+    let mut all_jit_codes: Vec<jit_mem::JitCode> =
+        Vec::with_capacity(1 + compiled_ff_codes.len() + compiled_comb_apply_codes.len());
     all_jit_codes.push(comb_jit);
 
     // Compile FF units
@@ -225,14 +333,19 @@ fn compile_program(
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
     let mut addr_to_id = HashMap::default();
-    let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
-    let mut compiled_comb_apply_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
+    let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = compiled_ff_codes
+        .iter()
+        .map(|(&fingerprint, code)| (fingerprint, code.fn_ptr))
+        .collect();
+    let mut compiled_comb_apply_cache: HashMap<u64, NativeSimFunc> = compiled_comb_apply_codes
+        .iter()
+        .map(|(&fingerprint, code)| (fingerprint, code.fn_ptr))
+        .collect();
 
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     >,
-                            all_codes: &mut Vec<jit_mem::JitCode>,
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
                             addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
                             compiled_ff_cache: &mut HashMap<u64, NativeSimFunc>,
@@ -240,7 +353,6 @@ fn compile_program(
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
                             id_to_event: &mut Vec<NativeEventRef>,
-                            label: &str,
                             compile_comb_prefix: bool|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
@@ -251,31 +363,9 @@ fn compile_program(
             }
 
             let fingerprint = fingerprint_ff_units(units);
-            let func = if let Some(&func) = compiled_ff_cache.get(&fingerprint) {
-                func
-            } else {
-                let code = compile_units(units, layout, options.four_state, label)?;
-                let func = code.fn_ptr;
-                all_codes.push(code);
-                compiled_ff_cache.insert(fingerprint, func);
-                func
-            };
+            let func = compiled_ff_cache[&fingerprint];
             let comb_apply_func = if compile_comb_prefix {
-                if let Some(&func) = compiled_comb_apply_cache.get(&fingerprint) {
-                    func
-                } else {
-                    let code = compile_comb_eval_apply_units(
-                        &sir.eval_comb,
-                        units,
-                        layout,
-                        options.four_state,
-                        "eval_comb_apply_ff",
-                    )?;
-                    let func = code.fn_ptr;
-                    all_codes.push(code);
-                    compiled_comb_apply_cache.insert(fingerprint, func);
-                    func
-                }
+                compiled_comb_apply_cache[&fingerprint]
             } else {
                 func
             };
@@ -309,7 +399,6 @@ fn compile_program(
 
     compile_ff_group(
         &sir.eval_apply_ffs,
-        &mut all_jit_codes,
         &mut event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
@@ -317,12 +406,10 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
-        "eval_apply_ff",
         true,
     )?;
     compile_ff_group(
         &sir.eval_only_ffs,
-        &mut all_jit_codes,
         &mut eval_only_event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
@@ -330,12 +417,10 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
-        "eval_only_ff",
         false,
     )?;
     compile_ff_group(
         &sir.apply_ffs,
-        &mut all_jit_codes,
         &mut apply_event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
@@ -343,9 +428,29 @@ fn compile_program(
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
-        "apply_ff",
         false,
     )?;
+    let mut compiled_ff_keys = compiled_ff_codes.keys().copied().collect::<Vec<_>>();
+    compiled_ff_keys.sort_unstable();
+    for fingerprint in compiled_ff_keys {
+        all_jit_codes.push(
+            compiled_ff_codes
+                .remove(&fingerprint)
+                .expect("compiled FF key exists"),
+        );
+    }
+    let mut compiled_comb_apply_keys = compiled_comb_apply_codes
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    compiled_comb_apply_keys.sort_unstable();
+    for fingerprint in compiled_comb_apply_keys {
+        all_jit_codes.push(
+            compiled_comb_apply_codes
+                .remove(&fingerprint)
+                .expect("compiled comb/apply key exists"),
+        );
+    }
 
     // Pre-compute 4-state initialization regions
     let mut four_state_inits = Vec::new();
