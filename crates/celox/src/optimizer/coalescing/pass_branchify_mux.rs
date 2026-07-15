@@ -1,5 +1,5 @@
 use super::pass_manager::ExecutionUnitPass;
-use super::placement_analysis::{PlacementAnalysis, ValueId, ValueSafety};
+use super::placement_analysis::{PlacementAnalysis, ValueId, ValueOrigin, ValueSafety, ValueUse};
 use super::shared::{def_reg, normalize_branch_condition};
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
@@ -199,6 +199,20 @@ struct AtomicPriorityPlacementPlan {
     regions: Vec<WholePriorityChainPlan>,
 }
 
+#[derive(Clone)]
+struct ExistingCfgPlacedInstruction {
+    value: ValueId,
+    source_block: BlockId,
+    source_index: usize,
+    target_block: BlockId,
+    topological_rank: usize,
+    instruction: SIRInstruction<RegionedAbsoluteAddr>,
+}
+
+struct ExistingCfgPlacementPlan {
+    placements: Vec<ExistingCfgPlacedInstruction>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct UseLocation {
     block: BlockId,
@@ -323,6 +337,17 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             let regions =
                 apply_atomic_priority_placement(eu, plan, &mut next_block_id, &mut reg_counter);
             applied += regions;
+        }
+
+        // Rebuild placement facts after the atomic CFG rewrite, then perform
+        // ordinary whole-unit ScheduleLate on the existing branch forest.
+        // This catches pure/state-versioned DAGs which feed only one existing
+        // control arm even when no Mux remains at the use site.  The complete
+        // connected move is selected and preflighted before any block changes.
+        if let Ok(placement) = PlacementAnalysis::analyze(eu)
+            && let Some(plan) = find_existing_cfg_placement(eu, &placement)
+        {
+            applied += apply_existing_cfg_placement(eu, plan);
         }
 
         if stats {
@@ -1065,6 +1090,332 @@ fn find_atomic_priority_placement(
         regions.push(candidate.plan);
     }
     (!regions.is_empty()).then_some(AtomicPriorityPlacementPlan { regions })
+}
+
+/// Schedule movable SSA occurrences as late as the existing CFG permits.
+///
+/// The target of a producer depends on the eventual targets of its users, so
+/// this is deliberately a whole-unit reverse-topological computation.  It is
+/// not a block-local "all uses happen to be in one arm" scan.  Parameters and
+/// observable instructions break the value DAG and remain fixed anchors.
+fn find_existing_cfg_placement(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+) -> Option<ExistingCfgPlacementPlan> {
+    let mut instruction_values = HashMap::<(BlockId, usize), ValueId>::default();
+    let mut candidates = BTreeSet::<ValueId>::new();
+    for occurrence in &placement.values {
+        let ValueOrigin::Instruction { block, index } = occurrence.origin else {
+            continue;
+        };
+        let Some(instruction) = eu
+            .blocks
+            .get(&block)
+            .and_then(|block| block.instructions.get(index))
+        else {
+            return None;
+        };
+        if def_reg(instruction) != Some(occurrence.register) {
+            return None;
+        }
+        instruction_values.insert((block, index), occurrence.id);
+        let movable = match occurrence.safety {
+            ValueSafety::Pure => is_cross_block_sinkable_input(instruction),
+            ValueSafety::StateRead(_) => matches!(instruction, SIRInstruction::Load(..)),
+            ValueSafety::Pinned(_) => false,
+        };
+        if movable {
+            candidates.insert(occurrence.id);
+        }
+    }
+
+    // Producer -> user edges. Repeated operands are one dependency edge, not
+    // a cycle or an inflated indegree.
+    let mut indegree = candidates
+        .iter()
+        .copied()
+        .map(|value| (value, 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut users = HashMap::<ValueId, Vec<ValueId>>::default();
+    for &user in &candidates {
+        let dependencies = placement.values[user.0]
+            .operands
+            .iter()
+            .copied()
+            .filter(|operand| candidates.contains(operand))
+            .collect::<BTreeSet<_>>();
+        indegree.insert(user, dependencies.len());
+        for dependency in dependencies {
+            users.entry(dependency).or_default().push(user);
+        }
+    }
+    for value_users in users.values_mut() {
+        value_users.sort_unstable();
+        value_users.dedup();
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(&value, &degree)| (degree == 0).then_some(value))
+        .collect::<BTreeSet<_>>();
+    let mut topological = Vec::with_capacity(candidates.len());
+    while let Some(&value) = ready.iter().next() {
+        ready.remove(&value);
+        topological.push(value);
+        for &user in users.get(&value).into_iter().flatten() {
+            let degree = indegree.get_mut(&user)?;
+            *degree = degree.checked_sub(1)?;
+            if *degree == 0 {
+                ready.insert(user);
+            }
+        }
+    }
+    // Valid SIR SSA is acyclic after block parameters cut loop-carried value
+    // edges. Refuse the complete plan if that invariant is not represented.
+    if topological.len() != candidates.len() {
+        return None;
+    }
+
+    let mut targets = HashMap::<ValueId, BlockId>::default();
+    for &value in topological.iter().rev() {
+        let occurrence = &placement.values[value.0];
+        let origin = occurrence.origin.block();
+        let use_blocks = occurrence.uses.iter().map(|site| match *site {
+            ValueUse::Instruction { block, index, .. } => instruction_values
+                .get(&(block, index))
+                .and_then(|user| targets.get(user))
+                .copied()
+                .unwrap_or(block),
+            ValueUse::BranchCondition { block } => block,
+            ValueUse::EdgeArgument { predecessor, .. } => predecessor,
+        });
+        let target = placement
+            .sink_bounds_for_use_blocks(value, use_blocks)
+            .map(|bounds| bounds.latest)
+            .filter(|&target| target != origin && !placement.cfg.postdominates(target, origin))
+            .unwrap_or(origin);
+        targets.insert(value, target);
+    }
+
+    let moved = candidates
+        .iter()
+        .copied()
+        .filter(|value| {
+            let origin = placement.values[value.0].origin.block();
+            targets.get(value).is_some_and(|target| *target != origin)
+        })
+        .collect::<BTreeSet<_>>();
+    if moved.is_empty() {
+        return None;
+    }
+
+    // Profitability belongs to the connected move, not to a cheap Mux or
+    // arithmetic node viewed in isolation.  Compare work skipped on the
+    // untaken half of an existing branch with the worst-case increase in
+    // values crossing the control boundary.  No new control transfer or phi
+    // is introduced by this transform.
+    let mut neighbors = HashMap::<ValueId, Vec<ValueId>>::default();
+    for &user in &moved {
+        for &operand in &placement.values[user.0].operands {
+            if !moved.contains(&operand) {
+                continue;
+            }
+            neighbors.entry(user).or_default().push(operand);
+            neighbors.entry(operand).or_default().push(user);
+        }
+    }
+    for adjacent in neighbors.values_mut() {
+        adjacent.sort_unstable();
+        adjacent.dedup();
+    }
+
+    let mut accepted = HashSet::<ValueId>::default();
+    let mut unvisited = moved.clone();
+    while let Some(&root) = unvisited.iter().next() {
+        let mut component = BTreeSet::new();
+        let mut worklist = VecDeque::from([root]);
+        unvisited.remove(&root);
+        while let Some(value) = worklist.pop_front() {
+            component.insert(value);
+            for &neighbor in neighbors.get(&value).into_iter().flatten() {
+                if unvisited.remove(&neighbor) {
+                    worklist.push_back(neighbor);
+                }
+            }
+        }
+        if existing_cfg_component_is_profitable(eu, placement, &instruction_values, &component) {
+            accepted.extend(component);
+        }
+    }
+    if accepted.is_empty() {
+        return None;
+    }
+
+    let placements = topological
+        .into_iter()
+        .enumerate()
+        .filter_map(|(topological_rank, value)| {
+            if !accepted.contains(&value) {
+                return None;
+            }
+            let occurrence = &placement.values[value.0];
+            let ValueOrigin::Instruction {
+                block: source_block,
+                index: source_index,
+            } = occurrence.origin
+            else {
+                return None;
+            };
+            let target_block = targets[&value];
+            Some(ExistingCfgPlacedInstruction {
+                value,
+                source_block,
+                source_index,
+                target_block,
+                topological_rank,
+                instruction: eu.blocks[&source_block].instructions[source_index].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    (!placements.is_empty()).then_some(ExistingCfgPlacementPlan { placements })
+}
+
+fn existing_cfg_component_is_profitable(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    instruction_values: &HashMap<(BlockId, usize), ValueId>,
+    component: &BTreeSet<ValueId>,
+) -> bool {
+    let mut inputs = BTreeSet::<ValueId>::new();
+    let mut outputs = BTreeSet::<ValueId>::new();
+    let mut moved_cost = 0u128;
+
+    for &value in component {
+        let occurrence = &placement.values[value.0];
+        let ValueOrigin::Instruction { block, index } = occurrence.origin else {
+            return false;
+        };
+        let Some(instruction) = eu
+            .blocks
+            .get(&block)
+            .and_then(|block| block.instructions.get(index))
+        else {
+            return false;
+        };
+        moved_cost =
+            moved_cost.saturating_add(branchified_instruction_cost(instruction, &eu.register_map));
+        inputs.extend(
+            occurrence
+                .operands
+                .iter()
+                .copied()
+                .filter(|operand| !component.contains(operand)),
+        );
+        if occurrence.uses.iter().any(|site| match *site {
+            ValueUse::Instruction { block, index, .. } => instruction_values
+                .get(&(block, index))
+                .is_none_or(|user| !component.contains(user)),
+            ValueUse::BranchCondition { .. } | ValueUse::EdgeArgument { .. } => true,
+        }) {
+            outputs.insert(value);
+        }
+    }
+
+    let chunks = |value: ValueId| {
+        eu.register_map
+            .get(&placement.values[value.0].register)
+            .map(|register| register.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    };
+    let input_chunks = inputs.into_iter().map(chunks).sum::<u128>();
+    let output_chunks = outputs.into_iter().map(chunks).sum::<u128>();
+    let added_live_chunks = input_chunks.saturating_sub(output_chunks);
+
+    // Scale by two: under the same profile-free even prior used by branch
+    // selection, moving C units into one arm skips C/2 expected work, while a
+    // newly live boundary chunk is charged on the complete path.
+    moved_cost
+        > added_live_chunks
+            .saturating_mul(LIVE_THROUGH_COST_PER_CHUNK)
+            .saturating_mul(2)
+}
+
+fn apply_existing_cfg_placement(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: ExistingCfgPlacementPlan,
+) -> usize {
+    let mut values = HashSet::<ValueId>::default();
+    let mut definitions = HashSet::<RegisterId>::default();
+    let mut source_locations = HashSet::<(BlockId, usize)>::default();
+    for placed in &plan.placements {
+        let Some(source) = eu.blocks.get(&placed.source_block) else {
+            return 0;
+        };
+        if placed.source_block == placed.target_block
+            || !eu.blocks.contains_key(&placed.target_block)
+            || source.instructions.get(placed.source_index) != Some(&placed.instruction)
+            || !values.insert(placed.value)
+            || !source_locations.insert((placed.source_block, placed.source_index))
+            || def_reg(&placed.instruction).is_none_or(|register| !definitions.insert(register))
+        {
+            return 0;
+        }
+    }
+
+    let mut removals = HashMap::<BlockId, BTreeSet<usize>>::default();
+    let mut insertions =
+        HashMap::<BlockId, Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)>>::default();
+    let mut touched = BTreeSet::<BlockId>::new();
+    for placed in &plan.placements {
+        removals
+            .entry(placed.source_block)
+            .or_default()
+            .insert(placed.source_index);
+        insertions
+            .entry(placed.target_block)
+            .or_default()
+            .push((placed.topological_rank, placed.instruction.clone()));
+        touched.insert(placed.source_block);
+        touched.insert(placed.target_block);
+    }
+
+    // Construct every touched block from the preflighted snapshot first. No
+    // partially rewritten CFG is observable if validation above fails.
+    let mut replacements = touched
+        .iter()
+        .map(|&block| (block, eu.blocks[&block].clone()))
+        .collect::<HashMap<_, _>>();
+    for (block, indices) in removals {
+        let replacement = replacements
+            .get_mut(&block)
+            .expect("preflighted source block must have a replacement");
+        replacement.instructions = replacement
+            .instructions
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, instruction)| (!indices.contains(&index)).then_some(instruction))
+            .collect();
+    }
+    for (block, mut instructions) in insertions {
+        instructions.sort_unstable_by_key(|(rank, _)| *rank);
+        replacements
+            .get_mut(&block)
+            .expect("preflighted target block must have a replacement")
+            .instructions
+            .splice(
+                0..0,
+                instructions.into_iter().map(|(_, instruction)| instruction),
+            );
+    }
+    for block in touched {
+        *eu.blocks
+            .get_mut(&block)
+            .expect("preflighted touched block must remain present") = replacements
+            .remove(&block)
+            .expect("preflighted touched block must have a replacement");
+    }
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    plan.placements.len()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4333,6 +4684,45 @@ mod tests {
         }
     }
 
+    fn cfg_unit(
+        register_count: usize,
+        one_bit_registers: &[usize],
+        blocks: Vec<BasicBlock<RegionedAbsoluteAddr>>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let one_bit_registers = one_bit_registers.iter().copied().collect::<HashSet<_>>();
+        let register_map = (0..register_count)
+            .map(|register| {
+                (
+                    RegisterId(register),
+                    RegisterType::Bit {
+                        width: if one_bit_registers.contains(&register) {
+                            1
+                        } else {
+                            64
+                        },
+                        signed: false,
+                    },
+                )
+            })
+            .collect();
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
+            register_map,
+        }
+    }
+
+    fn store(instance: usize, source: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            addr(instance),
+            SIROffset::Static(0),
+            64,
+            RegisterId(source),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
     fn profitability(
         true_arm_cost: u128,
         false_arm_cost: u128,
@@ -5911,7 +6301,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_priority_placement_does_not_move_a_state_read_as_pure_work() {
+    fn existing_cfg_moves_a_state_read_only_with_memoryssa_proof() {
         let mut register_map = HashMap::default();
         for reg in 0..17 {
             register_map.insert(
@@ -5989,8 +6379,8 @@ mod tests {
         let cfg = SirCfg::analyze(&eu).unwrap();
         let load_block = cfg.block_index(load_blocks[0]).unwrap();
         assert!(
-            cfg.controllers[load_block].is_empty(),
-            "state reads require an explicit MemorySSA placement plan"
+            !cfg.controllers[load_block].is_empty(),
+            "an unchanged versioned state read should execute only in its selected arm"
         );
     }
 
@@ -6316,6 +6706,312 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn existing_cfg_places_complete_dags_in_their_used_arms() {
+        let mut eu = cfg_unit(
+            10,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: vec![
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(4),
+                            RegisterId(3),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(5),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(6),
+                            RegisterId(5),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(7),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Add,
+                            RegisterId(2),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(10, 4), store(11, 7)],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![store(12, 6), store(13, 7)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 4);
+
+        let definitions = |block: BlockId| {
+            eu.blocks[&block]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(definitions(BlockId(0)), vec![RegisterId(7)]);
+        assert_eq!(definitions(BlockId(1)), vec![RegisterId(3), RegisterId(4)]);
+        assert_eq!(definitions(BlockId(2)), vec![RegisterId(5), RegisterId(6)]);
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_uses_edge_arguments_and_preserves_dependency_order() {
+        let mut eu = cfg_unit(
+            5,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: vec![
+                        SIRInstruction::Binary(
+                            RegisterId(2),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(2),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(3)]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![RegisterId(4)],
+                    instructions: vec![store(0, 4)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 2);
+        assert_eq!(
+            eu.blocks[&BlockId(1)]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>(),
+            vec![RegisterId(2), RegisterId(3)]
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_sinks_only_loads_with_the_same_state_version() {
+        let make_unit = |intervening_write: bool| {
+            let mut instructions = vec![
+                SIRInstruction::Load(RegisterId(3), addr(0), SIROffset::Static(0), 64),
+                SIRInstruction::Binary(
+                    RegisterId(4),
+                    RegisterId(3),
+                    crate::ir::BinaryOp::Mul,
+                    RegisterId(1),
+                ),
+            ];
+            if intervening_write {
+                instructions.push(store(0, 2));
+            }
+            cfg_unit(
+                5,
+                &[0],
+                vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                        instructions,
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Return,
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: vec![],
+                        instructions: vec![store(1, 4)],
+                        terminator: SIRTerminator::Return,
+                    },
+                ],
+            )
+        };
+
+        let mut unchanged = make_unit(false);
+        let placement = PlacementAnalysis::analyze(&unchanged).unwrap();
+        let plan = find_existing_cfg_placement(&unchanged, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut unchanged, plan), 2);
+        assert!(matches!(
+            unchanged.blocks[&BlockId(2)].instructions.first(),
+            Some(SIRInstruction::Load(RegisterId(3), _, _, _))
+        ));
+        assert_eq!(unchanged.verify_result(), Ok(()));
+
+        let mut changed = make_unit(true);
+        let placement = PlacementAnalysis::analyze(&changed).unwrap();
+        let plan = find_existing_cfg_placement(&changed, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut changed, plan), 1);
+        assert!(
+            changed.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Load(RegisterId(3), _, _, _)
+                ))
+        );
+        assert!(
+            changed.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Store(_, _, _, _, _, _)))
+        );
+        assert_eq!(changed.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_rejects_cyclic_targets_and_unprofitable_fan_in() {
+        let loop_unit = cfg_unit(
+            6,
+            &[0, 5],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(5)],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(3),
+                        RegisterId(1),
+                        crate::ir::BinaryOp::Mul,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(5),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&loop_unit).unwrap();
+        assert!(find_existing_cfg_placement(&loop_unit, &placement).is_none());
+
+        let cheap = cfg_unit(
+            4,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(3),
+                        RegisterId(1),
+                        crate::ir::BinaryOp::And,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&cheap).unwrap();
+        assert!(find_existing_cfg_placement(&cheap, &placement).is_none());
     }
 
     #[test]

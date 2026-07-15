@@ -406,11 +406,14 @@ Execution slices:
 4. **4c2a -- cross-block occurrence ownership (complete).** Extend a priority
    region's movable closure through dominating blocks, including exact state
    reads whose MemorySSA version remains valid at the decision edge.
-5. **4c2b -- existing-CFG and grouped multi-output regions (pending).** Extend
-   region recognition beyond one contiguous Mux result spine to an existing
-   branch forest and grouped outputs, while retaining explicit MemorySSA and
-   effect-domain restrictions.
-6. **4d -- generated-code and full-run evaluation (in progress).** Prove that
+5. **4c2b1 -- existing-CFG whole-unit late placement (complete).** Schedule a
+   connected value DAG into its latest legal existing control region, using
+   the eventual placement of instruction users and predecessor-edge placement
+   for block arguments.
+6. **4c2b2 -- grouped multi-output regions (pending).** Extend region
+   recognition beyond one contiguous Mux result spine to grouped outputs,
+   while retaining explicit MemorySSA and effect-domain restrictions.
+7. **4d -- generated-code and full-run evaluation (in progress).** Prove that
    untaken pure work is absent from executed paths, run the common and Linux
    gates after each retained 4c slice, and retain placement only if full
    runtime improves.
@@ -598,7 +601,51 @@ it does not claim that whole-region placement is implemented.
   `cy=9ab960 x3=aa pass=1`, and the final pass result in
   `target/heliodor/results/20260715T212842Z_celox_test_soc_linux_boot.log`.
 
-Status: **in progress (4a--4c2a complete; 4c2b pending)**.
+4c2b1 result:
+
+- added a whole-unit reverse-topological ScheduleLate computation over the
+  existing CFG. An instruction use is anchored at the already-computed target
+  of its user, while branch conditions and block arguments remain anchored at
+  their branch block and predecessor edge respectively. This lets complete
+  producer chains follow a root into one existing arm instead of leaving the
+  producers in the common head;
+- accepted only targets which are legal under dominance and execution
+  frequency and which do not post-dominate the source. Pure occurrences may
+  move; a state read may move only when its exact StateSSA fragment and
+  MemorySSA version are unchanged at the target entry. Observable effects,
+  parameters, changed state versions, and cyclic targets remain fixed;
+- evaluated profitability for each connected movement component rather than
+  for an isolated cheap Mux or arithmetic node. The profile-free model charges
+  the increase in boundary live-in chunks against the complete work skipped on
+  the untaken arm, so a CLZ/shift/Mux chain can move as one unit while a cheap
+  two-input bit operation which only expands the boundary is rejected;
+- preflighted every concrete source occurrence and target, built all touched
+  replacement blocks from the same snapshot, removed definitions by exact
+  occurrence, and inserted them at target entries in producer-before-user
+  order. No CFG edge, block parameter, register identity, or observable
+  operation is rewritten by this slice;
+- verified the previously residual Heliodor FPU region directly in optimized
+  SIR. Before `Branch(r29303 ? b4447 : b4448)`, neither CLZ arm is evaluated.
+  The `r29312` chain is in `b4447`; the `r29343..r29346` and
+  `r29368..r29371` chains are in `b4448`, with the latter retained at their
+  lowest common existing control block because their uses span its nested
+  branch arms;
+- two complete traces generated around the uninstrumented Linux run were
+  byte-identical for pre-SIR, post-SIR, and MIR. Their SHA-256 values are
+  `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`,
+  `b9ada97c81febb5f5cafc41639b8403d308afcafe991e214513d3ea51d7b1204`,
+  and `5e3380d085935eabc45d198f251b34c65f15da83e83dc4286835206ec3b8d7e4`
+  respectively;
+- focused branchification tests passed 41/41. Common gates passed with 714/714
+  library tests, 60 native-testbench passes, and 9 native/Cranelift/Wasm
+  counter passes; documented upstream/Veryl cases remained ignored; and
+- the clean pinned Heliodor full non-LTO run took `183.378 s` process time and
+  `183.259 s` runner-reported time. Its 47-line log contains exactly one
+  native/O2/two-state/full configuration, `reboot: Power down`,
+  `cy=9ab960 x3=aa pass=1`, and the final pass result in
+  `target/heliodor/results/20260715T215231Z_celox_test_soc_linux_boot.log`.
+
+Status: **in progress (4a--4c2b1 complete; 4c2b2 pending)**.
 
 ## Step 5: End-to-end qualification
 

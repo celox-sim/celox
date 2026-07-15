@@ -28,7 +28,7 @@ pub(super) enum ValueOrigin {
 }
 
 impl ValueOrigin {
-    fn block(self) -> BlockId {
+    pub fn block(self) -> BlockId {
         match self {
             Self::Parameter { block, .. } | Self::Instruction { block, .. } => block,
         }
