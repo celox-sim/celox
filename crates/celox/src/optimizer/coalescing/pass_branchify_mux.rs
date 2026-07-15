@@ -9,7 +9,7 @@ use crate::ir::{
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use std::cmp::Reverse;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 pub(super) struct BranchifyMuxPass;
 
@@ -174,6 +174,7 @@ enum PriorityPlacementSite {
 }
 #[derive(Clone)]
 struct PriorityPlacedInstruction {
+    block: BlockId,
     index: usize,
     site: PriorityPlacementSite,
     instruction: SIRInstruction<RegionedAbsoluteAddr>,
@@ -1076,7 +1077,7 @@ fn mark_priority_dependency(
     leaf_count: usize,
     register: RegisterId,
     leaf: usize,
-    masks: &mut HashMap<usize, Vec<bool>>,
+    masks: &mut HashMap<(BlockId, usize), Vec<bool>>,
     seen: &mut HashSet<(RegisterId, usize)>,
 ) {
     if !seen.insert((register, leaf)) {
@@ -1085,26 +1086,24 @@ fn mark_priority_dependency(
     let Some(&(definition_block, index)) = locations.get(&register) else {
         return;
     };
-    if definition_block != block_id || index >= first_mux_idx {
+    if definition_block == block_id && index >= first_mux_idx {
         return;
     }
-    let instruction = &eu.blocks[&block_id].instructions[index];
-    if !is_cross_block_sinkable_input(instruction) {
-        return;
-    }
+    let instruction = &eu.blocks[&definition_block].instructions[index];
     let Some(value) = placement.value_for_register(register) else {
         return;
     };
-    if !matches!(
-        placement.value(value).map(|value| value.safety),
-        Some(ValueSafety::Pure)
-    ) || !placement.can_sink_to_edge(value, block_id)
-    {
+    let sinkable = match placement.value(value).map(|value| value.safety) {
+        Some(ValueSafety::Pure) => is_cross_block_sinkable_input(instruction),
+        Some(ValueSafety::StateRead(_)) => matches!(instruction, SIRInstruction::Load(..)),
+        Some(ValueSafety::Pinned(_)) | None => false,
+    };
+    if !sinkable || !placement.can_sink_to_edge(value, block_id) {
         return;
     }
 
     masks
-        .entry(index)
+        .entry((definition_block, index))
         .or_insert_with(|| vec![false; leaf_count])[leaf] = true;
     for operand in inst_uses(instruction) {
         mark_priority_dependency(
@@ -1152,7 +1151,7 @@ fn build_whole_priority_chain_candidate(
     }
 
     let leaf_count = muxes.len() + 1;
-    let mut masks = HashMap::<usize, Vec<bool>>::default();
+    let mut masks = HashMap::<(BlockId, usize), Vec<bool>>::default();
     let mut seen = HashSet::<(RegisterId, usize)>::default();
     mark_priority_dependency(
         eu,
@@ -1195,68 +1194,46 @@ fn build_whole_priority_chain_candidate(
         }
     }
 
-    let chain_indices = muxes.iter().map(|mux| mux.mux_idx).collect::<HashSet<_>>();
+    let chain_locations = muxes
+        .iter()
+        .map(|mux| (block_id, mux.mux_idx))
+        .collect::<HashSet<_>>();
     let mut movable = masks
         .iter()
         .filter(|(_, mask)| !mask.iter().all(|needed| *needed))
-        .map(|(&index, _)| index)
+        .map(|(&location, _)| location)
         .collect::<HashSet<_>>();
     loop {
         let remove = movable
             .iter()
             .copied()
-            .filter(|&index| {
-                let register = def_reg(&eu.blocks[&block_id].instructions[index])
+            .filter(|&(definition_block, index)| {
+                let register = def_reg(&eu.blocks[&definition_block].instructions[index])
                     .expect("priority placement input defines a value");
                 use_locations
                     .get(&register)
                     .into_iter()
                     .flatten()
                     .any(|location| {
-                        location.block != block_id
-                            || location.instruction.is_none_or(|user| {
-                                !movable.contains(&user) && !chain_indices.contains(&user)
-                            })
+                        location.instruction.is_none_or(|user| {
+                            let user = (location.block, user);
+                            !movable.contains(&user) && !chain_locations.contains(&user)
+                        })
                     })
             })
             .collect::<Vec<_>>();
         if remove.is_empty() {
             break;
         }
-        for index in remove {
-            movable.remove(&index);
+        for location in remove {
+            movable.remove(&location);
         }
     }
     if movable.is_empty() {
         return None;
     }
 
-    let block = &eu.blocks[&block_id];
-    let mut placed = movable
-        .iter()
-        .copied()
-        .map(|index| {
-            let mask = &masks[&index];
-            let leaves = mask
-                .iter()
-                .enumerate()
-                .filter_map(|(leaf, needed)| needed.then_some(leaf))
-                .collect::<Vec<_>>();
-            let site = if leaves.len() == 1 {
-                PriorityPlacementSite::Leaf(leaves[0])
-            } else {
-                PriorityPlacementSite::Decision(
-                    leaves.iter().copied().max().expect("non-empty use mask") - 1,
-                )
-            };
-            PriorityPlacedInstruction {
-                index,
-                site,
-                instruction: block.instructions[index].clone(),
-            }
-        })
-        .collect::<Vec<_>>();
-    placed.sort_unstable_by_key(|placed| placed.index);
+    let placed = order_priority_placements(eu, placement, locations, &masks, &movable)?;
     let plan = WholePriorityChainPlan {
         block_id,
         first_mux_idx,
@@ -1269,6 +1246,11 @@ fn build_whole_priority_chain_candidate(
         .iter()
         .filter_map(|placed| def_reg(&placed.instruction))
         .filter_map(|register| placement.value_for_register(register))
+        .chain(
+            plan.muxes
+                .iter()
+                .filter_map(|mux| placement.value_for_register(mux.dst)),
+        )
         .collect::<HashSet<_>>();
     Some(WholePriorityChainCandidate {
         depth: dominator_depth(&placement.cfg, block_id),
@@ -1276,6 +1258,87 @@ fn build_whole_priority_chain_candidate(
         benefit_scaled,
         assigned_values,
     })
+}
+
+fn order_priority_placements(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    masks: &HashMap<(BlockId, usize), Vec<bool>>,
+    movable: &HashSet<(BlockId, usize)>,
+) -> Option<Vec<PriorityPlacedInstruction>> {
+    let mut indegree = movable
+        .iter()
+        .copied()
+        .map(|location| (location, 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut users = HashMap::<(BlockId, usize), Vec<(BlockId, usize)>>::default();
+    for &(block, index) in movable {
+        let mut dependencies = HashSet::default();
+        for operand in inst_uses(&eu.blocks[&block].instructions[index]) {
+            let Some(&dependency) = locations.get(&operand) else {
+                continue;
+            };
+            if movable.contains(&dependency) && dependencies.insert(dependency) {
+                *indegree.get_mut(&(block, index))? += 1;
+                users.entry(dependency).or_default().push((block, index));
+            }
+        }
+    }
+    for dependents in users.values_mut() {
+        dependents.sort_unstable();
+        dependents.dedup();
+    }
+
+    let order_key =
+        |(block, index): (BlockId, usize)| Some((placement.cfg.block_index(block)?, index));
+    let mut ready = BTreeSet::<(usize, usize)>::new();
+    for (&location, &degree) in &indegree {
+        if degree == 0 {
+            ready.insert(order_key(location)?);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(movable.len());
+    while let Some(key) = ready.first().copied() {
+        ready.remove(&key);
+        let location = (placement.cfg.block_ids[key.0], key.1);
+        ordered.push(location);
+        for &user in users.get(&location).into_iter().flatten() {
+            let degree = indegree.get_mut(&user)?;
+            *degree = degree.checked_sub(1)?;
+            if *degree == 0 {
+                ready.insert(order_key(user)?);
+            }
+        }
+    }
+    if ordered.len() != movable.len() {
+        return None;
+    }
+
+    ordered
+        .into_iter()
+        .map(|(block, index)| {
+            let leaves = masks[&(block, index)]
+                .iter()
+                .enumerate()
+                .filter_map(|(leaf, needed)| needed.then_some(leaf))
+                .collect::<Vec<_>>();
+            let site = if leaves.len() == 1 {
+                PriorityPlacementSite::Leaf(leaves[0])
+            } else {
+                PriorityPlacementSite::Decision(
+                    leaves.iter().copied().max().expect("non-empty use mask") - 1,
+                )
+            };
+            Some(PriorityPlacedInstruction {
+                block,
+                index,
+                site,
+                instruction: eu.blocks.get(&block)?.instructions.get(index)?.clone(),
+            })
+        })
+        .collect()
 }
 
 fn whole_priority_chain_benefit(
@@ -1792,6 +1855,23 @@ fn apply_atomic_priority_placement(
 ) -> usize {
     let mut additional_blocks = 0usize;
     for region in &plan.regions {
+        let Some(target) = eu.blocks.get(&region.block_id) else {
+            return 0;
+        };
+        if region
+            .muxes
+            .iter()
+            .any(|mux| target.instructions.get(mux.mux_idx).and_then(def_reg) != Some(mux.dst))
+            || region.placed.iter().any(|placed| {
+                eu.blocks
+                    .get(&placed.block)
+                    .and_then(|block| block.instructions.get(placed.index))
+                    .and_then(def_reg)
+                    != def_reg(&placed.instruction)
+            })
+        {
+            return 0;
+        }
         let Some(region_blocks) = region
             .muxes
             .len()
@@ -1841,16 +1921,41 @@ fn apply_whole_priority_chain(
     let merge_id = BlockId(leaf_base + mux_count + 1);
     *next_block_id = merge_id.0 + 1;
 
-    let removed_indices = plan
-        .muxes
+    let moved_registers = plan
+        .placed
         .iter()
-        .map(|mux| mux.mux_idx)
-        .chain(plan.placed.iter().map(|placed| placed.index))
+        .filter_map(|placed| def_reg(&placed.instruction))
         .collect::<HashSet<_>>();
+    for block in eu.blocks.values_mut() {
+        if block.id != plan.block_id {
+            block.instructions.retain(|instruction| {
+                def_reg(instruction).is_none_or(|register| !moved_registers.contains(&register))
+            });
+        }
+    }
     let original = eu
         .blocks
         .remove(&plan.block_id)
         .expect("whole priority target block must exist");
+    let first_mux_position = original
+        .instructions
+        .iter()
+        .position(|instruction| def_reg(instruction) == Some(plan.muxes[0].dst))
+        .expect("whole priority first Mux must remain in its target block");
+    let outer = plan
+        .muxes
+        .last()
+        .expect("whole priority chain is non-empty");
+    let outer_mux_position = original
+        .instructions
+        .iter()
+        .position(|instruction| def_reg(instruction) == Some(outer.dst))
+        .expect("whole priority outer Mux must remain in its target block");
+    let removed_registers = moved_registers
+        .iter()
+        .copied()
+        .chain(plan.muxes.iter().map(|mux| mux.dst))
+        .collect::<HashSet<_>>();
     let placed_for = |site| {
         plan.placed
             .iter()
@@ -1865,10 +1970,12 @@ fn apply_whole_priority_chain(
             let mut head = original
                 .instructions
                 .iter()
-                .enumerate()
-                .take(plan.first_mux_idx)
-                .filter(|(instruction_index, _)| !removed_indices.contains(instruction_index))
-                .map(|(_, instruction)| instruction.clone())
+                .take(first_mux_position)
+                .filter(|instruction| {
+                    def_reg(instruction)
+                        .is_none_or(|register| !removed_registers.contains(&register))
+                })
+                .cloned()
                 .collect::<Vec<_>>();
             head.extend(placed_for(PriorityPlacementSite::Decision(index)));
             head
@@ -1922,17 +2029,14 @@ fn apply_whole_priority_chain(
         );
     }
 
-    let outer = plan
-        .muxes
-        .last()
-        .expect("whole priority chain is non-empty");
     let suffix = original
         .instructions
         .iter()
-        .enumerate()
-        .skip(outer.mux_idx + 1)
-        .filter(|(index, _)| !removed_indices.contains(index))
-        .map(|(_, instruction)| instruction.clone())
+        .skip(outer_mux_position + 1)
+        .filter(|instruction| {
+            def_reg(instruction).is_none_or(|register| !removed_registers.contains(&register))
+        })
+        .cloned()
         .collect::<Vec<_>>();
     eu.blocks.insert(
         merge_id,
@@ -5181,6 +5285,153 @@ mod tests {
     }
 
     #[test]
+    fn atomic_priority_moves_cross_block_occurrences_with_valid_state_versions() {
+        let mut register_map = HashMap::default();
+        for reg in 0..24 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if matches!(reg, 4 | 6) { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![
+            imm(3, 1),
+            SIRInstruction::Binary(
+                RegisterId(4),
+                RegisterId(0),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(3),
+            ),
+            imm(5, 2),
+            SIRInstruction::Binary(
+                RegisterId(6),
+                RegisterId(0),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(5),
+            ),
+            SIRInstruction::Load(RegisterId(7), addr(0), SIROffset::Static(0), 64),
+            imm(8, 3),
+        ];
+        append_mul_chain(
+            &mut source,
+            7,
+            8,
+            &[9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                        instructions: source,
+                        terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Mux(
+                                RegisterId(21),
+                                RegisterId(4),
+                                RegisterId(20),
+                                RegisterId(1),
+                            ),
+                            SIRInstruction::Mux(
+                                RegisterId(22),
+                                RegisterId(6),
+                                RegisterId(2),
+                                RegisterId(21),
+                            ),
+                            SIRInstruction::Unary(
+                                RegisterId(23),
+                                crate::ir::UnaryOp::BitNot,
+                                RegisterId(22),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert_eq!(plan.regions.len(), 1);
+        let moved_load = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(7)))
+            .unwrap();
+        assert_eq!(moved_load.block, BlockId(0));
+        assert_eq!(moved_load.site, PriorityPlacementSite::Leaf(1));
+        let moved_inner_condition = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(4)))
+            .unwrap();
+        assert_eq!(
+            moved_inner_condition.site,
+            PriorityPlacementSite::Decision(0)
+        );
+
+        let mut next_block_id = 2;
+        let mut reg_counter = 23;
+        assert_eq!(
+            apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter),
+            1
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(7), ..))
+                        || def_reg(instruction) == Some(RegisterId(4))
+                })
+        );
+        let load_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(7), ..))
+                })
+            })
+            .unwrap();
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        assert!(!cfg.controllers[cfg.block_index(load_block.id).unwrap()].is_empty());
+        let condition_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| def_reg(instruction) == Some(RegisterId(4)))
+            })
+            .unwrap();
+        assert!(matches!(
+            condition_block.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn whole_priority_places_a_shared_descendant_once_at_its_lca() {
         let mut register_map = HashMap::default();
         for reg in 0..48 {
@@ -5813,6 +6064,20 @@ mod tests {
             register_map,
         };
 
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        if let Some(plan) = find_atomic_priority_placement(&eu, &placement) {
+            assert!(
+                !plan
+                    .regions
+                    .iter()
+                    .flat_map(|region| &region.placed)
+                    .any(|placed| matches!(
+                        placed.instruction,
+                        SIRInstruction::Load(RegisterId(1), ..)
+                    ))
+            );
+        }
+
         BranchifyMuxPass.run(&mut eu, &PassOptions::default());
 
         assert_eq!(eu.verify_result(), Ok(()));
@@ -5950,6 +6215,107 @@ mod tests {
         heads.sort_unstable();
 
         assert_eq!(heads, vec![BlockId(1), BlockId(2)]);
+    }
+
+    #[test]
+    fn atomic_apply_handles_disjoint_regions_sharing_a_definition_block() {
+        let mut register_map = HashMap::default();
+        for reg in 0..30 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg <= 2 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![imm(4, 3), imm(5, 5)];
+        append_mul_chain(&mut source, 4, 5, &[6, 7, 8, 9, 10, 11, 12, 13]);
+        source.extend([imm(14, 7), imm(15, 11)]);
+        append_mul_chain(&mut source, 14, 15, &[16, 17, 18, 19, 20, 21, 22, 23]);
+        let priority_block = |id, inner, outer, result, value| BasicBlock {
+            id: BlockId(id),
+            params: vec![],
+            instructions: vec![
+                SIRInstruction::Mux(
+                    RegisterId(inner),
+                    RegisterId(2),
+                    RegisterId(value),
+                    RegisterId(3),
+                ),
+                SIRInstruction::Mux(
+                    RegisterId(outer),
+                    RegisterId(1),
+                    RegisterId(3),
+                    RegisterId(inner),
+                ),
+                SIRInstruction::Unary(
+                    RegisterId(result),
+                    crate::ir::UnaryOp::BitNot,
+                    RegisterId(outer),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)],
+                        instructions: source,
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                ),
+                (BlockId(1), priority_block(1, 24, 25, 26, 13)),
+                (BlockId(2), priority_block(2, 27, 28, 29, 23)),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert_eq!(plan.regions.len(), 2);
+        let mut next_block_id = 3;
+        let mut reg_counter = 29;
+        assert_eq!(
+            apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter),
+            2
+        );
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    def_reg(instruction).is_some_and(|register| (4..=23).contains(&register.0))
+                })
+        );
+        for register in [RegisterId(13), RegisterId(23)] {
+            assert_eq!(
+                eu.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| def_reg(instruction) == Some(register))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

@@ -403,10 +403,14 @@ Execution slices:
    complete contiguous priority spines bottom-up from one whole-unit analysis,
    place shared pure values once at their leaf or lowest common decision, and
    apply all disjoint regions as one preflighted plan.
-4. **4c2 -- cross-block binary and grouped multiway placement (pending).**
-   Extend region recognition beyond a contiguous same-block Mux spine, while
-   retaining explicit MemorySSA/effect-domain restrictions.
-5. **4d -- generated-code and full-run evaluation (in progress).** Prove that
+4. **4c2a -- cross-block occurrence ownership (complete).** Extend a priority
+   region's movable closure through dominating blocks, including exact state
+   reads whose MemorySSA version remains valid at the decision edge.
+5. **4c2b -- existing-CFG and grouped multi-output regions (pending).** Extend
+   region recognition beyond one contiguous Mux result spine to an existing
+   branch forest and grouped outputs, while retaining explicit MemorySSA and
+   effect-domain restrictions.
+6. **4d -- generated-code and full-run evaluation (in progress).** Prove that
    untaken pure work is absent from executed paths, run the common and Linux
    gates after each retained 4c slice, and retain placement only if full
    runtime improves.
@@ -550,7 +554,51 @@ it does not claim that whole-region placement is implemented.
   `target/heliodor/results/20260715T205844Z_celox_test_soc_linux_boot.log`.
   The cleanup trace's byte identity ties this run to the final generated code.
 
-Status: **in progress (4a--4c1 complete; 4c2 pending)**.
+4c2a result:
+
+- changed placement ownership from a target-block instruction index to a
+  concrete `(block, instruction)` occurrence. The dependency walk may now
+  cross dominating blocks, but `PlacementAnalysis::can_sink_to_edge` must
+  prove dominance, unchanged loop execution frequency, and a legal placement
+  edge before an occurrence enters the region;
+- allowed an exact state-read occurrence to move only when StateSSA reports the
+  same fragment and MemorySSA version at the target block's exit. A write to
+  the fragment between the read and decision leaves the load at its original
+  point; dynamic or unversioned reads remain pinned;
+- closed each movable set over all uses before mutation. External instruction,
+  terminator, or other-region uses pin the producer and then transitively pin
+  its dependencies. Selected occurrences are scheduled with an iterative
+  topological worklist; repeated operands form one dependency edge rather than
+  an accidental cycle;
+- validated every source occurrence and every Mux from the shared snapshot
+  before applying any region. Removal uses unique SSA definitions after that
+  preflight, so two disjoint regions can safely move different occurrences out
+  of the same dominating block without stale instruction indexes;
+- verified the Heliodor result directly in optimized SIR. The previously
+  residual chain is now ordered as
+  `r29125 -> r29136 -> r29153 -> r29158 -> r29163 -> r29168 -> r29172 ->
+  r29179 -> r29261`. The four conversion-flag state loads occur only in their
+  selected leaves, and `CountLeadingZeros r29278` occurs only after every
+  earlier decision falls through;
+- the final complete trace has SHA-256
+  `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`
+  for pre-SIR,
+  `1baa8418b648a5216d803dc71c3b8aec82c236e9cdc7d91c193523a1c98a4cbb`
+  for post-SIR, and
+  `55dd639147e604cfe32e6d93a686dee33f1d6f9064cf77db70b71384a557c2c6`
+  for MIR;
+- focused branchification tests passed 37/37, including valid and invalid state
+  versions and two atomic regions sharing one definition block. Common gates
+  passed with 710/710 library tests, 60 native-testbench passes, and 9
+  native/Cranelift/Wasm counter passes; documented upstream/Veryl cases
+  remained ignored; and
+- the clean pinned Heliodor full non-LTO run took `183.531 s` process time and
+  `183.409 s` runner-reported time. The 47-line log has exactly one
+  native/O2/two-state/full configuration, `reboot: Power down`,
+  `cy=9ab960 x3=aa pass=1`, and the final pass result in
+  `target/heliodor/results/20260715T212842Z_celox_test_soc_linux_boot.log`.
+
+Status: **in progress (4a--4c2a complete; 4c2b pending)**.
 
 ## Step 5: End-to-end qualification
 
@@ -583,8 +631,9 @@ Status: **not started**.
 | 3 | `d4cdb0f7` | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
 | 4a | `f213119a` | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
 | 4b | `47006336` | placement 9/9; StateSSA 7/7 | lib 701/701; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 204.925 s | complete |
-| 4c1 | this commit | branchify 35/35 | lib 708/708; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 201.262 s | complete |
-| 4c2--4d | pending | pending | pending | pending | pending | in progress |
+| 4c1 | `6bff0569` | branchify 35/35 | lib 708/708; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 201.262 s | complete |
+| 4c2a | this commit | branchify 37/37 | lib 710/710; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.531 s | complete |
+| 4c2b--4d | pending | pending | pending | pending | pending | in progress |
 | 5 | pending | pending | pending | pending | pending | not started |
 
 ## Related design records
