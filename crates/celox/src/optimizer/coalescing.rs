@@ -36,14 +36,17 @@ pub(crate) mod pass_tail_call_split;
 mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod shared;
+#[cfg(target_arch = "x86_64")]
+mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    ff_entry: Option<BlockId>,
 ) -> bool {
-    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
+    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu, ff_entry)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -60,18 +63,29 @@ pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsolut
 }
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn optimize_native_merged_chain(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+pub(crate) fn optimize_native_merged_chain(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
     let mut changed = false;
-    if crate::ir::inline_single_predecessor_jumps(eu) {
+    if crate::ir::inline_single_predecessor_jumps(eu)
+        .map_err(|error| ("during native jump inlining", error))?
+    {
         changed = true;
     }
+    eu.verify_result()
+        .map_err(|error| ("after native jump inlining", error))?;
     OptimizeBlocksPass {
         skip_final_schedule: false,
     }
     .run(eu, &PassOptions::default());
+    eu.verify_result()
+        .map_err(|error| ("after native block optimization", error))?;
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
+        eu.verify_result()
+            .map_err(|error| ("after native merged-chain DCE", error))?;
     }
+    Ok(())
 }
 
 pub(crate) fn optimize_rooted_comb_memory(

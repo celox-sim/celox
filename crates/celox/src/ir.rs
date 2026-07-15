@@ -921,7 +921,9 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
 }
 
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub(crate) fn inline_single_predecessor_jumps<A: Clone>(eu: &mut ExecutionUnit<A>) -> bool {
+pub(crate) fn inline_single_predecessor_jumps<A: Clone>(
+    eu: &mut ExecutionUnit<A>,
+) -> Result<bool, crate::ir::verify::SirVerifyError> {
     fn successors(terminator: &SIRTerminator) -> Vec<BlockId> {
         match terminator {
             SIRTerminator::Jump(target, _) => vec![*target],
@@ -935,66 +937,109 @@ pub(crate) fn inline_single_predecessor_jumps<A: Clone>(eu: &mut ExecutionUnit<A
     }
 
     let mut changed = false;
-    loop {
-        let mut predecessor_count = crate::HashMap::<BlockId, usize>::default();
-        for block in eu.blocks.values() {
-            for successor in successors(&block.terminator) {
-                *predecessor_count.entry(successor).or_default() += 1;
-            }
+    let mut parameter_replacements = crate::HashMap::<RegisterId, RegisterId>::default();
+    let mut predecessor_count = crate::HashMap::<BlockId, usize>::default();
+    for block in eu.blocks.values() {
+        for successor in successors(&block.terminator) {
+            *predecessor_count.entry(successor).or_default() += 1;
         }
+    }
 
-        let mut inline = None;
-        let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-        block_ids.sort_unstable();
-        for block_id in block_ids {
-            let Some(block) = eu.blocks.get(&block_id) else {
-                continue;
-            };
-            let SIRTerminator::Jump(target, args) = &block.terminator else {
-                continue;
-            };
-            if *target == block_id || predecessor_count.get(target).copied().unwrap_or(0) != 1 {
-                continue;
-            }
-            let Some(target_block) = eu.blocks.get(target) else {
-                continue;
-            };
-            if target_block.params.len() != args.len() {
-                continue;
-            }
-            inline = Some((block_id, *target, args.clone()));
-            break;
-        }
-
-        let Some((block_id, target_id, args)) = inline else {
-            break;
+    // Inlining `source -> target` replaces every outgoing edge of `target`
+    // with the corresponding edge from `source`. Therefore predecessor edge
+    // counts of all surviving blocks stay unchanged. Only `source` gets a new
+    // terminator and can become a new candidate. A deterministic worklist
+    // avoids rebuilding and sorting the whole CFG after every inlining step.
+    let mut candidates = eu.blocks.keys().copied().collect::<BTreeSet<_>>();
+    while let Some(block_id) = candidates.pop_first() {
+        let Some(block) = eu.blocks.get(&block_id) else {
+            continue;
         };
+        let SIRTerminator::Jump(target, args) = &block.terminator else {
+            continue;
+        };
+        if *target == block_id
+            || *target == eu.entry_block_id
+            || predecessor_count.get(target).copied().unwrap_or(0) != 1
+        {
+            continue;
+        }
+        let Some(target_block) = eu.blocks.get(target) else {
+            continue;
+        };
+        if target_block.params.len() != args.len() {
+            continue;
+        }
+        let target_id = *target;
+        let args = args.clone();
+
         let target = eu
             .blocks
             .remove(&target_id)
             .expect("inline target exists when selected");
-        let replacements = target
-            .params
-            .iter()
-            .copied()
-            .zip(args)
-            .collect::<crate::HashMap<_, _>>();
-        let mut instructions = target.instructions;
-        let mut terminator = target.terminator;
-        for instruction in &mut instructions {
-            replace_sir_uses(instruction, &replacements);
+        candidates.remove(&target_id);
+        for (parameter, argument) in target.params.iter().copied().zip(args) {
+            parameter_replacements.insert(parameter, argument);
         }
-        replace_sir_terminator_uses(&mut terminator, &replacements);
 
         let block = eu
             .blocks
             .get_mut(&block_id)
             .expect("inline predecessor exists when selected");
-        block.instructions.extend(instructions);
-        block.terminator = terminator;
+        block.instructions.extend(target.instructions);
+        block.terminator = target.terminator;
+        candidates.insert(block_id);
         changed = true;
     }
-    changed
+
+    // A block parameter is an SSA definition whose uses may appear in any
+    // block dominated by the removed block. Resolve chains of removed
+    // parameters once, then rewrite the surviving unit in one linear pass.
+    let mut flattened = crate::HashMap::<RegisterId, RegisterId>::default();
+    let mut parameters = parameter_replacements.keys().copied().collect::<Vec<_>>();
+    parameters.sort_unstable();
+    for parameter in parameters {
+        if flattened.contains_key(&parameter) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut on_path = crate::HashSet::default();
+        let mut current = parameter;
+        let resolved = loop {
+            if let Some(&resolved) = flattened.get(&current) {
+                break resolved;
+            }
+            let Some(&next) = parameter_replacements.get(&current) else {
+                break current;
+            };
+            if !on_path.insert(current) {
+                return Err(crate::ir::verify::SirVerifyError {
+                    invariant: "SSA.INLINE_PARAMETER_ACYCLIC",
+                    block: None,
+                    instruction: None,
+                    message: format!("single-predecessor parameter cycle reaches r{}", current.0),
+                });
+            }
+            path.push(current);
+            current = next;
+        };
+        for register in path {
+            flattened.insert(register, resolved);
+        }
+    }
+    if !flattened.is_empty() {
+        for block in eu.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                replace_sir_uses(instruction, &flattened);
+            }
+            replace_sir_terminator_uses(&mut block.terminator, &flattened);
+        }
+    }
+    if let Err(mut error) = eu.verify_result() {
+        error.message = format!("after single-predecessor inlining: {}", error.message);
+        return Err(error);
+    }
+    Ok(changed)
 }
 
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -2000,5 +2045,98 @@ mod tests {
         assert!(block_display.contains("r1"));
         assert!(block_display.contains("Add"));
         assert!(block_display.contains("Return"));
+    }
+
+    #[test]
+    fn single_predecessor_inlining_rewrites_dominated_parameter_uses() {
+        let mut eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![RegisterId(1)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(2), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(2),
+                        UnaryOp::Ident,
+                        RegisterId(1),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ]
+            .into_iter()
+            .map(|block| (block.id, block))
+            .collect(),
+            register_map: (0..3)
+                .map(|register| {
+                    (
+                        RegisterId(register),
+                        RegisterType::Bit {
+                            width: 8,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        eu.verify_result().unwrap();
+
+        assert!(inline_single_predecessor_jumps(&mut eu).unwrap());
+        eu.verify_result().unwrap();
+        assert_eq!(eu.blocks.len(), 1);
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Unary(
+                RegisterId(2),
+                UnaryOp::Ident,
+                RegisterId(0)
+            )]
+        ));
+    }
+
+    #[test]
+    fn single_predecessor_inlining_handles_deep_linear_cfg() {
+        const BLOCK_COUNT: usize = 20_000;
+
+        let mut eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: (0..BLOCK_COUNT)
+                .map(|index| {
+                    let id = BlockId(index);
+                    let terminator = if index + 1 == BLOCK_COUNT {
+                        SIRTerminator::Return
+                    } else {
+                        SIRTerminator::Jump(BlockId(index + 1), Vec::new())
+                    };
+                    (
+                        id,
+                        BasicBlock {
+                            id,
+                            params: Vec::new(),
+                            instructions: Vec::new(),
+                            terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map: crate::HashMap::default(),
+        };
+        eu.verify_result().unwrap();
+
+        assert!(inline_single_predecessor_jumps(&mut eu).unwrap());
+        assert_eq!(eu.blocks.len(), 1);
+        assert_eq!(eu.blocks[&BlockId(0)].terminator, SIRTerminator::Return);
+        eu.verify_result().unwrap();
     }
 }

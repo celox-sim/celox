@@ -111,4 +111,96 @@ else { cnt[i] += 1; }
     assert_eq!(sim.get(cnt99), 1u8.into());
 
     }
+
+    fn test_phase_state_ssa_preserves_eval_before_apply_and_four_state(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    data: input logic<8>,
+    next_value: output logic<8>,
+    captured: output logic<8>,
+    previous: output logic<8>,
+) {
+    assign next_value = data ^ 8'ha5;
+
+    always_ff (clk, rst) {
+        if_reset {
+            captured = 0;
+        } else {
+            captured = next_value;
+        }
+    }
+
+    always_ff (clk, rst) {
+        if_reset {
+            previous = 0;
+        } else {
+            previous = captured;
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top").four_state(true);
+
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let data = sim.signal("data");
+        let captured = sim.signal("captured");
+        let previous = sim.signal("previous");
+
+        sim.modify(|io| io.set(rst, 0u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(captured),
+            (num_bigint::BigUint::from(0u8), num_bigint::BigUint::from(0u8))
+        );
+        assert_eq!(
+            sim.get_four_state(previous),
+            (num_bigint::BigUint::from(0u8), num_bigint::BigUint::from(0u8))
+        );
+
+        let first_value = num_bigint::BigUint::from(0x3cu8);
+        let first_mask = num_bigint::BigUint::from(0x10u8);
+        sim.modify(|io| {
+            io.set(rst, 1u8);
+            io.set_four_state(data, first_value.clone(), first_mask.clone());
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(captured),
+            (
+                &first_value ^ num_bigint::BigUint::from(0xa5u8),
+                first_mask.clone(),
+            )
+        );
+        assert_eq!(
+            sim.get_four_state(previous),
+            (num_bigint::BigUint::from(0u8), num_bigint::BigUint::from(0u8))
+        );
+
+        let second_value = num_bigint::BigUint::from(0x52u8);
+        let second_mask = num_bigint::BigUint::from(0x03u8);
+        sim.modify(|io| {
+            io.set_four_state(data, second_value.clone(), second_mask.clone());
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(captured),
+            (
+                &second_value ^ num_bigint::BigUint::from(0xa5u8),
+                second_mask,
+            )
+        );
+        assert_eq!(
+            sim.get_four_state(previous),
+            (
+                &first_value ^ num_bigint::BigUint::from(0xa5u8),
+                first_mask,
+            )
+        );
+    }
 }

@@ -228,7 +228,45 @@ Acceptance:
 - common tests and full Heliodor Linux boot pass before any new forwarding mode
   is enabled by default.
 
-Status: **not started**.
+Result:
+
+- added a phase-aware StateSSA graph with canonical address/plane/range
+  fragments, explicit def/use/kill/phi identities, pruned phi placement, and a
+  verifier for reaching-version identity and dominance;
+- made dynamic and overlapping accesses path-local kills, kept four-state
+  value/mask storage atomic, and applied promotion plans to a clone only after
+  complete analysis and SIR verification;
+- promoted exact non-escaping working-state round trips, including loop-carried
+  and disjoint fragments, while preserving old stable reads and rejecting
+  effectful or phase-external state atomically;
+- implemented verified stable-state forwarding for the fused FF suffix, but
+  deliberately left cross-phase comb-to-FF forwarding staged until Step 3 adds
+  allocator-owned reload recipes. Enabling it at this point reduced SIR/MIR
+  instruction count but extended cheap state-backed values across the full CFG:
+  the N=128 sorter spill frame grew from 20,048 to 39,736 bytes and its suite
+  scaling check regressed to 12.37x. With the mode staged, the unchanged sorter
+  thresholds passed 7/7; N=32 to N=128 measured 5.04x and N=128 took 5.61 s;
+- fixed a latent single-predecessor inliner bug exposed by StateSSA block
+  parameters: dominated uses outside the removed block are now rewritten after
+  transitive parameter substitutions are flattened. The inliner now uses a
+  deterministic incremental worklist rather than rebuilding and sorting the
+  full predecessor map after every merge; its focused 20,000-block fixture
+  completed together with the downstream-use regression;
+- focused tests: 7 StateSSA fixtures and 18 forwarding/promotion fixtures
+  passed, including loop phis, partial/dynamic aliases, phase bypass, stable
+  ordering, writeback motion, and four-state behavior;
+- common and extended tests: `cargo check -p celox`, all 661 library tests, 60
+  native-testbench tests, 9 native/Cranelift/Wasm counter tests, the 7 sorter
+  scaling tests, and the complete `celox --tests` suite passed; documented
+  upstream/Veryl cases remained ignored; and
+- non-LTO full run: `232.172 s` process time and `232.006 s` runner-reported
+  time, with one native/O2/two-state/full-execution configuration on clean
+  Heliodor commit `7ad830fc`;
+- completion: `reboot: Power down`, `cy=9ab960 x3=aa pass=1`, and
+  `CELOX_TEST_RESULT ... status=pass` in
+  `target/heliodor/results/20260715T070929Z_celox_test_soc_linux_boot.log`.
+
+Status: **complete**.
 
 ## Step 3: Reload recipes and allocator-owned splitting
 

@@ -3432,6 +3432,13 @@ pub fn emit_chained_eus(
     emit_chained_eu_groups(&[units], layout, four_state, label, None)
 }
 
+// Cross-phase stable forwarding deliberately stays staged until the allocator
+// can split a forwarded value and rematerialize it from a still-valid state
+// version. Enabling it earlier removes loads but turns cheap state homes into
+// whole-function live ranges, which is a compile-time and spill regression on
+// large fused CFGs. StateSSA itself and working-state promotion remain active.
+const ENABLE_CROSS_PHASE_STABLE_FORWARDING: bool = false;
+
 /// Compile combinational evaluation followed by one eval/apply FF domain as
 /// one SIR/MIR function.
 pub fn emit_comb_eval_apply_eus(
@@ -3441,7 +3448,14 @@ pub fn emit_comb_eval_apply_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[comb_units, ff_units], layout, four_state, label, None)
+    let stable_load_suffix = (!ff_units.is_empty()).then_some(comb_units.len());
+    emit_chained_eu_groups(
+        &[comb_units, ff_units],
+        layout,
+        four_state,
+        label,
+        stable_load_suffix,
+    )
 }
 
 fn emit_chained_eu_groups(
@@ -3472,32 +3486,43 @@ fn emit_chained_eu_groups(
     } else {
         ((*units[0]).clone(), vec![])
     };
-    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
+    let stable_suffix_entry = stable_load_suffix.map(|first_suffix_unit| {
+        if first_suffix_unit == 0 {
+            sir_eu.entry_block_id
+        } else {
+            sir_boundaries[first_suffix_unit - 1]
+        }
+    });
+    let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
+        eu.verify_result()
+            .map_err(|error| ChainedEmitError::Sir { phase, error })
+    };
+    verify_sir(&sir_eu, "before native StateSSA")?;
+    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(
+        &mut sir_eu,
+        stable_suffix_entry,
+    ) {
+        verify_sir(&sir_eu, "after native working StateSSA")?;
         crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        verify_sir(&sir_eu, "after native working StateSSA DCE")?;
     }
     // Keep the older direct-memory rewrite only for non-promotable round trips.
     crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &sir_boundaries,
     );
-    if let Some(first_suffix_unit) = stable_load_suffix {
-        let suffix_entry = if first_suffix_unit == 0 {
-            sir_eu.entry_block_id
-        } else {
-            sir_boundaries[first_suffix_unit - 1]
-        };
+    verify_sir(&sir_eu, "after native direct working rewrite")?;
+    if ENABLE_CROSS_PHASE_STABLE_FORWARDING && let Some(suffix_entry) = stable_suffix_entry {
         if crate::optimizer::coalescing::forward_stable_static_slots_from(&mut sir_eu, suffix_entry)
         {
+            verify_sir(&sir_eu, "after native stable StateSSA")?;
             crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
         }
     }
-    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu);
-    sir_eu
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Sir {
-            phase: "after native SIR merge",
-            error,
-        })?;
+    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu)
+        .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
+    verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     if let Some(start) = merge_start {
         let sir_insts: usize = sir_eu
             .blocks
