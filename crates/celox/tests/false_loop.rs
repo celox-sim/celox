@@ -279,6 +279,9 @@ fn test_large_scc_dynamic_loop_convergence(sim) {
 }
 
 fn test_read_then_overwrite_convergence(sim) {
+    // This exercises Celox's fixed-point scheduling. The Veryl simulator
+    // adapter evaluates these continuous assignments in source order.
+    @omit_veryl;
     @setup { let code = r#"
         module Top (
             i: input logic,

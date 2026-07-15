@@ -7,7 +7,7 @@ use crate::{
     ir::{LogicPathId, VarAtomBase},
 };
 
-use super::{NodeId, SLTNodeArena};
+use super::{NodeId, SLTNodeArena, SLTNodeFactsError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
@@ -56,6 +56,10 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
     pub previous_sources: HashSet<VarAtomBase<A>>,
+    /// Sources used to compute a dynamic address.  These remain ordinary
+    /// dependencies even when they overlap a previous-value source.
+    #[serde(default)]
+    pub address_sources: HashSet<VarAtomBase<A>>,
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
@@ -76,50 +80,78 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
         target_arena: &mut SLTNodeArena<B>,
         cache: &mut HashMap<NodeId, NodeId>,
         f: &F,
-    ) -> LogicPath<B>
+    ) -> Result<LogicPath<B>, SLTNodeFactsError>
     where
         F: Fn(&A) -> B,
     {
-        LogicPath {
-            target: match &self.target {
-                LogicPathTarget::Var(var) => LogicPathTarget::Var(VarAtomBase::new(
-                    f(&var.id),
-                    var.access.lsb,
-                    var.access.msb,
-                )),
-                LogicPathTarget::CombCaptureEvent {
-                    site_id,
-                    guard,
-                    emit_on_true,
-                    args,
-                    loop_runner,
-                    fatal_error_code,
-                    consume_enabled,
-                } => LogicPathTarget::CombCaptureEvent {
-                    site_id: *site_id,
-                    guard: guard.map(|node| {
+        let target = match &self.target {
+            LogicPathTarget::Var(var) => {
+                LogicPathTarget::Var(VarAtomBase::new(f(&var.id), var.access.lsb, var.access.msb))
+            }
+            LogicPathTarget::CombCaptureEvent {
+                site_id,
+                guard,
+                emit_on_true,
+                args,
+                loop_runner,
+                fatal_error_code,
+                consume_enabled,
+            } => LogicPathTarget::CombCaptureEvent {
+                site_id: *site_id,
+                guard: guard
+                    .map(|node| {
                         arena
                             .get(node)
                             .map_addr(node, arena, target_arena, cache, f)
-                    }),
-                    emit_on_true: *emit_on_true,
-                    args: args
-                        .iter()
-                        .map(|node| {
-                            arena
-                                .get(*node)
-                                .map_addr(*node, arena, target_arena, cache, f)
-                        })
-                        .collect(),
-                    loop_runner: loop_runner.map(|node| {
+                    })
+                    .transpose()?,
+                emit_on_true: *emit_on_true,
+                args: args
+                    .iter()
+                    .map(|node| {
+                        arena
+                            .get(*node)
+                            .map_addr(*node, arena, target_arena, cache, f)
+                    })
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?,
+                loop_runner: loop_runner
+                    .map(|node| {
                         arena
                             .get(node)
                             .map_addr(node, arena, target_arena, cache, f)
-                    }),
-                    fatal_error_code: *fatal_error_code,
-                    consume_enabled: *consume_enabled,
-                },
+                    })
+                    .transpose()?,
+                fatal_error_code: *fatal_error_code,
+                consume_enabled: *consume_enabled,
             },
+        };
+        let local_inputs = self
+            .local_inputs
+            .iter()
+            .map(|(id, node)| {
+                Ok((
+                    f(id),
+                    arena
+                        .get(*node)
+                        .map_addr(*node, arena, target_arena, cache, f)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+        let pre_lower_nodes = self
+            .pre_lower_nodes
+            .iter()
+            .map(|node| {
+                arena
+                    .get(*node)
+                    .map_addr(*node, arena, target_arena, cache, f)
+            })
+            .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+        let expr = arena
+            .get(self.expr)
+            .map_addr(self.expr, arena, target_arena, cache, f)?;
+
+        Ok(LogicPath {
+            target,
             sources: self
                 .sources
                 .iter()
@@ -130,32 +162,16 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
                 .iter()
                 .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),
-            local_inputs: self
-                .local_inputs
+            address_sources: self
+                .address_sources
                 .iter()
-                .map(|(id, node)| {
-                    (
-                        f(id),
-                        arena
-                            .get(*node)
-                            .map_addr(*node, arena, target_arena, cache, f),
-                    )
-                })
+                .map(|v| VarAtomBase::new(f(&v.id), v.access.lsb, v.access.msb))
                 .collect(),
+            local_inputs,
             order_before: self.order_before.clone(),
             comb_capture_enable_sites: self.comb_capture_enable_sites.clone(),
-            pre_lower_nodes: self
-                .pre_lower_nodes
-                .iter()
-                .map(|node| {
-                    arena
-                        .get(*node)
-                        .map_addr(*node, arena, target_arena, cache, f)
-                })
-                .collect(),
-            expr: arena
-                .get(self.expr)
-                .map_addr(self.expr, arena, target_arena, cache, f),
-        }
+            pre_lower_nodes,
+            expr,
+        })
     }
 }

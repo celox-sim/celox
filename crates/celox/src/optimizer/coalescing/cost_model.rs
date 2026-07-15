@@ -59,7 +59,7 @@ pub fn estimate_clif_cost(
                 let base = match op {
                     BinaryOp::Add | BinaryOp::Sub => 5,
                     BinaryOp::Mul => 5,
-                    BinaryOp::Div | BinaryOp::Rem => 10,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => 10,
                     BinaryOp::Eq
                     | BinaryOp::Ne
                     | BinaryOp::LtU
@@ -93,7 +93,9 @@ pub fn estimate_clif_cost(
                     // Mul: schoolbook O(n²), ~5*nc² + 5*nc
                     BinaryOp::Mul => 5 * nc * nc + 5 * nc,
                     // Div/Rem: trial division O(n²), ~640*nc² + 384*nc
-                    BinaryOp::Div | BinaryOp::Rem => 640 * nc * nc + 384 * nc,
+                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+                        640 * nc * nc + 384 * nc
+                    }
                     // Comparisons: ~3 per chunk
                     BinaryOp::Eq
                     | BinaryOp::Ne
@@ -131,12 +133,20 @@ pub fn estimate_clif_cost(
             let width = d_w.max(s_w);
 
             if width <= 64 {
-                2 * state_mul
+                let base = match op {
+                    UnaryOp::PopCount
+                    | UnaryOp::CountLeadingZeros
+                    | UnaryOp::CountTrailingZeros => 3,
+                    _ => 2,
+                };
+                base * state_mul
             } else {
                 let nc = num_chunks(width);
                 let base = match op {
                     UnaryOp::Minus => 5 * nc + 1,
                     UnaryOp::LogicNot => 2 * nc + 4,
+                    UnaryOp::PopCount => 2 * nc + 1,
+                    UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 3 * nc + 1,
                     _ => 2 * nc,
                 };
                 base * state_mul
@@ -146,7 +156,7 @@ pub fn estimate_clif_cost(
             let nc = num_chunks(*op_width);
             let base = if *op_width <= 64 {
                 3
-            } else if matches!(offset, SIROffset::Dynamic(_)) {
+            } else if offset.is_dynamic() {
                 // Dynamic offset: unaligned access, ~9 per chunk + 3 setup
                 9 * nc + 3
             } else if op_width.is_multiple_of(64) {

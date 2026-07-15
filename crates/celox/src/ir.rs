@@ -61,19 +61,33 @@ pub struct VariableInfo {
 }
 
 #[derive(Clone, Debug)]
+pub struct InitialMemoryWriteRun {
+    pub bit_offset: usize,
+    pub bit_width: usize,
+    pub value_bytes: Vec<u8>,
+    pub mask_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub enum InitialMemoryData {
+    Packed {
+        value: BigUint,
+        mask: BigUint,
+        written_mask: BigUint,
+    },
+    Writes(Vec<InitialMemoryWriteRun>),
+}
+
+#[derive(Clone, Debug)]
 pub struct InitialMemoryValue {
     pub addr: AbsoluteAddr,
-    pub value: BigUint,
-    pub mask: BigUint,
-    pub written_mask: BigUint,
+    pub data: InitialMemoryData,
 }
 
 #[derive(Clone, Debug)]
 pub struct ModuleInitialMemoryValue {
     pub var_id: VarId,
-    pub value: BigUint,
-    pub mask: BigUint,
-    pub written_mask: BigUint,
+    pub data: InitialMemoryData,
 }
 
 impl fmt::Debug for VariableInfo {
@@ -197,6 +211,17 @@ impl Program {
     /// Build and store the memory layout. Also removes identity Stores for
     /// validated aliases and runs DCE to clean up dead instruction chains.
     pub fn build_layout(&mut self, four_state: bool) {
+        self.build_layout_with_mode(
+            four_state,
+            crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        );
+    }
+
+    pub fn build_layout_with_mode(
+        &mut self,
+        four_state: bool,
+        mode: crate::backend::memory_layout::MemoryLayoutMode,
+    ) {
         if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
                 .comb_observers
@@ -209,7 +234,7 @@ impl Program {
                 !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
-        let layout = crate::backend::MemoryLayout::build(self, four_state);
+        let layout = crate::backend::MemoryLayout::build(self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
         if !self.address_aliases.is_empty() {
@@ -387,6 +412,28 @@ impl Program {
 
         addrs
     }
+
+    pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
+        let mut addrs = std::collections::HashSet::new();
+        for units in self
+            .eval_apply_ffs
+            .values()
+            .chain(self.eval_only_ffs.values())
+        {
+            for eu in units {
+                for block in eu.blocks.values() {
+                    for inst in &block.instructions {
+                        if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
+                            && addr.region == SPARSE_WORKING_REGION
+                        {
+                            addrs.insert(addr.absolute_addr());
+                        }
+                    }
+                }
+            }
+        }
+        addrs
+    }
 }
 
 fn comb_capture_enable_needs_unaliased_old_value(
@@ -490,6 +537,7 @@ where
 pub type VarAtom = VarAtomBase<VarId>;
 mod builder;
 pub(crate) use builder::SIRBuilder;
+pub(crate) mod verify;
 use veryl_parser::resource_table::StrId;
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -547,16 +595,26 @@ impl<V: fmt::Display> fmt::Display for AbsoluteAddrBase<V> {
 /// a [`SignalRef`] stores the pre-resolved memory offset and metadata, allowing
 /// for essentially zero-cost reads and writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignalArrayLayout {
+    pub element_width: usize,
+    pub element_count: usize,
+    pub element_stride: usize,
+    pub plane_size: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SignalRef {
     pub offset: usize,
     pub width: usize,
     pub is_4state: bool,
+    pub array_layout: Option<SignalArrayLayout>,
 }
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct InstancePath(pub Vec<(StrId, usize)>);
 
 pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
+pub const SPARSE_WORKING_REGION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RegionedVarAddrBase<V> {
@@ -665,10 +723,21 @@ impl<A: Display> Display for ExecutionUnit<A> {
             }
         }
         writeln!(f, "  }}")?;
-        let mut block_ids: Vec<_> = self.blocks.keys().collect();
-        block_ids.sort();
-        for id in block_ids {
-            let block = &self.blocks[id];
+        let block_order = crate::cfg_order::dominance_order(
+            self.entry_block_id,
+            self.blocks.keys().copied(),
+            |id| match &self.blocks[&id].terminator {
+                SIRTerminator::Jump(target, _) => vec![*target],
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => vec![true_block.0, false_block.0],
+                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+            },
+        );
+        for id in block_order {
+            let block = &self.blocks[&id];
             writeln!(f, "{}", block)?;
         }
         writeln!(f, "}}")
@@ -849,6 +918,17 @@ fn renumber_sir_inst<A: Clone>(
     let off = |o: &SIROffset| match o {
         SIROffset::Static(v) => SIROffset::Static(*v),
         SIROffset::Dynamic(reg) => SIROffset::Dynamic(r(*reg)),
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => SIROffset::Element {
+            index: r(*index),
+            element_width: *element_width,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: dynamic_bit_offset.map(r),
+        },
     };
 
     match inst {
@@ -1038,8 +1118,10 @@ pub enum BinaryOp {
     Add,
     Sub,
     Mul,
-    Div,
-    Rem,
+    DivU,
+    DivS,
+    RemU,
+    RemS,
     And,
     Or,
     Xor,
@@ -1086,8 +1168,10 @@ impl fmt::Display for BinaryOp {
             BinaryOp::Add => "Add",
             BinaryOp::Sub => "Sub",
             BinaryOp::Mul => "Mul",
-            BinaryOp::Div => "Div",
-            BinaryOp::Rem => "Rem",
+            BinaryOp::DivU => "DivU",
+            BinaryOp::DivS => "DivS",
+            BinaryOp::RemU => "RemU",
+            BinaryOp::RemS => "RemS",
             BinaryOp::And => "And",
             BinaryOp::Or => "Or",
             BinaryOp::Xor => "Xor",
@@ -1116,24 +1200,54 @@ impl fmt::Display for BinaryOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnaryOp {
     Ident,
+    /// Convert a four-state value to two-state form. Unknown bits become zero:
+    /// `(value, mask) -> (value & !mask, 0)`.
+    ToTwoState,
     Minus,
     BitNot,
     LogicNot,
     And,
     Or,
     Xor,
+    PopCount,
+    CountLeadingZeros,
+    CountTrailingZeros,
+}
+
+impl UnaryOp {
+    /// Return the canonical result width for an operand of `operand_width` bits.
+    ///
+    /// Bit-count operations return a value in `0..=operand_width`, which needs
+    /// `ceil(log2(operand_width + 1))` bits.  Computing that as the bit length
+    /// of `operand_width` avoids overflowing when the operand width is
+    /// `usize::MAX`.
+    pub fn result_width(self, operand_width: usize) -> usize {
+        match self {
+            UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
+                operand_width
+            }
+            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+                usize::BITS as usize - operand_width.leading_zeros() as usize
+            }
+        }
+    }
 }
 
 impl fmt::Display for UnaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
             UnaryOp::Ident => "Ident",
+            UnaryOp::ToTwoState => "ToTwoState",
             UnaryOp::Minus => "Minus",
             UnaryOp::BitNot => "BitNot",
             UnaryOp::LogicNot => "LogicNot",
             UnaryOp::And => "And",
             UnaryOp::Or => "Or",
             UnaryOp::Xor => "Xor",
+            UnaryOp::PopCount => "PopCount",
+            UnaryOp::CountLeadingZeros => "CountLeadingZeros",
+            UnaryOp::CountTrailingZeros => "CountTrailingZeros",
         };
         write!(f, "{}", op_str)
     }
@@ -1177,6 +1291,18 @@ pub enum SIROffset {
     Static(usize),
     /// Dynamic bit offset (register value)
     Dynamic(RegisterId),
+    /// Access to one element of an unpacked array.
+    ///
+    /// `index` is the flattened element index, not a bit offset.  The logical
+    /// bit offset is `index * element_width + bit_offset`.  Keeping this form
+    /// in SIR lets a backend choose an element-strided physical layout without
+    /// recovering source type information from arithmetic instructions.
+    Element {
+        index: RegisterId,
+        element_width: usize,
+        bit_offset: usize,
+        dynamic_bit_offset: Option<RegisterId>,
+    },
 }
 
 impl fmt::Display for SIROffset {
@@ -1184,7 +1310,41 @@ impl fmt::Display for SIROffset {
         match self {
             SIROffset::Static(val) => write!(f, "{}", val),
             SIROffset::Dynamic(reg) => write!(f, "r{}", reg.0),
+            SIROffset::Element {
+                index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset,
+            } => {
+                write!(
+                    f,
+                    "element(r{}, width={}, bit={}",
+                    index.0, element_width, bit_offset
+                )?;
+                if let Some(dynamic) = dynamic_bit_offset {
+                    write!(f, "+r{}", dynamic.0)?;
+                }
+                write!(f, ")")
+            }
         }
+    }
+}
+
+impl SIROffset {
+    pub fn dynamic_registers(&self) -> [Option<RegisterId>; 2] {
+        match self {
+            SIROffset::Static(_) => [None, None],
+            SIROffset::Dynamic(register) => [Some(*register), None],
+            SIROffset::Element {
+                index,
+                dynamic_bit_offset,
+                ..
+            } => [Some(*index), *dynamic_bit_offset],
+        }
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        !matches!(self, SIROffset::Static(_))
     }
 }
 
@@ -1213,7 +1373,8 @@ pub enum SIRInstruction<Addr> {
     Slice(RegisterId, RegisterId, usize, usize), // dst, src, bit_offset, width
     /// Mux: dst = if cond { then_val } else { else_val }.
     /// In 4-state mode, preserves exact mask bits (including Z) of the selected branch.
-    /// When cond has X/Z bits, result is all-X.
+    /// A known one in `cond` selects `then_val`. If `cond` has no known one but
+    /// contains X/Z, equal arm bits are preserved and differing bits become X.
     Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
     RuntimeEvent {
         site_id: u32,
@@ -1518,6 +1679,48 @@ mod tests {
         assert_eq!(format!("{}", UnaryOp::Minus), "Minus");
         assert_eq!(format!("{}", UnaryOp::LogicNot), "LogicNot");
         assert_eq!(format!("{}", UnaryOp::BitNot), "BitNot");
+        assert_eq!(format!("{}", UnaryOp::PopCount), "PopCount");
+        assert_eq!(
+            format!("{}", UnaryOp::CountLeadingZeros),
+            "CountLeadingZeros"
+        );
+        assert_eq!(
+            format!("{}", UnaryOp::CountTrailingZeros),
+            "CountTrailingZeros"
+        );
+    }
+
+    #[test]
+    fn bit_count_result_width_represents_operand_width() {
+        for (operand_width, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (8, 4),
+            (usize::MAX, usize::BITS as usize),
+        ] {
+            for op in [
+                UnaryOp::PopCount,
+                UnaryOp::CountLeadingZeros,
+                UnaryOp::CountTrailingZeros,
+            ] {
+                assert_eq!(op.result_width(operand_width), expected, "{op}");
+            }
+        }
+    }
+
+    #[test]
+    fn bit_count_unary_ops_roundtrip_through_serde() {
+        for op in [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ] {
+            let encoded = serde_json::to_string(&op).unwrap();
+            let decoded: UnaryOp = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, op);
+        }
     }
 
     #[test]

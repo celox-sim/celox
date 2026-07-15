@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, OnceLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backend::RuntimeEventBuffer;
@@ -12,13 +12,53 @@ use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     display_format::{DisplayFormatArg, format_display_arg},
-    ir::{InstancePath, Program, RuntimeEventKind, RuntimeEventSite, SignalRef, VariableInfo},
+    ir::{
+        InitialMemoryData, InitialMemoryWriteRun, InstancePath, Program, RuntimeEventKind,
+        RuntimeEventSite, SignalRef, VariableInfo,
+    },
 };
 #[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
 
 mod builder;
 mod error;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tick_timing_every() -> Option<u64> {
+    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("CELOX_TICK_TIMING")
+            .ok()
+            .and_then(|value| value.parse().ok())
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn record_tick_timing(eval_apply_ns: u64, eval_comb_ns: u64) {
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    static EVAL_APPLY_NS: AtomicU64 = AtomicU64::new(0);
+    static EVAL_COMB_NS: AtomicU64 = AtomicU64::new(0);
+
+    let Some(every) = tick_timing_every() else {
+        return;
+    };
+    if every == 0 {
+        return;
+    }
+
+    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let apply_total = EVAL_APPLY_NS.fetch_add(eval_apply_ns, Ordering::Relaxed) + eval_apply_ns;
+    let comb_total = EVAL_COMB_NS.fetch_add(eval_comb_ns, Ordering::Relaxed) + eval_comb_ns;
+    if ticks.is_multiple_of(every) {
+        eprintln!(
+            "[tick-timing] ticks={ticks} eval_apply_ms={:.3} eval_comb_ms={:.3} avg_apply_us={:.3} avg_comb_us={:.3}",
+            apply_total as f64 / 1_000_000.0,
+            comb_total as f64 / 1_000_000.0,
+            apply_total as f64 / ticks as f64 / 1_000.0,
+            comb_total as f64 / ticks as f64 / 1_000.0,
+        );
+    }
+}
 
 pub use builder::compile_to_sir;
 #[cfg(not(target_arch = "wasm32"))]
@@ -187,6 +227,74 @@ fn slice_biguint(value: &BigUint, lsb: usize, msb: usize) -> BigUint {
         return BigUint::from(0u8);
     }
     mask_width(value >> lsb, msb - lsb + 1)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_bits_to_memory(mem: &mut [u8], dst_bit_offset: usize, bit_width: usize, src: &[u8]) {
+    write_bits_to_memory_from(mem, dst_bit_offset, bit_width, src, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_bits_to_memory_from(
+    mem: &mut [u8],
+    dst_bit_offset: usize,
+    bit_width: usize,
+    src: &[u8],
+    src_bit_offset: usize,
+) {
+    for bit in 0..bit_width {
+        let src_bit_index = src_bit_offset + bit;
+        let src_bit = (src[src_bit_index / 8] >> (src_bit_index % 8)) & 1;
+        let dst_idx = (dst_bit_offset + bit) / 8;
+        let dst_mask = 1u8 << ((dst_bit_offset + bit) % 8);
+        if src_bit == 0 {
+            mem[dst_idx] &= !dst_mask;
+        } else {
+            mem[dst_idx] |= dst_mask;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_initial_run_to_plane(
+    mem: &mut [u8],
+    signal: SignalRef,
+    mask_plane: bool,
+    run: &InitialMemoryWriteRun,
+    src: &[u8],
+) {
+    let Some(array) = signal.array_layout else {
+        let plane_size = signal.width.div_ceil(8);
+        let plane_bit_offset =
+            (signal.offset + usize::from(mask_plane) * plane_size) * 8 + run.bit_offset;
+        write_bits_to_memory(mem, plane_bit_offset, run.bit_width, src);
+        return;
+    };
+
+    let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+    let mut consumed = 0usize;
+    while consumed < run.bit_width {
+        let logical_offset = run.bit_offset + consumed;
+        let element = logical_offset / array.element_width;
+        let intra_element = logical_offset % array.element_width;
+        let part_width = (run.bit_width - consumed).min(array.element_width - intra_element);
+        let destination_bit_offset =
+            (plane_offset + element * array.element_stride) * 8 + intra_element;
+
+        if consumed.is_multiple_of(8)
+            && destination_bit_offset.is_multiple_of(8)
+            && part_width.is_multiple_of(8)
+        {
+            let src_byte = consumed / 8;
+            let dst_byte = destination_bit_offset / 8;
+            let byte_width = part_width / 8;
+            mem[dst_byte..dst_byte + byte_width]
+                .copy_from_slice(&src[src_byte..src_byte + byte_width]);
+        } else {
+            write_bits_to_memory_from(mem, destination_bit_offset, part_width, src, consumed);
+        }
+        consumed += part_width;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -461,26 +569,87 @@ impl<B: SimBackend> Simulator<B> {
 
     pub(crate) fn apply_initial_values(&mut self) {
         let mut applied = false;
-        for init in &self.program.initial_memory_values {
+        let initial_memory_values = std::mem::take(&mut self.program.initial_memory_values);
+        for init in &initial_memory_values {
             applied = true;
             let signal = self.backend.resolve_signal(&init.addr);
-            let width_mask = if signal.width == 0 {
-                BigUint::default()
-            } else {
-                (BigUint::from(1u8) << signal.width) - BigUint::from(1u8)
-            };
-            let preserve_mask = &width_mask ^ (&init.written_mask & &width_mask);
-            let (current_value, current_mask) = self.backend.get_four_state(signal);
-            let value = (current_value & &preserve_mask) | (&init.value & &init.written_mask);
-            let mask = (current_mask & &preserve_mask) | (&init.mask & &init.written_mask);
-            if signal.is_4state {
-                self.backend.set_four_state(signal, value, mask);
-            } else {
-                self.backend.set_wide(signal, value);
+            match &init.data {
+                InitialMemoryData::Packed {
+                    value,
+                    mask,
+                    written_mask,
+                } => {
+                    let width_mask = if signal.width == 0 {
+                        BigUint::default()
+                    } else {
+                        (BigUint::from(1u8) << signal.width) - BigUint::from(1u8)
+                    };
+                    let preserve_mask = &width_mask ^ (written_mask & &width_mask);
+                    let (current_value, current_mask) = self.backend.get_four_state(signal);
+                    let value = (current_value & &preserve_mask) | (value & written_mask);
+                    let mask = (current_mask & &preserve_mask) | (mask & written_mask);
+                    if signal.is_4state {
+                        self.backend.set_four_state(signal, value, mask);
+                    } else {
+                        self.backend.set_wide(signal, value);
+                    }
+                }
+                InitialMemoryData::Writes(runs) => {
+                    self.apply_initial_memory_writes(signal, runs);
+                }
             }
         }
         if applied {
             self.dirty = true;
+        }
+        self.program.initial_memory_values = initial_memory_values;
+    }
+
+    fn apply_initial_memory_writes(&mut self, signal: SignalRef, runs: &[InitialMemoryWriteRun]) {
+        let value_byte_size = signal.width.div_ceil(8);
+        let write_mask = self.backend.layout().four_state && signal.is_4state;
+        let (ptr, mem_len) = self.backend.memory_as_mut_ptr();
+        let mem = unsafe { std::slice::from_raw_parts_mut(ptr, mem_len) };
+
+        for run in runs {
+            if run.bit_width == 0 {
+                continue;
+            }
+            if signal.array_layout.is_some() {
+                write_initial_run_to_plane(mem, signal, false, run, &run.value_bytes);
+                if write_mask {
+                    write_initial_run_to_plane(mem, signal, true, run, &run.mask_bytes);
+                }
+                continue;
+            }
+            if run.bit_offset % 8 == 0 && run.bit_width % 8 == 0 {
+                let byte_offset = run.bit_offset / 8;
+                let byte_width = run.bit_width / 8;
+                let value_offset = signal.offset + byte_offset;
+                mem[value_offset..value_offset + byte_width]
+                    .copy_from_slice(&run.value_bytes[..byte_width]);
+                if write_mask {
+                    let mask_offset = signal.offset + value_byte_size + byte_offset;
+                    mem[mask_offset..mask_offset + byte_width]
+                        .copy_from_slice(&run.mask_bytes[..byte_width]);
+                }
+                continue;
+            }
+
+            write_bits_to_memory(
+                mem,
+                signal.offset * 8 + run.bit_offset,
+                run.bit_width,
+                &run.value_bytes,
+            );
+            if write_mask {
+                write_bits_to_memory(
+                    mem,
+                    (signal.offset + value_byte_size) * 8 + run.bit_offset,
+                    run.bit_width,
+                    &run.mask_bytes,
+                );
+            }
         }
     }
 
@@ -499,6 +668,9 @@ impl<B: SimBackend> Simulator<B> {
         if self.dirty {
             self.eval_comb_checked().unwrap();
             self.dirty = false;
+        }
+        if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq() {
+            return Vec::new();
         }
         self.collect_backend_runtime_events()
             .into_iter()
@@ -666,6 +838,25 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.program.runtime_event_sites.is_empty() {
+            return self
+                .backend
+                .eval_comb()
+                .map_err(|e| self.decorate_runtime_error(e));
+        }
+        if self.program.comb_observers.is_empty() {
+            let runtime_event_start_seq = self.runtime_event_write_seq();
+            let eval_result = self
+                .backend
+                .eval_comb()
+                .map_err(|e| self.decorate_runtime_error(e));
+            let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
+            if let Some(err) = self.fatal_comb_capture_error(&runtime_events) {
+                return Err(err);
+            }
+            return eval_result;
+        }
+
         let before = self.snapshot_all_comb_observers();
         let active_before: Vec<bool> = before
             .iter()
@@ -774,14 +965,39 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Manually triggers a clock or event to process sequential logic.
     pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        let timing_enabled = tick_timing_every().is_some();
+        let mut eval_comb_ns = 0u64;
+        let mut eval_apply_ns = 0u64;
         if self.dirty {
-            self.eval_comb_checked()?;
-            self.eval_apply_ff_at_checked(event)?;
+            if timing_enabled {
+                let start = crate::timing::now();
+                self.eval_comb_checked()?;
+                eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+                let start = crate::timing::now();
+                self.eval_apply_ff_at_checked(event)?;
+                eval_apply_ns = eval_apply_ns.saturating_add(start.elapsed().as_nanos() as u64);
+            } else {
+                self.eval_comb_checked()?;
+                self.eval_apply_ff_at_checked(event)?;
+            }
             self.dirty = false;
         } else {
-            self.eval_apply_ff_at_checked(event)?;
+            if timing_enabled {
+                let start = crate::timing::now();
+                self.eval_apply_ff_at_checked(event)?;
+                eval_apply_ns = eval_apply_ns.saturating_add(start.elapsed().as_nanos() as u64);
+            } else {
+                self.eval_apply_ff_at_checked(event)?;
+            }
         }
-        self.eval_comb_checked()?;
+        if timing_enabled {
+            let start = crate::timing::now();
+            self.eval_comb_checked()?;
+            eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
+            record_tick_timing(eval_apply_ns, eval_comb_ns);
+        } else {
+            self.eval_comb_checked()?;
+        }
         self.dirty = false;
         Ok(())
     }

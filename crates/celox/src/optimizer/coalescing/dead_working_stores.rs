@@ -35,12 +35,16 @@ pub(super) fn eliminate_dead_working_stores(eu: &mut ExecutionUnit<RegionedAbsol
 
     fn is_dynamic_working_read(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
         match inst {
-            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_), _) => {
+            SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, _) => {
                 addr.region == WORKING_REGION
             }
-            SIRInstruction::Commit(src, _, SIROffset::Dynamic(_), _, _) => {
-                src.region == WORKING_REGION
-            }
+            SIRInstruction::Commit(
+                src,
+                _,
+                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                _,
+                _,
+            ) => src.region == WORKING_REGION,
             _ => false,
         }
     }

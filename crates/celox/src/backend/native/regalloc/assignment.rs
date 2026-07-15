@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
 
 // ────────────────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ pub enum PhysReg {
     RCX = 1,
     RDX = 2,
     RBX = 3,
+    RBP = 5,
     RSI = 6,
     RDI = 7,
     R8 = 8,
@@ -37,6 +39,7 @@ impl fmt::Display for PhysReg {
             PhysReg::RCX => "rcx",
             PhysReg::RDX => "rdx",
             PhysReg::RBX => "rbx",
+            PhysReg::RBP => "rbp",
             PhysReg::RSI => "rsi",
             PhysReg::RDI => "rdi",
             PhysReg::R8 => "r8",
@@ -84,6 +87,7 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::R11,
     PhysReg::RCX,
     PhysReg::RBX,
+    PhysReg::RBP,
     PhysReg::R12,
     PhysReg::R13,
     PhysReg::R14,
@@ -99,12 +103,28 @@ pub enum RegConstraint {
     Fixed(PhysReg),
 }
 
-pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
+/// Physical location of a phi source at one predecessor edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeLocation {
+    Register(PhysReg),
+    Stack(i32),
+    Immediate(u64),
+}
+
+pub(super) fn use_constraints(
+    inst: &MInst,
+    shift_encoding: VariableShiftEncoding,
+) -> Vec<RegConstraint> {
     match inst {
-        // x86 variable shifts require shift amount in CL (low byte of RCX).
+        // BMI2's three-operand shifts accept the count in any GPR. Baseline
+        // x86 shifts require it in CL (the low byte of RCX).
         MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. } => {
-            // uses() = [lhs, rhs]. rhs must be in RCX.
-            vec![RegConstraint::Any, RegConstraint::Fixed(PhysReg::RCX)]
+            let rhs = match shift_encoding {
+                VariableShiftEncoding::Bmi2 => RegConstraint::Any,
+                VariableShiftEncoding::LegacyCl => RegConstraint::Fixed(PhysReg::RCX),
+            };
+            // uses() = [lhs, rhs].
+            vec![RegConstraint::Any, rhs]
         }
         _ => inst.uses().iter().map(|_| RegConstraint::Any).collect(),
     }
@@ -113,9 +133,11 @@ pub fn use_constraints(inst: &MInst) -> Vec<RegConstraint> {
 /// Returns physical registers clobbered by this instruction (besides dst).
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     match inst {
-        MInst::UDiv { .. } | MInst::URem { .. } | MInst::UMulHi { .. } => {
-            &[PhysReg::RAX, PhysReg::RDX]
-        }
+        MInst::UDiv { .. }
+        | MInst::URem { .. }
+        | MInst::SDiv { .. }
+        | MInst::SRem { .. }
+        | MInst::UMulHi { .. } => &[PhysReg::RAX, PhysReg::RDX],
         _ => &[],
     }
 }
@@ -150,6 +172,9 @@ pub fn block_clobber_points_for(
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: HashMap<VReg, PhysReg>,
+    pub edge_spill_slots: HashMap<VReg, i32>,
+    pub edge_locations: HashMap<(BlockId, VReg), EdgeLocation>,
+    pub edge_location_points: HashMap<(BlockId, VReg), usize>,
 }
 
 impl AssignmentMap {
@@ -159,6 +184,44 @@ impl AssignmentMap {
 
     pub fn set(&mut self, vreg: VReg, preg: PhysReg) {
         self.map.insert(vreg, preg);
+    }
+
+    pub fn edge_spill_slot(&self, vreg: VReg) -> Option<i32> {
+        self.edge_spill_slots.get(&vreg).copied()
+    }
+
+    pub fn set_edge_spill_slot(&mut self, vreg: VReg, offset: i32) {
+        self.edge_spill_slots.insert(vreg, offset);
+    }
+
+    pub fn edge_location(&self, pred: BlockId, vreg: VReg) -> Option<EdgeLocation> {
+        self.edge_locations.get(&(pred, vreg)).copied()
+    }
+
+    pub fn set_edge_location(&mut self, pred: BlockId, vreg: VReg, location: EdgeLocation) {
+        self.set_edge_location_at(pred, vreg, location, 0);
+    }
+
+    pub fn set_edge_location_at(
+        &mut self,
+        pred: BlockId,
+        vreg: VReg,
+        location: EdgeLocation,
+        program_point: usize,
+    ) {
+        self.edge_locations.insert((pred, vreg), location);
+        self.edge_location_points
+            .insert((pred, vreg), program_point);
+    }
+
+    pub fn edge_location_at(
+        &self,
+        pred: BlockId,
+        vreg: VReg,
+        program_point: usize,
+    ) -> Option<EdgeLocation> {
+        let valid_from = self.edge_location_points.get(&(pred, vreg)).copied()?;
+        (program_point >= valid_from).then(|| self.edge_locations[&(pred, vreg)])
     }
 
     /// Returns entries sorted by VReg for deterministic display.

@@ -8,19 +8,20 @@ use crate::{
     HashMap, HashSet,
     parser::{
         BuildConfig, LoweringPhase, ParserError,
-        bitaccess::{eval_constexpr, get_access_width},
+        bitaccess::{celox_value_from_comptime_in_context, eval_constexpr},
         case::case_arm_condition_expr,
     },
 };
 use bit_set::BitSet;
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 
 use veryl_analyzer::ir::{
-    AssertKind, CaseStatement, Expression, Factor, FfDeclaration, FfReset, ForBound, ForRange,
+    AssertKind, CaseStatement, Expression, FfDeclaration, FfReset, ForBound, ForRange,
     ForStatement, IfResetStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
-    SystemFunctionInput, SystemFunctionKind, TypeKind, ValueVariant, VarId,
+    SystemFunctionInput, SystemFunctionKind, TypeKind, VarId,
 };
+use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
 
@@ -53,6 +54,154 @@ mod loop_bound_status_tests {
     }
 }
 
+#[cfg(test)]
+mod procedural_condition_tests {
+    use super::FfParser;
+    use veryl_analyzer::{
+        ir::{Comptime, Expression, Factor, Shape, Type, TypeKind, ValueVariant},
+        value::Value,
+    };
+    use veryl_parser::token_range::TokenRange;
+
+    fn logic_constant(payload: u128, mask: u128, width: usize) -> Expression {
+        let token = TokenRange::default();
+        let mut ty = Type::new(TypeKind::Logic);
+        ty.set_concrete_width(Shape::new(vec![Some(width)]));
+        Expression::Term(Box::new(Factor::Value(Comptime {
+            value: ValueVariant::Numeric(Value::from_u128(payload, mask, width, false)),
+            r#type: ty,
+            is_const: true,
+            is_global: true,
+            evaluated: true,
+            token,
+            ..Default::default()
+        })))
+    }
+
+    #[test]
+    fn constant_truth_ignores_unknown_bits_but_keeps_known_ones() {
+        // Veryl encodes X=(payload 0, mask 1) and Z=(payload 1, mask 1).
+        for (payload, mask, expected) in [
+            (0x80, 0x04, true),
+            (0x00, 0x04, false),
+            (0x04, 0x04, false),
+            (0x00, 0x00, false),
+            (0x80, 0x00, true),
+        ] {
+            let condition = logic_constant(payload, mask, 8);
+            assert_eq!(
+                FfParser::get_constant_procedural_truth(&condition),
+                Some(expected),
+                "payload={payload:#x}, mask={mask:#x}",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod signed_div_rem_tests {
+    use super::FfParser;
+    use crate::ir::{BinaryOp, SIRBuilder, SIRInstruction};
+    use crate::parser::BuildConfig;
+    use veryl_analyzer::{
+        Analyzer, Context, attribute_table,
+        ir::{Component, Declaration, Ir},
+        symbol_table,
+    };
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
+
+    #[test]
+    fn ff_parser_selects_explicit_div_rem_signedness_from_source_expressions() {
+        symbol_table::clear();
+        attribute_table::clear();
+
+        let code = r#"
+            module Top (
+                clk: input clock,
+                ua: input logic<8>,
+                ub: input logic<8>,
+                sa: input signed logic<8>,
+                sb: input signed logic<8>,
+                sc: input signed logic<8>,
+                udiv: output logic<8>,
+                urem: output logic<8>,
+                sdiv: output signed logic<8>,
+                srem: output signed logic<8>,
+                nested: output signed logic<8>,
+                mixed: output logic<8>
+            ) {
+                always_ff (clk) {
+                    udiv = ua / ub;
+                    urem = ua % ub;
+                    sdiv = sa / sb;
+                    srem = sa % sb;
+                    nested = (sa / sb) / sc;
+                    mixed = sa / ub;
+                }
+            }
+        "#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let declarations = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = SIRBuilder::new();
+        parser.parse_ff_group(&declarations, &mut builder).unwrap();
+        let execution_unit = builder.flush_eu().unwrap();
+
+        let mut div_u = 0;
+        let mut div_s = 0;
+        let mut rem_u = 0;
+        let mut rem_s = 0;
+        for op in execution_unit.blocks.values().flat_map(|block| {
+            block
+                .instructions
+                .iter()
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Binary(_, _, op, _) => Some(*op),
+                    _ => None,
+                })
+        }) {
+            match op {
+                BinaryOp::DivU => div_u += 1,
+                BinaryOp::DivS => div_s += 1,
+                BinaryOp::RemU => rem_u += 1,
+                BinaryOp::RemS => rem_s += 1,
+                _ => {}
+            }
+        }
+
+        assert_eq!((div_u, div_s, rem_u, rem_s), (2, 3, 1, 1));
+    }
+}
+
 mod expression;
 mod function_call;
 
@@ -67,12 +216,20 @@ impl Domain {
     }
 }
 
+#[derive(Default)]
+pub struct FfGroupParseResult {
+    pub targets: Vec<VarAtomBase<crate::ir::RegionedVarAddr>>,
+    pub dynamic_write_vars: HashSet<VarId>,
+}
+
 pub struct FfParser<'a> {
     module: &'a Module,
     stack: VecDeque<RegisterId>,
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
+    dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
+    local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<crate::ir::BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
@@ -90,12 +247,23 @@ enum ControlFlow {
 
 impl<'a> FfParser<'a> {
     pub fn new(module: &'a Module, config: BuildConfig) -> Self {
+        let local_working_vars = module
+            .variables
+            .iter()
+            .filter_map(|(id, variable)| {
+                (variable.affiliation == Affiliation::AlwaysFf
+                    && variable.kind != veryl_analyzer::ir::VarKind::Let)
+                    .then_some(*id)
+            })
+            .collect();
         Self {
             module,
             stack: VecDeque::new(),
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
-            local_working_vars: HashSet::default(),
+            dynamic_write_vars: HashSet::default(),
+            local_working_vars,
+            local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
@@ -228,6 +396,7 @@ impl<'a> FfParser<'a> {
                     &cond.0, targets, domain, convert, sources, ir_builder, None,
                 )?;
                 let cond_reg = self.stack.pop_back().unwrap();
+                let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
                 let pass_bb = ir_builder.new_block();
                 let fail_bb = ir_builder.new_block();
                 let event_kind = match kind {
@@ -278,26 +447,73 @@ impl<'a> FfParser<'a> {
         eval_constexpr(expr)?.to_u64()
     }
 
-    fn get_cast_target_info(&self, expr: &Expression) -> Option<(usize, bool, bool)> {
-        let Expression::Term(factor) = expr else {
+    fn get_constant_procedural_truth(expr: &Expression) -> Option<bool> {
+        let comptime = expr.comptime();
+        let is_value = matches!(expr, Expression::Term(factor) if matches!(factor.as_ref(), veryl_analyzer::ir::Factor::Value(_)));
+        if !(comptime.is_const || is_value && comptime.evaluated) {
             return None;
-        };
-        let Factor::Value(comptime) = factor.as_ref() else {
-            return None;
-        };
-        match &comptime.value {
-            ValueVariant::Type(ty) => {
-                let width = ty.total_width()?;
-                let signed = ty.signed;
-                let is_2state = ty.is_2state();
-                Some((width, signed, is_2state))
+        }
+
+        if let Some((value, mask, width, _)) = celox_value_from_comptime_in_context(comptime, None)
+        {
+            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let known = &width_mask ^ (&mask & &width_mask);
+            return Some(!(value & known).is_zero());
+        }
+
+        comptime
+            .r#type
+            .is_2state()
+            .then(|| eval_constexpr(expr).map(|value| !value.is_zero()))
+            .flatten()
+    }
+
+    fn lower_procedural_condition<A>(
+        &self,
+        condition: RegisterId,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        if matches!(
+            ir_builder.register(&condition),
+            RegisterType::Bit {
+                width: 1,
+                signed: false
             }
-            ValueVariant::Numeric(v) => {
-                let width = v.to_usize()?;
-                // Numeric width cast is unsigned, 2-state (bit)
-                Some((width, false, true))
-            }
-            _ => None,
+        ) {
+            return condition;
+        }
+
+        if matches!(
+            ir_builder.register(&condition),
+            RegisterType::Logic { width: 1 }
+        ) {
+            let known_truth = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Unary(
+                known_truth,
+                UnaryOp::ToTwoState,
+                condition,
+            ));
+            return known_truth;
+        }
+
+        let source_is_two_state =
+            matches!(ir_builder.register(&condition), RegisterType::Bit { .. });
+        let truth = if source_is_two_state {
+            ir_builder.alloc_bit(1, false)
+        } else {
+            ir_builder.alloc_logic(1)
+        };
+        ir_builder.emit(SIRInstruction::Unary(truth, UnaryOp::Or, condition));
+        if source_is_two_state {
+            truth
+        } else {
+            let known_truth = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Unary(
+                known_truth,
+                UnaryOp::ToTwoState,
+                truth,
+            ));
+            known_truth
         }
     }
 
@@ -308,19 +524,24 @@ impl<'a> FfParser<'a> {
         target_width: usize,
         signed: bool,
     ) -> RegisterId {
-        let src_width = ir_builder.register(&reg).width();
+        let src_type = ir_builder.register(&reg).clone();
+        let src_width = src_type.width();
+        let alloc_like_source = |builder: &mut SIRBuilder<A>, width, signed| match &src_type {
+            RegisterType::Logic { .. } => builder.alloc_logic(width),
+            RegisterType::Bit { .. } => builder.alloc_bit(width, signed),
+        };
         if src_width == target_width {
             reg
         } else if src_width < target_width {
-            let dest = ir_builder.alloc_bit(target_width, signed);
+            let dest = alloc_like_source(ir_builder, target_width, signed);
             if signed {
-                let sign = ir_builder.alloc_bit(1, false);
+                let sign = alloc_like_source(ir_builder, 1, false);
                 ir_builder.emit(SIRInstruction::Slice(sign, reg, src_width - 1, 1));
                 let pad_width = target_width - src_width;
                 let pad = if pad_width == 1 {
                     sign
                 } else {
-                    let ext = ir_builder.alloc_bit(pad_width, true);
+                    let ext = alloc_like_source(ir_builder, pad_width, true);
                     ir_builder.emit(SIRInstruction::Concat(
                         ext,
                         std::iter::repeat_n(sign, pad_width).collect(),
@@ -340,7 +561,7 @@ impl<'a> FfParser<'a> {
                 mask,
                 crate::ir::SIRValue::new(mask_val),
             ));
-            let dest = ir_builder.alloc_bit(target_width, signed);
+            let dest = alloc_like_source(ir_builder, target_width, signed);
             ir_builder.emit(SIRInstruction::Binary(
                 dest,
                 reg,
@@ -352,76 +573,9 @@ impl<'a> FfParser<'a> {
     }
 
     fn get_expression_width(&self, expr: &Expression) -> usize {
-        match expr {
-            Expression::Binary(left, op, right, _) => {
-                let lw = self.get_expression_width(left);
-                let rw = self.get_expression_width(right);
-                match op {
-                    Op::Eq
-                    | Op::Ne
-                    | Op::Less
-                    | Op::LessEq
-                    | Op::Greater
-                    | Op::GreaterEq
-                    | Op::LogicAnd
-                    | Op::LogicOr
-                    | Op::LogicNot => 1,
-                    // Shift/pow result width is determined by the LHS only
-                    // (IEEE 1800-2023 §11.4.10).
-                    Op::LogicShiftL
-                    | Op::LogicShiftR
-                    | Op::ArithShiftL
-                    | Op::ArithShiftR
-                    | Op::Pow => lw,
-                    _ => lw.max(rw),
-                }
-            }
-            Expression::Unary(op, expr, _) => match op {
-                Op::LogicNot
-                | Op::BitAnd
-                | Op::BitOr
-                | Op::BitXor
-                | Op::BitXnor
-                | Op::BitNand
-                | Op::BitNor => 1,
-                _ => self.get_expression_width(expr),
-            },
-            Expression::Term(factor) => self.get_factor_width(factor),
-            Expression::Ternary(_, then, els, _) => self
-                .get_expression_width(then)
-                .max(self.get_expression_width(els)),
-            Expression::Concatenation(exprs, _) => {
-                let mut total = 0;
-                for (expr, replication) in exprs {
-                    let w = self.get_expression_width(expr);
-                    let rep = if let Some(rep_expr) = replication {
-                        self.get_constant_value(rep_expr).unwrap_or(1) as usize
-                    } else {
-                        1
-                    };
-                    total += w * rep;
-                }
-                total
-            }
-            _ => 64,
-        }
-    }
-
-    fn get_factor_width(&self, factor: &Factor) -> usize {
-        match factor {
-            Factor::Variable(var_id, index, select, _) => {
-                get_access_width(self.module, *var_id, index, select).unwrap_or(64)
-            }
-            Factor::Value(comptime) => {
-                if let Ok(v) = comptime.get_value() {
-                    v.width()
-                } else {
-                    64
-                }
-            }
-            Factor::FunctionCall(call) => call.comptime.r#type.total_width().unwrap_or(64),
-            _ => 64,
-        }
+        crate::context_width::get_expr_width(expr)
+            .or_else(|| expr.comptime().r#type.total_width())
+            .unwrap_or(64)
     }
 
     // expression / function-call lowering is split into submodules:
@@ -473,8 +627,8 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<ControlFlow, ParserError> {
         // Constant folding: if condition is compile-time constant, inline the appropriate side
-        if let Some(const_val) = self.get_constant_value(&stmt.cond) {
-            let side = if const_val != 0 {
+        if let Some(cond_is_true) = Self::get_constant_procedural_truth(&stmt.cond) {
+            let side = if cond_is_true {
                 &stmt.true_side
             } else {
                 &stmt.false_side
@@ -487,6 +641,7 @@ impl<'a> FfParser<'a> {
             &stmt.cond, targets, domain, convert, sources, ir_builder, None,
         )?;
         let cond_reg = self.stack.pop_back().unwrap();
+        let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();
@@ -598,8 +753,8 @@ impl<'a> FfParser<'a> {
         };
 
         let cond = case_arm_condition_expr(&stmt.case_target, &arm.patterns);
-        if let Some(const_val) = self.get_constant_value(&cond) {
-            return if const_val != 0 {
+        if let Some(cond_is_true) = Self::get_constant_procedural_truth(&cond) {
+            return if cond_is_true {
                 self.parse_statement_list(&arm.body, targets, domain, convert, sources, ir_builder)
             } else {
                 self.parse_case_arm(
@@ -616,6 +771,7 @@ impl<'a> FfParser<'a> {
 
         self.parse_expression(&cond, targets, domain, convert, sources, ir_builder, None)?;
         let cond_reg = self.stack.pop_back().unwrap();
+        let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();
@@ -1221,16 +1377,17 @@ impl<'a> FfParser<'a> {
         let header_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let fitcheck_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let precheck_bb = ir_builder.new_block();
+        let needs_range_check = compare_width != loop_width;
+        let precheck_bb = (!reverse && needs_range_check).then(|| ir_builder.new_block());
         let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
-        let empty_exit_check_bb = ir_builder.new_block_with(vec![empty_exit_counter]);
+        let empty_exit_check_bb =
+            needs_range_check.then(|| ir_builder.new_block_with(vec![empty_exit_counter]));
         let header_bb = ir_builder.new_block_with(vec![header_counter]);
         let fitcheck_bb = ir_builder.new_block_with(vec![fitcheck_counter]);
         let body_bb = ir_builder.new_block_with(vec![body_counter]);
-        let range_error_bb = ir_builder.new_block();
-        let stall_bb = ir_builder.new_block();
+        let range_error_bb = needs_range_check.then(|| ir_builder.new_block());
         let exit_bb = ir_builder.new_block();
-        if !reverse && compare_width != loop_width {
+        if let Some(precheck_bb) = precheck_bb {
             ir_builder.seal_block(SIRTerminator::Jump(precheck_bb, vec![]));
         } else {
             ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
@@ -1239,7 +1396,9 @@ impl<'a> FfParser<'a> {
         let pre_loop_defined = self.defined_ranges.clone();
         let pre_loop_dynamic = self.dynamic_defined_vars.clone();
 
-        if !reverse && compare_width != loop_width {
+        if let (Some(precheck_bb), Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (precheck_bb, empty_exit_check_bb, range_error_bb)
+        {
             ir_builder.switch_to_block(precheck_bb);
             let end_allowed_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
@@ -1356,23 +1515,20 @@ impl<'a> FfParser<'a> {
                 } else {
                     None
                 };
-                let singleton_bb = ir_builder.new_block();
+                let singleton_bb = singleton.map(|_| ir_builder.new_block());
                 let true_loop_bb = ir_builder.new_block();
                 let in_range_bb = ir_builder.new_block();
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: in_range,
                     true_block: (in_range_bb, vec![]),
-                    false_block: if compare_width != loop_width {
-                        (empty_exit_check_bb, vec![header_counter])
-                    } else {
-                        (exit_bb, vec![])
-                    },
+                    false_block: empty_exit_check_bb
+                        .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
                 });
                 ir_builder.switch_to_block(in_range_bb);
-                if let Some(singleton) = singleton {
+                if let (Some(singleton), Some(singleton_bb)) = (singleton, singleton_bb) {
                     ir_builder.seal_block(SIRTerminator::Branch {
                         cond: singleton,
-                        true_block: (singleton_bb, vec![header_counter]),
+                        true_block: (singleton_bb, vec![]),
                         false_block: (true_loop_bb, vec![]),
                     });
                 } else {
@@ -1382,8 +1538,10 @@ impl<'a> FfParser<'a> {
                 let error_code =
                     self.runtime_error(non_progress_message.clone(), vec![stmt.var_id]);
                 ir_builder.seal_block(SIRTerminator::Error(error_code));
-                ir_builder.switch_to_block(singleton_bb);
-                ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
+                if let Some(singleton_bb) = singleton_bb {
+                    ir_builder.switch_to_block(singleton_bb);
+                    ir_builder.seal_block(SIRTerminator::Jump(fitcheck_bb, vec![header_counter]));
+                }
             } else {
                 let loop_math =
                     self.cast_reg_width_ext(ir_builder, header_counter, math_width, loop_signed);
@@ -1428,11 +1586,8 @@ impl<'a> FfParser<'a> {
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
                     true_block: (fitcheck_bb, vec![body_counter_reg]),
-                    false_block: if compare_width != loop_width {
-                        (empty_exit_check_bb, vec![header_counter])
-                    } else {
-                        (exit_bb, vec![])
-                    },
+                    false_block: empty_exit_check_bb
+                        .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
                 });
             }
         } else {
@@ -1458,7 +1613,9 @@ impl<'a> FfParser<'a> {
             });
         }
 
-        if compare_width != loop_width {
+        if let (Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (empty_exit_check_bb, range_error_bb)
+        {
             ir_builder.switch_to_block(empty_exit_check_bb);
             let empty_fits_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
@@ -1541,7 +1698,7 @@ impl<'a> FfParser<'a> {
             Vec::new(),
             Vec::new(),
         ));
-        if compare_width != loop_width {
+        if let Some(range_error_bb) = range_error_bb {
             let fits_loop_reg = if compare_width > 64 {
                 Self::emit_loop_value_fits(
                     ir_builder,
@@ -1575,9 +1732,11 @@ impl<'a> FfParser<'a> {
         } else {
             ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
         }
-        ir_builder.switch_to_block(range_error_bb);
-        let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
-        ir_builder.seal_block(SIRTerminator::Error(error_code));
+        if let Some(range_error_bb) = range_error_bb {
+            ir_builder.switch_to_block(range_error_bb);
+            let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
+            ir_builder.seal_block(SIRTerminator::Error(error_code));
+        }
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
 
@@ -1653,6 +1812,7 @@ impl<'a> FfParser<'a> {
                 crate::ir::BinaryOp::Ne,
                 current_math,
             ));
+            let stall_bb = ir_builder.new_block();
             let continue_bb = ir_builder.new_block();
             ir_builder.seal_block(SIRTerminator::Branch {
                 cond: progress_reg,
@@ -1833,7 +1993,7 @@ impl<'a> FfParser<'a> {
 
         // 1.1 Handle reset polarity (Invert if Low-Active)
         if is_low {
-            let inverted_reg = ir_builder.alloc_bit(1, false);
+            let inverted_reg = ir_builder.alloc_logic(1);
             ir_builder.emit(SIRInstruction::Unary(
                 inverted_reg,
                 UnaryOp::LogicNot,
@@ -1841,6 +2001,7 @@ impl<'a> FfParser<'a> {
             ));
             cond_reg = inverted_reg;
         }
+        cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
 
         let then_bb = ir_builder.new_block();
         let else_bb = ir_builder.new_block();
@@ -1928,13 +2089,15 @@ impl<'a> FfParser<'a> {
         &mut self,
         decls: &[&FfDeclaration],
         ir_builder: &mut SIRBuilder<crate::ir::RegionedVarAddr>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<FfGroupParseResult, ParserError> {
         if decls.is_empty() {
-            return Ok(());
+            return Ok(FfGroupParseResult::default());
         }
 
         self.defined_ranges.clear();
         self.dynamic_defined_vars.clear();
+        self.dynamic_write_vars.clear();
+        self.local_let_values.clear();
         self.reset = decls[0].reset.clone();
 
         let mut targets = Vec::new();
@@ -1978,89 +2141,10 @@ impl<'a> FfParser<'a> {
             )?;
         }
 
-        Ok(())
-    }
-
-    /// Returns the set of variables written by this FF group (deduplicated).
-    /// Used by the caller to generate Commit instructions.
-    pub fn collect_written_vars(decls: &[&FfDeclaration]) -> impl Iterator<Item = VarId> {
-        let mut seen = crate::HashSet::default();
-        decls
-            .iter()
-            .flat_map(|d| d.statements.iter())
-            .flat_map(Self::collect_assigned_var_ids)
-            .filter(move |id| seen.insert(*id))
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    fn collect_expr_output_var_ids(expr: &Expression) -> Vec<VarId> {
-        match expr {
-            Expression::Term(factor) => {
-                if let Factor::FunctionCall(call) = factor.as_ref() {
-                    call.outputs
-                        .values()
-                        .flat_map(|dsts| dsts.iter().map(|d| d.id))
-                        .collect()
-                } else {
-                    vec![]
-                }
-            }
-            Expression::Binary(lhs, _, rhs, _) => {
-                let mut v = Self::collect_expr_output_var_ids(lhs);
-                v.extend(Self::collect_expr_output_var_ids(rhs));
-                v
-            }
-            Expression::Unary(_, inner, _) => Self::collect_expr_output_var_ids(inner),
-            Expression::Ternary(cond, then_e, else_e, _) => {
-                let mut v = Self::collect_expr_output_var_ids(cond);
-                v.extend(Self::collect_expr_output_var_ids(then_e));
-                v.extend(Self::collect_expr_output_var_ids(else_e));
-                v
-            }
-            _ => vec![],
-        }
-    }
-
-    fn collect_assigned_var_ids(stmt: &Statement) -> Vec<VarId> {
-        match stmt {
-            Statement::Assign(a) => {
-                let mut ids: Vec<VarId> = a.dst.iter().map(|d| d.id).collect();
-                // Also collect output args of any FunctionCall embedded in the RHS expression
-                ids.extend(Self::collect_expr_output_var_ids(&a.expr));
-                ids
-            }
-            Statement::If(s) => s
-                .true_side
-                .iter()
-                .chain(s.false_side.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::Case(s) => s
-                .arms
-                .iter()
-                .flat_map(|arm| arm.body.iter())
-                .chain(s.default.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::IfReset(s) => s
-                .true_side
-                .iter()
-                .chain(s.false_side.iter())
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::For(s) => s
-                .body
-                .iter()
-                .flat_map(Self::collect_assigned_var_ids)
-                .collect(),
-            Statement::FunctionCall(call) => call
-                .outputs
-                .values()
-                .flat_map(|dsts| dsts.iter().map(|d| d.id))
-                .collect(),
-            _ => vec![],
-        }
+        Ok(FfGroupParseResult {
+            targets,
+            dynamic_write_vars: self.dynamic_write_vars.clone(),
+        })
     }
 
     fn bound_const_value(bound: &ForBound) -> Option<usize> {

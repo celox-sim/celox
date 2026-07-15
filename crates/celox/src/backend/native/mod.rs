@@ -4,11 +4,14 @@
 
 pub mod backend;
 pub mod emit;
+pub(crate) mod features;
 pub mod isel;
 pub mod jit_mem;
 pub mod mir;
 pub(crate) mod mir_legalize;
 pub(crate) mod mir_opt;
+pub mod mir_verify;
 pub mod regalloc;
+pub(crate) mod ssa_destroy;
 
 pub use backend::{NativeBackend, SharedNativeCode};

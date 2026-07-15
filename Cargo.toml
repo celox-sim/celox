@@ -22,13 +22,13 @@ description = "Celox HDL Simulator"
 rust-version = "1.97.0"
 
 [workspace.dependencies]
-veryl-analyzer = "0.20.0"
-veryl-emitter  = "0.20.0"
-veryl-metadata = "0.20.0"
-veryl-parser   = { version = "0.20.0", default-features = false }
-veryl-path      = "0.20.0"
-veryl-simulator = "0.20.0"
-veryl-std       = "0.20.0"
+veryl-analyzer = "0.20.2"
+veryl-emitter  = "0.20.2"
+veryl-metadata = "0.20.2"
+veryl-parser   = { version = "0.20.2", default-features = false }
+veryl-path      = "0.20.2"
+veryl-simulator = "0.20.2"
+veryl-std       = "0.20.2"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
@@ -74,6 +74,14 @@ opt-level = 3
 strip         = "debuginfo"
 lto           = true
 codegen-units = 1
+
+# Fast incremental host build for iterative Heliodor correctness checks.
+# The fixed acceptance gate still uses the release/LTO profile.
+[profile.heliodor-dev]
+inherits      = "release"
+lto           = false
+codegen-units = 16
+incremental   = true
 
 [profile.bench]
 debug = true

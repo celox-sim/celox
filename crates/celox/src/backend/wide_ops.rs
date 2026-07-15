@@ -29,6 +29,8 @@ pub fn emit_wide_binary(
     r_chunks: &[Value],
     num_chunks: usize,
     l_width: usize,
+    r_width: usize,
+    operation_width: usize,
 ) -> Vec<Value> {
     match op {
         // 1. Bitwise operations ─────────────────────────────
@@ -63,13 +65,20 @@ pub fn emit_wide_binary(
 
         // 8. Signed comparisons ─────────────────────────────
         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS => {
-            emit_wide_signed_cmp(builder, op, l_chunks, r_chunks, num_chunks)
+            emit_wide_signed_cmp(builder, op, l_chunks, r_chunks, num_chunks, operation_width)
         }
 
         // 9. Division / remainder ───────────────────────────
-        BinaryOp::Div | BinaryOp::Rem => {
-            emit_wide_divrem(builder, op, l_chunks, r_chunks, num_chunks)
-        }
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => emit_wide_divrem(
+            builder,
+            op,
+            l_chunks,
+            r_chunks,
+            num_chunks,
+            l_width,
+            r_width,
+            operation_width,
+        ),
 
         // In Veryl syntax, `&&` / `||` map to `BinaryOp::LogicAnd` / `BinaryOp::LogicOr`.
         // These are always routed to `emit_wide_logic_andor` by the translator.
@@ -145,7 +154,7 @@ pub fn emit_wide_unary(
 ) -> Vec<Value> {
     match op {
         UnaryOp::Minus => emit_wide_negate(builder, r_chunks, num_chunks),
-        UnaryOp::Ident => emit_wide_ident(builder, r_chunks, num_chunks),
+        UnaryOp::Ident | UnaryOp::ToTwoState => emit_wide_ident(builder, r_chunks, num_chunks),
         UnaryOp::BitNot => emit_wide_bitnot(builder, r_chunks, num_chunks),
         UnaryOp::LogicNot => emit_wide_logical_not(builder, r_chunks, num_chunks),
         UnaryOp::Or => emit_wide_reduction_or(builder, r_chunks, num_chunks),
@@ -153,6 +162,106 @@ pub fn emit_wide_unary(
         UnaryOp::And => {
             emit_wide_reduction_and(builder, r_chunks, num_chunks, common_logical_width)
         }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let count = emit_wide_bit_count(builder, op, r_chunks, common_logical_width);
+            let zero = builder.ins().iconst(types::I64, 0);
+            std::iter::once(count)
+                .chain(std::iter::repeat_n(zero, num_chunks.saturating_sub(1)))
+                .collect()
+        }
+    }
+}
+
+/// Count bits in a logical-width integer represented by little-endian i64 chunks.
+///
+/// The returned count is an i64 scalar. Padding above `logical_width` in the
+/// most-significant physical chunk is ignored. CLZ/CTZ return `logical_width`
+/// for an all-zero input.
+pub fn emit_wide_bit_count(
+    builder: &mut FunctionBuilder,
+    op: &UnaryOp,
+    r_chunks: &[Value],
+    logical_width: usize,
+) -> Value {
+    debug_assert!(logical_width > 0);
+    debug_assert!(matches!(
+        op,
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
+    ));
+
+    let num_chunks = logical_width.div_ceil(64);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let logical_chunk = |builder: &mut FunctionBuilder, index: usize| {
+        let chunk = get_chunk_as_i64(builder, r_chunks, index);
+        if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+            let valid_bits = logical_width % 64;
+            builder
+                .ins()
+                .band_imm(chunk, ((1u64 << valid_bits) - 1) as i64)
+        } else {
+            chunk
+        }
+    };
+
+    match op {
+        UnaryOp::PopCount => {
+            let mut count = zero;
+            for index in 0..num_chunks {
+                let chunk = logical_chunk(builder, index);
+                let chunk_count = builder.ins().popcnt(chunk);
+                count = builder.ins().iadd(count, chunk_count);
+            }
+            count
+        }
+        UnaryOp::CountLeadingZeros => {
+            let mut count = zero;
+            let mut still_zero = builder.ins().iconst(types::I8, 1);
+            for index in (0..num_chunks).rev() {
+                let valid_bits = if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+                    logical_width % 64
+                } else {
+                    64
+                };
+                let chunk = logical_chunk(builder, index);
+                let physical_count = builder.ins().clz(chunk);
+                let logical_count = if valid_bits < 64 {
+                    builder
+                        .ins()
+                        .iadd_imm(physical_count, -((64 - valid_bits) as i64))
+                } else {
+                    physical_count
+                };
+                let contribution = builder.ins().select(still_zero, logical_count, zero);
+                count = builder.ins().iadd(count, contribution);
+                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                still_zero = builder.ins().band(still_zero, chunk_is_zero);
+            }
+            count
+        }
+        UnaryOp::CountTrailingZeros => {
+            let mut count = zero;
+            let mut still_zero = builder.ins().iconst(types::I8, 1);
+            for index in 0..num_chunks {
+                let valid_bits = if index + 1 == num_chunks && !logical_width.is_multiple_of(64) {
+                    logical_width % 64
+                } else {
+                    64
+                };
+                let chunk = logical_chunk(builder, index);
+                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                let physical_count = builder.ins().ctz(chunk);
+                let valid_bits_value = builder.ins().iconst(types::I64, valid_bits as i64);
+                let logical_count =
+                    builder
+                        .ins()
+                        .select(chunk_is_zero, valid_bits_value, physical_count);
+                let contribution = builder.ins().select(still_zero, logical_count, zero);
+                count = builder.ins().iadd(count, contribution);
+                still_zero = builder.ins().band(still_zero, chunk_is_zero);
+            }
+            count
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -587,6 +696,7 @@ fn emit_wide_signed_cmp(
     l_chunks: &[Value],
     r_chunks: &[Value],
     num_chunks: usize,
+    logical_width: usize,
 ) -> Vec<Value> {
     // Result when both operands are equal:
     // LeS/GeS => true, LtS/GtS => false.
@@ -596,12 +706,26 @@ fn emit_wide_signed_cmp(
         0i64
     };
     let mut res = builder.ins().iconst(types::I8, init_val);
+    let top_bits = logical_width - (num_chunks - 1) * 64;
     for i in 0..num_chunks {
         let l = get_chunk_as_i64(builder, l_chunks, i);
         let r = get_chunk_as_i64(builder, r_chunks, i);
         let eq = builder.ins().icmp(IntCC::Equal, l, r);
         let cmp = if i == num_chunks - 1 {
-            // The most-significant chunk uses signed (strict) comparison.
+            // A partial top chunk stores its sign below physical bit 63.
+            // Sign-extend from the logical sign bit before using an i64 signed
+            // comparison; otherwise negative non-chunk-aligned values appear
+            // positive.
+            let (l, r) = if top_bits < 64 {
+                let shift = (64 - top_bits) as i64;
+                let l = builder.ins().ishl_imm(l, shift);
+                let l = builder.ins().sshr_imm(l, shift);
+                let r = builder.ins().ishl_imm(r, shift);
+                let r = builder.ins().sshr_imm(r, shift);
+                (l, r)
+            } else {
+                (l, r)
+            };
             builder.ins().icmp(
                 match op {
                     BinaryOp::LtS | BinaryOp::LeS => IntCC::SignedLessThan,
@@ -640,7 +764,35 @@ fn emit_wide_divrem(
     l_chunks: &[Value],
     r_chunks: &[Value],
     num_chunks: usize,
+    l_width: usize,
+    r_width: usize,
+    operation_width: usize,
 ) -> Vec<Value> {
+    let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+    let lhs_negative = wide_sign_bit(builder, l_chunks, l_width);
+    let rhs_negative = wide_sign_bit(builder, r_chunks, r_width);
+    let normalized_lhs = if signed {
+        let extended = sign_extend_wide_chunks(builder, l_chunks, l_width, num_chunks);
+        conditional_negate_wide(builder, &extended, lhs_negative, num_chunks)
+    } else {
+        (0..num_chunks)
+            .map(|i| get_chunk_as_i64(builder, l_chunks, i))
+            .collect()
+    };
+    let normalized_rhs = if signed {
+        let extended = sign_extend_wide_chunks(builder, r_chunks, r_width, num_chunks);
+        conditional_negate_wide(builder, &extended, rhs_negative, num_chunks)
+    } else {
+        (0..num_chunks)
+            .map(|i| get_chunk_as_i64(builder, r_chunks, i))
+            .collect()
+    };
+
+    let mut divisor_or = builder.ins().iconst(types::I64, 0);
+    for &chunk in &normalized_rhs {
+        divisor_or = builder.ins().bor(divisor_or, chunk);
+    }
+    let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, divisor_or, 0);
     let total_bits = num_chunks * 64;
 
     let mut q_chunks: Vec<Value> = (0..num_chunks)
@@ -666,7 +818,7 @@ fn emit_wide_divrem(
         }
 
         // remainder[0] |= (dividend[chunk_idx] >> bit_idx) & 1
-        let dividend_chunk = get_chunk_as_i64(builder, l_chunks, chunk_idx);
+        let dividend_chunk = normalized_lhs[chunk_idx];
         let extracted = builder.ins().ushr_imm(dividend_chunk, bit_idx as i64);
         let one_bit = builder.ins().band_imm(extracted, 1);
         rem_chunks[0] = builder.ins().bor(rem_chunks[0], one_bit);
@@ -674,7 +826,7 @@ fn emit_wide_divrem(
         // if remainder >= divisor (multi-chunk unsigned GE)
         let mut ge_result = builder.ins().iconst(types::I8, 1);
         for (c, &rc) in rem_chunks.iter().enumerate() {
-            let dc = get_chunk_as_i64(builder, r_chunks, c);
+            let dc = normalized_rhs[c];
             let eq = builder.ins().icmp(IntCC::Equal, rc, dc);
             let gt = builder
                 .ins()
@@ -687,7 +839,7 @@ fn emit_wide_divrem(
         {
             let mut borrow: Option<Value> = None;
             for (c, &rc) in rem_chunks.iter().enumerate() {
-                let dc = get_chunk_as_i64(builder, r_chunks, c);
+                let dc = normalized_rhs[c];
                 let (diff, bout) = match borrow {
                     None => {
                         let d = builder.ins().isub(rc, dc);
@@ -717,11 +869,96 @@ fn emit_wide_divrem(
         q_chunks[chunk_idx] = builder.ins().bor(q_chunks[chunk_idx], masked);
     }
 
-    if matches!(op, BinaryOp::Div) {
-        q_chunks
+    let mut result = if matches!(op, BinaryOp::DivU | BinaryOp::DivS) {
+        if signed {
+            let quotient_negative = builder.ins().bxor(lhs_negative, rhs_negative);
+            conditional_negate_wide(builder, &q_chunks, quotient_negative, num_chunks)
+        } else {
+            q_chunks
+        }
+    } else if signed {
+        // Signed remainder follows the dividend, matching truncation toward zero.
+        conditional_negate_wide(builder, &rem_chunks, lhs_negative, num_chunks)
     } else {
         rem_chunks
+    };
+
+    let zero = builder.ins().iconst(types::I64, 0);
+    for chunk in &mut result {
+        *chunk = builder.ins().select(divisor_is_zero, zero, *chunk);
     }
+
+    // Signed normalization operates in the full physical chunk width. Restore
+    // the declared operation width so padding bits never escape as value bits.
+    let top_bits = operation_width % 64;
+    if top_bits != 0 {
+        let top = operation_width / 64;
+        if let Some(chunk) = result.get_mut(top) {
+            let mask = builder
+                .ins()
+                .iconst(types::I64, ((1u64 << top_bits) - 1) as i64);
+            *chunk = builder.ins().band(*chunk, mask);
+        }
+    }
+    result
+}
+
+fn wide_sign_bit(builder: &mut FunctionBuilder, chunks: &[Value], width: usize) -> Value {
+    if width == 0 {
+        return builder.ins().iconst(types::I8, 0);
+    }
+    let sign_index = width - 1;
+    let chunk = get_chunk_as_i64(builder, chunks, sign_index / 64);
+    let shifted = builder.ins().ushr_imm(chunk, (sign_index % 64) as i64);
+    let bit = builder.ins().band_imm(shifted, 1);
+    builder.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+}
+
+fn sign_extend_wide_chunks(
+    builder: &mut FunctionBuilder,
+    chunks: &[Value],
+    width: usize,
+    num_chunks: usize,
+) -> Vec<Value> {
+    let sign = wide_sign_bit(builder, chunks, width);
+    let all_ones = builder.ins().iconst(types::I64, -1);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let fill = builder.ins().select(sign, all_ones, zero);
+    let source_chunks = width.div_ceil(64);
+    let top_bits = width % 64;
+
+    (0..num_chunks)
+        .map(|index| {
+            if index >= source_chunks {
+                return fill;
+            }
+            let raw = get_chunk_as_i64(builder, chunks, index);
+            if index + 1 != source_chunks || top_bits == 0 {
+                return raw;
+            }
+            let low_mask_value = (1u64 << top_bits) - 1;
+            let low_mask = builder.ins().iconst(types::I64, low_mask_value as i64);
+            let low = builder.ins().band(raw, low_mask);
+            let high_mask = builder.ins().iconst(types::I64, (!low_mask_value) as i64);
+            let high = builder.ins().band(fill, high_mask);
+            builder.ins().bor(low, high)
+        })
+        .collect()
+}
+
+fn conditional_negate_wide(
+    builder: &mut FunctionBuilder,
+    chunks: &[Value],
+    negate: Value,
+    num_chunks: usize,
+) -> Vec<Value> {
+    let negated = emit_wide_negate(builder, chunks, num_chunks);
+    (0..num_chunks)
+        .map(|index| {
+            let original = get_chunk_as_i64(builder, chunks, index);
+            builder.ins().select(negate, negated[index], original)
+        })
+        .collect()
 }
 
 // ═════════════════════════════════════════════════════════

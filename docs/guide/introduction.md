@@ -8,8 +8,8 @@ The [Celox Playground](https://celox-sim.github.io/celox/playground/) lets you w
 
 ## Key Features
 
-- **JIT Compilation** -- Veryl designs are compiled through a multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code) for near-native execution speed.
-- **Native x86-64 Backend** -- On x86-64, Celox uses its own code generator for the fastest simulation throughput.
+- **JIT Compilation** -- Veryl designs are compiled through a multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code).
+- **Native x86-64 Backend** -- On x86-64, Celox uses its own experimental code generator. Whole-design performance remains an open validation target.
 - **Cranelift Fallback** -- On ARM, RISC-V, and other non-x86-64 targets, Celox can still JIT-compile and run designs.
 - **Event-Driven Scheduling** -- An event-driven scheduler with multi-clock domain support handles complex timing interactions.
 - **4-State Simulation** -- IEEE 1800-compliant 4-state value representation with proper X propagation.

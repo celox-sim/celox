@@ -10,9 +10,10 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
 use num_bigint::BigUint;
+use num_traits::Zero;
 
 use crate::ir::BitAccess;
-use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena};
+use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError};
 use crate::{HashMap, HashSet};
 
 /// Check if an SLT expression tree is purely constant (no Input references).
@@ -25,6 +26,9 @@ fn is_const_expr<A: Clone + Eq + Hash>(node: NodeId, arena: &SLTNodeArena<A>) ->
         SLTNode::Binary(l, _, r) => is_const_expr(*l, arena) && is_const_expr(*r, arena),
         SLTNode::Unary(_, inner) => is_const_expr(*inner, arena),
         SLTNode::Concat(parts) => parts.iter().all(|(id, _)| is_const_expr(*id, arena)),
+        // The update expressions contain loop-scoped inputs whose values are
+        // supplied by the fold, so child constness alone is not sufficient.
+        SLTNode::ForFoldGroup { .. } => false,
         _ => false,
     }
 }
@@ -93,16 +97,78 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
         }
         SLTNode::Unary(op, inner) => {
             use crate::ir::UnaryOp;
-            let (v, m, _) = eval_const_expr(*inner, arena);
+            let (v, m, inner_width) = eval_const_expr(*inner, arena);
+            if matches!(op, UnaryOp::ToTwoState) {
+                return (
+                    v & (&width_mask ^ (&m & &width_mask)),
+                    BigUint::from(0u32),
+                    width,
+                );
+            }
+            if matches!(op, UnaryOp::LogicNot | UnaryOp::Or) {
+                let inner_width_mask = if inner_width > 0 {
+                    (BigUint::from(1u32) << inner_width) - 1u32
+                } else {
+                    BigUint::from(0u32)
+                };
+                let unknown = &m & &inner_width_mask;
+                let known = &inner_width_mask ^ &unknown;
+                let definite_ones = (&v & &inner_width_mask) & known;
+                let has_unknown = !unknown.is_zero();
+                let (value, mask) = match op {
+                    UnaryOp::LogicNot => {
+                        if !definite_ones.is_zero() {
+                            (0u8, 0u8)
+                        } else if has_unknown {
+                            (1u8, 1u8)
+                        } else {
+                            (1u8, 0u8)
+                        }
+                    }
+                    UnaryOp::Or => {
+                        if !definite_ones.is_zero() {
+                            (1u8, 0u8)
+                        } else if has_unknown {
+                            (1u8, 1u8)
+                        } else {
+                            (0u8, 0u8)
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                return (BigUint::from(value), BigUint::from(mask), width);
+            }
             if m != BigUint::from(0u32) {
                 return (BigUint::from(0u32), width_mask.clone(), width);
             }
             let result = match op {
                 UnaryOp::BitNot => (&width_mask) ^ &v,
+                UnaryOp::PopCount => BigUint::from(
+                    v.iter_u64_digits()
+                        .map(|digit| digit.count_ones() as usize)
+                        .sum::<usize>(),
+                ),
+                UnaryOp::CountLeadingZeros => {
+                    BigUint::from(inner_width.saturating_sub(v.bits() as usize))
+                }
+                UnaryOp::CountTrailingZeros => {
+                    let zeros = v
+                        .iter_u64_digits()
+                        .enumerate()
+                        .find_map(|(index, digit)| {
+                            (digit != 0).then_some(
+                                index * u64::BITS as usize + digit.trailing_zeros() as usize,
+                            )
+                        })
+                        .unwrap_or(inner_width)
+                        .min(inner_width);
+                    BigUint::from(zeros)
+                }
                 _ => return (BigUint::from(0u32), width_mask.clone(), width),
             };
-            (result, BigUint::from(0u32), width)
+            (result & &width_mask, BigUint::from(0u32), width)
         }
+        SLTNode::ForFoldGroup { .. } => (BigUint::from(0u32), width_mask, width),
         _ => (BigUint::from(0u32), width_mask, width),
     }
 }
@@ -121,7 +187,7 @@ struct ConstVar {
 pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     paths: &mut [LogicPath<A>],
     arena: &mut SLTNodeArena<A>,
-) -> bool {
+) -> Result<bool, SLTNodeFactsError> {
     // 1. Identify constant variables.
     //    A variable is "fully constant" if every LogicPath targeting it has a
     //    Constant expression and no dynamic index.
@@ -149,7 +215,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
 
     // Exclude variables that are read via dynamic index anywhere in the arena,
     // because inlining them would change the value seen by the dynamic load.
-    for node in &arena.nodes {
+    for node in arena.iter() {
         if let SLTNode::Input {
             variable, index, ..
         } = node
@@ -161,7 +227,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     }
 
     if const_candidates.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // 2. Build the combined constant value for each constant variable.
@@ -196,7 +262,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     }
 
     if const_vars.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // 3. Rewrite expression trees (see rewrite_expr below): for each remaining LogicPath, recursively
@@ -206,8 +272,12 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     let mut rewrite_cache: HashMap<NodeId, NodeId> = HashMap::default();
     for path in paths.iter_mut() {
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
-            path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache);
+            path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache)?;
             path.sources.retain(|src| !const_vars.contains_key(&src.id));
+            path.previous_sources
+                .retain(|src| !const_vars.contains_key(&src.id));
+            path.address_sources
+                .retain(|src| !const_vars.contains_key(&src.id));
         }
     }
 
@@ -215,7 +285,7 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     // Their Stores must persist so that other EUs (FF evaluation) reading from
     // working memory see the correct values.
 
-    true
+    Ok(true)
 }
 
 /// Recursively rewrite an expression tree, replacing Input nodes that reference
@@ -225,9 +295,9 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
     arena: &mut SLTNodeArena<A>,
     const_vars: &HashMap<A, ConstVar>,
     cache: &mut HashMap<NodeId, NodeId>,
-) -> NodeId {
+) -> Result<NodeId, SLTNodeFactsError> {
     if let Some(&cached) = cache.get(&node) {
-        return cached;
+        return Ok(cached);
     }
 
     let result = match arena.get(node).clone() {
@@ -242,48 +312,48 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                 let bit_mask = (BigUint::from(1u32) << width) - 1u32;
                 let val = (&cv.payload >> access.lsb) & &bit_mask;
                 let msk = (&cv.mask >> access.lsb) & &bit_mask;
-                arena.alloc(SLTNode::Constant(val, msk, width, false))
+                arena.alloc(SLTNode::Constant(val, msk, width, false))?
             } else {
                 node
             }
         }
         SLTNode::Slice { expr, access } => {
-            let new_expr = rewrite_expr(expr, arena, const_vars, cache);
+            let new_expr = rewrite_expr(expr, arena, const_vars, cache)?;
             if new_expr == expr {
                 node
             } else {
                 arena.alloc(SLTNode::Slice {
                     expr: new_expr,
                     access,
-                })
+                })?
             }
         }
         SLTNode::Binary(l, op, r) => {
-            let new_l = rewrite_expr(l, arena, const_vars, cache);
-            let new_r = rewrite_expr(r, arena, const_vars, cache);
+            let new_l = rewrite_expr(l, arena, const_vars, cache)?;
+            let new_r = rewrite_expr(r, arena, const_vars, cache)?;
             if new_l == l && new_r == r {
                 node
             } else {
-                arena.alloc(SLTNode::Binary(new_l, op, new_r))
+                arena.alloc(SLTNode::Binary(new_l, op, new_r))?
             }
         }
         SLTNode::Unary(op, inner) => {
-            let new_inner = rewrite_expr(inner, arena, const_vars, cache);
+            let new_inner = rewrite_expr(inner, arena, const_vars, cache)?;
             if new_inner == inner {
                 node
             } else {
-                arena.alloc(SLTNode::Unary(op, new_inner))
+                arena.alloc(SLTNode::Unary(op, new_inner))?
             }
         }
         SLTNode::Concat(parts) => {
             let new_parts: Vec<_> = parts
                 .iter()
-                .map(|&(id, w)| (rewrite_expr(id, arena, const_vars, cache), w))
-                .collect();
+                .map(|&(id, w)| Ok((rewrite_expr(id, arena, const_vars, cache)?, w)))
+                .collect::<Result<_, SLTNodeFactsError>>()?;
             if new_parts.iter().zip(parts.iter()).all(|(a, b)| a.0 == b.0) {
                 node
             } else {
-                arena.alloc(SLTNode::Concat(new_parts))
+                arena.alloc(SLTNode::Concat(new_parts))?
             }
         }
         SLTNode::Mux {
@@ -291,9 +361,9 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
             then_expr,
             else_expr,
         } => {
-            let new_cond = rewrite_expr(cond, arena, const_vars, cache);
-            let new_then = rewrite_expr(then_expr, arena, const_vars, cache);
-            let new_else = rewrite_expr(else_expr, arena, const_vars, cache);
+            let new_cond = rewrite_expr(cond, arena, const_vars, cache)?;
+            let new_then = rewrite_expr(then_expr, arena, const_vars, cache)?;
+            let new_else = rewrite_expr(else_expr, arena, const_vars, cache)?;
             if new_cond == cond && new_then == then_expr && new_else == else_expr {
                 node
             } else {
@@ -301,12 +371,175 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                     cond: new_cond,
                     then_expr: new_then,
                     else_expr: new_else,
-                })
+                })?
+            }
+        }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            step,
+            trip_count,
+            entry_guard,
+            states,
+        } => {
+            // Never replace the loop variable or loop-carried state bindings
+            // with a module-level constant.  If none of those IDs is a
+            // constant candidate, ordinary child rewriting is context-free
+            // and can share the caller's memoization table safely.
+            let binding_is_constant = const_vars.contains_key(&loop_var)
+                || states
+                    .iter()
+                    .any(|state| const_vars.contains_key(&state.target.id));
+            if binding_is_constant {
+                node
+            } else {
+                let new_entry_guard = rewrite_expr(entry_guard, arena, const_vars, cache)?;
+                let new_states = states
+                    .iter()
+                    .map(|state| {
+                        Ok(crate::logic_tree::comb::SLTForFoldGroupState {
+                            target: state.target.clone(),
+                            initial: rewrite_expr(state.initial, arena, const_vars, cache)?,
+                            update: rewrite_expr(state.update, arena, const_vars, cache)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+                let unchanged = new_entry_guard == entry_guard
+                    && new_states
+                        .iter()
+                        .zip(&states)
+                        .all(|(new, old)| new.initial == old.initial && new.update == old.update);
+                if unchanged {
+                    node
+                } else {
+                    arena.alloc(SLTNode::ForFoldGroup {
+                        loop_var,
+                        loop_width,
+                        loop_signed,
+                        start,
+                        step,
+                        trip_count,
+                        entry_guard: new_entry_guard,
+                        states: new_states,
+                    })?
+                }
             }
         }
         _ => node,
     };
 
     cache.insert(node, result);
-    result
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::UnaryOp;
+    use crate::logic_tree::comb::{SLTNode, SLTNodeArena};
+    use num_bigint::BigUint;
+
+    use super::eval_const_expr;
+
+    #[test]
+    fn evaluates_two_state_bit_count_constants() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b0011_0100u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        for (op, expected) in [
+            (UnaryOp::PopCount, 3u8),
+            (UnaryOp::CountLeadingZeros, 2u8),
+            (UnaryOp::CountTrailingZeros, 2u8),
+        ] {
+            let node = arena.alloc(SLTNode::Unary(op, value)).unwrap();
+            assert_eq!(
+                eval_const_expr(node, &arena),
+                (BigUint::from(expected), BigUint::from(0u8), 4),
+            );
+        }
+    }
+
+    #[test]
+    fn zero_has_full_operand_width_leading_and_trailing_zero_counts() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        for op in [UnaryOp::CountLeadingZeros, UnaryOp::CountTrailingZeros] {
+            let node = arena.alloc(SLTNode::Unary(op, zero)).unwrap();
+            assert_eq!(
+                eval_const_expr(node, &arena),
+                (BigUint::from(8u8), BigUint::from(0u8), 4),
+            );
+        }
+    }
+
+    #[test]
+    fn logical_not_and_reduction_or_constants_use_dominant_known_one() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let known_one_and_x = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b1000_0100u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let only_x = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0b0000_0100u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let only_z = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0b0000_0100u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        let known_not = arena
+            .alloc(SLTNode::Unary(UnaryOp::LogicNot, known_one_and_x))
+            .unwrap();
+        let known_or = arena
+            .alloc(SLTNode::Unary(UnaryOp::Or, known_one_and_x))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(known_not, &arena),
+            (BigUint::from(0u8), BigUint::from(0u8), 1),
+        );
+        assert_eq!(
+            eval_const_expr(known_or, &arena),
+            (BigUint::from(1u8), BigUint::from(0u8), 1),
+        );
+
+        for inner in [only_x, only_z] {
+            for op in [UnaryOp::LogicNot, UnaryOp::Or] {
+                let node = arena.alloc(SLTNode::Unary(op, inner)).unwrap();
+                assert_eq!(
+                    eval_const_expr(node, &arena),
+                    (BigUint::from(1u8), BigUint::from(1u8), 1),
+                    "{op:?}",
+                );
+            }
+        }
+    }
 }

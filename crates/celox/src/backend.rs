@@ -19,7 +19,7 @@ mod wide_ops;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use jit_engine::JitEngine;
-pub use memory_layout::{MemoryLayout, get_byte_size};
+pub use memory_layout::{MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]

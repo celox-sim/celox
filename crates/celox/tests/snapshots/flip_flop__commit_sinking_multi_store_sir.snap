@@ -1,6 +1,5 @@
 ---
 source: crates/celox/tests/flip_flop.rs
-assertion_line: 1816
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
@@ -9,38 +8,36 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
     Entry Block: 0
     Registers:
       r0: logic<1>
-      r1: bit<1>
-      r2: bit<32>
-      r3: bit<8>
+      r1: logic<1>
+      r2: bit<1>
+      r3: bit<32>
       r4: bit<8>
-      r5: bit<32>
-      r6: bit<8>
-      r7: bit<8>
-      r8: bit<32>
-      r9: bit<8>
+      r5: signed bit<8>
+      r9: bit<32>
       r10: bit<8>
-      r11: bit<32>
-      r12: bit<8>
-      r13: bit<8>
+      r11: signed bit<8>
+      r12: bit<32>
+      r14: signed bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
-      Branch(r1 ? b1 : b2)
+      r2 = ToTwoState r1
+      Branch(r2 ? b1 : b2)
     b1:
-      r2 = SIRValue(0x0)
-      r3 = SIRValue(0xff)
-      r4 = r2 And r3
-      Store(addr=a (region=0), offset=0, bits=8, src_reg = 4)
-      Store(addr=b (region=0), offset=0, bits=8, src_reg = 4)
+      r3 = SIRValue(0x0)
+      r4 = SIRValue(0xff)
+      r5 = r3 And r4
+      Store(addr=a (region=0), offset=0, bits=8, src_reg = 5)
+      Store(addr=b (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r8 = SIRValue(0x1)
-      r9 = SIRValue(0xff)
-      r10 = r8 And r9
-      Store(addr=a (region=0), offset=0, bits=8, src_reg = 10)
-      r11 = SIRValue(0x2)
-      r13 = r11 And r9
-      Store(addr=b (region=0), offset=0, bits=8, src_reg = 13)
+      r9 = SIRValue(0x1)
+      r10 = SIRValue(0xff)
+      r11 = r9 And r10
+      Store(addr=a (region=0), offset=0, bits=8, src_reg = 11)
+      r12 = SIRValue(0x2)
+      r14 = r12 And r10
+      Store(addr=b (region=0), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
       Return
@@ -49,38 +46,36 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
     Entry Block: 0
     Registers:
       r0: logic<1>
-      r1: bit<1>
-      r2: bit<32>
-      r3: bit<8>
+      r1: logic<1>
+      r2: bit<1>
+      r3: bit<32>
       r4: bit<8>
-      r5: bit<32>
-      r6: bit<8>
-      r7: bit<8>
-      r8: bit<32>
-      r9: bit<8>
+      r5: signed bit<8>
+      r9: bit<32>
       r10: bit<8>
-      r11: bit<32>
-      r12: bit<8>
-      r13: bit<8>
+      r11: signed bit<8>
+      r12: bit<32>
+      r14: signed bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
-      Branch(r1 ? b1 : b2)
+      r2 = ToTwoState r1
+      Branch(r2 ? b1 : b2)
     b1:
-      r2 = SIRValue(0x0)
-      r3 = SIRValue(0xff)
-      r4 = r2 And r3
-      Store(addr=a (region=0), offset=0, bits=8, src_reg = 4)
-      Store(addr=b (region=0), offset=0, bits=8, src_reg = 4)
+      r3 = SIRValue(0x0)
+      r4 = SIRValue(0xff)
+      r5 = r3 And r4
+      Store(addr=a (region=0), offset=0, bits=8, src_reg = 5)
+      Store(addr=b (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r8 = SIRValue(0x1)
-      r9 = SIRValue(0xff)
-      r10 = r8 And r9
-      Store(addr=a (region=0), offset=0, bits=8, src_reg = 10)
-      r11 = SIRValue(0x2)
-      r13 = r11 And r9
-      Store(addr=b (region=0), offset=0, bits=8, src_reg = 13)
+      r9 = SIRValue(0x1)
+      r10 = SIRValue(0xff)
+      r11 = r9 And r10
+      Store(addr=a (region=0), offset=0, bits=8, src_reg = 11)
+      r12 = SIRValue(0x2)
+      r14 = r12 And r10
+      Store(addr=b (region=0), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
       Return
@@ -91,40 +86,38 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
     Entry Block: 0
     Registers:
       r0: logic<1>
-      r1: bit<1>
-      r2: bit<32>
-      r3: bit<8>
+      r1: logic<1>
+      r2: bit<1>
+      r3: bit<32>
       r4: bit<8>
-      r5: bit<32>
-      r6: bit<8>
-      r7: bit<8>
-      r8: bit<32>
-      r9: bit<8>
+      r5: signed bit<8>
+      r9: bit<32>
       r10: bit<8>
-      r11: bit<32>
-      r12: bit<8>
-      r13: bit<8>
+      r11: signed bit<8>
+      r12: bit<32>
+      r14: signed bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
       Commit(src=b (region=0), dst=b (region=1), offset=0, bits=8)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
-      Branch(r1 ? b1 : b2)
+      r2 = ToTwoState r1
+      Branch(r2 ? b1 : b2)
     b1:
-      r2 = SIRValue(0x0)
-      r3 = SIRValue(0xff)
-      r4 = r2 And r3
-      Store(addr=a (region=1), offset=0, bits=8, src_reg = 4)
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 4)
+      r3 = SIRValue(0x0)
+      r4 = SIRValue(0xff)
+      r5 = r3 And r4
+      Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r8 = SIRValue(0x1)
-      r9 = SIRValue(0xff)
-      r10 = r8 And r9
-      Store(addr=a (region=1), offset=0, bits=8, src_reg = 10)
-      r11 = SIRValue(0x2)
-      r13 = r11 And r9
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 13)
+      r9 = SIRValue(0x1)
+      r10 = SIRValue(0xff)
+      r11 = r9 And r10
+      Store(addr=a (region=1), offset=0, bits=8, src_reg = 11)
+      r12 = SIRValue(0x2)
+      r14 = r12 And r10
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
       Return
@@ -133,40 +126,38 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
     Entry Block: 0
     Registers:
       r0: logic<1>
-      r1: bit<1>
-      r2: bit<32>
-      r3: bit<8>
+      r1: logic<1>
+      r2: bit<1>
+      r3: bit<32>
       r4: bit<8>
-      r5: bit<32>
-      r6: bit<8>
-      r7: bit<8>
-      r8: bit<32>
-      r9: bit<8>
+      r5: signed bit<8>
+      r9: bit<32>
       r10: bit<8>
-      r11: bit<32>
-      r12: bit<8>
-      r13: bit<8>
+      r11: signed bit<8>
+      r12: bit<32>
+      r14: signed bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
       Commit(src=b (region=0), dst=b (region=1), offset=0, bits=8)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
-      Branch(r1 ? b1 : b2)
+      r2 = ToTwoState r1
+      Branch(r2 ? b1 : b2)
     b1:
-      r2 = SIRValue(0x0)
-      r3 = SIRValue(0xff)
-      r4 = r2 And r3
-      Store(addr=a (region=1), offset=0, bits=8, src_reg = 4)
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 4)
+      r3 = SIRValue(0x0)
+      r4 = SIRValue(0xff)
+      r5 = r3 And r4
+      Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r8 = SIRValue(0x1)
-      r9 = SIRValue(0xff)
-      r10 = r8 And r9
-      Store(addr=a (region=1), offset=0, bits=8, src_reg = 10)
-      r11 = SIRValue(0x2)
-      r13 = r11 And r9
-      Store(addr=b (region=1), offset=0, bits=8, src_reg = 13)
+      r9 = SIRValue(0x1)
+      r10 = SIRValue(0xff)
+      r11 = r9 And r10
+      Store(addr=a (region=1), offset=0, bits=8, src_reg = 11)
+      r12 = SIRValue(0x2)
+      r14 = r12 And r10
+      Store(addr=b (region=1), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
       Return

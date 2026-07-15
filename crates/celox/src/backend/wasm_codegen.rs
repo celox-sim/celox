@@ -12,6 +12,8 @@ use wasm_encoder::{
     MemoryType, Module, TypeSection, ValType,
 };
 
+#[cfg(test)]
+use crate::backend::memory_layout::MemoryLayoutMode;
 use crate::{
     HashMap,
     backend::{
@@ -463,18 +465,24 @@ fn compile_instruction(
             );
         }
         SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-            compile_commit(
-                src_addr,
-                dst_addr,
-                offset,
-                *op_width,
-                triggers,
-                layout,
-                four_state,
-                emit_triggers,
-                locals,
-                instrs,
-            );
+            if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+                compile_sparse_commit(
+                    src_addr, dst_addr, *op_width, layout, four_state, locals, instrs,
+                );
+            } else {
+                compile_commit(
+                    src_addr,
+                    dst_addr,
+                    offset,
+                    *op_width,
+                    triggers,
+                    layout,
+                    four_state,
+                    emit_triggers,
+                    locals,
+                    instrs,
+                );
+            }
         }
         SIRInstruction::Concat(dst, args) => {
             compile_concat(dst, args, unit, four_state, locals, instrs);
@@ -519,6 +527,201 @@ fn compile_instruction(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
         }
+    }
+}
+
+fn compile_sparse_chunk_copy(
+    src_base: usize,
+    dst_base: usize,
+    byte_index: u32,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let mut copied = 0usize;
+    for bytes in [8usize, 4, 2, 1] {
+        while copied + bytes <= byte_len {
+            for base in [dst_base + copied, src_base + copied] {
+                instrs.push(Instruction::I64Const(base as i64));
+                instrs.push(Instruction::LocalGet(byte_index));
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::I32WrapI64);
+            }
+            let memarg = wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            };
+            match bytes {
+                8 => {
+                    instrs.push(Instruction::I64Load(memarg));
+                    instrs.push(Instruction::I64Store(memarg));
+                }
+                4 => {
+                    instrs.push(Instruction::I32Load(memarg));
+                    instrs.push(Instruction::I32Store(memarg));
+                }
+                2 => {
+                    instrs.push(Instruction::I32Load16U(memarg));
+                    instrs.push(Instruction::I32Store16(memarg));
+                }
+                1 => {
+                    instrs.push(Instruction::I32Load8U(memarg));
+                    instrs.push(Instruction::I32Store8(memarg));
+                }
+                _ => unreachable!(),
+            }
+            copied += bytes;
+        }
+    }
+}
+
+fn compile_sparse_commit(
+    src_addr: &RegionedAbsoluteAddr,
+    dst_addr: &RegionedAbsoluteAddr,
+    _op_width: usize,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    debug_assert_eq!(src_addr.region, crate::ir::SPARSE_WORKING_REGION);
+    debug_assert_eq!(dst_addr.region, crate::ir::STABLE_REGION);
+    let abs = src_addr.absolute_addr();
+    let sparse = &layout.sparse_layouts[&abs];
+    let byte_size = get_byte_size(layout.widths[&abs]);
+    let src_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
+    let dst_base = layout.offsets[&abs];
+    let plane_count = if four_state && layout.is_4states[&abs] {
+        2
+    } else {
+        1
+    };
+    let last_chunk = sparse.chunk_count.saturating_sub(1);
+    let last_len = byte_size.saturating_sub(last_chunk * 8);
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+
+    let summary_bits = locals.alloc(1);
+    let dirty_bits = locals.alloc(1);
+    let word_index = locals.alloc(1);
+    let chunk = locals.alloc(1);
+    let byte_index = locals.alloc(1);
+
+    for summary_index in 0..sparse.summary_word_count {
+        let summary_addr = sparse.summary_words_offset + summary_index * 8;
+        instrs.push(Instruction::I32Const(summary_addr as i32));
+        instrs.push(Instruction::I64Load(memarg));
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::I32Const(summary_addr as i32));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Store(memarg));
+
+        instrs.push(Instruction::Block(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::Loop(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::BrIf(1));
+
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Const((summary_index * 64) as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(word_index));
+        instrs.push(Instruction::I32Const(sparse.dirty_words_offset as i32));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Add);
+        instrs.push(Instruction::I64Load(memarg));
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        instrs.push(Instruction::I32Const(sparse.dirty_words_offset as i32));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I32Add);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Store(memarg));
+
+        instrs.push(Instruction::Block(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::Loop(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::BrIf(1));
+        instrs.push(Instruction::LocalGet(word_index));
+        instrs.push(Instruction::I64Const(64));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(chunk));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::LocalSet(byte_index));
+
+        if last_len == 8 {
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+        } else {
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(last_chunk as i64));
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    last_len,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::Else);
+            for plane in 0..plane_count {
+                let delta = plane * byte_size;
+                compile_sparse_chunk_copy(
+                    src_base + delta,
+                    dst_base + delta,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::End);
+        }
+
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        instrs.push(Instruction::Br(0));
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::End);
+
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::Br(0));
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::End);
     }
 }
 
@@ -745,7 +948,7 @@ fn emit_regs_changed(
     old: &RegisterId,
     new: &RegisterId,
     four_state: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let old_reg = &locals.reg_map[old];
@@ -893,9 +1096,9 @@ fn compile_slice(
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    let d = &locals.reg_map[dst];
+    let d = locals.reg_map[dst].clone();
     let s = locals.reg_map[src].clone();
-    emit_slice_chunks(d, &s, bit_offset, width, instrs);
+    emit_slice_chunks(&d, &s, bit_offset, width, instrs);
 
     if four_state {
         if let (Some(dst_mask), Some(src_mask)) = (d.mask_idx, s.mask_idx) {
@@ -925,96 +1128,175 @@ fn compile_mux(
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let d_width = unit.register_map[dst].width();
+    let cond_width = unit.register_map[cond].width();
     let d_chunks = locals.reg_map[dst].num_chunks;
     let dst_reg = locals.reg_map[dst].clone();
     let cond_reg = locals.reg_map[cond].clone();
     let then_reg = locals.reg_map[then_val].clone();
     let else_reg = locals.reg_map[else_val].clone();
-    let cond_local = cond_reg.value_idx;
 
-    // Allocate temps for cond_bc and not_cond_bc
-    let tmp_cbc = locals.alloc(1);
-    let tmp_ncbc = locals.alloc(1);
-
-    // cond_bc = 0 - cond (all ones if cond=1, all zeros if cond=0)
+    // A condition is definitely true when any bit is a known one.  If there
+    // is no known one but at least one X/Z bit, the condition is unknown;
+    // otherwise it is definitely false.  Reduce every condition chunk so a
+    // wide condition has the same semantics as a narrow one.
+    let cond_is_true = locals.alloc(1);
     instrs.push(Instruction::I64Const(0));
-    instrs.push(Instruction::LocalGet(cond_local));
-    instrs.push(Instruction::I64Sub);
-    instrs.push(Instruction::LocalTee(tmp_cbc));
+    instrs.push(Instruction::LocalSet(cond_is_true));
 
-    // not_cond_bc = ~cond_bc
+    let cond_is_unknown = if four_state {
+        let cond_mask = cond_reg.mask_idx.expect("four-state condition mask");
+        let cond_has_unknown = locals.alloc(1);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(cond_has_unknown));
+
+        for i in 0..cond_reg.num_chunks {
+            // Accumulate known-one bits: cond_value & !cond_mask.
+            instrs.push(Instruction::LocalGet(cond_is_true));
+            instrs.push(Instruction::LocalGet(cond_reg.value_idx + i as u32));
+            instrs.push(Instruction::LocalGet(cond_mask + i as u32));
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::I64And);
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_is_true));
+
+            // Accumulate X/Z bits independently.  A known one dominates them.
+            instrs.push(Instruction::LocalGet(cond_has_unknown));
+            instrs.push(Instruction::LocalGet(cond_mask + i as u32));
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_has_unknown));
+        }
+
+        // Canonicalize the reductions to i64 booleans.
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(cond_is_true));
+
+        let is_unknown = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(cond_has_unknown));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::I32And);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(is_unknown));
+        Some(is_unknown)
+    } else {
+        for i in 0..cond_reg.num_chunks {
+            instrs.push(Instruction::LocalGet(cond_is_true));
+            instrs.push(Instruction::LocalGet(cond_reg.value_idx + i as u32));
+            emit_chunk_mask_to_width(instrs, i, cond_reg.num_chunks, cond_width);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(cond_is_true));
+        }
+        instrs.push(Instruction::LocalGet(cond_is_true));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(cond_is_true));
+        None
+    };
+
+    let branch_masks = if four_state {
+        Some((
+            then_reg.mask_idx.expect("four-state then-value mask"),
+            else_reg.mask_idx.expect("four-state else-value mask"),
+            dst_reg.mask_idx.expect("four-state destination mask"),
+        ))
+    } else {
+        None
+    };
+    let diff = branch_masks.map(|_| locals.alloc(1));
+
+    // Broadcast each mutually-exclusive condition state to an i64 selection
+    // mask so the per-chunk merge stays branchless.
+    let true_bc = locals.alloc(1);
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalGet(cond_is_true));
+    instrs.push(Instruction::I64Sub);
+    instrs.push(Instruction::LocalSet(true_bc));
+
+    let unknown_bc = cond_is_unknown.map(|cond_is_unknown| {
+        let local = locals.alloc(1);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalGet(cond_is_unknown));
+        instrs.push(Instruction::I64Sub);
+        instrs.push(Instruction::LocalSet(local));
+        local
+    });
+
+    let false_bc = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(true_bc));
+    if let Some(unknown_bc) = unknown_bc {
+        instrs.push(Instruction::LocalGet(unknown_bc));
+        instrs.push(Instruction::I64Or);
+    }
     instrs.push(Instruction::I64Const(-1));
     instrs.push(Instruction::I64Xor);
-    instrs.push(Instruction::LocalSet(tmp_ncbc));
+    instrs.push(Instruction::LocalSet(false_bc));
 
     for i in 0..d_chunks {
         let tv_local = then_reg.value_idx + i as u32;
         let ev_local = else_reg.value_idx + i as u32;
         let dst_local = dst_reg.value_idx + i as u32;
 
-        // masked_then = cond_bc & then_val
-        instrs.push(Instruction::LocalGet(tmp_cbc));
-        instrs.push(Instruction::LocalGet(tv_local));
-        instrs.push(Instruction::I64And);
-
-        // masked_else = ~cond_bc & else_val
-        instrs.push(Instruction::LocalGet(tmp_ncbc));
-        instrs.push(Instruction::LocalGet(ev_local));
-        instrs.push(Instruction::I64And);
-
-        // result = masked_then | masked_else
-        instrs.push(Instruction::I64Or);
-
-        // Width mask for last chunk
-        if i == d_chunks - 1 {
-            let last_bits = d_width % 64;
-            if last_bits != 0 {
-                let mask = (1u64 << last_bits) - 1;
-                instrs.push(Instruction::I64Const(mask as i64));
-                instrs.push(Instruction::I64And);
-            }
+        if let (Some((then_mask, else_mask, _)), Some(diff)) = (branch_masks, diff) {
+            // For an unknown condition, bits that differ in either value or
+            // mask become X: diff = (tv ^ ev) | (tm ^ em).
+            instrs.push(Instruction::LocalGet(tv_local));
+            instrs.push(Instruction::LocalGet(ev_local));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::LocalGet(then_mask + i as u32));
+            instrs.push(Instruction::LocalGet(else_mask + i as u32));
+            instrs.push(Instruction::I64Xor);
+            instrs.push(Instruction::I64Or);
+            emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
+            instrs.push(Instruction::LocalSet(diff));
         }
 
+        // Definite true/false selects the corresponding value.  An unknown
+        // condition contributes the bitwise merge value.
+        instrs.push(Instruction::LocalGet(true_bc));
+        instrs.push(Instruction::LocalGet(tv_local));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalGet(false_bc));
+        instrs.push(Instruction::LocalGet(ev_local));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Or);
+        if let (Some(unknown_bc), Some(diff)) = (unknown_bc, diff) {
+            instrs.push(Instruction::LocalGet(unknown_bc));
+            instrs.push(Instruction::LocalGet(tv_local));
+            instrs.push(Instruction::LocalGet(diff));
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+        }
+        emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
         instrs.push(Instruction::LocalSet(dst_local));
-    }
 
-    if four_state {
-        let (Some(dst_mask), Some(cond_mask), Some(then_mask), Some(else_mask)) = (
-            dst_reg.mask_idx,
-            cond_reg.mask_idx,
-            then_reg.mask_idx,
-            else_reg.mask_idx,
-        ) else {
-            return;
-        };
-
-        let cond_has_x = locals.alloc(1);
-        instrs.push(Instruction::LocalGet(cond_mask));
-        instrs.push(Instruction::I64Const(0));
-        instrs.push(Instruction::I64Ne);
-        instrs.push(Instruction::I64ExtendI32U);
-        instrs.push(Instruction::LocalSet(cond_has_x));
-
-        for i in 0..d_chunks {
-            let chunk_mask = chunk_mask_for_width(i, d_chunks, d_width);
-            instrs.push(Instruction::LocalGet(cond_has_x));
-            instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
-
-            instrs.push(Instruction::LocalGet(tmp_cbc));
+        if let (Some((then_mask, else_mask, dst_mask)), Some(unknown_bc), Some(diff)) =
+            (branch_masks, unknown_bc, diff)
+        {
+            instrs.push(Instruction::LocalGet(true_bc));
             instrs.push(Instruction::LocalGet(then_mask + i as u32));
             instrs.push(Instruction::I64And);
-            instrs.push(Instruction::LocalGet(tmp_ncbc));
+            instrs.push(Instruction::LocalGet(false_bc));
             instrs.push(Instruction::LocalGet(else_mask + i as u32));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalGet(unknown_bc));
+            instrs.push(Instruction::LocalGet(then_mask + i as u32));
+            instrs.push(Instruction::LocalGet(diff));
+            instrs.push(Instruction::I64Or);
             instrs.push(Instruction::I64And);
             instrs.push(Instruction::I64Or);
             emit_chunk_mask_to_width(instrs, i, d_chunks, d_width);
             instrs.push(Instruction::LocalSet(dst_mask + i as u32));
-
-            instrs.push(Instruction::Else);
-            instrs.push(Instruction::I64Const(chunk_mask as i64));
-            instrs.push(Instruction::LocalSet(dst_mask + i as u32));
-            instrs.push(Instruction::End);
         }
     }
 }
@@ -1086,7 +1368,16 @@ fn compile_binary_narrow(
         emit_mask_to_width(instrs, d_width);
         instrs.push(Instruction::LocalSet(d.value_idx));
 
-        compile_binary_mask_narrow(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_narrow(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1099,11 +1390,19 @@ fn compile_binary_narrow(
         BinaryOp::Add => instrs.push(Instruction::I64Add),
         BinaryOp::Sub => instrs.push(Instruction::I64Sub),
         BinaryOp::Mul => instrs.push(Instruction::I64Mul),
-        BinaryOp::Div => {
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+            let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            let quotient = matches!(op, BinaryOp::DivU | BinaryOp::DivS);
             let tmp_l = locals.alloc(1);
             let tmp_r = locals.alloc(1);
             instrs.push(Instruction::LocalSet(tmp_r));
             instrs.push(Instruction::LocalSet(tmp_l));
+            if signed {
+                emit_sign_extend(instrs, tmp_l, l_width.max(1));
+                instrs.push(Instruction::LocalSet(tmp_l));
+                emit_sign_extend(instrs, tmp_r, r_width.max(1));
+                instrs.push(Instruction::LocalSet(tmp_r));
+            }
             instrs.push(Instruction::LocalGet(tmp_r));
             instrs.push(Instruction::I64Eqz);
             instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
@@ -1111,26 +1410,42 @@ fn compile_binary_narrow(
             )));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::Else);
-            instrs.push(Instruction::LocalGet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64DivU);
-            instrs.push(Instruction::End);
-        }
-        BinaryOp::Rem => {
-            let tmp_l = locals.alloc(1);
-            let tmp_r = locals.alloc(1);
-            instrs.push(Instruction::LocalSet(tmp_r));
-            instrs.push(Instruction::LocalSet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64Eqz);
-            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
-                ValType::I64,
-            )));
-            instrs.push(Instruction::I64Const(0));
-            instrs.push(Instruction::Else);
-            instrs.push(Instruction::LocalGet(tmp_l));
-            instrs.push(Instruction::LocalGet(tmp_r));
-            instrs.push(Instruction::I64RemU);
+            if signed {
+                // WebAssembly signed division traps on MIN / -1. SIR arithmetic
+                // wraps that quotient to MIN and defines the remainder as zero.
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::I64Const(i64::MIN));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(Instruction::I64Const(-1));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::I32And);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                if quotient {
+                    instrs.push(Instruction::LocalGet(tmp_l));
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(if quotient {
+                    Instruction::I64DivS
+                } else {
+                    Instruction::I64RemS
+                });
+                instrs.push(Instruction::End);
+            } else {
+                instrs.push(Instruction::LocalGet(tmp_l));
+                instrs.push(Instruction::LocalGet(tmp_r));
+                instrs.push(if quotient {
+                    Instruction::I64DivU
+                } else {
+                    Instruction::I64RemU
+                });
+            }
             instrs.push(Instruction::End);
         }
         BinaryOp::And => instrs.push(Instruction::I64And),
@@ -1251,7 +1566,16 @@ fn compile_binary_narrow(
     instrs.push(Instruction::LocalSet(d.value_idx));
 
     if four_state {
-        compile_binary_mask_narrow(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_narrow(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
     }
 }
@@ -1271,31 +1595,35 @@ fn compile_binary_wide(
     let l = locals.reg_map[lhs].clone();
     let r = locals.reg_map[rhs].clone();
     let d_chunks = d.num_chunks;
+    let l_width = unit.register_map[lhs].width();
+    let r_width = unit.register_map[rhs].width();
 
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
+        let operand_width = l_width.max(r_width);
+        let operand_chunks = l.num_chunks.max(r.num_chunks);
         let compare_mask = RegLocal {
-            value_idx: locals.alloc(d_chunks),
-            num_chunks: d_chunks,
+            value_idx: locals.alloc(operand_chunks),
+            num_chunks: operand_chunks,
             mask_idx: None,
         };
-        for c in 0..d_chunks {
+        for c in 0..operand_chunks {
             if c < r.num_chunks {
                 instrs.push(Instruction::LocalGet(
                     r.mask_idx.expect("four-state rhs mask") + c as u32,
                 ));
                 instrs.push(Instruction::I64Const(-1));
                 instrs.push(Instruction::I64Xor);
-                emit_chunk_mask_to_width(instrs, c, d_chunks, d_width);
+                emit_chunk_mask_to_width(instrs, c, operand_chunks, operand_width);
                 instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
             } else {
-                let chunk_mask = chunk_mask_for_width(c, d_chunks, d_width);
+                let chunk_mask = chunk_mask_for_width(c, operand_chunks, operand_width);
                 instrs.push(Instruction::I64Const(chunk_mask as i64));
                 instrs.push(Instruction::LocalSet(compare_mask.value_idx + c as u32));
             }
         }
 
         instrs.push(Instruction::I64Const(1));
-        for c in 0..d_chunks {
+        for c in 0..operand_chunks {
             emit_wide_get_chunk(instrs, &l, c);
             emit_wide_get_chunk(instrs, &compare_mask, c);
             instrs.push(Instruction::I64And);
@@ -1316,7 +1644,7 @@ fn compile_binary_wide(
             instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
         }
 
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_wide(&d, &l, op, &r, d_width, operand_width, locals, instrs);
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1513,14 +1841,19 @@ fn compile_binary_wide(
             let l_sign = locals.alloc(1);
             let r_sign = locals.alloc(1);
             let top = l.num_chunks.max(r.num_chunks) - 1;
-            // Get sign bits (bit 63 of top chunk, or the actual top bit)
+            let sign_bit = ((l_width.max(r_width) - 1) % 64) as i64;
+            // The sign bit can be below bit 63 in a partial top chunk.
             emit_wide_get_chunk(instrs, &l, top);
-            instrs.push(Instruction::I64Const(63));
+            instrs.push(Instruction::I64Const(sign_bit));
             instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64And);
             instrs.push(Instruction::LocalSet(l_sign));
             emit_wide_get_chunk(instrs, &r, top);
-            instrs.push(Instruction::I64Const(63));
+            instrs.push(Instruction::I64Const(sign_bit));
             instrs.push(Instruction::I64ShrU);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64And);
             instrs.push(Instruction::LocalSet(r_sign));
 
             // If signs differ: negative < positive
@@ -1688,7 +2021,29 @@ fn compile_binary_wide(
                 }
             }
         }
-        BinaryOp::Div | BinaryOp::Rem => {
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+            let signed = matches!(op, BinaryOp::DivS | BinaryOp::RemS);
+            let quotient = matches!(op, BinaryOp::DivU | BinaryOp::DivS);
+            let (dividend, lhs_negative) = if signed {
+                prepare_wide_signed_magnitude(&l, l_width, d_chunks, locals, instrs)
+            } else {
+                (l.clone(), None)
+            };
+            let (divisor, rhs_negative) = if signed {
+                prepare_wide_signed_magnitude(&r, r_width, d_chunks, locals, instrs)
+            } else {
+                (r.clone(), None)
+            };
+            let divisor_is_zero = locals.alloc(1);
+            instrs.push(Instruction::I64Const(0));
+            for c in 0..d_chunks {
+                emit_wide_get_chunk(instrs, &divisor, c);
+                instrs.push(Instruction::I64Or);
+            }
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::LocalSet(divisor_is_zero));
+
             let q = locals.alloc(d_chunks);
             let rem = locals.alloc(d_chunks);
             let cand = locals.alloc(d_chunks);
@@ -1723,7 +2078,7 @@ fn compile_binary_wide(
                 }
 
                 instrs.push(Instruction::LocalGet(rem));
-                emit_wide_get_chunk(instrs, &l, chunk_idx);
+                emit_wide_get_chunk(instrs, &dividend, chunk_idx);
                 instrs.push(Instruction::I64Const(bit_idx as i64));
                 instrs.push(Instruction::I64ShrU);
                 instrs.push(Instruction::I64Const(1));
@@ -1735,11 +2090,11 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(ge));
                 for c in 0..d_chunks {
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64Ne);
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64GtU);
                     instrs.push(Instruction::I64ExtendI32U);
                     instrs.push(Instruction::LocalSet(ge));
@@ -1750,12 +2105,12 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(borrow));
                 for c in 0..d_chunks {
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64Sub);
                     instrs.push(Instruction::LocalSet(d1));
 
                     instrs.push(Instruction::LocalGet(rem + c as u32));
-                    emit_wide_get_chunk(instrs, &r, c);
+                    emit_wide_get_chunk(instrs, &divisor, c);
                     instrs.push(Instruction::I64LtU);
                     instrs.push(Instruction::I64ExtendI32U);
                     instrs.push(Instruction::LocalSet(c1));
@@ -1791,9 +2146,36 @@ fn compile_binary_wide(
                 instrs.push(Instruction::End);
             }
 
-            let src = if matches!(op, BinaryOp::Div) { q } else { rem };
+            let magnitude = RegLocal {
+                value_idx: if quotient { q } else { rem },
+                num_chunks: d_chunks,
+                mask_idx: None,
+            };
+            let signed_result = if signed {
+                let result_negative = if quotient {
+                    let result = locals.alloc(1);
+                    instrs.push(Instruction::LocalGet(lhs_negative.unwrap()));
+                    instrs.push(Instruction::LocalGet(rhs_negative.unwrap()));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::LocalSet(result));
+                    result
+                } else {
+                    lhs_negative.unwrap()
+                };
+                conditional_negate_wide_local(&magnitude, result_negative, d_chunks, locals, instrs)
+            } else {
+                magnitude
+            };
             for c in 0..d_chunks {
-                instrs.push(Instruction::LocalGet(src + c as u32));
+                instrs.push(Instruction::LocalGet(divisor_is_zero));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                emit_wide_get_chunk(instrs, &signed_result, c);
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::End);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
@@ -1811,7 +2193,16 @@ fn compile_binary_wide(
     }
 
     if four_state {
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, locals, instrs);
+        compile_binary_mask_wide(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            l_width.max(r_width),
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
     }
 }
@@ -1822,6 +2213,7 @@ fn compile_binary_mask_narrow(
     op: &BinaryOp,
     rhs: &RegLocal,
     d_width: usize,
+    operand_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2001,7 +2393,7 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalGet(rhs_mask));
             instrs.push(Instruction::I64Const(-1));
             instrs.push(Instruction::I64Xor);
-            emit_mask_to_width(instrs, d_width);
+            emit_mask_to_width(instrs, operand_width);
             instrs.push(Instruction::LocalSet(compare_mask));
 
             instrs.push(Instruction::LocalGet(lhs_mask));
@@ -2064,6 +2456,7 @@ fn compile_binary_mask_wide(
     op: &BinaryOp,
     rhs: &RegLocal,
     d_width: usize,
+    operand_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2330,18 +2723,19 @@ fn compile_binary_mask_wide(
         BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
             let any_unknown = locals.alloc(1);
             let any_mismatch = locals.alloc(1);
+            let operand_chunks = lhs.num_chunks.max(rhs.num_chunks);
 
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(any_unknown));
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(any_mismatch));
 
-            for c in 0..dst.num_chunks.max(lhs.num_chunks).max(rhs.num_chunks) {
+            for c in 0..operand_chunks {
                 let compare_mask = locals.alloc(1);
                 emit_wide_get_chunk(instrs, &rhs_mask, c);
                 instrs.push(Instruction::I64Const(-1));
                 instrs.push(Instruction::I64Xor);
-                emit_chunk_mask_to_width(instrs, c, dst.num_chunks, d_width);
+                emit_chunk_mask_to_width(instrs, c, operand_chunks, operand_width);
                 instrs.push(Instruction::LocalSet(compare_mask));
 
                 emit_wide_get_chunk(instrs, &lhs_mask, c);
@@ -2738,9 +3132,23 @@ fn compile_unary(
     let s_width = unit.register_map[src].width();
 
     match op {
-        UnaryOp::Ident => {
+        UnaryOp::Ident | UnaryOp::ToTwoState => {
             for c in 0..d.num_chunks {
                 emit_wide_get_chunk(instrs, &s, c);
+                if matches!(op, UnaryOp::ToTwoState)
+                    && four_state
+                    && let Some(src_mask) = s.mask_idx
+                {
+                    if c < s.num_chunks {
+                        instrs.push(Instruction::LocalGet(src_mask + c as u32));
+                    } else {
+                        instrs.push(Instruction::I64Const(0));
+                    }
+                    instrs.push(Instruction::I64Const(-1));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::I64And);
+                }
+                emit_chunk_mask_to_width(instrs, c, d.num_chunks, d_width);
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
@@ -2888,11 +3296,14 @@ fn compile_unary(
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            compile_count_unary_value(&d, op, &s, d_width, s_width, locals, instrs);
+        }
     }
 
     if four_state {
         compile_unary_mask(&d, op, &s, d_width, s_width, locals, instrs);
-        if !matches!(op, UnaryOp::Ident | UnaryOp::BitNot) {
+        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot) {
             normalize_reg_with_mask(&d, d_width, instrs);
         }
     }
@@ -2924,7 +3335,13 @@ fn compile_unary_mask(
                 instrs.push(Instruction::LocalSet(dst_mask + c as u32));
             }
         }
-        UnaryOp::Minus | UnaryOp::LogicNot => {
+        UnaryOp::ToTwoState => {
+            for c in 0..dst.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+        }
+        UnaryOp::Minus => {
             let has_x = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
             instrs.push(Instruction::LocalSet(has_x));
@@ -2949,7 +3366,37 @@ fn compile_unary_mask(
             }
             instrs.push(Instruction::End);
         }
-        UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => {
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let has_x = locals.alloc(1);
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(has_x));
+            for c in 0..src.num_chunks {
+                instrs.push(Instruction::LocalGet(has_x));
+                instrs.push(Instruction::LocalGet(src_mask + c as u32));
+                if c + 1 == src.num_chunks && !s_width.is_multiple_of(64) {
+                    let valid_bits = s_width % 64;
+                    instrs.push(Instruction::I64Const(((1u64 << valid_bits) - 1) as i64));
+                    instrs.push(Instruction::I64And);
+                }
+                instrs.push(Instruction::I64Or);
+                instrs.push(Instruction::LocalSet(has_x));
+            }
+            instrs.push(Instruction::LocalGet(has_x));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            for c in 0..dst.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+            instrs.push(Instruction::Else);
+            for c in 0..dst.num_chunks {
+                let chunk_mask = chunk_mask_for_width(c, dst.num_chunks, d_width);
+                instrs.push(Instruction::I64Const(chunk_mask as i64));
+                instrs.push(Instruction::LocalSet(dst_mask + c as u32));
+            }
+            instrs.push(Instruction::End);
+        }
+        UnaryOp::And | UnaryOp::LogicNot | UnaryOp::Or | UnaryOp::Xor => {
             let has_x = locals.alloc(1);
             let definite = locals.alloc(1);
             instrs.push(Instruction::I64Const(0));
@@ -2986,7 +3433,7 @@ fn compile_unary_mask(
                         instrs.push(Instruction::I64Or);
                         instrs.push(Instruction::LocalSet(definite));
                     }
-                    UnaryOp::Or => {
+                    UnaryOp::LogicNot | UnaryOp::Or => {
                         instrs.push(Instruction::LocalGet(definite));
                         instrs.push(Instruction::LocalGet(src.value_idx + c as u32));
                         instrs.push(Instruction::LocalGet(src_mask + c as u32));
@@ -3006,7 +3453,7 @@ fn compile_unary_mask(
             }
 
             match op {
-                UnaryOp::And | UnaryOp::Or => {
+                UnaryOp::And | UnaryOp::LogicNot | UnaryOp::Or => {
                     instrs.push(Instruction::LocalGet(definite));
                     instrs.push(Instruction::I64Eqz);
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
@@ -3046,9 +3493,189 @@ fn compile_unary_mask(
     }
 }
 
+fn emit_masked_source_chunk(
+    src: &RegLocal,
+    chunk: usize,
+    source_width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32));
+    if chunk + 1 == src.num_chunks && !source_width.is_multiple_of(64) {
+        let valid_bits = source_width % 64;
+        instrs.push(Instruction::I64Const(((1u64 << valid_bits) - 1) as i64));
+        instrs.push(Instruction::I64And);
+    }
+}
+
+fn compile_count_unary_value(
+    dst: &RegLocal,
+    op: &UnaryOp,
+    src: &RegLocal,
+    destination_width: usize,
+    source_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    debug_assert!(source_width > 0);
+    let count = locals.alloc(1);
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalSet(count));
+
+    match op {
+        UnaryOp::PopCount => {
+            for chunk in 0..src.num_chunks {
+                instrs.push(Instruction::LocalGet(count));
+                emit_masked_source_chunk(src, chunk, source_width, instrs);
+                instrs.push(Instruction::I64Popcnt);
+                instrs.push(Instruction::I64Add);
+                instrs.push(Instruction::LocalSet(count));
+            }
+        }
+        UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            let active = locals.alloc(1);
+            let source_chunk = locals.alloc(1);
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::LocalSet(active));
+
+            if matches!(op, UnaryOp::CountLeadingZeros) {
+                for chunk in (0..src.num_chunks).rev() {
+                    compile_zero_count_chunk(
+                        src,
+                        chunk,
+                        source_width,
+                        true,
+                        count,
+                        active,
+                        source_chunk,
+                        instrs,
+                    );
+                }
+            } else {
+                for chunk in 0..src.num_chunks {
+                    compile_zero_count_chunk(
+                        src,
+                        chunk,
+                        source_width,
+                        false,
+                        count,
+                        active,
+                        source_chunk,
+                        instrs,
+                    );
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    instrs.push(Instruction::LocalGet(count));
+    emit_mask_to_width(instrs, destination_width);
+    instrs.push(Instruction::LocalSet(dst.value_idx));
+    for chunk in 1..dst.num_chunks {
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(dst.value_idx + chunk as u32));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_zero_count_chunk(
+    src: &RegLocal,
+    chunk: usize,
+    source_width: usize,
+    leading: bool,
+    count: u32,
+    active: u32,
+    source_chunk: u32,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    instrs.push(Instruction::LocalGet(active));
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::I64Ne);
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+
+    emit_masked_source_chunk(src, chunk, source_width, instrs);
+    instrs.push(Instruction::LocalSet(source_chunk));
+    let valid_bits = if chunk + 1 == src.num_chunks && !source_width.is_multiple_of(64) {
+        source_width % 64
+    } else {
+        64
+    };
+
+    if leading {
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Clz);
+        if valid_bits < 64 {
+            instrs.push(Instruction::I64Const((64 - valid_bits) as i64));
+            instrs.push(Instruction::I64Sub);
+        }
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(active));
+    } else {
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::I64Const(valid_bits as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+        instrs.push(Instruction::Else);
+        instrs.push(Instruction::LocalGet(count));
+        instrs.push(Instruction::LocalGet(source_chunk));
+        instrs.push(Instruction::I64Ctz);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(count));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(active));
+        instrs.push(Instruction::End);
+    }
+    instrs.push(Instruction::End);
+}
+
 // ============================================================
 // Memory operations
 // ============================================================
+
+fn compile_logical_bit_offset(
+    offset: &SIROffset,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> u32 {
+    let result = locals.alloc(1);
+    match offset {
+        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
+        SIROffset::Dynamic(reg) => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[index].value_idx));
+            if *element_width != 1 {
+                instrs.push(Instruction::I64Const(*element_width as i64));
+                instrs.push(Instruction::I64Mul);
+            }
+            if *bit_offset != 0 {
+                instrs.push(Instruction::I64Const(*bit_offset as i64));
+                instrs.push(Instruction::I64Add);
+            }
+            if let Some(dynamic) = dynamic_bit_offset {
+                instrs.push(Instruction::LocalGet(locals.reg_map[dynamic].value_idx));
+                instrs.push(Instruction::I64Add);
+            }
+        }
+    }
+    instrs.push(Instruction::LocalSet(result));
+    result
+}
 
 fn compile_load(
     dst: &RegisterId,
@@ -3057,10 +3684,10 @@ fn compile_load(
     op_width: usize,
     layout: &MemoryLayout,
     four_state: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    let d = &locals.reg_map[dst];
+    let d = locals.reg_map[dst].clone();
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
     let var_width = layout.widths[&abs];
@@ -3072,7 +3699,7 @@ fn compile_load(
             let bit_shift = bit_off % 8;
             let load_offset = base_offset + byte_off;
 
-            compile_load_at_offset(d, load_offset, bit_shift, op_width, instrs);
+            compile_load_at_offset(&d, load_offset, bit_shift, op_width, instrs);
 
             // 4-state: load mask
             if four_state {
@@ -3108,7 +3735,7 @@ fn compile_load(
             // Dynamic bit offset is in offset_reg.value_idx (i64).
             // byte_offset = base_offset + (dynamic_bits / 8)
             // bit_shift = dynamic_bits % 8
-            compile_load_dynamic(d, base_offset, offset_reg.value_idx, op_width, instrs);
+            compile_load_dynamic(&d, base_offset, offset_reg.value_idx, op_width, instrs);
 
             if four_state {
                 if let Some(mask_idx) = d.mask_idx {
@@ -3132,6 +3759,33 @@ fn compile_load(
                             instrs.push(Instruction::I64Const(0));
                             instrs.push(Instruction::LocalSet(mask_idx + c as u32));
                         }
+                    }
+                }
+            }
+        }
+        SIROffset::Element { .. } => {
+            let offset_local = compile_logical_bit_offset(offset, locals, instrs);
+            compile_load_dynamic(&d, base_offset, offset_local, op_width, instrs);
+
+            if four_state && let Some(mask_idx) = d.mask_idx {
+                let is_4state = layout.is_4states.get(&abs).copied().unwrap_or(false);
+                if is_4state {
+                    let mask_local = RegLocal {
+                        value_idx: mask_idx,
+                        num_chunks: d.num_chunks,
+                        mask_idx: None,
+                    };
+                    compile_load_dynamic(
+                        &mask_local,
+                        base_offset + var_byte_size,
+                        offset_local,
+                        op_width,
+                        instrs,
+                    );
+                } else {
+                    for c in 0..d.num_chunks {
+                        instrs.push(Instruction::I64Const(0));
+                        instrs.push(Instruction::LocalSet(mask_idx + c as u32));
                     }
                 }
             }
@@ -3309,6 +3963,162 @@ fn compile_load_dynamic(
     }
 }
 
+fn compile_prepare_sparse_store(
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    op_width: usize,
+    layout: &MemoryLayout,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let abs = addr.absolute_addr();
+    let sparse = &layout.sparse_layouts[&abs];
+    let stable_base = layout.offsets[&abs];
+    let sparse_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
+    let byte_size = get_byte_size(layout.widths[&abs]);
+    let bit_offset = locals.alloc(1);
+    let logical_offset = compile_logical_bit_offset(offset, locals, instrs);
+    instrs.push(Instruction::LocalGet(logical_offset));
+    instrs.push(Instruction::LocalSet(bit_offset));
+    let start_chunk = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(bit_offset));
+    instrs.push(Instruction::I64Const(6));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(start_chunk));
+    let end_chunk = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(bit_offset));
+    instrs.push(Instruction::I64Const(op_width.saturating_sub(1) as i64));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::I64Const(6));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::LocalSet(end_chunk));
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+
+    for delta in 0..(op_width.div_ceil(64) + 1) {
+        let candidate = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(start_chunk));
+        instrs.push(Instruction::I64Const(delta as i64));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalSet(candidate));
+        let chunk = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(candidate));
+        instrs.push(Instruction::LocalGet(start_chunk));
+        instrs.push(Instruction::LocalGet(candidate));
+        instrs.push(Instruction::LocalGet(end_chunk));
+        instrs.push(Instruction::I64LeU);
+        instrs.push(Instruction::Select);
+        instrs.push(Instruction::LocalSet(chunk));
+
+        let dirty_word = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(chunk));
+        instrs.push(Instruction::I64Const(6));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::LocalSet(dirty_word));
+        let dirty_addr = locals.alloc(1);
+        instrs.push(Instruction::I64Const(sparse.dirty_words_offset as i64));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(dirty_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Load(memarg));
+        let dirty_bits = locals.alloc(1);
+        instrs.push(Instruction::LocalSet(dirty_bits));
+        let dirty_mask = locals.alloc(1);
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::LocalGet(chunk));
+        instrs.push(Instruction::I64Const(63));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::LocalSet(dirty_mask));
+        let was_dirty = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_mask));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(was_dirty));
+
+        for plane_delta in
+            [0, byte_size]
+                .into_iter()
+                .take(if four_state && layout.is_4states[&abs] {
+                    2
+                } else {
+                    1
+                })
+        {
+            let stable = locals.alloc(1);
+            instrs.push(Instruction::I64Const((stable_base + plane_delta) as i64));
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(8));
+            instrs.push(Instruction::I64Mul);
+            instrs.push(Instruction::I64Add);
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::I64Load(memarg));
+            instrs.push(Instruction::LocalSet(stable));
+            let working = locals.alloc(1);
+            instrs.push(Instruction::I64Const((sparse_base + plane_delta) as i64));
+            instrs.push(Instruction::LocalGet(chunk));
+            instrs.push(Instruction::I64Const(8));
+            instrs.push(Instruction::I64Mul);
+            instrs.push(Instruction::I64Add);
+            instrs.push(Instruction::LocalTee(working));
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::I64Load(memarg));
+            let old_working = locals.alloc(1);
+            instrs.push(Instruction::LocalSet(old_working));
+            instrs.push(Instruction::LocalGet(working));
+            instrs.push(Instruction::I32WrapI64);
+            instrs.push(Instruction::LocalGet(old_working));
+            instrs.push(Instruction::LocalGet(stable));
+            instrs.push(Instruction::LocalGet(was_dirty));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::I64Ne);
+            instrs.push(Instruction::Select);
+            instrs.push(Instruction::I64Store(memarg));
+        }
+
+        instrs.push(Instruction::LocalGet(dirty_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::LocalGet(dirty_bits));
+        instrs.push(Instruction::LocalGet(dirty_mask));
+        instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::I64Store(memarg));
+
+        let summary_addr = locals.alloc(1);
+        instrs.push(Instruction::I64Const(sparse.summary_words_offset as i64));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(6));
+        instrs.push(Instruction::I64ShrU);
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(summary_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Load(memarg));
+        let summary_bits = locals.alloc(1);
+        instrs.push(Instruction::LocalSet(summary_bits));
+        instrs.push(Instruction::LocalGet(summary_addr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::LocalGet(summary_bits));
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::LocalGet(dirty_word));
+        instrs.push(Instruction::I64Const(63));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::I64Shl);
+        instrs.push(Instruction::I64Or);
+        instrs.push(Instruction::I64Store(memarg));
+    }
+}
+
 fn compile_store(
     addr: &RegionedAbsoluteAddr,
     offset: &SIROffset,
@@ -3328,6 +4138,9 @@ fn compile_store(
             emit_trigger_detection(addr, triggers, layout, locals, instrs);
         }
         return;
+    }
+    if addr.region == crate::ir::SPARSE_WORKING_REGION {
+        compile_prepare_sparse_store(addr, offset, op_width, layout, four_state, locals, instrs);
     }
     let s = locals.reg_map[src].clone();
     let abs = addr.absolute_addr();
@@ -3398,8 +4211,8 @@ fn compile_store(
                 }
             }
         }
-        SIROffset::Dynamic(reg) => {
-            let offset_reg_value_idx = locals.reg_map[reg].value_idx;
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            let offset_reg_value_idx = compile_logical_bit_offset(offset, locals, instrs);
             compile_store_dynamic(
                 &s,
                 base_offset,
@@ -3432,20 +4245,6 @@ fn compile_store(
                         // TODO: implement dynamic zero store
                     }
                 }
-            }
-        }
-    }
-
-    // 4-state type boundary enforcement:
-    // When storing to a 2-state variable, subsequent users of the same source
-    // register must observe the mask-cleared value. This mirrors the native
-    // backend and is required because combinational lowering can reuse the same
-    // source register across expressions that conceptually flow through a bit variable.
-    if four_state && !layout.is_4states.get(&abs).copied().unwrap_or(false) {
-        if let Some(mask_idx) = s.mask_idx {
-            for c in 0..s.num_chunks {
-                instrs.push(Instruction::I64Const(0));
-                instrs.push(Instruction::LocalSet(mask_idx + c as u32));
             }
         }
     }
@@ -3497,7 +4296,7 @@ fn emit_load_store_value(
     op_width: usize,
     base_offset: usize,
     dst: &RegLocal,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) -> Option<()> {
     match offset {
@@ -3532,8 +4331,8 @@ fn emit_load_store_value(
                 }
             }
         }
-        SIROffset::Dynamic(reg) => {
-            let dyn_bit_offset_local = locals.reg_map[reg].value_idx;
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            let dyn_bit_offset_local = compile_logical_bit_offset(offset, locals, instrs);
             if op_width <= 64 {
                 compile_load_dynamic(dst, base_offset, dyn_bit_offset_local, op_width, instrs);
             } else {
@@ -3657,7 +4456,7 @@ fn compile_store_at_offset(
         // Byte-aligned store. Break remaining bytes into power-of-2
         // sized stores (8/4/2/1) so every byte of the value is written.
         for c in 0..num_chunks {
-            let remaining_bytes = store_bytes - c * 8;
+            let remaining_bytes = (store_bytes - c * 8).min(8);
             let src_local = (c < src.num_chunks).then_some(src.value_idx + c as u32);
             let mut written = 0usize;
             while written < remaining_bytes {
@@ -4198,7 +4997,7 @@ fn compile_commit(
                 // TODO: implement bit-offset commit
             }
         }
-        SIROffset::Dynamic(_reg) => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
             // TODO: dynamic offset commit
         }
     }
@@ -4455,10 +5254,10 @@ fn compile_terminator(
 // ============================================================
 
 fn compute_byte_offset(layout: &MemoryLayout, abs: &AbsoluteAddr, region: u32) -> usize {
-    if region == STABLE_REGION {
-        layout.offsets[abs]
-    } else {
-        layout.working_base_offset + layout.working_offsets[abs]
+    match region {
+        STABLE_REGION => layout.offsets[abs],
+        crate::ir::SPARSE_WORKING_REGION => layout.sparse_base_offset + layout.sparse_offsets[abs],
+        _ => layout.working_base_offset + layout.working_offsets[abs],
     }
 }
 
@@ -4665,6 +5464,119 @@ fn emit_sign_extend(instrs: &mut Vec<Instruction<'static>>, local_idx: u32, widt
     }
 }
 
+fn prepare_wide_signed_magnitude(
+    source: &RegLocal,
+    width: usize,
+    num_chunks: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> (RegLocal, Option<u32>) {
+    debug_assert!(width > 0);
+    let sign = locals.alloc(1);
+    let sign_bit = width - 1;
+    emit_wide_get_chunk(instrs, source, sign_bit / 64);
+    instrs.push(Instruction::I64Const((sign_bit % 64) as i64));
+    instrs.push(Instruction::I64ShrU);
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::I64And);
+    instrs.push(Instruction::LocalSet(sign));
+
+    let extended = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    let source_chunks = width.div_ceil(64);
+    let top_bits = width % 64;
+    for chunk in 0..num_chunks {
+        if chunk >= source_chunks {
+            instrs.push(Instruction::LocalGet(sign));
+            instrs.push(Instruction::I64Eqz);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                ValType::I64,
+            )));
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::Else);
+            instrs.push(Instruction::I64Const(-1));
+            instrs.push(Instruction::End);
+        } else {
+            emit_wide_get_chunk(instrs, source, chunk);
+            if chunk + 1 == source_chunks && top_bits != 0 {
+                let low_mask = (1u64 << top_bits) - 1;
+                instrs.push(Instruction::I64Const(low_mask as i64));
+                instrs.push(Instruction::I64And);
+                instrs.push(Instruction::LocalGet(sign));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::Else);
+                instrs.push(Instruction::I64Const((!low_mask) as i64));
+                instrs.push(Instruction::End);
+                instrs.push(Instruction::I64Or);
+            }
+        }
+        instrs.push(Instruction::LocalSet(extended.value_idx + chunk as u32));
+    }
+
+    (
+        conditional_negate_wide_local(&extended, sign, num_chunks, locals, instrs),
+        Some(sign),
+    )
+}
+
+fn conditional_negate_wide_local(
+    source: &RegLocal,
+    negate: u32,
+    num_chunks: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> RegLocal {
+    let negated = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    let carry = locals.alloc(1);
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::LocalSet(carry));
+    for chunk in 0..num_chunks {
+        emit_wide_get_chunk(instrs, source, chunk);
+        instrs.push(Instruction::I64Const(-1));
+        instrs.push(Instruction::I64Xor);
+        instrs.push(Instruction::LocalGet(carry));
+        instrs.push(Instruction::I64Add);
+        instrs.push(Instruction::LocalTee(negated.value_idx + chunk as u32));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::LocalGet(carry));
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::I32And);
+        instrs.push(Instruction::I64ExtendI32U);
+        instrs.push(Instruction::LocalSet(carry));
+    }
+
+    let result = RegLocal {
+        value_idx: locals.alloc(num_chunks),
+        num_chunks,
+        mask_idx: None,
+    };
+    for chunk in 0..num_chunks {
+        instrs.push(Instruction::LocalGet(negate));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Result(
+            ValType::I64,
+        )));
+        emit_wide_get_chunk(instrs, source, chunk);
+        instrs.push(Instruction::Else);
+        emit_wide_get_chunk(instrs, &negated, chunk);
+        instrs.push(Instruction::End);
+        instrs.push(Instruction::LocalSet(result.value_idx + chunk as u32));
+    }
+    result
+}
+
 fn emit_wide_get_chunk(instrs: &mut Vec<Instruction<'static>>, reg: &RegLocal, chunk: usize) {
     if chunk < reg.num_chunks {
         instrs.push(Instruction::LocalGet(reg.value_idx + chunk as u32));
@@ -4757,4 +5669,337 @@ fn emit_trigger_detection(
         }));
     }
     instrs.push(Instruction::End); // end if
+}
+
+#[cfg(test)]
+mod bit_count_tests {
+    use num_bigint::BigUint;
+    use veryl_analyzer::ir::VarId;
+    use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
+
+    use super::*;
+    use crate::{
+        SimulatorOptions,
+        backend::JitEngine,
+        ir::{BasicBlock, InstanceId},
+    };
+
+    const OUTPUT_OFFSET: usize = 32;
+    const SLOT_BITS: usize = 128;
+
+    #[derive(Clone)]
+    struct CountCase {
+        source_width: usize,
+        destination_width: usize,
+        value: BigUint,
+        mask: BigUint,
+        expected: [usize; 3],
+    }
+
+    fn address() -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        }
+    }
+
+    fn layout(variable_width: usize, four_state: bool) -> MemoryLayout {
+        let addr = address();
+        let mut offsets = HashMap::default();
+        offsets.insert(addr, OUTPUT_OFFSET);
+        let mut widths = HashMap::default();
+        widths.insert(addr, variable_width);
+        let mut is_4states = HashMap::default();
+        is_4states.insert(addr, true);
+        let variable_bytes = get_byte_size(variable_width);
+        let total_size = OUTPUT_OFFSET + variable_bytes * usize::from(four_state) + variable_bytes;
+        let working_base_offset = (total_size + 7) & !7;
+
+        MemoryLayout {
+            four_state,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets,
+            widths,
+            is_4states,
+            total_size,
+            working_offsets: HashMap::default(),
+            working_base_offset,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: working_base_offset,
+            sparse_layouts: HashMap::default(),
+            sparse_active_count_offset: working_base_offset,
+            sparse_active_flags_offset: working_base_offset,
+            sparse_active_list_offset: working_base_offset,
+            sparse_active_capacity: 0,
+            merged_total_size: 65_536,
+            triggered_bits_offset: working_base_offset,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: working_base_offset,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: Vec::new(),
+        }
+    }
+
+    fn execution_unit(cases: &[CountCase]) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        let mut next_reg = 0usize;
+        let ops = [
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ];
+
+        for (case_index, case) in cases.iter().enumerate() {
+            let source = RegisterId(next_reg);
+            next_reg += 1;
+            register_map.insert(
+                source,
+                RegisterType::Logic {
+                    width: case.source_width,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(
+                source,
+                SIRValue::new_four_state(case.value.clone(), case.mask.clone()),
+            ));
+
+            for (op_index, op) in ops.iter().copied().enumerate() {
+                let destination = RegisterId(next_reg);
+                next_reg += 1;
+                register_map.insert(
+                    destination,
+                    RegisterType::Logic {
+                        width: case.destination_width,
+                    },
+                );
+                instructions.push(SIRInstruction::Unary(destination, op, source));
+                let result_index = case_index * ops.len() + op_index;
+                instructions.push(SIRInstruction::Store(
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                    SIROffset::Static(result_index * SLOT_BITS),
+                    case.destination_width,
+                    destination,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+        }
+
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: std::iter::once((BlockId(0), block)).collect(),
+            register_map,
+        }
+    }
+
+    fn run_cranelift(
+        unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let options = SimulatorOptions {
+            four_state,
+            ..SimulatorOptions::default()
+        };
+        let mut engine = JitEngine::new(layout.clone(), &options).expect("create JIT engine");
+        let code = engine
+            .compile_units(std::slice::from_ref(unit), None, None, None)
+            .expect("compile count operations");
+        let function: unsafe extern "C" fn(*mut u8) -> u64 = unsafe { std::mem::transmute(code) };
+        let mut memory = vec![0u8; layout.merged_total_size];
+        let status = unsafe { function(memory.as_mut_ptr()) };
+        assert_eq!(status, 0);
+        memory
+    }
+
+    fn run_wasm(
+        unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let wasm = compile_units(std::slice::from_ref(unit), layout, four_state, false);
+        let engine = Engine::default();
+        let module = WasmtimeModule::new(&engine, &wasm.bytes).expect("compile Wasm module");
+        let mut store = Store::new(&engine, ());
+        let memory = Memory::new(&mut store, wasmtime::MemoryType::new(1, None))
+            .expect("create Wasm memory");
+        let mut linker = Linker::new(&engine);
+        linker
+            .define(&mut store, "env", "memory", memory)
+            .expect("define Wasm memory");
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .expect("instantiate Wasm module");
+        let run = instance
+            .get_typed_func::<(), i64>(&mut store, "run")
+            .expect("find Wasm entry point");
+        assert_eq!(run.call(&mut store, ()).expect("execute Wasm"), 0);
+        memory.data(&store).to_vec()
+    }
+
+    fn read_bits_at(memory: &[u8], base_offset: usize, bit_offset: usize, width: usize) -> BigUint {
+        assert!(bit_offset.is_multiple_of(8));
+        let byte_offset = base_offset + bit_offset / 8;
+        BigUint::from_bytes_le(&memory[byte_offset..byte_offset + get_byte_size(width)])
+            & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
+    }
+
+    fn read_bits(memory: &[u8], bit_offset: usize, width: usize) -> BigUint {
+        read_bits_at(memory, OUTPUT_OFFSET, bit_offset, width)
+    }
+
+    fn assert_results(cases: &[CountCase], memory: &[u8]) {
+        for (case_index, case) in cases.iter().enumerate() {
+            for (op_index, expected) in case.expected.iter().copied().enumerate() {
+                let result_index = case_index * 3 + op_index;
+                assert_eq!(
+                    read_bits(memory, result_index * SLOT_BITS, case.destination_width),
+                    BigUint::from(expected),
+                    "case {case_index}, operation {op_index}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bit_counts_match_for_narrow_and_wide_two_state_values() {
+        let cases = vec![
+            CountCase {
+                source_width: 1,
+                destination_width: 1,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 1, 1],
+            },
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0b0_0100u8),
+                mask: BigUint::from(0u8),
+                expected: [1, 2, 2],
+            },
+            CountCase {
+                source_width: 63,
+                destination_width: 6,
+                value: (BigUint::from(1u8) << 62) | (BigUint::from(1u8) << 7),
+                mask: BigUint::from(0u8),
+                expected: [2, 0, 7],
+            },
+            CountCase {
+                source_width: 64,
+                destination_width: 7,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 64, 64],
+            },
+            CountCase {
+                source_width: 65,
+                destination_width: 7,
+                value: (BigUint::from(1u8) << 64) | (BigUint::from(1u8) << 40),
+                mask: BigUint::from(0u8),
+                expected: [2, 0, 40],
+            },
+            CountCase {
+                source_width: 70,
+                destination_width: 80,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(0u8),
+                expected: [0, 70, 70],
+            },
+            CountCase {
+                source_width: 130,
+                destination_width: 8,
+                value: (BigUint::from(1u8) << 128)
+                    | (BigUint::from(1u8) << 65)
+                    | (BigUint::from(1u8) << 3),
+                mask: BigUint::from(0u8),
+                expected: [3, 1, 3],
+            },
+        ];
+        let variable_width = cases.len() * 3 * SLOT_BITS;
+        let layout = layout(variable_width, false);
+        let unit = execution_unit(&cases);
+
+        assert_results(&cases, &run_cranelift(&unit, &layout, false));
+        assert_results(&cases, &run_wasm(&unit, &layout, false));
+    }
+
+    #[test]
+    fn bit_counts_propagate_unknown_as_full_destination_mask() {
+        let cases = vec![
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0b0_0100u8),
+                mask: BigUint::from(0u8),
+                expected: [1, 2, 2],
+            },
+            CountCase {
+                source_width: 5,
+                destination_width: 3,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(1u8) << 2,
+                expected: [0, 0, 0],
+            },
+            CountCase {
+                source_width: 70,
+                destination_width: 80,
+                value: BigUint::from(0u8),
+                mask: BigUint::from(1u8) << 66,
+                expected: [0, 0, 0],
+            },
+        ];
+        let variable_width = cases.len() * 3 * SLOT_BITS;
+        let layout = layout(variable_width, true);
+        let unit = execution_unit(&cases);
+        let value_bytes = get_byte_size(variable_width);
+
+        for memory in [
+            run_cranelift(&unit, &layout, true),
+            run_wasm(&unit, &layout, true),
+        ] {
+            for (case_index, case) in cases.iter().enumerate() {
+                let expected_mask = if case.mask == BigUint::from(0u8) {
+                    BigUint::from(0u8)
+                } else {
+                    (BigUint::from(1u8) << case.destination_width) - BigUint::from(1u8)
+                };
+                for (op_index, expected_count) in case.expected.iter().copied().enumerate() {
+                    let result_index = case_index * 3 + op_index;
+                    let bit_offset = result_index * SLOT_BITS;
+                    let expected_value = if expected_mask == BigUint::from(0u8) {
+                        BigUint::from(expected_count)
+                    } else {
+                        expected_mask.clone()
+                    };
+                    assert_eq!(
+                        read_bits(&memory, bit_offset, case.destination_width),
+                        expected_value,
+                        "case {case_index}, operation {op_index} value",
+                    );
+                    assert_eq!(
+                        read_bits_at(
+                            &memory,
+                            OUTPUT_OFFSET + value_bytes,
+                            bit_offset,
+                            case.destination_width,
+                        ),
+                        expected_mask,
+                        "case {case_index}, operation {op_index} mask",
+                    );
+                }
+            }
+        }
+    }
 }

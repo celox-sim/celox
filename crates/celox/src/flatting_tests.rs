@@ -169,7 +169,7 @@ fn setup_to_flatting(
         &crate::debug::TraceOptions::default(),
         None,
     );
-    (r, modules, arena)
+    (r.unwrap(), modules, arena)
 }
 
 #[test]

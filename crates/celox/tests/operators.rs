@@ -372,6 +372,9 @@ assign y = (a as i8) <: (b as i8);
     }
 
     fn test_cast_signed_to_unsigned_affects_comparison(sim) {
+        // Veryl 0.20.2's runtime keeps the source signedness for this cast;
+        // the analyzer and emitted SystemVerilog make the result unsigned.
+        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (a: input i8, b: input i8, y: output logic) {
 assign y = (a as u8) <: (b as u8);
@@ -389,6 +392,97 @@ assign y = (a as u8) <: (b as u8);
     })
     .unwrap();
     assert_eq!(sim.get(y), 0u8.into());
+
+    }
+
+    fn test_symbolic_store_preserves_declared_state_signedness(sim) {
+        @setup { let code = r#"
+module Top (
+    sel:           input  logic,
+    signed_value:  input  signed logic<8>,
+    signed_lhs:    input  signed logic<8>,
+    unsigned_cmp:  output logic,
+    unsigned_wide: output logic<16>,
+    signed_cmp:    output logic
+) {
+    var unsigned_state: logic<8>;
+    var signed_state: signed logic<8>;
+    always_comb {
+        unsigned_state = 8'd0;
+        signed_state = signed_value;
+        if sel {
+            unsigned_state = signed_value;
+        }
+        unsigned_cmp = signed_lhs >: unsigned_state;
+        unsigned_wide = unsigned_state;
+        signed_cmp = signed_lhs >: signed_state;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let signed_value = sim.signal("signed_value");
+    let signed_lhs = sim.signal("signed_lhs");
+    let unsigned_cmp = sim.signal("unsigned_cmp");
+    let unsigned_wide = sim.signal("unsigned_wide");
+    let signed_cmp = sim.signal("signed_cmp");
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(signed_value, 0xffu8); // -1 as signed logic<8>
+        io.set(signed_lhs, 1u8);
+    })
+    .unwrap();
+
+    // An assignment changes the stored bits, not the declared type of the
+    // variable read by the following expressions.
+    assert_eq!(sim.get(unsigned_cmp), 0u8.into()); // unsigned 1 > 255
+    assert_eq!(sim.get(unsigned_wide), 0x00ffu16.into());
+    assert_eq!(sim.get(signed_cmp), 1u8.into()); // signed 1 > -1
+
+    }
+
+    fn test_unsigned_type_cast_does_not_inherit_source_signedness(sim) {
+        // Veryl 0.20.2's runtime lowerer zero-extends this widening cast,
+        // contrary to its analyzer, emitter, and SystemVerilog cast rules.
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    sel:       input  logic,
+    signed_in: input  signed logic<5>,
+    lhs:       input  signed logic<8>,
+    cmp:       output logic,
+    wide:      output logic<12>
+) {
+    var state: logic<8>;
+    always_comb {
+        state = 8'd0;
+        if sel {
+            state = signed_in as u8;
+        }
+        cmp = lhs >: state;
+        wide = state;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let signed_in = sim.signal("signed_in");
+    let lhs = sim.signal("lhs");
+    let cmp = sim.signal("cmp");
+    let wide = sim.signal("wide");
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        // Resizing to u8 first preserves the signed source bits (0xff), then
+        // the result is reinterpreted as unsigned.
+        io.set(signed_in, 0x1fu8);
+        io.set(lhs, 0x20u8);
+    })
+    .unwrap();
+
+    assert_eq!(sim.get(cmp), 0u8.into()); // unsigned 32 > 255 is false
+    assert_eq!(sim.get(wide), 0x00ffu16.into());
 
     }
 
@@ -453,6 +547,68 @@ assign r = a % b;
     })
     .unwrap();
     assert_eq!(sim.get(r), 15u16.into()); // 255%16 = 15
+
+    }
+
+    fn test_ternary_div_zero_branch_is_lazy(sim) {
+        @setup { let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+q: output logic<16>
+) {
+assign q = if b == 16'd0 ? 16'hFFFF : a / b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 0u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(q), 0xFFFFu16.into());
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 7u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(q), 14u16.into());
+
+    }
+
+    fn test_ternary_rem_zero_branch_is_lazy(sim) {
+        @setup { let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<16>,
+r: output logic<16>
+) {
+assign r = if b == 16'd0 ? a : a % b;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let r = sim.signal("r");
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 0u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 100u16.into());
+
+    sim.modify(|io| {
+        io.set(a, 100u16);
+        io.set(b, 7u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(r), 2u16.into());
 
     }
 

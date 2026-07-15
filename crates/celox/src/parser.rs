@@ -8,35 +8,489 @@ use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 use veryl_parser::token_range::TokenRange;
 
-fn rebuild_slt_cache<A: std::hash::Hash + Eq + Clone>(arena: &mut SLTNodeArena<A>) {
-    arena.cache.clear();
-    for (idx, node) in arena.nodes.iter().cloned().enumerate() {
-        arena.cache.insert(node, crate::logic_tree::NodeId(idx));
-    }
-}
-
 fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     start: usize,
     runtime_event_site_map: &HashMap<u32, u32>,
-) {
-    let mut changed = false;
-    for node in arena.nodes.iter_mut().skip(start) {
-        let crate::logic_tree::SLTNode::ForFold { effects, .. } = node else {
-            continue;
+) -> Result<(), ParserError> {
+    arena
+        .remap_for_fold_effect_sites(start..arena.len(), |site_id, fatal_error_code| {
+            Ok(runtime_event_site_map.get(&site_id).map(|&global_site| {
+                (
+                    global_site,
+                    fatal_error_code.map(|_| i64::from(global_site)),
+                )
+            }))
+        })
+        .map_err(|error| {
+            ParserError::illegal_context(
+                "ForFold runtime-event relocation",
+                error.to_string(),
+                None,
+            )
+        })
+}
+
+fn verify_slt_roots<A>(
+    arena: &SLTNodeArena<A>,
+    paths: &[LogicPath<A>],
+    observers: &[CombObserver<A>],
+    variable_widths: &HashMap<A, usize>,
+    variable_signedness: &HashMap<A, bool>,
+    phase: &'static str,
+) -> Result<(), ParserError>
+where
+    A: Hash + Eq + Clone,
+{
+    let facts =
+        SLTNodeFacts::verify(arena).map_err(|error| ParserError::SltVerify { phase, error })?;
+    let require = |node, role| {
+        facts
+            .require_lowerable(node, role)
+            .map_err(|error| ParserError::SltVerify { phase, error })
+    };
+    let fail = |invariant, node, message| ParserError::SltVerify {
+        phase,
+        error: crate::logic_tree::SLTNodeFactsError::new(invariant, node, message),
+    };
+    let access_width = |access: crate::ir::BitAccess,
+                        role: &'static str,
+                        node: NodeId|
+     -> Result<usize, ParserError> {
+        let span = access.msb.checked_sub(access.lsb).ok_or_else(|| {
+            fail(
+                "ROOT.ACCESS_ORDERED",
+                node,
+                format!(
+                    "{role} access has lsb {} greater than msb {}",
+                    access.lsb, access.msb
+                ),
+            )
+        })?;
+        span.checked_add(1).ok_or_else(|| {
+            fail(
+                "ROOT.ACCESS_REPRESENTABLE",
+                node,
+                format!(
+                    "{role} access [{}:{}] has an unrepresentable width",
+                    access.msb, access.lsb
+                ),
+            )
+        })
+    };
+    let verify_atom = |id: &A,
+                       access: crate::ir::BitAccess,
+                       role: &'static str,
+                       node: NodeId|
+     -> Result<usize, ParserError> {
+        let width = access_width(access, role, node)?;
+        let Some(&variable_width) = variable_widths.get(id) else {
+            return Err(fail(
+                "ROOT.VARIABLE_EXISTS",
+                node,
+                format!("{role} names a variable absent from the semantic type table"),
+            ));
         };
-        for effect in effects {
-            if let Some(global_site) = runtime_event_site_map.get(&effect.site_id) {
-                effect.site_id = *global_site;
-                if effect.fatal_error_code.is_some() {
-                    effect.fatal_error_code = Some(*global_site as i64);
+        if variable_width == 0 || access.msb >= variable_width {
+            return Err(fail(
+                "ROOT.ACCESS_IN_VARIABLE_BOUNDS",
+                node,
+                format!(
+                    "{role} access [{}:{}] is outside variable width {variable_width}",
+                    access.msb, access.lsb
+                ),
+            ));
+        }
+        Ok(width)
+    };
+
+    for (node_index, node) in arena.iter().enumerate() {
+        let node_id = NodeId(node_index);
+        match node {
+            crate::logic_tree::SLTNode::Input {
+                variable, access, ..
+            } => {
+                verify_atom(variable, *access, "SLT input", node_id)?;
+            }
+            crate::logic_tree::SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                loop_signed,
+                result,
+                initials,
+                updates,
+                ..
+            } => {
+                let Some(&declared_loop_width) = variable_widths.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_VARIABLE_EXISTS",
+                        node_id,
+                        "ForFold loop variable is absent from the semantic type table".to_string(),
+                    ));
+                };
+                if *loop_width != declared_loop_width {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_WIDTH_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFold loop width {loop_width} does not equal declared width {declared_loop_width}"
+                        ),
+                    ));
                 }
-                changed = true;
+                let Some(&declared_loop_signed) = variable_signedness.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_SIGNEDNESS_EXISTS",
+                        node_id,
+                        "ForFold loop variable signedness is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_signed != declared_loop_signed {
+                    return Err(fail(
+                        "FOR_FOLD.LOOP_SIGNEDNESS_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFold loop signedness {loop_signed} does not equal declared signedness {declared_loop_signed}"
+                        ),
+                    ));
+                }
+                verify_atom(&result.id, result.access, "ForFold result", node_id)?;
+                for update in initials.iter().chain(updates) {
+                    verify_atom(
+                        &update.target.id,
+                        update.target.access,
+                        "ForFold state target",
+                        node_id,
+                    )?;
+                }
+            }
+            crate::logic_tree::SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                states,
+                ..
+            } => {
+                let Some(&declared_loop_width) = variable_widths.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_VARIABLE_EXISTS",
+                        node_id,
+                        "ForFoldGroup loop variable is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_width != declared_loop_width {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_WIDTH_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFoldGroup loop width {loop_width} does not equal declared width {declared_loop_width}"
+                        ),
+                    ));
+                }
+                let Some(&declared_loop_signed) = variable_signedness.get(loop_var) else {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_EXISTS",
+                        node_id,
+                        "ForFoldGroup loop variable signedness is absent from the semantic type table"
+                            .to_string(),
+                    ));
+                };
+                if *loop_signed != declared_loop_signed {
+                    return Err(fail(
+                        "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_MATCHES_VARIABLE",
+                        node_id,
+                        format!(
+                            "ForFoldGroup loop signedness {loop_signed} does not equal declared signedness {declared_loop_signed}"
+                        ),
+                    ));
+                }
+                for state in states {
+                    verify_atom(
+                        &state.target.id,
+                        state.target.access,
+                        "ForFoldGroup state target",
+                        node_id,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (path_index, path) in paths.iter().enumerate() {
+        let expression_width = require(path.expr, "logic-path result")?;
+        if let LogicPathTarget::Var(target) = &path.target {
+            let target_width =
+                verify_atom(&target.id, target.access, "logic-path target", path.expr)?;
+            if expression_width != target_width {
+                return Err(fail(
+                    "ROOT.RESULT_WIDTH_MATCHES_TARGET",
+                    path.expr,
+                    format!(
+                        "logic-path result width {expression_width} does not equal target width {target_width}"
+                    ),
+                ));
+            }
+        }
+        for &node in &path.pre_lower_nodes {
+            require(node, "logic-path pre-lower value")?;
+        }
+        let mut local_ids = HashSet::default();
+        for (_, node) in &path.local_inputs {
+            require(*node, "logic-path local input")?;
+        }
+        for (id, _) in &path.local_inputs {
+            if !local_ids.insert(id.clone()) {
+                return Err(fail(
+                    "ROOT.LOCAL_INPUT_ID_UNIQUE",
+                    path.expr,
+                    "logic-path contains duplicate local-input IDs".to_string(),
+                ));
+            }
+        }
+        for source in path
+            .sources
+            .iter()
+            .chain(&path.previous_sources)
+            .chain(&path.address_sources)
+        {
+            verify_atom(&source.id, source.access, "logic-path source", path.expr)?;
+        }
+        for address in &path.address_sources {
+            if !path
+                .sources
+                .iter()
+                .any(|source| source.id == address.id && source.access.overlaps(&address.access))
+            {
+                return Err(fail(
+                    "ROOT.ADDRESS_SOURCE_IS_CURRENT_SOURCE",
+                    path.expr,
+                    "logic-path address source is absent from current-value sources".to_string(),
+                ));
+            }
+        }
+        for &successor in &path.order_before {
+            if successor.0 >= paths.len() {
+                return Err(fail(
+                    "ROOT.ORDER_EDGE_EXISTS",
+                    path.expr,
+                    format!(
+                        "logic path {path_index} orders before missing path {}",
+                        successor.0
+                    ),
+                ));
+            }
+            if successor.0 == path_index {
+                return Err(fail(
+                    "ROOT.ORDER_EDGE_NOT_SELF",
+                    path.expr,
+                    format!("logic path {path_index} contains a self ordering edge"),
+                ));
+            }
+        }
+        if let LogicPathTarget::CombCaptureEvent {
+            guard,
+            args,
+            loop_runner,
+            ..
+        } = &path.target
+        {
+            if let Some(guard) = guard {
+                require(*guard, "capture-event guard")?;
+            }
+            for &arg in args {
+                require(arg, "capture-event argument")?;
+            }
+            if let Some(loop_runner) = loop_runner {
+                require(*loop_runner, "capture-event loop runner")?;
             }
         }
     }
-    if changed {
-        rebuild_slt_cache(arena);
+
+    for observer in observers {
+        if let Some(guard) = observer.guard {
+            require(guard, "observer guard")?;
+        }
+        for &arg in &observer.args {
+            require(arg, "observer argument")?;
+        }
+        if let Some(loop_runner) = observer.loop_runner {
+            require(loop_runner, "observer loop runner")?;
+        }
+        let mut local_ids = HashSet::default();
+        for (id, node) in &observer.local_inputs {
+            require(*node, "observer local input")?;
+            if !local_ids.insert(id.clone()) {
+                return Err(fail(
+                    "ROOT.LOCAL_INPUT_ID_UNIQUE",
+                    *node,
+                    "observer contains duplicate local-input IDs".to_string(),
+                ));
+            }
+        }
+        let diagnostic_node = observer
+            .guard
+            .or(observer.loop_runner)
+            .or_else(|| observer.args.first().copied())
+            .unwrap_or(NodeId(0));
+        for atom in observer
+            .sensitivity
+            .iter()
+            .chain(&observer.observed_inputs)
+            .chain(&observer.position_inputs)
+            .chain(&observer.preceding_writes)
+            .chain(&observer.written_before)
+            .chain(&observer.written_input_atoms)
+        {
+            verify_atom(&atom.id, atom.access, "observer atom", diagnostic_node)?;
+        }
+        for id in &observer.written_inputs {
+            if !variable_widths.contains_key(id) {
+                return Err(fail(
+                    "ROOT.VARIABLE_EXISTS",
+                    diagnostic_node,
+                    "observer written input is absent from the semantic type table".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod slt_root_verify_tests {
+    use num_bigint::{BigInt, BigUint};
+
+    use super::verify_slt_roots;
+    use crate::ir::VarAtomBase;
+    use crate::logic_tree::{
+        LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTForUpdate, SLTLoopBound, SLTNode,
+        SLTNodeArena, SLTStepOp,
+    };
+
+    fn path(expr: crate::logic_tree::NodeId) -> LogicPath<u32> {
+        LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(2, 0, 7)),
+            sources: crate::HashSet::default(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        }
+    }
+
+    fn semantic_tables() -> (crate::HashMap<u32, usize>, crate::HashMap<u32, bool>) {
+        (
+            [(1, 8), (2, 8)].into_iter().collect(),
+            [(1, false), (2, false)].into_iter().collect(),
+        )
+    }
+
+    #[test]
+    fn rejects_legacy_for_fold_loop_signedness_mismatch() {
+        let mut arena = SLTNodeArena::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let continue_cond = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let target = VarAtomBase::new(2, 0, 7);
+        let fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: true,
+                start: SLTLoopBound::Const(0),
+                end: SLTLoopBound::Const(1),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: target,
+                initials: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                updates: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                effects: Vec::new(),
+                continue_cond,
+            })
+            .unwrap();
+        let (widths, signedness) = semantic_tables();
+
+        let error =
+            verify_slt_roots(&arena, &[path(fold)], &[], &widths, &signedness, "test").unwrap_err();
+        let super::ParserError::SltVerify { error, .. } = error else {
+            panic!("expected SLT verifier error")
+        };
+        assert_eq!(error.invariant, "FOR_FOLD.LOOP_SIGNEDNESS_MATCHES_VARIABLE");
+    }
+
+    #[test]
+    fn rejects_for_fold_group_loop_signedness_mismatch() {
+        let mut arena = SLTNodeArena::new();
+        let value = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: true,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial: value,
+                    update: value,
+                }],
+            })
+            .unwrap();
+        let (widths, signedness) = semantic_tables();
+
+        let error = verify_slt_roots(&arena, &[path(group)], &[], &widths, &signedness, "test")
+            .unwrap_err();
+        let super::ParserError::SltVerify { error, .. } = error else {
+            panic!("expected SLT verifier error")
+        };
+        assert_eq!(
+            error.invariant,
+            "FOR_FOLD_GROUP.LOOP_SIGNEDNESS_MATCHES_VARIABLE"
+        );
     }
 }
 
@@ -67,17 +521,19 @@ pub mod bitaccess;
 mod bitslicer;
 pub(crate) mod case;
 pub mod ff;
+pub(crate) mod loop_provenance;
 pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath, LogicPathId,
-    ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
-    VarAtomBase, VariableInfo,
+    AbsoluteAddr, CombObserver, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath,
+    LogicPathId, ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION,
+    SimModule, VarAtomBase, VariableInfo,
 };
-use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena};
+use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena, SLTNodeFacts};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::Hash;
 use veryl_analyzer::ir::Declaration;
 
 /// Source location information for rich error diagnostics.
@@ -168,6 +624,25 @@ pub enum ParserError {
 
     #[error("Top module `{name}` is generic and cannot be used as a top-level module")]
     GenericTop { name: String },
+
+    #[error("SIR verification failed {phase} in {group} unit {unit}: {error}")]
+    SirVerify {
+        phase: &'static str,
+        group: &'static str,
+        unit: usize,
+        #[source]
+        error: crate::ir::verify::SirVerifyError,
+    },
+
+    #[error("SLT verification failed {phase}: {error}")]
+    SltVerify {
+        phase: &'static str,
+        #[source]
+        error: crate::logic_tree::SLTNodeFactsError,
+    },
+
+    #[error("SLT construction failed: {0}")]
+    SltConstruction(#[from] crate::logic_tree::SLTNodeFactsError),
 }
 
 impl ParserError {
@@ -231,6 +706,10 @@ impl miette::Diagnostic for ParserError {
             }
             ParserError::TopNotFound { .. } => Some(Box::new("top_not_found")),
             ParserError::GenericTop { .. } => Some(Box::new("generic_top")),
+            ParserError::SirVerify { .. } => Some(Box::new("sir_verify")),
+            ParserError::SltVerify { .. } | ParserError::SltConstruction(_) => {
+                Some(Box::new("slt_verify"))
+            }
         }
     }
 
@@ -346,8 +825,18 @@ pub struct ParseIrResult<'a> {
     pub root_id: ModuleId,
 }
 
+#[cfg(test)]
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+    top: &StrId,
+) -> Result<ParseIrResult<'a>, ParserError> {
+    parse_ir_with_loop_provenance(ir, &loop_provenance::LoopProvenance::default(), config, top)
+}
+
+fn parse_ir_with_loop_provenance<'a>(
+    ir: &'a veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
     config: &BuildConfig,
     top: &StrId,
 ) -> Result<ParseIrResult<'a>, ParserError> {
@@ -464,7 +953,8 @@ pub fn parse_ir<'a>(
     // Parse all discovered modules
     for (mid, ir_module) in &module_ir {
         let inst_ids = inst_sequences.get(mid).map(|v| v.as_slice()).unwrap_or(&[]);
-        let sim_module = ModuleParser::parse(ir_module, config, inst_ids)?;
+        let sim_module =
+            ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
         modules.insert(*mid, sim_module);
     }
 
@@ -651,8 +1141,8 @@ pub(crate) fn flatten(
     let (
         mut global_arena,
         mut eval_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
+        mut eval_only_ffs,
+        mut apply_ffs,
         mut comb_blocks,
         mut comb_observers,
         mut runtime_errors,
@@ -669,7 +1159,7 @@ pub(crate) fn flatten(
             trace_opts,
             &mut trace,
         )
-    );
+    )?;
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
@@ -704,6 +1194,8 @@ pub(crate) fn flatten(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
             &mut eval_apply_ffs,
+            &mut eval_only_ffs,
+            &mut apply_ffs,
             &comb_blocks,
             &global_arena,
             &clock_domains,
@@ -724,7 +1216,10 @@ pub(crate) fn flatten(
     // is a constant, then replace all Input references with Constant nodes.
     // This eliminates Store→Load roundtrips for compile-time constants
     // (e.g. genvar-expanded parity-check matrices).
-    crate::logic_tree::const_inline::inline_constant_variables(&mut comb_blocks, &mut global_arena);
+    crate::logic_tree::const_inline::inline_constant_variables(
+        &mut comb_blocks,
+        &mut global_arena,
+    )?;
     apply_always_comb_previous_source_ordering(&mut comb_blocks);
 
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
@@ -744,13 +1239,30 @@ pub(crate) fn flatten(
             })
         })
         .collect();
+    let var_signedness: HashMap<AbsoluteAddr, bool> = instance_modules
+        .iter()
+        .flat_map(|(&inst_id, &mod_id)| {
+            module_ir[&mod_id]
+                .variables
+                .iter()
+                .map(move |(var_id, var)| {
+                    (
+                        AbsoluteAddr {
+                            instance_id: inst_id,
+                            var_id: *var_id,
+                        },
+                        var.r#type.signed,
+                    )
+                })
+        })
+        .collect();
 
     build_comb_observer_capture_paths(
         &mut comb_blocks,
         &mut comb_observers,
         &runtime_event_sites,
         &mut global_arena,
-    );
+    )?;
     for (site_id, site) in runtime_event_sites.iter().enumerate() {
         if !matches!(site.kind, crate::ir::RuntimeEventKind::AssertFatal) {
             continue;
@@ -766,8 +1278,17 @@ pub(crate) fn flatten(
             });
     }
 
+    verify_slt_roots(
+        &global_arena,
+        &comb_blocks,
+        &comb_observers,
+        &var_widths,
+        &var_signedness,
+        "after flattening symbolic logic",
+    )?;
+
     let sched_start = flatten_timing.then(crate::timing::now);
-    let schedule = scheduler::sort(
+    let schedule = match scheduler::sort(
         comb_blocks,
         &global_arena,
         &ignored_loops,
@@ -775,49 +1296,51 @@ pub(crate) fn flatten(
         four_state,
         &var_widths,
         next_runtime_error_code,
-    )
-    .map_err(|e| {
-        let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
-        let program = Program {
-            eval_apply_ffs: HashMap::default(),
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
-            eval_comb: Vec::new(),
-            runtime_errors: HashMap::default(),
-            runtime_event_sites: Vec::new(),
-            comb_observers: Vec::new(),
-            eval_comb_plan: None,
-            instance_ids: expanded.clone(),
-            instance_module: instance_modules.clone(),
-            module_variables: err_vars,
-            module_var_path_index: err_path_idx,
-            module_names: module_names.clone(),
-            clock_domains: HashMap::default(),
-            topological_clocks: Vec::new(),
-            cascaded_clocks: BTreeSet::new(),
-            arena: SLTNodeArena::new(),
-            num_events: 0,
-            reset_clock_map: HashMap::default(),
-            address_aliases: HashMap::default(),
-            layout: None,
-            initial_memory_values: Vec::new(),
-            initial_statements: None,
-            tb_functions: fxhash::FxHashMap::default(),
-        };
-        let source_locations = scheduler_source_locations(&e, module_ir, &instance_modules);
-        let mut target_arena = SLTNodeArena::new();
-        let error = e.map_addr(&global_arena, &mut target_arena, &|addr| {
-            program.get_path(addr)
-        });
-        if source_locations.is_empty() {
-            ParserError::Scheduler(error)
-        } else {
-            ParserError::SchedulerWithLocation {
-                error,
-                source_locations,
-            }
+    ) {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
+            let program = Program {
+                eval_apply_ffs: HashMap::default(),
+                eval_only_ffs: HashMap::default(),
+                apply_ffs: HashMap::default(),
+                eval_comb: Vec::new(),
+                runtime_errors: HashMap::default(),
+                runtime_event_sites: Vec::new(),
+                comb_observers: Vec::new(),
+                eval_comb_plan: None,
+                instance_ids: expanded.clone(),
+                instance_module: instance_modules.clone(),
+                module_variables: err_vars,
+                module_var_path_index: err_path_idx,
+                module_names: module_names.clone(),
+                clock_domains: HashMap::default(),
+                topological_clocks: Vec::new(),
+                cascaded_clocks: BTreeSet::new(),
+                arena: SLTNodeArena::new(),
+                num_events: 0,
+                reset_clock_map: HashMap::default(),
+                address_aliases: HashMap::default(),
+                layout: None,
+                initial_memory_values: Vec::new(),
+                initial_statements: None,
+                tb_functions: fxhash::FxHashMap::default(),
+            };
+            let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
+            let mut target_arena = SLTNodeArena::new();
+            let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
+                program.get_path(addr)
+            })?;
+            return Err(if source_locations.is_empty() {
+                ParserError::Scheduler(error)
+            } else {
+                ParserError::SchedulerWithLocation {
+                    error,
+                    source_locations,
+                }
+            });
         }
-    })?;
+    };
     if let Some(s) = sched_start {
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
@@ -863,14 +1386,15 @@ pub(crate) fn flatten(
         t.scheduled_units = Some(schduled.clone());
     }
 
-    // Conditional Population: only include split blocks if multiple active FF domains exist.
-    // This optimization saves JIT resources for simple designs and designs where only one clock is active.
+    // The unified function is the normal fast path.  Split evaluator/apply
+    // functions are needed only when scheduling can evaluate several active
+    // domains or must cascade through a derived clock.
     let active_ff_domains = eval_apply_ffs
         .values()
-        .filter(|eus| !eus.is_empty())
+        .filter(|units| !units.is_empty())
         .count();
-
-    let (eval_only_ffs, apply_ffs) = if active_ff_domains > 1 {
+    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    let (eval_only_ffs, apply_ffs) = if needs_split_path {
         (eval_only_ffs, apply_ffs)
     } else {
         (HashMap::default(), HashMap::default())
@@ -900,9 +1424,7 @@ pub(crate) fn flatten(
                         instance_id,
                         var_id: init.var_id,
                     },
-                    value: init.value.clone(),
-                    mask: init.mask.clone(),
-                    written_mask: init.written_mask.clone(),
+                    data: init.data.clone(),
                 })
         })
         .collect();
@@ -1061,8 +1583,87 @@ pub(crate) fn flatten(
         }
     }
 
+    dump_addr_map_if_requested(&program);
+
     Ok(program)
 }
+
+fn dump_addr_map_if_requested(program: &Program) {
+    if std::env::var_os("CELOX_ADDR_MAP_DUMP").is_none() {
+        return;
+    }
+
+    let filter = parse_addr_map_filter();
+    let mut entries = Vec::new();
+    for (&instance_id, &module_id) in &program.instance_module {
+        let Some(vars) = program.module_variables.get(&module_id) else {
+            continue;
+        };
+        for (&var_id, info) in vars {
+            let inst_key = instance_id.0.to_string();
+            let var_key = normalized_addr_id(&var_id.to_string());
+            if let Some(filter) = &filter
+                && !filter.contains(&(inst_key, var_key))
+            {
+                continue;
+            }
+            entries.push((instance_id, module_id, var_id, info));
+        }
+    }
+
+    entries.sort_by(|(a_inst, _, a_var, _), (b_inst, _, b_var, _)| {
+        (a_inst.0, a_var.to_string()).cmp(&(b_inst.0, b_var.to_string()))
+    });
+
+    for (instance_id, module_id, var_id, info) in entries {
+        let module_name = program
+            .module_names
+            .get(&module_id)
+            .and_then(|name| resource_table::get_str_value(*name))
+            .unwrap_or_default();
+        let addr = AbsoluteAddr {
+            instance_id,
+            var_id,
+        };
+        eprintln!(
+            "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
+            instance_id,
+            var_id,
+            module_name,
+            program.get_path(&addr),
+            info.width,
+            info.array_dims,
+            info.is_4state,
+            info.kind,
+            info.var_kind.description(),
+        );
+    }
+}
+
+fn parse_addr_map_filter() -> Option<HashSet<(String, String)>> {
+    let raw = std::env::var_os("CELOX_ADDR_MAP_FILTER")?;
+    let raw = raw.to_string_lossy();
+    let mut filter = HashSet::default();
+    for item in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let Some((inst, var)) = item.split_once(':') else {
+            continue;
+        };
+        filter.insert((normalized_addr_id(inst), normalized_addr_id(var)));
+    }
+    Some(filter)
+}
+
+fn normalized_addr_id(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("inst")
+        .trim_start_matches("var")
+        .to_string()
+}
+
 fn module_variables(
     module_ir: &HashMap<ModuleId, &Module>,
     config: &BuildConfig,
@@ -1364,9 +1965,249 @@ fn expand(
     }
 }
 
+fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), ParserError> {
+    let units = program
+        .eval_comb
+        .iter()
+        .enumerate()
+        .map(|(unit, eu)| ("eval_comb", unit, eu))
+        .chain(
+            program
+                .eval_apply_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("eval_apply_ffs", unit, eu)),
+        )
+        .chain(
+            program
+                .eval_only_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("eval_only_ffs", unit, eu)),
+        )
+        .chain(
+            program
+                .apply_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("apply_ffs", unit, eu)),
+        );
+    for (group, unit, eu) in units {
+        verify_memory_offset_contract(program, eu).map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
+        verify_region_contract(group, eu).map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
+        eu.verify_result().map_err(|error| ParserError::SirVerify {
+            phase,
+            group,
+            unit,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
+fn verify_memory_offset_contract(
+    program: &Program,
+    eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::SIRInstruction;
+
+    for block in eu.blocks.values() {
+        for (index, inst) in block.instructions.iter().enumerate() {
+            let (addr, offset, operation) = match inst {
+                SIRInstruction::Load(_, addr, offset, _) => (addr, offset, "Load"),
+                SIRInstruction::Store(addr, offset, _, _, _, _) => (addr, offset, "Store"),
+                SIRInstruction::Commit(src, dst, offset, _, _) => {
+                    verify_memory_offset_for_addr(
+                        program,
+                        block.id,
+                        index,
+                        dst,
+                        offset,
+                        "Commit destination",
+                    )?;
+                    (src, offset, "Commit source")
+                }
+                _ => continue,
+            };
+            verify_memory_offset_for_addr(program, block.id, index, addr, offset, operation)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_memory_offset_for_addr(
+    program: &Program,
+    block: crate::ir::BlockId,
+    index: usize,
+    addr: &RegionedAbsoluteAddr,
+    offset: &crate::ir::SIROffset,
+    operation: &'static str,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::SIROffset;
+
+    let Some(info) = program.get_variable_info(&addr.absolute_addr()) else {
+        return Err(crate::ir::verify::SirVerifyError::instruction(
+            "MEMORY.ADDRESS_HAS_DECLARATION",
+            block,
+            index,
+            format!("no variable declaration for memory address {addr:?}"),
+        ));
+    };
+    let element_count = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |count, &dimension| count.checked_mul(dimension));
+    let declared_element_width = element_count
+        .filter(|&count| count != 0 && info.width % count == 0)
+        .map(|count| info.width / count);
+
+    match offset {
+        SIROffset::Dynamic(_) if !info.array_dims.is_empty() => {
+            let absolute_addr = addr.absolute_addr();
+            return Err(crate::ir::verify::SirVerifyError::instruction(
+                "MEMORY.UNPACKED_OFFSET_IS_ELEMENT",
+                block,
+                index,
+                format!(
+                    "{operation} addresses unpacked array {} with dimensions {:?} by an arbitrary dynamic bit offset; preserve the element index as SIROffset::Element",
+                    program.get_path(&absolute_addr),
+                    info.array_dims,
+                ),
+            ));
+        }
+        SIROffset::Element { element_width, .. } => {
+            if info.array_dims.is_empty() {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_OFFSET_REQUIRES_UNPACKED_ARRAY",
+                    block,
+                    index,
+                    "SIROffset::Element used for a variable without unpacked dimensions",
+                ));
+            }
+            let Some(declared_element_width) = declared_element_width else {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.UNPACKED_DECLARATION_HAS_ELEMENT_WIDTH",
+                    block,
+                    index,
+                    format!(
+                        "array dimensions {:?} do not divide declared width {}",
+                        info.array_dims, info.width
+                    ),
+                ));
+            };
+            if *element_width != declared_element_width {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_WIDTH_MATCHES_DECLARATION",
+                    block,
+                    index,
+                    format!(
+                        "SIR element width {element_width} does not match declared element width {declared_element_width}"
+                    ),
+                ));
+            }
+        }
+        SIROffset::Static(_) | SIROffset::Dynamic(_) => {}
+    }
+    Ok(())
+}
+
+fn verify_region_contract(
+    group: &'static str,
+    eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<(), crate::ir::verify::SirVerifyError> {
+    use crate::ir::{SIRInstruction, SIROffset, SPARSE_WORKING_REGION};
+
+    for block in eu.blocks.values() {
+        for (index, inst) in block.instructions.iter().enumerate() {
+            match inst {
+                SIRInstruction::Load(_, addr, _, _)
+                | SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region > SPARSE_WORKING_REGION =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.KNOWN_MEMORY_REGION",
+                        block.id,
+                        index,
+                        format!("unknown memory region {}", addr.region),
+                    ));
+                }
+                SIRInstruction::Commit(src, dst, _, _, _)
+                    if src.region > SPARSE_WORKING_REGION || dst.region > SPARSE_WORKING_REGION =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.KNOWN_MEMORY_REGION",
+                        block.id,
+                        index,
+                        format!("unknown Commit region pair {}→{}", src.region, dst.region),
+                    ));
+                }
+                SIRInstruction::Load(_, addr, _, _) if addr.region == SPARSE_WORKING_REGION => {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_IS_NOT_READABLE",
+                        block.id,
+                        index,
+                        "FF sparse next-state storage cannot be loaded; FF RHS values read STABLE",
+                    ));
+                }
+                SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == SPARSE_WORKING_REGION
+                        && !matches!(group, "eval_only_ffs" | "eval_apply_ffs") =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_STORE_IN_EVALUATOR",
+                        block.id,
+                        index,
+                        format!("SPARSE Store is not valid in {group}"),
+                    ));
+                }
+                SIRInstruction::Commit(src, dst, offset, _, triggers)
+                    if src.region == SPARSE_WORKING_REGION =>
+                {
+                    if dst.region != STABLE_REGION
+                        || !matches!(group, "apply_ffs" | "eval_apply_ffs")
+                        || !matches!(offset, SIROffset::Static(0))
+                        || !triggers.is_empty()
+                    {
+                        return Err(crate::ir::verify::SirVerifyError::instruction(
+                            "REGION.SPARSE_COMMIT_FORM",
+                            block.id,
+                            index,
+                            "SPARSE Commit must be an untriggered full-range SPARSE→STABLE apply",
+                        ));
+                    }
+                }
+                SIRInstruction::Commit(_, dst, _, _, _) if dst.region == SPARSE_WORKING_REGION => {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.SPARSE_IS_NOT_COMMIT_DESTINATION",
+                        block.id,
+                        index,
+                        "SPARSE is populated by Store, not by Commit",
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -1382,6 +2223,10 @@ pub fn parse(
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<Program, ParserError> {
+    debug_assert!(
+        loop_provenance.is_consistent_with(ir),
+        "loop provenance must describe the analyzer IR passed to the parser"
+    );
     let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
 
     macro_rules! timed_phase {
@@ -1397,7 +2242,10 @@ pub fn parse(
         }};
     }
 
-    let result = timed_phase!("parse_ir", parse_ir(ir, config, top))?;
+    let result = timed_phase!(
+        "parse_ir",
+        parse_ir_with_loop_provenance(ir, loop_provenance, config, top)
+    )?;
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.analyzer_ir
     {
@@ -1425,12 +2273,21 @@ pub fn parse(
         t.pre_optimized_sir = Some(program.clone());
     }
 
+    timed_phase!(
+        "verify_sir_before_optimize",
+        verify_program_sir(&program, "before optimization")
+    )?;
+
     // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
     // may be enabled and need to execute.
     timed_phase!(
         "optimize",
         crate::optimizer::optimize(&mut program, four_state, optimize_options)
     );
+    timed_phase!(
+        "verify_sir_after_optimize",
+        verify_program_sir(&program, "after optimization")
+    )?;
 
     if let Some(t) = trace
         && trace_opts.post_optimized_sir
@@ -1640,17 +2497,20 @@ fn relocate_units(
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     trace: &mut Option<&mut crate::debug::CompilationTrace>,
-) -> (
-    SLTNodeArena<AbsoluteAddr>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
-    Vec<crate::ir::CombObserver<AbsoluteAddr>>,
-    HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
-    Vec<crate::ir::RuntimeEventSite>,
-    i64,
-) {
+) -> Result<
+    (
+        SLTNodeArena<AbsoluteAddr>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
+        Vec<crate::ir::CombObserver<AbsoluteAddr>>,
+        HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+        Vec<crate::ir::RuntimeEventSite>,
+        i64,
+    ),
+    ParserError,
+> {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
     let mut eval_apply_ffs: HashMap<
         AbsoluteAddr,
@@ -1699,7 +2559,7 @@ fn relocate_units(
             runtime_event_sites.push(site.clone());
         }
 
-        let arena_start = global_arena.nodes.len();
+        let arena_start = global_arena.len();
         let mut relocated_module = flatting::flatting(
             sim_module,
             path,
@@ -1708,8 +2568,12 @@ fn relocate_units(
             &mut global_arena,
             trace_opts,
             trace.as_deref_mut(),
-        );
-        remap_for_fold_runtime_event_sites(&mut global_arena, arena_start, &runtime_event_site_map);
+        )?;
+        remap_for_fold_runtime_event_sites(
+            &mut global_arena,
+            arena_start,
+            &runtime_event_site_map,
+        )?;
         for observer in &mut relocated_module.comb_observers {
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
@@ -1857,7 +2721,7 @@ fn relocate_units(
             }
         }
     }
-    (
+    Ok((
         global_arena,
         eval_apply_ffs,
         eval_only_ffs,
@@ -1867,7 +2731,7 @@ fn relocate_units(
         runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
-    )
+    ))
 }
 
 fn build_comb_observer_capture_paths(
@@ -1875,9 +2739,9 @@ fn build_comb_observer_capture_paths(
     observers: &mut [crate::ir::CombObserver<AbsoluteAddr>],
     sites: &[crate::ir::RuntimeEventSite],
     arena: &mut SLTNodeArena<AbsoluteAddr>,
-) {
+) -> Result<(), ParserError> {
     if observers.is_empty() {
-        return;
+        return Ok(());
     }
 
     annotate_comb_capture_enable_sites(comb_blocks, observers);
@@ -1933,6 +2797,7 @@ fn build_comb_observer_capture_paths(
                 },
                 sources,
                 previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
                 local_inputs: observer.local_inputs.clone(),
                 order_before: order_before.clone(),
                 comb_capture_enable_sites: Vec::new(),
@@ -1961,6 +2826,7 @@ fn build_comb_observer_capture_paths(
                     },
                     sources: std::iter::once(trigger_target).collect(),
                     previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
                     local_inputs: observer.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -1997,17 +2863,15 @@ fn build_comb_observer_capture_paths(
                     }),
             );
         }
-        let expr = observer
-            .guard
-            .or_else(|| observer.args.first().copied())
-            .unwrap_or_else(|| {
-                arena.alloc(crate::logic_tree::SLTNode::Constant(
-                    num_bigint::BigUint::from(1u8),
-                    num_bigint::BigUint::from(0u8),
-                    1,
-                    false,
-                ))
-            });
+        let expr = match observer.guard.or_else(|| observer.args.first().copied()) {
+            Some(expr) => expr,
+            None => arena.alloc(crate::logic_tree::SLTNode::Constant(
+                num_bigint::BigUint::from(1u8),
+                num_bigint::BigUint::from(0u8),
+                1,
+                false,
+            ))?,
+        };
         let emit_on_true = matches!(
             sites[observer.site_id as usize].kind,
             crate::ir::RuntimeEventKind::Display
@@ -2042,6 +2906,7 @@ fn build_comb_observer_capture_paths(
             },
             sources,
             previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
             local_inputs: observer.local_inputs.clone(),
             order_before,
             comb_capture_enable_sites: Vec::new(),
@@ -2067,18 +2932,19 @@ fn build_comb_observer_capture_paths(
                     crate::ir::RuntimeEventKind::AssertFatal
                 )
                 .then_some(member.site_id as i64);
-                let member_expr = member
+                let member_expr = match member
                     .loop_runner
                     .or(member.guard)
                     .or_else(|| member.args.first().copied())
-                    .unwrap_or_else(|| {
-                        arena.alloc(crate::logic_tree::SLTNode::Constant(
-                            num_bigint::BigUint::from(1u8),
-                            num_bigint::BigUint::from(0u8),
-                            1,
-                            false,
-                        ))
-                    });
+                {
+                    Some(expr) => expr,
+                    None => arena.alloc(crate::logic_tree::SLTNode::Constant(
+                        num_bigint::BigUint::from(1u8),
+                        num_bigint::BigUint::from(0u8),
+                        1,
+                        false,
+                    ))?,
+                };
                 let path_id = LogicPathId(comb_blocks.len());
                 if let Some(prev) = previous_trigger_capture_path {
                     comb_blocks[prev.0].order_before.insert(path_id);
@@ -2096,6 +2962,7 @@ fn build_comb_observer_capture_paths(
                     },
                     sources: std::iter::once(trigger_target).collect(),
                     previous_sources: HashSet::default(),
+                    address_sources: HashSet::default(),
                     local_inputs: member.local_inputs.clone(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
@@ -2106,6 +2973,7 @@ fn build_comb_observer_capture_paths(
             }
         }
     }
+    Ok(())
 }
 
 fn apply_always_comb_previous_source_ordering(comb_blocks: &mut [LogicPath<AbsoluteAddr>]) {
@@ -2120,10 +2988,15 @@ fn apply_always_comb_previous_source_ordering(comb_blocks: &mut [LogicPath<Absol
         }
 
         let previous_sources = path.previous_sources.clone();
+        let address_sources = path.address_sources.clone();
         path.sources.retain(|source| {
-            !previous_sources.iter().any(|previous| {
+            let is_previous = previous_sources.iter().any(|previous| {
                 previous.id == source.id && previous.access.overlaps(&source.access)
-            })
+            });
+            let is_address = address_sources
+                .iter()
+                .any(|address| address.id == source.id && address.access.overlaps(&source.access));
+            !is_previous || is_address
         });
 
         let mut order_before = Vec::new();
@@ -2336,6 +3209,8 @@ fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
 
 fn analyze_clock_dependencies(
     eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     comb_blocks: &[LogicPath<AbsoluteAddr>],
     arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -2350,9 +3225,9 @@ fn analyze_clock_dependencies(
 
     // 1. Identify all variables written by FFs (direct sequential outputs)
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
+    unique_clocks.extend(eval_apply_ffs.keys().copied());
 
     for (domain_clock, eus) in &*eval_apply_ffs {
-        unique_clocks.insert(*domain_clock);
         for eu in eus {
             for bb in eu.blocks.values() {
                 for inst in &bb.instructions {
@@ -2363,7 +3238,9 @@ fn analyze_clock_dependencies(
 
                         ff_outputs.insert(abs);
 
-                        if canonical_target != *domain_clock {
+                        if canonical_target != *domain_clock
+                            && unique_clocks.contains(&canonical_target)
+                        {
                             clock_deps
                                 .entry(canonical_target)
                                 .or_default()
@@ -2500,6 +3377,8 @@ fn analyze_clock_dependencies(
                 let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
                 // Add empty execution units so it becomes a valid event domain for scheduling
                 eval_apply_ffs.entry(canonical).or_default();
+                eval_only_ffs.entry(canonical).or_default();
+                apply_ffs.entry(canonical).or_default();
 
                 if !visited.contains(&canonical) {
                     topo_visit(

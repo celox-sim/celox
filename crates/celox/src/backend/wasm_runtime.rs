@@ -431,6 +431,7 @@ impl WasmBackend {
             offset,
             width,
             is_4state,
+            array_layout: None,
         }
     }
 

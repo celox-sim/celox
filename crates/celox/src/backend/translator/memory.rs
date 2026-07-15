@@ -1,4 +1,7 @@
-use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
+use cranelift::{
+    codegen::ir::{BlockArg, MemFlagsData as MemFlags},
+    prelude::*,
+};
 
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
 use super::{SIRTranslator, TranslationState, get_byte_size};
@@ -9,7 +12,391 @@ fn isub_from_imm(state: &mut TranslationState, imm: i64, rhs: Value) -> Value {
     state.builder.ins().isub(lhs, rhs)
 }
 
+fn scalar_access_type(op_width: usize, max_bit_shift: usize) -> Type {
+    let total_bits_needed = op_width.saturating_add(max_bit_shift);
+    if total_bits_needed <= 8 {
+        types::I8
+    } else if total_bits_needed <= 16 {
+        types::I16
+    } else if total_bits_needed <= 32 {
+        types::I32
+    } else {
+        types::I64
+    }
+}
+
+fn max_bit_shift(offset: &SIROffset) -> usize {
+    match offset {
+        SIROffset::Static(bit_offset) => bit_offset & 7,
+        SIROffset::Dynamic(_) => 7,
+        SIROffset::Element {
+            element_width,
+            bit_offset,
+            ..
+        } => {
+            if element_width % 8 == 0 {
+                bit_offset & 7
+            } else {
+                7
+            }
+        }
+    }
+}
+
+fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value {
+    match offset {
+        SIROffset::Static(value) => state.builder.ins().iconst(types::I64, *value as i64),
+        SIROffset::Dynamic(reg) => {
+            let value = state.regs[reg].first_value(state.builder);
+            cast_type(state.builder, value, types::I64)
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            let index = state.regs[index].first_value(state.builder);
+            let index = cast_type(state.builder, index, types::I64);
+            let scaled = state.builder.ins().imul_imm(index, *element_width as i64);
+            let with_static = state.builder.ins().iadd_imm(scaled, *bit_offset as i64);
+            if let Some(dynamic) = dynamic_bit_offset {
+                let dynamic = state.regs[dynamic].first_value(state.builder);
+                let dynamic = cast_type(state.builder, dynamic, types::I64);
+                state.builder.ins().iadd(with_static, dynamic)
+            } else {
+                with_static
+            }
+        }
+    }
+}
+
+fn packed_byte_and_shift(state: &mut TranslationState, offset: &SIROffset) -> (Value, Value) {
+    let total_bit_offset = logical_bit_offset(state, offset);
+    (
+        state.builder.ins().ushr_imm(total_bit_offset, 3),
+        state.builder.ins().band_imm(total_bit_offset, 7),
+    )
+}
+
 impl SIRTranslator {
+    fn copy_sparse_chunk(
+        &self,
+        state: &mut TranslationState,
+        src_base: i64,
+        dst_base: i64,
+        byte_index: Value,
+        byte_len: usize,
+    ) {
+        let mut copied = 0usize;
+        for (bytes, ty) in [
+            (8usize, types::I64),
+            (4, types::I32),
+            (2, types::I16),
+            (1, types::I8),
+        ] {
+            while copied + bytes <= byte_len {
+                let src = state
+                    .builder
+                    .ins()
+                    .iadd_imm(state.mem_ptr, src_base + copied as i64);
+                let src = state.builder.ins().iadd(src, byte_index);
+                let dst = state
+                    .builder
+                    .ins()
+                    .iadd_imm(state.mem_ptr, dst_base + copied as i64);
+                let dst = state.builder.ins().iadd(dst, byte_index);
+                let value = state.builder.ins().load(ty, MemFlags::new(), src, 0);
+                state.builder.ins().store(MemFlags::new(), value, dst, 0);
+                copied += bytes;
+            }
+        }
+    }
+
+    pub(super) fn translate_sparse_commit_inst(
+        &self,
+        state: &mut TranslationState,
+        src_addr: &RegionedAbsoluteAddr,
+        dst_addr: &RegionedAbsoluteAddr,
+        _op_width: usize,
+    ) {
+        debug_assert_eq!(src_addr.region, crate::ir::SPARSE_WORKING_REGION);
+        debug_assert_eq!(dst_addr.region, STABLE_REGION);
+        let abs = src_addr.absolute_addr();
+        let sparse = &self.layout.sparse_layouts[&abs];
+        let byte_size = get_byte_size(self.layout.widths[&abs]);
+        let src_base = (self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]) as i64;
+        let dst_base = self.layout.offsets[&abs] as i64;
+        let plane_count = if self.options.four_state && self.layout.is_4states[&abs] {
+            2
+        } else {
+            1
+        };
+        let last_chunk = sparse.chunk_count.saturating_sub(1);
+        let last_len = byte_size.saturating_sub(last_chunk * 8);
+
+        // Summary words are few and statically known.  Only set bits enter the
+        // generated loops; the hot path never calls back into Rust.
+        for summary_index in 0..sparse.summary_word_count {
+            let summary_addr = state.builder.ins().iadd_imm(
+                state.mem_ptr,
+                (sparse.summary_words_offset + summary_index * 8) as i64,
+            );
+            let summary_bits =
+                state
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), summary_addr, 0);
+            let zero = state.builder.ins().iconst(types::I64, 0);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), zero, summary_addr, 0);
+
+            let summary_loop = state.builder.create_block();
+            let summary_body = state.builder.create_block();
+            let summary_done = state.builder.create_block();
+            state.builder.append_block_param(summary_loop, types::I64);
+            state
+                .builder
+                .ins()
+                .jump(summary_loop, &[BlockArg::Value(summary_bits)]);
+            state.builder.switch_to_block(summary_loop);
+            let bits = state.builder.block_params(summary_loop)[0];
+            let nonzero = state.builder.ins().icmp_imm(IntCC::NotEqual, bits, 0);
+            state
+                .builder
+                .ins()
+                .brif(nonzero, summary_body, &[], summary_done, &[]);
+
+            state.builder.switch_to_block(summary_body);
+            let bit = state.builder.ins().ctz(bits);
+            let word_index = state
+                .builder
+                .ins()
+                .iadd_imm(bit, (summary_index * 64) as i64);
+            let dirty_byte_index = state.builder.ins().ishl_imm(word_index, 3);
+            let dirty_addr = state
+                .builder
+                .ins()
+                .iadd_imm(state.mem_ptr, sparse.dirty_words_offset as i64);
+            let dirty_addr = state.builder.ins().iadd(dirty_addr, dirty_byte_index);
+            let dirty_bits = state
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::new(), dirty_addr, 0);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), zero, dirty_addr, 0);
+
+            let dirty_loop = state.builder.create_block();
+            let dirty_body = state.builder.create_block();
+            let dirty_done = state.builder.create_block();
+            state.builder.append_block_param(dirty_loop, types::I64);
+            state
+                .builder
+                .ins()
+                .jump(dirty_loop, &[BlockArg::Value(dirty_bits)]);
+            state.builder.switch_to_block(dirty_loop);
+            let dirty = state.builder.block_params(dirty_loop)[0];
+            let dirty_nonzero = state.builder.ins().icmp_imm(IntCC::NotEqual, dirty, 0);
+            state
+                .builder
+                .ins()
+                .brif(dirty_nonzero, dirty_body, &[], dirty_done, &[]);
+
+            state.builder.switch_to_block(dirty_body);
+            let dirty_bit = state.builder.ins().ctz(dirty);
+            let chunk_base = state.builder.ins().ishl_imm(word_index, 6);
+            let chunk = state.builder.ins().iadd(chunk_base, dirty_bit);
+            let byte_index = state.builder.ins().ishl_imm(chunk, 3);
+
+            if last_len == 8 {
+                for plane in 0..plane_count {
+                    let delta = (plane * byte_size) as i64;
+                    self.copy_sparse_chunk(
+                        state,
+                        src_base + delta,
+                        dst_base + delta,
+                        byte_index,
+                        8,
+                    );
+                }
+            } else {
+                let full = state.builder.create_block();
+                let partial = state.builder.create_block();
+                let copied = state.builder.create_block();
+                let is_last = state
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, chunk, last_chunk as i64);
+                state.builder.ins().brif(is_last, partial, &[], full, &[]);
+                state.builder.switch_to_block(full);
+                for plane in 0..plane_count {
+                    let delta = (plane * byte_size) as i64;
+                    self.copy_sparse_chunk(
+                        state,
+                        src_base + delta,
+                        dst_base + delta,
+                        byte_index,
+                        8,
+                    );
+                }
+                state.builder.ins().jump(copied, &[]);
+                state.builder.switch_to_block(partial);
+                for plane in 0..plane_count {
+                    let delta = (plane * byte_size) as i64;
+                    self.copy_sparse_chunk(
+                        state,
+                        src_base + delta,
+                        dst_base + delta,
+                        byte_index,
+                        last_len,
+                    );
+                }
+                state.builder.ins().jump(copied, &[]);
+                state.builder.switch_to_block(copied);
+                state.builder.seal_block(full);
+                state.builder.seal_block(partial);
+                state.builder.seal_block(copied);
+            }
+
+            let one_less = state.builder.ins().iadd_imm(dirty, -1);
+            let remaining_dirty = state.builder.ins().band(dirty, one_less);
+            state
+                .builder
+                .ins()
+                .jump(dirty_loop, &[BlockArg::Value(remaining_dirty)]);
+
+            state.builder.switch_to_block(dirty_done);
+            let one_less = state.builder.ins().iadd_imm(bits, -1);
+            let remaining_summary = state.builder.ins().band(bits, one_less);
+            state
+                .builder
+                .ins()
+                .jump(summary_loop, &[BlockArg::Value(remaining_summary)]);
+
+            state.builder.switch_to_block(summary_done);
+            state.builder.seal_block(summary_body);
+            state.builder.seal_block(dirty_body);
+            state.builder.seal_block(dirty_loop);
+            state.builder.seal_block(dirty_done);
+            state.builder.seal_block(summary_loop);
+            state.builder.seal_block(summary_done);
+        }
+    }
+
+    fn prepare_sparse_store(
+        &self,
+        state: &mut TranslationState,
+        addr: &RegionedAbsoluteAddr,
+        offset: &SIROffset,
+        width: usize,
+    ) {
+        let abs = addr.absolute_addr();
+        let sparse = &self.layout.sparse_layouts[&abs];
+        let stable_base = self.layout.offsets[&abs] as i64;
+        let sparse_base =
+            (self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]) as i64;
+        let byte_size = get_byte_size(self.layout.widths[&abs]) as i64;
+        let bit_offset = logical_bit_offset(state, offset);
+        let start_chunk = state.builder.ins().ushr_imm(bit_offset, 6);
+        let end_bit = state
+            .builder
+            .ins()
+            .iadd_imm(bit_offset, width.saturating_sub(1) as i64);
+        let end_chunk = state.builder.ins().ushr_imm(end_bit, 6);
+
+        for chunk_delta in 0..(width.div_ceil(64) + 1) {
+            let candidate = state
+                .builder
+                .ins()
+                .iadd_imm(start_chunk, chunk_delta as i64);
+            let valid =
+                state
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedLessThanOrEqual, candidate, end_chunk);
+            let chunk = state.builder.ins().select(valid, candidate, start_chunk);
+            let dirty_word = state.builder.ins().ushr_imm(chunk, 6);
+            let dirty_index = state.builder.ins().ishl_imm(dirty_word, 3);
+            let dirty_addr = state
+                .builder
+                .ins()
+                .iadd_imm(state.mem_ptr, sparse.dirty_words_offset as i64);
+            let dirty_addr = state.builder.ins().iadd(dirty_addr, dirty_index);
+            let dirty_bits = state
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::new(), dirty_addr, 0);
+            let bit_in_word = state.builder.ins().band_imm(chunk, 63);
+            let one = state.builder.ins().iconst(types::I64, 1);
+            let dirty_mask = state.builder.ins().ishl(one, bit_in_word);
+            let dirty_test = state.builder.ins().band(dirty_bits, dirty_mask);
+            let was_dirty = state.builder.ins().icmp_imm(IntCC::NotEqual, dirty_test, 0);
+            let data_index = state.builder.ins().ishl_imm(chunk, 3);
+
+            for plane_delta in [0, byte_size].into_iter().take(
+                if self.options.four_state && self.layout.is_4states[&abs] {
+                    2
+                } else {
+                    1
+                },
+            ) {
+                let stable_addr = state
+                    .builder
+                    .ins()
+                    .iadd_imm(state.mem_ptr, stable_base + plane_delta);
+                let stable_addr = state.builder.ins().iadd(stable_addr, data_index);
+                let sparse_addr = state
+                    .builder
+                    .ins()
+                    .iadd_imm(state.mem_ptr, sparse_base + plane_delta);
+                let sparse_addr = state.builder.ins().iadd(sparse_addr, data_index);
+                let stable = state
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), stable_addr, 0);
+                let working = state
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), sparse_addr, 0);
+                let initialized = state.builder.ins().select(was_dirty, working, stable);
+                state
+                    .builder
+                    .ins()
+                    .store(MemFlags::new(), initialized, sparse_addr, 0);
+            }
+
+            let new_dirty = state.builder.ins().bor(dirty_bits, dirty_mask);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), new_dirty, dirty_addr, 0);
+
+            let summary_word = state.builder.ins().ushr_imm(dirty_word, 6);
+            let summary_index = state.builder.ins().ishl_imm(summary_word, 3);
+            let summary_addr = state
+                .builder
+                .ins()
+                .iadd_imm(state.mem_ptr, sparse.summary_words_offset as i64);
+            let summary_addr = state.builder.ins().iadd(summary_addr, summary_index);
+            let summary_bits =
+                state
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), summary_addr, 0);
+            let summary_bit = state.builder.ins().band_imm(dirty_word, 63);
+            let summary_mask = state.builder.ins().ishl(one, summary_bit);
+            let new_summary = state.builder.ins().bor(summary_bits, summary_mask);
+            state
+                .builder
+                .ins()
+                .store(MemFlags::new(), new_summary, summary_addr, 0);
+        }
+    }
+
     pub(super) fn translate_load_inst(
         &self,
         state: &mut TranslationState,
@@ -121,26 +508,7 @@ impl SIRTranslator {
             }
         }
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         // Physical read-start byte address
         let final_addr = state
@@ -157,6 +525,7 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 d_phys_width,
+                max_bit_shift(offset),
             )]
         } else {
             self.translate_load_multi_word(
@@ -183,6 +552,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         d_phys_width,
+                        max_bit_shift(offset),
                     )]
                 } else {
                     self.translate_load_multi_word(
@@ -223,6 +593,9 @@ impl SIRTranslator {
         triggers: &[TriggerIdWithKind],
         comb_capture_sites: &[u32],
     ) {
+        if addr.region == crate::ir::SPARSE_WORKING_REGION && *op_width != 0 {
+            self.prepare_sparse_store(state, addr, offset, *op_width);
+        }
         // width=0: identity Store optimized away by alias; emit triggers only.
         if *op_width == 0 {
             if self.options.emit_triggers && !triggers.is_empty() {
@@ -276,41 +649,24 @@ impl SIRTranslator {
 
         // 1. Calculate base memory address (static offset)
         let abs = addr.absolute_addr();
-        let (mem_base, base_offset_bytes) = if addr.region == STABLE_REGION {
-            (state.mem_ptr, self.layout.offsets[&abs])
-        } else {
-            (
-                state.mem_ptr,
+        let base_offset_bytes = match addr.region {
+            STABLE_REGION => self.layout.offsets[&abs],
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]
+            }
+            _ => {
                 self.layout.working_base_offset
                     + *self.layout.working_offsets.get(&abs).unwrap_or_else(|| {
                         panic!(
                             "Working region address is not laid out: region={}, addr={}",
                             addr.region, abs
                         )
-                    }),
-            )
+                    })
+            }
         };
+        let mem_base = state.mem_ptr;
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         // Physical write-start byte address
         let final_addr = state
@@ -329,6 +685,7 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 s_phys_width,
+                max_bit_shift(offset),
             )]
         } else {
             let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -365,6 +722,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     s_phys_width,
+                    max_bit_shift(offset),
                 )]
             } else {
                 let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -427,7 +785,14 @@ impl SIRTranslator {
                     );
                 }
             } else {
-                self.translate_store_native(state, final_addr, bit_shift_val, *op_width, val_v);
+                self.translate_store_native(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    *op_width,
+                    val_v,
+                    max_bit_shift(offset),
+                );
                 if self.options.four_state && self.layout.is_4states[&abs] {
                     let var_byte_size = get_byte_size(self.layout.widths[&abs]);
                     let final_addr_m = state
@@ -440,6 +805,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         m_chunks[0],
+                        max_bit_shift(offset),
                     );
                 }
             }
@@ -489,24 +855,6 @@ impl SIRTranslator {
             }
         }
 
-        // 4-state type boundary enforcement:
-        // When storing to a 2-state variable, replace the source register's mask with zeros.
-        // This is critical because the combinational analysis inlines intermediate variables,
-        // making subsequent LogicPaths that share expression nodes (via lower_cache) reuse
-        // the same registers. Without this, X masks would propagate through 2-state variables.
-        if self.options.four_state && !self.layout.is_4states[&abs] {
-            let zero_masks: Vec<_> = v_chunks
-                .iter()
-                .map(|_| state.builder.ins().iconst(get_cl_type(s_phys_width), 0))
-                .collect();
-            state.regs.insert(
-                *src_reg,
-                TransValue::FourState {
-                    values: v_chunks,
-                    masks: zero_masks,
-                },
-            );
-        }
         if !comb_capture_sites.is_empty() {
             let new_value_chunks = if s_phys_width <= 64 {
                 vec![self.translate_load_native(
@@ -515,6 +863,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     s_phys_width,
+                    max_bit_shift(offset),
                 )]
             } else {
                 let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -551,6 +900,7 @@ impl SIRTranslator {
                         bit_shift_val,
                         *op_width,
                         s_phys_width,
+                        max_bit_shift(offset),
                     )]
                 } else {
                     let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
@@ -762,26 +1112,7 @@ impl SIRTranslator {
             return;
         }
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         let src_final_addr = state
             .builder
@@ -803,8 +1134,16 @@ impl SIRTranslator {
                 bit_shift_val,
                 *op_width,
                 phys_width,
+                max_bit_shift(offset),
             );
-            self.translate_store_native(state, dst_final_addr, bit_shift_val, *op_width, val);
+            self.translate_store_native(
+                state,
+                dst_final_addr,
+                bit_shift_val,
+                *op_width,
+                val,
+                max_bit_shift(offset),
+            );
 
             if self.options.four_state {
                 let var_byte_size_src = get_byte_size(self.layout.widths[&src_abs]);
@@ -823,6 +1162,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     phys_width,
+                    max_bit_shift(offset),
                 );
                 self.translate_store_native(
                     state,
@@ -830,6 +1170,7 @@ impl SIRTranslator {
                     bit_shift_val,
                     *op_width,
                     val_m,
+                    max_bit_shift(offset),
                 );
             }
         } else {
@@ -943,18 +1284,10 @@ impl SIRTranslator {
         bit_shift: Value, // 0 ~ 7 (i64)
         op_width: usize,  // bit width to write
         src_val: Value,   // source
+        max_bit_shift: usize,
     ) {
         // 1. Determine minimum necessary access type
-        let total_bits_needed = op_width + 7;
-        let access_ty = if total_bits_needed <= 8 {
-            types::I8
-        } else if total_bits_needed <= 16 {
-            types::I16
-        } else if total_bits_needed <= 32 {
-            types::I32
-        } else {
-            types::I64
-        };
+        let access_ty = scalar_access_type(op_width, max_bit_shift);
         let m_raw = if op_width >= 64 {
             !0u64
         } else {
@@ -1016,18 +1349,10 @@ impl SIRTranslator {
         bit_shift: Value,
         op_width: usize,
         d_phys_width: usize,
+        max_bit_shift: usize,
     ) -> Value {
         // 1. Determine minimum necessary access type
-        let total_bits_needed = op_width + 7;
-        let access_ty = if total_bits_needed <= 8 {
-            types::I8
-        } else if total_bits_needed <= 16 {
-            types::I16
-        } else if total_bits_needed <= 32 {
-            types::I32
-        } else {
-            types::I64
-        };
+        let access_ty = scalar_access_type(op_width, max_bit_shift);
 
         // 2. Load and alignment (right shift)
         let raw_val = state
@@ -1322,11 +1647,8 @@ impl SIRTranslator {
                     state.builder.ins().band_imm(shifted, mask as i64)
                 }
             }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                let total_bit_offset = logical_bit_offset(state, offset);
                 let shifted = state.builder.ins().ushr(pre_loaded, total_bit_offset);
                 let mask_val = state.builder.ins().iconst(types::I64, mask as i64);
                 state.builder.ins().band(shifted, mask_val)
@@ -1349,34 +1671,21 @@ impl SIRTranslator {
             )
         };
 
-        let (byte_offset_val, bit_shift_val) = match offset {
-            SIROffset::Static(val) => {
-                let byte_off = (val >> 3) as i64;
-                let bit_shift = (val & 7) as i64;
-                (
-                    state.builder.ins().iconst(types::I64, byte_off),
-                    state.builder.ins().iconst(types::I64, bit_shift),
-                )
-            }
-            SIROffset::Dynamic(reg) => {
-                let total_bit_offset = {
-                    let v = state.regs[reg].first_value(state.builder);
-                    cast_type(state.builder, v, types::I64)
-                };
-                (
-                    state.builder.ins().ushr_imm(total_bit_offset, 3),
-                    state.builder.ins().band_imm(total_bit_offset, 7),
-                )
-            }
-        };
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 
         let actual_final_addr = state
             .builder
             .ins()
             .iadd_imm(state.mem_ptr, base_offset_bytes as i64);
         let actual_final_addr = state.builder.ins().iadd(actual_final_addr, byte_offset_val);
-        let new_val =
-            self.translate_load_native(state, actual_final_addr, bit_shift_val, *op_width, 64);
+        let new_val = self.translate_load_native(
+            state,
+            actual_final_addr,
+            bit_shift_val,
+            *op_width,
+            64,
+            max_bit_shift(offset),
+        );
 
         // 3. For each trigger, generate edge detection logic
         for trigger in triggers {
@@ -1437,5 +1746,21 @@ impl SIRTranslator {
             state.builder.seal_block(triggered_block);
             state.builder.seal_block(merge_block);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_scalar_access_uses_the_known_intra_byte_shift() {
+        let boundary = SIROffset::Static(186);
+        assert_eq!(max_bit_shift(&boundary), 2);
+        assert_eq!(scalar_access_type(6, max_bit_shift(&boundary)), types::I8);
+
+        let dynamic = SIROffset::Dynamic(RegisterId(0));
+        assert_eq!(max_bit_shift(&dynamic), 7);
+        assert_eq!(scalar_access_type(6, max_bit_shift(&dynamic)), types::I16);
     }
 }

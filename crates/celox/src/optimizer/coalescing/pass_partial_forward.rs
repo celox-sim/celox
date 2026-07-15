@@ -97,7 +97,14 @@ fn partial_forward_block(
                 var_states.remove(addr);
                 new_instructions.push(inst);
             }
-            SIRInstruction::Store(addr, SIROffset::Dynamic(_), _, _, _, _) => {
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                _,
+                _,
+                _,
+                _,
+            ) => {
                 var_states.remove(addr);
                 new_instructions.push(inst);
             }

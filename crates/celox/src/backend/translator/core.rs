@@ -11,7 +11,9 @@ use crate::{
         SIRInstruction, STABLE_REGION,
     },
     optimizer::coalescing::TailCallChunk,
-    optimizer::coalescing::pass_tail_call_split::{SpillSlot, SpilledChunk},
+    optimizer::coalescing::pass_tail_call_split::{
+        SpillSlot, SpilledChunk, reverse_postorder_blocks,
+    },
 };
 
 use super::MemoryLayout;
@@ -379,7 +381,13 @@ impl SIRTranslator {
                 );
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-                self.translate_commit_inst(state, src_addr, dst_addr, offset, op_width, triggers);
+                if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+                    self.translate_sparse_commit_inst(state, src_addr, dst_addr, *op_width);
+                } else {
+                    self.translate_commit_inst(
+                        state, src_addr, dst_addr, offset, op_width, triggers,
+                    );
+                }
             }
             SIRInstruction::Slice(dst, src, bit_offset, width) => {
                 self.translate_slice_inst(state, dst, src, *bit_offset, *width);
@@ -850,7 +858,11 @@ impl SIRTranslator {
                     let nc = width.div_ceil(64).max(1);
                     for chunk_idx in 0..nc {
                         let chunk_width = (width - chunk_idx * 64).min(64);
-                        let ty = get_cl_type(chunk_width);
+                        let ty = if nc > 1 {
+                            types::I64
+                        } else {
+                            get_cl_type(chunk_width)
+                        };
                         state.builder.append_block_param(cl_bb, ty);
                         if self.options.four_state {
                             state.builder.append_block_param(cl_bb, ty);
@@ -860,8 +872,7 @@ impl SIRTranslator {
                 block_map.insert(*id, cl_bb);
             }
 
-            let mut block_ids: Vec<_> = unit.blocks.keys().collect();
-            block_ids.sort();
+            let block_ids = reverse_postorder_blocks(&unit.blocks, unit.entry_block_id);
 
             for id in &block_ids {
                 let cl_block = block_map[id];
@@ -1034,7 +1045,11 @@ impl SIRTranslator {
                     let nc = width.div_ceil(64).max(1);
                     for chunk_idx in 0..nc {
                         let chunk_width = (width - chunk_idx * 64).min(64);
-                        let ty = get_cl_type(chunk_width);
+                        let ty = if nc > 1 {
+                            types::I64
+                        } else {
+                            get_cl_type(chunk_width)
+                        };
                         state.builder.append_block_param(cl_bb, ty);
                         if self.options.four_state {
                             state.builder.append_block_param(cl_bb, ty);
@@ -1044,8 +1059,7 @@ impl SIRTranslator {
                 block_map.insert(*id, cl_bb);
             }
 
-            let mut block_ids: Vec<_> = unit.blocks.keys().collect();
-            block_ids.sort();
+            let block_ids = reverse_postorder_blocks(&unit.blocks, unit.entry_block_id);
 
             for id in &block_ids {
                 let cl_block = block_map[id];
@@ -1207,7 +1221,11 @@ impl SIRTranslator {
                 let nc = width.div_ceil(64).max(1);
                 for chunk_idx in 0..nc {
                     let chunk_width = (width - chunk_idx * 64).min(64);
-                    let ty = get_cl_type(chunk_width);
+                    let ty = if nc > 1 {
+                        types::I64
+                    } else {
+                        get_cl_type(chunk_width)
+                    };
                     builder.append_block_param(cl_bb, ty);
                     if self.options.four_state {
                         builder.append_block_param(cl_bb, ty);
@@ -1245,7 +1263,11 @@ impl SIRTranslator {
                 let nc = width.div_ceil(64).max(1);
                 for chunk_idx in 0..nc {
                     let chunk_width = (width - chunk_idx * 64).min(64);
-                    let ty = get_cl_type(chunk_width);
+                    let ty = if nc > 1 {
+                        types::I64
+                    } else {
+                        get_cl_type(chunk_width)
+                    };
                     let zero = builder.ins().iconst(ty, 0);
                     entry_args.push(BlockArg::Value(zero));
                     if self.options.four_state {
@@ -1264,13 +1286,7 @@ impl SIRTranslator {
             .collect();
         let cross_chunk_edges = &chunk.cross_chunk_edges;
 
-        // Topological sort within the chunk so definitions precede uses.
-        // (BlockId order worked for the original EU but not after partition_with_single_entry
-        //  which can place high-numbered entry blocks before low-numbered successors.)
-        let block_ids = crate::optimizer::coalescing::pass_tail_call_split::topological_sort_blocks(
-            &eu.blocks,
-            eu.entry_block_id,
-        );
+        let block_ids = reverse_postorder_blocks(&eu.blocks, eu.entry_block_id);
 
         // Create state ONCE for the entire chunk — SIR uses a flat register
         // space per EU, not strict SSA block params.

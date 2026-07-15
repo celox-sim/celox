@@ -13,21 +13,21 @@ Celox uses a GCC-style optimization model: **preset levels** set defaults, and *
 | Level | SIR Passes | DSE | Cranelift |
 |---|---|---|---|
 | `O0` | TailCallSplit only | Off | `fast_compile()` |
-| `O1` (default) | All 18 passes | Off | Speed / Backtracking |
-| `O2` | All 18 passes | PreserveTopPorts | Speed / Backtracking |
+| `O1` (default) | 20 production-default passes | Off | Speed / Backtracking |
+| `O2` | 20 production-default passes | PreserveTopPorts | Speed / Backtracking |
 
 ## Quick Start
 
 ```ts
 import { Simulator } from '@celox-sim/celox';
 
-// Default (O1): all optimizations enabled
+// Default (O1): production optimizations enabled
 const sim = Simulator.create(module);
 
 // O0: minimal optimization (fast compile, slower simulation)
 const fastCompile = Simulator.create(module, { optLevel: "O0" });
 
-// O2: all optimizations + dead store elimination
+// O2: production optimizations + dead store elimination
 const simO2 = Simulator.create(module, { optLevel: "O2" });
 
 // O1 with specific passes disabled
@@ -42,7 +42,7 @@ const legacy = Simulator.create(module, { optimize: false });
 
 ## SIRT Optimization Passes
 
-SIRT (Simulator IR Transform) passes optimize the intermediate representation before handing it to the backend for code generation. All 18 passes are individually controllable via `SirPass` (Rust) or `passOverrides` (TypeScript).
+SIRT (Simulator IR Transform) passes optimize the intermediate representation before handing it to the backend for code generation. All 19 passes are individually controllable via `SirPass` (Rust) or `passOverrides` (TypeScript); 18 are enabled by the O1/O2 production presets.
 
 | Pass | What it does |
 |---|---|
@@ -60,10 +60,18 @@ SIRT (Simulator IR Transform) passes optimize the intermediate representation be
 | `concat_folding` | Folds redundant Concat operations |
 | `xor_chain_folding` | Folds XOR chains |
 | `vectorize_concat` | Vectorizes Concat patterns in combinational blocks |
+| `branchify_mux` | Moves profitable exclusive mux-arm work behind 2-state control flow (explicit opt-in) |
 | `split_coalesced_stores` | Splits wide coalesced stores back after reschedule to reduce register pressure |
 | `partial_forward` | Partial store-load forwarding in combinational blocks |
 | `identity_store_bypass` | Detects identity copies and registers address aliases for layout sharing |
 | `tail_call_split` | Splits large functions into tail-call chains (enabled even at O0) |
+
+`branchify_mux` is currently an explicit opt-in because a branch must pay for
+control transfer, expected misprediction, merge copies, and added liveness. To
+evaluate it on a 2-state design, use `passOverrides: ["+sir:branchify_mux"]` and
+compare runtime, not only compile time or IR size. Cost-directed mux CFG
+lowering can already preserve profitable source-level control independently;
+the SIR pass is its cleanup complement.
 
 ### Post-Merge Passes (Native Backend)
 
@@ -155,7 +163,7 @@ let sim = Simulator::builder(code, "Top").build_cranelift()?;
 // Default: O1, native backend on x86-64
 const sim = Simulator.create(module);
 
-// O2: all optimizations + DSE
+// O2: production optimizations + DSE
 const simO2 = Simulator.create(module, { optLevel: "O2" });
 
 // O1 with per-pass overrides:

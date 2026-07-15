@@ -13,7 +13,6 @@ use celox::{BigUint, SimBackend, Simulator, SimulatorBuilder};
 const WIDTHS: &[usize] = &[
     1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 66, 127, 128, 129,
 ];
-const LINEAR_SORTER_PULL_MRE: &str = include_str!("fixtures/linear_sorter_pull_mre.veryl");
 
 fn mask(width: usize) -> BigUint {
     if width == 0 {
@@ -377,7 +376,8 @@ fn static_commit_offset_width_boundary_table_preserves_neighbors() {
 
 #[test]
 fn post_optimized_sir_keeps_boundary_store_and_commit_corpus() {
-    assert_optimized_sir_has_static_store(LINEAR_SORTER_PULL_MRE, "LinearSorterPullMreU16", 1, 99);
+    let wide_unaligned = ff_commit_source(1, 99, case_total_width(1, 99));
+    assert_optimized_sir_has_static_store(&wide_unaligned, "Top", 1, 99);
 
     let commit = ff_commit_source(7, 66, case_total_width(7, 66));
     assert_optimized_sir_has_static_store(&commit, "Top", 7, 66);

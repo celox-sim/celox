@@ -2,12 +2,13 @@
 source: crates/celox/tests/native_mir.rs
 expression: output
 ---
+=== MIR (all native execution units) ===
 === MIR (eval_comb) ===
-Execution Unit 0 (before regalloc):
+Execution Unit eval_comb[0] (before regalloc):
 bb0:
   ret
 
-Execution Unit 0 (after regalloc):
+Execution Unit eval_comb[0] (after regalloc):
 bb0:
   ret
   Register assignment:
@@ -20,3 +21,413 @@ bb0:
   0x0000000d  add rsp,8
   0x00000011  pop r15
   0x00000013  ret
+
+=== MIR (eval_apply_ffs) Trigger: clk ===
+Execution Unit eval_apply_ffs[0] (before regalloc):
+bb0:
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb1, bb2
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 35], v6
+  jmp bb3
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 35], v5
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit eval_apply_ffs[0] (after regalloc):
+bb0:
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 35], v6
+  jmp bb3
+bb5:
+  jmp bb2
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 35], v5
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v2 -> rax
+    v4 -> rax
+    v5 -> rax
+    v6 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+22h]
+  0x0000000e  test rax,rax
+  0x00000011  sete al
+  0x00000014  movzx eax,al
+  0x00000017  mov eax,eax
+  0x00000019  test rax,rax
+  0x0000001c  jne short 0000000000000029h
+  0x0000001e  movzx eax,byte [r15+21h]
+  0x00000023  mov [r15+23h],al
+  0x00000027  jmp short 000000000000002Fh
+  0x00000029  xor eax,eax
+  0x0000002b  mov [r15+23h],al
+  0x0000002f  xor eax,eax
+  0x00000031  jmp short 0000000000000033h
+  0x00000033  add rsp,8
+  0x00000037  pop r15
+  0x00000039  ret
+
+=== MIR (eval_apply_ffs) Trigger: rst ===
+Execution Unit eval_apply_ffs[0] (before regalloc):
+bb0:
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb1, bb2
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 35], v6
+  jmp bb3
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 35], v5
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit eval_apply_ffs[0] (after regalloc):
+bb0:
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 35], v6
+  jmp bb3
+bb5:
+  jmp bb2
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 35], v5
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v2 -> rax
+    v4 -> rax
+    v5 -> rax
+    v6 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+22h]
+  0x0000000e  test rax,rax
+  0x00000011  sete al
+  0x00000014  movzx eax,al
+  0x00000017  mov eax,eax
+  0x00000019  test rax,rax
+  0x0000001c  jne short 0000000000000029h
+  0x0000001e  movzx eax,byte [r15+21h]
+  0x00000023  mov [r15+23h],al
+  0x00000027  jmp short 000000000000002Fh
+  0x00000029  xor eax,eax
+  0x0000002b  mov [r15+23h],al
+  0x0000002f  xor eax,eax
+  0x00000031  jmp short 0000000000000033h
+  0x00000033  add rsp,8
+  0x00000037  pop r15
+  0x00000039  ret
+
+=== MIR (eval_only_ffs) Trigger: clk ===
+Execution Unit eval_only_ffs[0] (before regalloc):
+bb0:
+  v7 = load.i8 [sim + 35]
+  v8 = and.w32 v7, 0xff
+  v9 = load.i8 [sim + 40]
+  v11 = and.w64 v9, 0xffffffffffffff00
+  v12 = mov.w32 v8
+  v10 = or.w64 v11, v12
+  store.i8 [sim + 40], v10
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb1, bb2
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 40], v6
+  jmp bb3
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 40], v5
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit eval_only_ffs[0] (after regalloc):
+bb0:
+  v7 = load.i8 [sim + 35]
+  v8 = and.w32 v7, 0xff
+  v9 = load.i8 [sim + 40]
+  v11 = and.w64 v9, 0xffffffffffffff00
+  v12 = mov.w32 v8
+  v10 = or.w64 v11, v12
+  store.i8 [sim + 40], v10
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 40], v6
+  jmp bb3
+bb5:
+  jmp bb2
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 40], v5
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v2 -> rax
+    v4 -> rax
+    v5 -> rax
+    v6 -> rax
+    v7 -> rax
+    v8 -> rax
+    v9 -> rdx
+    v10 -> rdx
+    v11 -> rdx
+    v12 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+23h]
+  0x0000000e  and eax,0FFh
+  0x00000013  movzx edx,byte [r15+28h]
+  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001f  mov eax,eax
+  0x00000021  or rdx,rax
+  0x00000024  mov [r15+28h],dl
+  0x00000028  movzx eax,byte [r15+22h]
+  0x0000002d  test rax,rax
+  0x00000030  sete al
+  0x00000033  movzx eax,al
+  0x00000036  mov eax,eax
+  0x00000038  test rax,rax
+  0x0000003b  jne short 0000000000000048h
+  0x0000003d  movzx eax,byte [r15+21h]
+  0x00000042  mov [r15+28h],al
+  0x00000046  jmp short 000000000000004Eh
+  0x00000048  xor eax,eax
+  0x0000004a  mov [r15+28h],al
+  0x0000004e  xor eax,eax
+  0x00000050  jmp short 0000000000000052h
+  0x00000052  add rsp,8
+  0x00000056  pop r15
+  0x00000058  ret
+
+=== MIR (eval_only_ffs) Trigger: rst ===
+Execution Unit eval_only_ffs[0] (before regalloc):
+bb0:
+  v7 = load.i8 [sim + 35]
+  v8 = and.w32 v7, 0xff
+  v9 = load.i8 [sim + 40]
+  v11 = and.w64 v9, 0xffffffffffffff00
+  v12 = mov.w32 v8
+  v10 = or.w64 v11, v12
+  store.i8 [sim + 40], v10
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb1, bb2
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 40], v6
+  jmp bb3
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 40], v5
+  jmp bb3
+bb3:
+  ret
+
+Execution Unit eval_only_ffs[0] (after regalloc):
+bb0:
+  v7 = load.i8 [sim + 35]
+  v8 = and.w32 v7, 0xff
+  v9 = load.i8 [sim + 40]
+  v11 = and.w64 v9, 0xffffffffffffff00
+  v12 = mov.w32 v8
+  v10 = or.w64 v11, v12
+  store.i8 [sim + 40], v10
+  v0 = load.i8 [sim + 34]
+  v4 = cmp.Eq v0, 0
+  v2 = mov.w32 v4
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v6 = imm 0x0
+  store.i8 [sim + 40], v6
+  jmp bb3
+bb5:
+  jmp bb2
+bb2:
+  v5 = load.i8 [sim + 33]
+  store.i8 [sim + 40], v5
+  jmp bb3
+bb3:
+  ret
+  Register assignment:
+    v0 -> rax
+    v2 -> rax
+    v4 -> rax
+    v5 -> rax
+    v6 -> rax
+    v7 -> rax
+    v8 -> rax
+    v9 -> rdx
+    v10 -> rdx
+    v11 -> rdx
+    v12 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+23h]
+  0x0000000e  and eax,0FFh
+  0x00000013  movzx edx,byte [r15+28h]
+  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001f  mov eax,eax
+  0x00000021  or rdx,rax
+  0x00000024  mov [r15+28h],dl
+  0x00000028  movzx eax,byte [r15+22h]
+  0x0000002d  test rax,rax
+  0x00000030  sete al
+  0x00000033  movzx eax,al
+  0x00000036  mov eax,eax
+  0x00000038  test rax,rax
+  0x0000003b  jne short 0000000000000048h
+  0x0000003d  movzx eax,byte [r15+21h]
+  0x00000042  mov [r15+28h],al
+  0x00000046  jmp short 000000000000004Eh
+  0x00000048  xor eax,eax
+  0x0000004a  mov [r15+28h],al
+  0x0000004e  xor eax,eax
+  0x00000050  jmp short 0000000000000052h
+  0x00000052  add rsp,8
+  0x00000056  pop r15
+  0x00000058  ret
+
+=== MIR (apply_ffs) Trigger: clk ===
+Execution Unit apply_ffs[0] (before regalloc):
+bb0:
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
+  v2 = load.i8 [sim + 35]
+  v4 = and.w64 v2, 0xffffffffffffff00
+  v5 = mov.w32 v1
+  v3 = or.w64 v4, v5
+  store.i8 [sim + 35], v3
+  ret
+
+Execution Unit apply_ffs[0] (after regalloc):
+bb0:
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
+  v2 = load.i8 [sim + 35]
+  v4 = and.w64 v2, 0xffffffffffffff00
+  v5 = mov.w32 v1
+  v3 = or.w64 v4, v5
+  store.i8 [sim + 35], v3
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rax
+    v2 -> rdx
+    v3 -> rdx
+    v4 -> rdx
+    v5 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+28h]
+  0x0000000e  and eax,0FFh
+  0x00000013  movzx edx,byte [r15+23h]
+  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001f  mov eax,eax
+  0x00000021  or rdx,rax
+  0x00000024  mov [r15+23h],dl
+  0x00000028  xor eax,eax
+  0x0000002a  jmp short 000000000000002Ch
+  0x0000002c  add rsp,8
+  0x00000030  pop r15
+  0x00000032  ret
+
+=== MIR (apply_ffs) Trigger: rst ===
+Execution Unit apply_ffs[0] (before regalloc):
+bb0:
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
+  v2 = load.i8 [sim + 35]
+  v4 = and.w64 v2, 0xffffffffffffff00
+  v5 = mov.w32 v1
+  v3 = or.w64 v4, v5
+  store.i8 [sim + 35], v3
+  ret
+
+Execution Unit apply_ffs[0] (after regalloc):
+bb0:
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
+  v2 = load.i8 [sim + 35]
+  v4 = and.w64 v2, 0xffffffffffffff00
+  v5 = mov.w32 v1
+  v3 = or.w64 v4, v5
+  store.i8 [sim + 35], v3
+  ret
+  Register assignment:
+    v0 -> rax
+    v1 -> rax
+    v2 -> rdx
+    v3 -> rdx
+    v4 -> rdx
+    v5 -> rax
+  x86-64 disassembly:
+  0x00000000  push r15
+  0x00000002  sub rsp,8
+  0x00000006  mov r15,rdi
+  0x00000009  movzx eax,byte [r15+28h]
+  0x0000000e  and eax,0FFh
+  0x00000013  movzx edx,byte [r15+23h]
+  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001f  mov eax,eax
+  0x00000021  or rdx,rax
+  0x00000024  mov [r15+23h],dl
+  0x00000028  xor eax,eax
+  0x0000002a  jmp short 000000000000002Ch
+  0x0000002c  add rsp,8
+  0x00000030  pop r15
+  0x00000032  ret

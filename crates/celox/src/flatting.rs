@@ -8,7 +8,9 @@ use crate::ir::{
     AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
     RelocationModule, SimModule, VarAtomBase,
 };
-use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, get_width};
+use crate::logic_tree::{
+    LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, get_width,
+};
 
 pub fn flatting(
     module: &SimModule,
@@ -18,7 +20,7 @@ pub fn flatting(
     arena: &mut SLTNodeArena<AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
-) -> RelocationModule {
+) -> Result<RelocationModule, SLTNodeFactsError> {
     let instance_id = instance_ids[path];
     let cv = &|id: &VarId| AbsoluteAddr {
         instance_id,
@@ -30,7 +32,7 @@ pub fn flatting(
         .comb_blocks
         .iter()
         .map(|e| convert_logic_path(e, &module.arena, arena, &mut comb_cache, &cv))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let mut observer_cache = HashMap::default();
     let comb_observers: Vec<_> = module
         .comb_observers
@@ -38,7 +40,7 @@ pub fn flatting(
         .map(|observer| {
             convert_comb_observer(observer, &module.arena, arena, &mut observer_cache, &cv)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for (child_instance_name, gbs) in &module.glue_blocks {
         for (idx, gb) in gbs.iter().enumerate() {
             let mut glue_cache = HashMap::default();
@@ -52,7 +54,7 @@ pub fn flatting(
                 &gb.arena,
                 arena,
                 &mut glue_cache,
-            ));
+            )?);
         }
     }
     if let Some(t) = trace.as_deref_mut()
@@ -66,7 +68,7 @@ pub fn flatting(
     }
 
     // Atomize logic paths
-    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena);
+    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena)?;
 
     if let Some(t) = trace
         && trace_opts.atomized_comb_blocks
@@ -78,7 +80,7 @@ pub fn flatting(
         }
     }
 
-    RelocationModule {
+    Ok(RelocationModule {
         #[cfg(test)]
         variables: module.variables.clone(),
         eval_apply_ff_blocks: HashMap::default(),
@@ -86,7 +88,7 @@ pub fn flatting(
         apply_ff_blocks: HashMap::default(),
         comb_blocks: atomized_comb_blocks,
         comb_observers,
-    }
+    })
 }
 
 /// Atomizes the given logic paths based on the provided boundary map.
@@ -94,7 +96,7 @@ fn atomize_logic_paths(
     paths: &Vec<LogicPath<AbsoluteAddr>>,
     boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
-) -> Vec<LogicPath<AbsoluteAddr>> {
+) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let mut atomized_paths = Vec::new();
 
     for path in paths {
@@ -124,7 +126,7 @@ fn atomize_logic_paths(
                 let new_expr = arena.alloc(SLTNode::Slice {
                     expr: path.expr,
                     access: relative_atom_access,
-                });
+                })?;
                 let mut expr_inputs = crate::HashSet::default();
                 collect_inputs(new_expr, arena, &mut expr_inputs);
                 let filtered_sources: crate::HashSet<_> = expr_inputs
@@ -163,7 +165,7 @@ fn atomize_logic_paths(
                     arena.alloc(SLTNode::Slice {
                         expr: path.expr,
                         access: relative_access,
-                    })
+                    })?
                 };
 
                 // Collect the actual bit-level sources for the merged range.
@@ -175,11 +177,21 @@ fn atomize_logic_paths(
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
                 let filtered_previous_sources: crate::HashSet<_> = merged_sources
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|input_atom| {
                         original_previous_sources.iter().any(|previous| {
                             previous.id == input_atom.id
                                 && previous.access.overlaps(&input_atom.access)
+                        })
+                    })
+                    .collect();
+                let filtered_address_sources: crate::HashSet<_> = merged_sources
+                    .into_iter()
+                    .filter(|input_atom| {
+                        path.address_sources.iter().any(|address| {
+                            address.id == input_atom.id
+                                && address.access.overlaps(&input_atom.access)
                         })
                     })
                     .collect();
@@ -189,6 +201,7 @@ fn atomize_logic_paths(
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
                     previous_sources: filtered_previous_sources,
+                    address_sources: filtered_address_sources,
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
@@ -201,7 +214,7 @@ fn atomize_logic_paths(
             atomized_paths.push(path.clone());
         }
     }
-    atomized_paths
+    Ok(atomized_paths)
 }
 
 pub fn collect_inputs<A: Hash + Eq + Clone + Debug>(
@@ -360,8 +373,81 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
             collect_inputs_with_window(*continue_cond, None, arena, set, visited);
             set.retain(|atom| atom.id != *loop_var);
         }
+        SLTNode::ForFoldGroup {
+            loop_var,
+            entry_guard,
+            states,
+            ..
+        } => {
+            let mut group_inputs = crate::HashSet::default();
+            let mut group_visited = crate::HashSet::default();
+            collect_inputs_with_window(
+                *entry_guard,
+                None,
+                arena,
+                &mut group_inputs,
+                &mut group_visited,
+            );
+            for state in states {
+                collect_inputs_with_window(
+                    state.initial,
+                    None,
+                    arena,
+                    &mut group_inputs,
+                    &mut group_visited,
+                );
+            }
+            let mut update_inputs = crate::HashSet::default();
+            let mut update_visited = crate::HashSet::default();
+            for state in states {
+                collect_inputs_with_window(
+                    state.update,
+                    None,
+                    arena,
+                    &mut update_inputs,
+                    &mut update_visited,
+                );
+            }
+            update_inputs
+                .retain(|atom| atom.id != *loop_var && !carried_states_cover_atom(atom, states));
+            group_inputs.extend(update_inputs);
+            set.extend(group_inputs);
+        }
         SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+/// Return whether the union of loop-carried ranges covers every bit of an
+/// input atom.  Matching only on the variable ID is unsound for partial state
+/// targets because uncovered bits still come from the enclosing storage.
+fn carried_states_cover_atom<A: Hash + Eq + Clone>(
+    atom: &VarAtomBase<A>,
+    states: &[crate::logic_tree::SLTForFoldGroupState<A>],
+) -> bool {
+    let mut ranges = states
+        .iter()
+        .filter(|state| state.target.id == atom.id)
+        .map(|state| state.target.access)
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|access| (access.lsb, access.msb));
+
+    let mut next = atom.access.lsb;
+    for range in ranges {
+        if range.msb < next {
+            continue;
+        }
+        if range.lsb > next {
+            return false;
+        }
+        if range.msb >= atom.access.msb {
+            return true;
+        }
+        let Some(after) = range.msb.checked_add(1) else {
+            return false;
+        };
+        next = after;
+    }
+    false
 }
 fn convert_logic_path<
     A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
@@ -372,7 +458,7 @@ fn convert_logic_path<
     target_arena: &mut SLTNodeArena<B>,
     cache: &mut HashMap<NodeId, NodeId>,
     f: &impl Fn(&A) -> B,
-) -> LogicPath<B> {
+) -> Result<LogicPath<B>, SLTNodeFactsError> {
     lp.map_addr(arena, target_arena, cache, f)
 }
 
@@ -385,18 +471,23 @@ fn convert_comb_observer<
     target_arena: &mut SLTNodeArena<B>,
     cache: &mut HashMap<NodeId, NodeId>,
     f: &impl Fn(&A) -> B,
-) -> CombObserver<B> {
+) -> Result<CombObserver<B>, SLTNodeFactsError> {
     let mut map_node = |node| {
         arena
             .get(node)
             .map_addr(node, arena, target_arena, cache, f)
     };
-    CombObserver {
+    Ok(CombObserver {
         site_id: observer.site_id,
         activation_group: observer.activation_group,
-        guard: observer.guard.map(&mut map_node),
-        args: observer.args.iter().copied().map(&mut map_node).collect(),
-        loop_runner: observer.loop_runner.map(&mut map_node),
+        guard: observer.guard.map(&mut map_node).transpose()?,
+        args: observer
+            .args
+            .iter()
+            .copied()
+            .map(&mut map_node)
+            .collect::<Result<_, _>>()?,
+        loop_runner: observer.loop_runner.map(&mut map_node).transpose()?,
         sensitivity: observer
             .sensitivity
             .iter()
@@ -406,14 +497,14 @@ fn convert_comb_observer<
             .local_inputs
             .iter()
             .map(|(id, node)| {
-                (
+                Ok((
                     f(id),
                     arena
                         .get(*node)
-                        .map_addr(*node, arena, target_arena, cache, f),
-                )
+                        .map_addr(*node, arena, target_arena, cache, f)?,
+                ))
             })
-            .collect(),
+            .collect::<Result<_, SLTNodeFactsError>>()?,
         observed_inputs: observer
             .observed_inputs
             .iter()
@@ -441,7 +532,7 @@ fn convert_comb_observer<
             .collect(),
         written_inputs: observer.written_inputs.iter().map(f).collect(),
         captured_in_loop: observer.captured_in_loop,
-    }
+    })
 }
 
 fn convert_glue_block(
@@ -451,7 +542,7 @@ fn convert_glue_block(
     arena: &SLTNodeArena<GlueAddr>,
     target_arena: &mut SLTNodeArena<AbsoluteAddr>,
     cache: &mut HashMap<NodeId, NodeId>,
-) -> Vec<LogicPath<AbsoluteAddr>> {
+) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let GlueBlock {
         module_id: _,
         input_ports,
@@ -471,19 +562,21 @@ fn convert_glue_block(
     let mut res = Vec::new();
 
     for (_ports, abb) in input_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv));
+        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
     }
     for (_ports, abb) in output_ports {
-        res.push(convert_logic_path(abb, arena, target_arena, cache, cv));
+        res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
     }
-    res
+    Ok(res)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ModuleId;
+    use crate::ir::{BinaryOp, ModuleId};
+    use crate::logic_tree::SLTForFoldGroupState;
     use crate::parser::module::ModuleParser;
+    use num_bigint::{BigInt, BigUint};
     use veryl_analyzer::{
         self, Analyzer, Context, attribute_table,
         ir::{Component, Declaration, Ir, VarPath},
@@ -650,7 +743,8 @@ mod tests {
             &mut arena,
             &crate::debug::TraceOptions::default(),
             None,
-        );
+        )
+        .unwrap();
 
         // Expected logic paths:
         // 1. i_c = i; (in top)
@@ -743,5 +837,77 @@ mod tests {
             0,
             0
         )));
+    }
+
+    #[test]
+    fn for_fold_group_inputs_keep_initial_but_hide_loop_scoped_update_bindings() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let input = |arena: &mut SLTNodeArena<u32>, variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        };
+        let guard = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))
+            .unwrap();
+        let initial = input(&mut arena, 2);
+        let state_input = input(&mut arena, 2);
+        let loop_input = input(&mut arena, 1);
+        let external_input = input(&mut arena, 3);
+        let uncovered_state_input = arena
+            .alloc(SLTNode::Input {
+                variable: 2,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+        let scoped_sum = arena
+            .alloc(SLTNode::Binary(state_input, BinaryOp::Add, loop_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(scoped_sum, BinaryOp::Add, external_input))
+            .unwrap();
+        let update = arena
+            .alloc(SLTNode::Binary(
+                update,
+                BinaryOp::Add,
+                uncovered_state_input,
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: 1,
+                loop_width: 8,
+                loop_signed: false,
+                start: BigInt::from(0),
+                step: BigInt::from(1),
+                trip_count: 2,
+                entry_guard: guard,
+                states: vec![SLTForFoldGroupState {
+                    target: VarAtomBase::new(2, 0, 7),
+                    initial,
+                    update,
+                }],
+            })
+            .unwrap();
+
+        let mut inputs = crate::HashSet::default();
+        collect_inputs(group, &arena, &mut inputs);
+
+        assert!(inputs.contains(&VarAtomBase::new(2, 0, 7)));
+        assert!(inputs.contains(&VarAtomBase::new(2, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(3, 0, 7)));
+        assert!(!inputs.iter().any(|atom| atom.id == 1));
     }
 }

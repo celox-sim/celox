@@ -587,7 +587,8 @@ fn test_four_state_mux_x_condition(sim) {
     let id_b = sim.signal("b");
     let id_y = sim.signal("y");
 
-    // sel = X (v=1,m=1), a = 0xAA, b = 0xBB → cond uncertain → all-X
+    // sel = X (v=1,m=1), a = 0xAA, b = 0xBB. Equal branch bits are
+    // preserved; only differing bits become X.
     sim.modify(|io| {
         io.set_four_state(id_sel, BigUint::from(1u32), BigUint::from(1u32));
         io.set_four_state(id_a, BigUint::from(0xAAu32), BigUint::from(0u32));
@@ -595,11 +596,12 @@ fn test_four_state_mux_x_condition(sim) {
     })
     .unwrap();
 
-    let (_, m_y) = sim.get_four_state(id_y);
+    let (v_y, m_y) = sim.get_four_state(id_y);
+    assert_eq!(v_y, BigUint::from(0xBBu32));
     assert_eq!(
         m_y,
-        BigUint::from(0xFFu32),
-        "Mux with X condition → all bits uncertain"
+        BigUint::from(0x11u32),
+        "Mux with X condition must merge branch bits"
     );
 }
 
@@ -1854,17 +1856,82 @@ fn test_four_state_multibit_mux_with_x(sim) {
     })
     .unwrap();
 
-    // Selector has X → result should have X (conservative mux of all branches)
+    // A procedural condition takes its true branch only for a definite one.
+    // Both equality tests are unknown here, so control reaches the final else.
     sim.modify(|io| {
         io.set_four_state(id_sel, BigUint::from(0u32), BigUint::from(1u32)); // bit 0 is X
     })
     .unwrap();
-    let (_, m) = sim.get_four_state(id_y);
-    assert_ne!(
-        m,
-        BigUint::from(0u32),
-        "Multi-bit mux with X in selector should produce X in output"
-    );
+    let (v, m) = sim.get_four_state(id_y);
+    assert_eq!(m, BigUint::from(0u32));
+    assert_eq!(v, BigUint::from(0xCCu32));
+}
+
+fn test_four_state_procedural_case_x_uses_default(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            sel: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                case sel {
+                    2'd0: y = 8'd10;
+                    2'd1: y = 8'd20;
+                    default: y = 8'd99;
+                }
+            }
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let sel = sim.signal("sel");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set_four_state(sel, BigUint::from(1u32), BigUint::from(1u32));
+    })
+    .unwrap();
+
+    let (value, mask) = sim.get_four_state(y);
+    assert_eq!(mask, BigUint::from(0u32));
+    assert_eq!(value, BigUint::from(99u32));
+}
+
+fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            cond: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                if cond {
+                    y = 8'hA5;
+                } else {
+                    y = 8'h5A;
+                }
+            }
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let cond = sim.signal("cond");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        // 2'b1x has a known nonzero bit, so it is a true procedural condition.
+        io.set_four_state(cond, BigUint::from(2u32), BigUint::from(1u32));
+    })
+    .unwrap();
+
+    let (value, mask) = sim.get_four_state(y);
+    assert_eq!(mask, BigUint::from(0u32));
+    assert_eq!(value, BigUint::from(0xA5u32));
 }
 
 // ==========================================================================
@@ -2966,6 +3033,80 @@ fn test_four_state_ne_wildcard_value_at_wildcard_pos(sim) {
         "!=? with definite mismatch should be definite"
     );
     assert_eq!(v, BigUint::from(1u32), "!=? with mismatch = 1");
+}
+
+fn test_four_state_wide_wildcard_equality(sim) {
+    @ignore_on(veryl);
+    @setup {
+    let code = r#"
+        module Top (
+            a: input logic<130>,
+            b: input logic<130>,
+            y_eq: output logic,
+            y_ne: output logic
+        ) {
+            assign y_eq = a ==? b;
+            assign y_ne = a !=? b;
+        }
+    "#;
+    }
+    @build SimulatorBuilder::new(code, "Top")
+        .four_state(true);
+
+    let id_a = sim.signal("a");
+    let id_b = sim.signal("b");
+    let id_y_eq = sim.signal("y_eq");
+    let id_y_ne = sim.signal("y_ne");
+    let bit_64 = BigUint::from(1u32) << 64usize;
+    let bit_65 = BigUint::from(1u32) << 65usize;
+    let bit_129 = BigUint::from(1u32) << 129usize;
+    let rhs_value = &bit_64 | &bit_129;
+
+    // A difference at an RHS wildcard in the second chunk is ignored.
+    sim.modify(|io| {
+        io.set_four_state(id_a, &rhs_value | &bit_65, BigUint::from(0u32));
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(1u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(0u32), BigUint::from(0u32))
+    );
+
+    // An unknown LHS bit at a non-wildcard position in the top chunk makes
+    // both wildcard equality results unknown.
+    sim.modify(|io| {
+        io.set_four_state(id_a, rhs_value.clone(), bit_129.clone());
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(1u32), BigUint::from(1u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(1u32), BigUint::from(1u32))
+    );
+
+    // A definite mismatch in another high chunk dominates that unknown.
+    sim.modify(|io| {
+        io.set_four_state(id_a, bit_129.clone(), bit_129.clone());
+        io.set_four_state(id_b, rhs_value.clone(), bit_65.clone());
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(id_y_eq),
+        (BigUint::from(0u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.get_four_state(id_y_ne),
+        (BigUint::from(1u32), BigUint::from(0u32))
+    );
 }
 
 // ==========================================================================

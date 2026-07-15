@@ -10,12 +10,70 @@ use crate::{
 };
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Statement, VarId, VarIndex,
-    VarSelect,
+    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement, Type,
+    TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    fn normalize_function_control_condition(condition: Expression) -> Expression {
+        let token = TokenRange::default();
+        let already_one_bit = condition.comptime().r#type.total_width() == Some(1)
+            || matches!(
+                &condition,
+                Expression::Binary(
+                    _,
+                    Op::Eq
+                        | Op::EqWildcard
+                        | Op::Ne
+                        | Op::NeWildcard
+                        | Op::Less
+                        | Op::LessEq
+                        | Op::Greater
+                        | Op::GreaterEq
+                        | Op::LogicAnd
+                        | Op::LogicOr,
+                    _,
+                    _,
+                ) | Expression::Unary(
+                    Op::BitAnd
+                        | Op::BitOr
+                        | Op::BitXor
+                        | Op::BitNand
+                        | Op::BitNor
+                        | Op::BitXnor
+                        | Op::LogicNot,
+                    _,
+                    _,
+                )
+            );
+        let truth = if already_one_bit {
+            condition
+        } else {
+            Expression::Unary(
+                Op::BitOr,
+                Box::new(condition),
+                Box::new(Comptime::create_unknown(token)),
+            )
+        };
+        let mut bit_type = Type::new(TypeKind::Bit);
+        bit_type.set_concrete_width(Shape::new(vec![Some(1)]));
+        let cast_target = Expression::Term(Box::new(Factor::Value(Comptime {
+            value: ValueVariant::Type(bit_type),
+            r#type: Type::new(TypeKind::Type),
+            is_const: true,
+            is_global: true,
+            token,
+            ..Default::default()
+        })));
+        Expression::Binary(
+            Box::new(truth),
+            Op::As,
+            Box::new(cast_target),
+            Box::new(Comptime::create_unknown(token)),
+        )
+    }
+
     fn default_expr_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         Self::expr_shape_matches_formal(expr, formal_shape)
             || (!formal_shape.is_empty() && expr.comptime().r#type.array.is_empty())
@@ -338,7 +396,7 @@ impl<'a> FfParser<'a> {
                     merged.insert(
                         id,
                         Expression::Ternary(
-                            Box::new(cond.clone()),
+                            Box::new(FfParser::normalize_function_control_condition(cond.clone())),
                             Box::new(then_expr),
                             Box::new(else_expr.clone()),
                             Box::new(Comptime::create_unknown(TokenRange::default())),
@@ -584,7 +642,7 @@ impl<'a> FfParser<'a> {
 
                     match (then_expr, else_expr) {
                         (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(
-                            Box::new(cond),
+                            Box::new(FfParser::normalize_function_control_condition(cond)),
                             Box::new(then_expr),
                             Box::new(else_expr),
                             Box::new(Comptime::create_unknown(TokenRange::default())),
@@ -676,7 +734,7 @@ impl<'a> FfParser<'a> {
 
                 match (then_expr, else_expr) {
                     (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(
-                        Box::new(cond),
+                        Box::new(FfParser::normalize_function_control_condition(cond)),
                         Box::new(then_expr),
                         Box::new(else_expr),
                         Box::new(Comptime::create_unknown(TokenRange::default())),

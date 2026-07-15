@@ -108,13 +108,13 @@ Execution Unit 0:
     r93: logic<64>
     r94: logic<64>
     r95: logic<64>
-    r96: logic<64>
     r97: logic<20>
   b0:
     r0 = SIRValue(0x0)
     r1 = SIRValue(0x3)
     Jump(b1 [r0])
   b1:
+    params: [r2]
     r3 = r2 LtU r1
     Branch(r3 ? b2 : b4)
   b2:
@@ -133,8 +133,7 @@ Execution Unit 0:
     r5 = r92 And r93
     r94 = SIRValue(0x2)
     r95 = r90 Shr r94
-    r96 = SIRValue(0x1)
-    r6 = r95 And r96
+    r6 = r95 And r93
     r7 = r5 Ne r6
     r11 = r9 Ne r6
     r41 = Load(addr=v (region=0), offset=12, bits=1)

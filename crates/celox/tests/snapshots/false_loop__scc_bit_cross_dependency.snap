@@ -27,8 +27,6 @@ Execution Unit 0:
     r12: logic<64>
     r13: logic<64>
     r14: logic<64>
-    r15: logic<64>
-    r16: logic<64>
     r17: logic<2>
   b0:
     r0 = Load(addr=sel (region=0), offset=0, bits=1)

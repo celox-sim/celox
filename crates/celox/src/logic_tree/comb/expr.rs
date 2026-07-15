@@ -1,8 +1,14 @@
 use super::*;
 
 use crate::{
-    context_width::get_context_width,
-    parser::{bitaccess::celox_value_from_comptime, case::case_arm_condition_expr},
+    context_width::{
+        ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
+        resolve_binary_op,
+    },
+    parser::{
+        bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
+        case::case_arm_condition_expr,
+    },
 };
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
@@ -116,7 +122,7 @@ pub(super) fn eval_array_literal_expression(
     }
 
     Ok((
-        (arena.alloc(SLTNode::Concat(parts)), total_sources),
+        (arena.alloc(SLTNode::Concat(parts))?, total_sources),
         all_bounds,
     ))
 }
@@ -417,9 +423,25 @@ pub(super) fn eval_function_body_return(
     ) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
         let ret_var = &module.variables[&ret_id];
         let ret_width = resolve_total_width(module, ret_var)?;
+        if ret_width == 0 {
+            return Err(ParserError::illegal_context(
+                "function return value",
+                "return variable has zero width",
+                None,
+            ));
+        }
         let ret_access = BitAccess::new(0, ret_width - 1);
-        let ret_parts = store[&ret_id].get_parts(ret_access);
-        Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena))
+        let range_store = store.get(&ret_id).ok_or_else(|| {
+            ParserError::illegal_context(
+                "function return value",
+                "return variable is absent from the symbolic store",
+                None,
+            )
+        })?;
+        let ret_parts = range_store
+            .get_parts(ret_access)
+            .map_err(|error| super::range_store_error("function return value", error, None))?;
+        Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena)?)
     }
 
     fn function_control_target(
@@ -458,12 +480,12 @@ pub(super) fn eval_function_body_return(
                 )?;
                 let merged_live_expr = match constant_bool(arena, next_live_expr) {
                     Some(true) => state.live_expr,
-                    Some(false) => bool_node(arena, false),
+                    Some(false) => bool_node(arena, false)?,
                     None => arena.alloc(SLTNode::Binary(
                         state.live_expr,
                         BinaryOp::And,
                         next_live_expr,
-                    )),
+                    ))?,
                 };
                 let mut merged_live_sources = state.live_sources;
                 merged_live_sources.extend(next_live_sources);
@@ -486,6 +508,7 @@ pub(super) fn eval_function_body_return(
     ) -> Result<FunctionControlState, ParserError> {
         let ((cond_expr, cond_sources), cond_bounds) =
             eval_expression(module, &state.store, &if_stmt.cond, arena, Some(1))?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -550,7 +573,7 @@ pub(super) fn eval_function_body_return(
                 then_state.live_expr,
                 else_state.live_expr,
                 arena,
-            ),
+            )?,
             live_sources,
         })
     }
@@ -600,7 +623,7 @@ pub(super) fn eval_function_body_return(
                             next_function.live_expr,
                             state.function.live_expr,
                             arena,
-                        ),
+                        )?,
                         live_sources: merged_live_sources,
                     },
                     ..state
@@ -617,6 +640,7 @@ pub(super) fn eval_function_body_return(
         ) -> Result<FunctionLoopControlState, ParserError> {
             let ((cond_expr, cond_sources), cond_bounds) =
                 eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -690,7 +714,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -698,7 +722,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             })
         }
@@ -731,6 +755,7 @@ pub(super) fn eval_function_body_return(
                     arena,
                     Some(1),
                 )?;
+                let cond_expr = procedural_condition(arena, cond_expr)?;
                 let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
                 if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -807,7 +832,7 @@ pub(super) fn eval_function_body_return(
                             then_state.function.live_expr,
                             else_state.function.live_expr,
                             arena,
-                        ),
+                        )?,
                         live_sources,
                     },
                     continue_expr: merge_control_expr(
@@ -815,7 +840,7 @@ pub(super) fn eval_function_body_return(
                         then_state.continue_expr,
                         else_state.continue_expr,
                         arena,
-                    ),
+                    )?,
                     continue_sources: merged_sources,
                 })
             }
@@ -854,7 +879,7 @@ pub(super) fn eval_function_body_return(
                 }
                 Statement::Break => Ok(FunctionLoopControlState {
                     continue_sources: HashSet::default(),
-                    continue_expr: bool_node(arena, false),
+                    continue_expr: bool_node(arena, false)?,
                     ..state
                 }),
                 Statement::IfReset(ir) => Err(ParserError::illegal_context(
@@ -932,9 +957,23 @@ pub(super) fn eval_function_body_return(
                 }
                 let end = bit - 1;
                 let access = BitAccess::new(start, end);
-                let parts = original.get_parts(access);
-                let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena);
-                loop_store.update(access, Some((expr, sources)));
+                let parts = original.get_parts(access).map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
+                let (expr, sources) = combine_parts_with_default(*id, access.lsb, parts, arena)?;
+                loop_store
+                    .update(access, Some((expr, sources)))
+                    .map_err(|error| {
+                        super::range_store_error(
+                            "function for-loop state",
+                            error,
+                            Some(&for_stmt.token),
+                        )
+                    })?;
             }
             symbolic_store.insert(*id, loop_store);
         }
@@ -946,10 +985,10 @@ pub(super) fn eval_function_body_return(
                 function: FunctionControlState {
                     store: symbolic_store,
                     boundaries: state.boundaries.clone(),
-                    live_expr: bool_node(arena, true),
+                    live_expr: bool_node(arena, true)?,
                     live_sources: HashSet::default(),
                 },
-                continue_expr: bool_node(arena, true),
+                continue_expr: bool_node(arena, true)?,
                 continue_sources: HashSet::default(),
             },
             |s, stmt| eval_function_loop_statement(module, s, stmt, ret_id, arena),
@@ -1057,7 +1096,7 @@ pub(super) fn eval_function_body_return(
         merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
         merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
 
-        let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena);
+        let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena)?;
         let folded_updates: Vec<_> = updates
             .iter()
             .map(|(target, expr, _)| SLTForUpdate {
@@ -1072,22 +1111,35 @@ pub(super) fn eval_function_body_return(
         let initial_updates: Vec<_> = updates
             .iter()
             .map(|(target, _, _)| {
-                let parts = state.store[&target.id].get_parts(target.access);
+                let range_store = state.store.get(&target.id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "function for-loop initial state",
+                        "state variable is absent from the symbolic store",
+                        Some(&for_stmt.token),
+                    )
+                })?;
+                let parts = range_store.get_parts(target.access).map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop initial state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
                 let (expr, _) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena);
-                SLTForUpdate {
+                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
+                Ok(SLTForUpdate {
                     target: *target,
                     expr,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ParserError>>()?;
 
         let mut result_store = state.store.clone();
         let loop_effective_continue = arena.alloc(SLTNode::Binary(
             iter_state.continue_expr,
             BinaryOp::And,
             iter_state.function.live_expr,
-        ));
+        ))?;
         for (target, _expr, sources) in &updates {
             let mut all_sources = start_sources.clone();
             all_sources.extend(end_sources.iter().copied());
@@ -1128,16 +1180,27 @@ pub(super) fn eval_function_body_return(
                 updates: folded_updates.clone(),
                 effects: Vec::new(),
                 continue_cond: loop_effective_continue,
-            });
+            })?;
 
+            let variable = module.variables.get(&target.id).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "function for-loop result state",
+                    "state variable is absent from the semantic module",
+                    Some(&for_stmt.token),
+                )
+            })?;
+            let width = resolve_total_width(module, variable)?;
             result_store
                 .entry(target.id)
-                .or_insert_with(|| {
-                    let width =
-                        resolve_total_width(module, &module.variables[&target.id]).unwrap_or(0);
-                    RangeStore::new(None, width)
-                })
-                .update(target.access, Some((folded_expr, all_sources)));
+                .or_insert_with(|| RangeStore::new(None, width))
+                .update(target.access, Some((folded_expr, all_sources)))
+                .map_err(|error| {
+                    super::range_store_error(
+                        "function for-loop result state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
         }
         result_store.remove(&for_stmt.var_id);
 
@@ -1152,7 +1215,7 @@ pub(super) fn eval_function_body_return(
             let mut control_initials = initial_updates.clone();
             control_initials.push(SLTForUpdate {
                 target: control_target,
-                expr: bool_node(arena, true),
+                expr: bool_node(arena, true)?,
             });
             let mut control_updates = folded_updates.clone();
             control_updates.push(SLTForUpdate {
@@ -1174,9 +1237,9 @@ pub(super) fn eval_function_body_return(
                 updates: control_updates,
                 effects: Vec::new(),
                 continue_cond: iter_state.continue_expr,
-            })
+            })?
         } else {
-            bool_node(arena, true)
+            bool_node(arena, true)?
         };
 
         apply_function_guard(
@@ -1228,7 +1291,7 @@ pub(super) fn eval_function_body_return(
                         next_function.live_expr,
                         state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources: merged_live_sources,
                 },
                 ..state
@@ -1246,6 +1309,7 @@ pub(super) fn eval_function_body_return(
         let outer_state = state.clone();
         let ((cond_expr, cond_sources), cond_bounds) =
             eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+        let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
         let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1318,7 +1382,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -1326,7 +1390,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             }
         };
@@ -1343,12 +1407,12 @@ pub(super) fn eval_function_body_return(
         )?;
         let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
             Some(true) => outer_state.continue_expr,
-            Some(false) => bool_node(arena, false),
+            Some(false) => bool_node(arena, false)?,
             None => arena.alloc(SLTNode::Binary(
                 outer_state.continue_expr,
                 BinaryOp::And,
                 executed_state.continue_expr,
-            )),
+            ))?,
         };
         let mut continue_sources = outer_state.continue_sources;
         continue_sources.extend(executed_state.continue_sources);
@@ -1387,6 +1451,7 @@ pub(super) fn eval_function_body_return(
                 arena,
                 Some(1),
             )?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1463,7 +1528,7 @@ pub(super) fn eval_function_body_return(
                         then_state.function.live_expr,
                         else_state.function.live_expr,
                         arena,
-                    ),
+                    )?,
                     live_sources,
                 },
                 continue_expr: merge_control_expr(
@@ -1471,7 +1536,7 @@ pub(super) fn eval_function_body_return(
                     then_state.continue_expr,
                     else_state.continue_expr,
                     arena,
-                ),
+                )?,
                 continue_sources: merged_sources,
             })
         }
@@ -1491,12 +1556,12 @@ pub(super) fn eval_function_body_return(
         )?;
         let continue_expr = match constant_bool(arena, executed_state.continue_expr) {
             Some(true) => outer_state.continue_expr,
-            Some(false) => bool_node(arena, false),
+            Some(false) => bool_node(arena, false)?,
             None => arena.alloc(SLTNode::Binary(
                 outer_state.continue_expr,
                 BinaryOp::And,
                 executed_state.continue_expr,
-            )),
+            ))?,
         };
         let mut continue_sources = outer_state.continue_sources;
         continue_sources.extend(executed_state.continue_sources);
@@ -1536,7 +1601,7 @@ pub(super) fn eval_function_body_return(
             }
             Statement::Break => Ok(FunctionLoopControlState {
                 continue_sources: HashSet::default(),
-                continue_expr: bool_node(arena, false),
+                continue_expr: bool_node(arena, false)?,
                 ..state
             }),
             Statement::IfReset(ir) => Err(ParserError::illegal_context(
@@ -1565,7 +1630,7 @@ pub(super) fn eval_function_body_return(
         let loop_state = statements.iter().try_fold(
             FunctionLoopControlState {
                 function: state,
-                continue_expr: bool_node(arena, true),
+                continue_expr: bool_node(arena, true)?,
                 continue_sources: HashSet::default(),
             },
             |s, stmt| eval_function_break_statement(module, s, stmt, ret_id, arena),
@@ -1636,6 +1701,7 @@ pub(super) fn eval_function_body_return(
                 arena,
                 Some(1),
             )?;
+            let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
@@ -1695,7 +1761,7 @@ pub(super) fn eval_function_body_return(
                     then_state.live_expr,
                     else_state.live_expr,
                     arena,
-                ),
+                )?,
                 live_sources,
             })
         }
@@ -1720,9 +1786,9 @@ pub(super) fn eval_function_body_return(
                 let (next_store, next_bounds) =
                     eval_assign(module, state.store, state.boundaries, assign, arena)?;
                 let next_live = if is_whole_var_assign_to(assign, ret_id) {
-                    bool_node(arena, false)
+                    bool_node(arena, false)?
                 } else {
-                    bool_node(arena, true)
+                    bool_node(arena, true)?
                 };
                 apply_function_guard(
                     module,
@@ -1754,7 +1820,7 @@ pub(super) fn eval_function_body_return(
                     guard_state,
                     next_store,
                     next_bounds,
-                    bool_node(arena, true),
+                    bool_node(arena, true)?,
                     HashSet::default(),
                     arena,
                 )
@@ -1812,7 +1878,7 @@ pub(super) fn eval_function_body_return(
         FunctionControlState {
             store: local_store,
             boundaries: local_bounds,
-            live_expr: bool_node(arena, true),
+            live_expr: bool_node(arena, true)?,
             live_sources: HashSet::default(),
         },
         &body.statements,
@@ -1897,9 +1963,6 @@ fn eval_function_call_expression(
             ));
         };
 
-        let ((arg_node, sources), bounds) = eval_expression(module, store, arg_expr, arena, None)?;
-        arg_bounds = merge_boundaries(arg_bounds, bounds);
-
         let Some(arg_var) = module.variables.get(arg_id) else {
             return Err(ParserError::unsupported(
                 67,
@@ -1910,6 +1973,14 @@ fn eval_function_call_expression(
             ));
         };
         let arg_width = resolve_total_width(module, arg_var)?;
+        let ((arg_node, sources), bounds) =
+            eval_assignment_expression(module, store, arg_expr, arena, arg_width)?;
+        let arg_node = if arg_var.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
+        } else {
+            arg_node
+        };
+        arg_bounds = merge_boundaries(arg_bounds, bounds);
         local_store.insert(
             *arg_id,
             RangeStore::new(Some((arg_node, sources)), arg_width),
@@ -1931,102 +2002,48 @@ pub fn eval_expression(
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context = context_width.map(|width| ValueContext {
+        width,
+        signed: expression_signed(expr),
+    });
+    eval_expression_in_context(module, store, expr, arena, context)
+}
+
+fn eval_expression_in_context(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
     // Short-circuit: compile-time constant compound expression → emit Constant node.
-    // context_width is not applied here — compound constant expressions (e.g. `N - 1`)
-    // always have well-defined widths from the analyzer.  Fill-literals like `'0` are
-    // Term(Factor::Value), not compound, so they take the Factor::Value path which
-    // does apply context_width.
+    // The folded value still participates in its enclosing width context.  Skipping
+    // that coercion used to produce mismatched wildcard operands for enum cases and
+    // can also lose carry bits when a folded operand is widened by its parent.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
         if ct.is_const {
-            if let Some((celox_value, mask_xz, width, signed)) = celox_value_from_comptime(ct) {
-                let expr = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed));
-                return Ok(((expr, HashSet::default()), BoundaryMap::default()));
+            if let Some((celox_value, mask_xz, width, signed)) =
+                celox_value_from_comptime_in_context(ct, context_width)
+            {
+                let node = arena.alloc(SLTNode::Constant(celox_value, mask_xz, width, signed))?;
+                let node = coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context.map(|context| context.signed).unwrap_or(signed),
+                )?;
+                return Ok(((node, HashSet::default()), BoundaryMap::default()));
             }
         }
     }
 
     match expr {
-        Expression::Term(factor) => eval_factor(module, store, factor, arena, context_width),
+        Expression::Term(factor) => eval_factor(module, store, factor, arena, context),
         Expression::Binary(lhs, op, rhs, _) => {
-            let (lhs_context_width, rhs_context_width) = if matches!(op, Op::As) {
-                // `as` cast: LHS inherits target width from RHS type/numeric, RHS is metadata
-                let target_width = if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v) = f.as_ref() {
-                        match &v.value {
-                            ValueVariant::Type(ty) => ty.total_width(),
-                            ValueVariant::Numeric(n) => n.to_usize(),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                (target_width, None)
-            } else if matches!(
-                op,
-                Op::LogicShiftL | Op::LogicShiftR | Op::ArithShiftL | Op::ArithShiftR | Op::Pow
-            ) {
-                (get_context_width(lhs, context_width), None)
-            } else {
-                let context_width = if matches!(
-                    op,
-                    Op::Less
-                        | Op::LessEq
-                        | Op::Greater
-                        | Op::GreaterEq
-                        | Op::Eq
-                        | Op::Ne
-                        | Op::EqWildcard
-                        | Op::NeWildcard
-                        | Op::LogicAnd
-                        | Op::LogicOr
-                ) {
-                    None
-                } else {
-                    context_width
-                };
-                let lw = get_context_width(lhs, context_width);
-                let rw = get_context_width(rhs, context_width);
-                let w = lw.and_then(|lw| rw.map(|rw| lw.max(rw)));
-                (w, w)
-            };
-
-            // `as` cast: use RHS type for context width and signedness.
             if matches!(op, Op::As) {
-                let ((l_expr, l_sources), l_bounds) =
-                    eval_expression(module, store, lhs, arena, lhs_context_width)?;
-
-                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
-                let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v) = f.as_ref() {
-                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
-                            BoundaryMap::default()
-                        } else {
-                            eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                        }
-                    } else {
-                        eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                    }
-                } else {
-                    eval_expression(module, store, rhs, arena, rhs_context_width)?.1
-                };
-
-                // Extract signedness and width from RHS type/numeric
-                let (target_width, target_signed) = match rhs.as_ref() {
-                    Expression::Term(f) => match f.as_ref() {
-                        Factor::Value(v) => match &v.value {
-                            ValueVariant::Type(ty) => (ty.total_width(), ty.signed),
-                            ValueVariant::Numeric(n) => (n.to_usize(), false),
-                            _ => (None, false),
-                        },
-                        _ => (None, false),
-                    },
-                    _ => (None, false),
-                };
-                let Some(target_width) = target_width else {
+                let Some(cast) = cast_semantics(lhs, rhs) else {
                     return Err(ParserError::unsupported(
                         67,
                         LoweringPhase::CombLowering,
@@ -2035,46 +2052,70 @@ pub fn eval_expression(
                         Some(&rhs.token_range()),
                     ));
                 };
+                let ((l_expr, l_sources), l_bounds) = eval_expression_in_context(
+                    module,
+                    store,
+                    lhs,
+                    arena,
+                    Some(ValueContext {
+                        width: cast.width,
+                        signed: cast.source_signed,
+                    }),
+                )?;
 
-                let mut result_node = l_expr;
-                let expr_width = get_width(result_node, arena);
-
-                if expr_width < target_width {
-                    let pad_width = target_width - expr_width;
-                    let pad = if target_signed || is_signed(module, result_node, arena) {
-                        // 符号拡張: MSBをpad
-                        let msb_slice = arena.alloc(SLTNode::Slice {
-                            expr: result_node,
-                            access: BitAccess::new(expr_width - 1, expr_width - 1),
-                        });
-                        (msb_slice, pad_width)
+                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
+                let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
+                    if let Factor::Value(v) = f.as_ref() {
+                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
+                            BoundaryMap::default()
+                        } else {
+                            eval_expression_in_context(module, store, rhs, arena, None)?.1
+                        }
                     } else {
-                        // ゼロ拡張: 0をpad
-                        let zero = arena.alloc(SLTNode::Constant(
-                            BigUint::from(0u8),
-                            BigUint::from(0u32),
-                            pad_width,
-                            false,
-                        ));
-                        (zero, pad_width)
-                    };
-                    result_node =
-                        arena.alloc(SLTNode::Concat(vec![pad, (result_node, expr_width)]));
-                } else if expr_width > target_width {
-                    result_node = arena.alloc(SLTNode::Slice {
-                        expr: result_node,
-                        access: BitAccess::new(0, target_width - 1),
-                    });
-                }
+                        eval_expression_in_context(module, store, rhs, arena, None)?.1
+                    }
+                } else {
+                    eval_expression_in_context(module, store, rhs, arena, None)?.1
+                };
+
+                // Resize uses the source signedness.  Reinterpretation changes
+                // the signedness seen by the enclosing context, not the bits.
+                let cast_value =
+                    coerce_node_width(arena, l_expr, Some(cast.width), cast.source_signed)?;
+                let cast_value = if cast.result_is_2state && !cast.source_is_2state {
+                    arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, cast_value))?
+                } else {
+                    cast_value
+                };
+                let result_node = coerce_node_width(
+                    arena,
+                    cast_value,
+                    context_width,
+                    context
+                        .map(|context| context.signed)
+                        .unwrap_or(cast.result_signed),
+                )?;
                 return Ok((
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
                 ));
             }
+
+            let lhs_width = get_expr_width(lhs)
+                .or_else(|| lhs.comptime().r#type.total_width())
+                .unwrap_or(1);
+            let rhs_width = get_expr_width(rhs)
+                .or_else(|| rhs.comptime().r#type.total_width())
+                .unwrap_or(1);
+            let lhs_signed = expression_signed(lhs);
+            let rhs_signed = expression_signed(rhs);
+            let semantics =
+                binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
+
             // `pow`: currently lowered for constant exponent only.
             if matches!(op, Op::Pow) {
                 let ((l_expr, l_sources), l_bounds) =
-                    eval_expression(module, store, lhs, arena, lhs_context_width)?;
+                    eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
                 let Some(exp) = eval_constexpr(rhs).and_then(|x| x.to_u64().map(|v| v as usize))
                 else {
                     return Err(ParserError::unsupported(
@@ -2092,20 +2133,28 @@ pub fn eval_expression(
                         BigUint::from(0u32),
                         lhs_width,
                         false,
-                    ))
+                    ))?
                 } else {
                     let mut acc = l_expr;
                     for _ in 1..exp {
-                        acc = arena.alloc(SLTNode::Binary(acc, BinaryOp::Mul, l_expr));
+                        acc = arena.alloc(SLTNode::Binary(acc, BinaryOp::Mul, l_expr))?;
                     }
                     acc
                 };
+                let result_node = coerce_node_width(
+                    arena,
+                    result_node,
+                    context_width,
+                    context
+                        .map(|context| context.signed)
+                        .unwrap_or(semantics.result_signed),
+                )?;
                 return Ok(((result_node, l_sources), l_bounds));
             }
             let ((l_expr, l_sources), l_bounds) =
-                eval_expression(module, store, lhs, arena, lhs_context_width)?;
+                eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
             let ((r_expr, r_sources), r_bounds) =
-                eval_expression(module, store, rhs, arena, rhs_context_width)?;
+                eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
 
             let mut sources = l_sources;
             sources.extend(r_sources);
@@ -2113,25 +2162,20 @@ pub fn eval_expression(
             // BitXnor/BitNand/BitNor は既存演算に分解
             let result_node = match op {
                 Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))
+                    let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))?
                 }
                 Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))
+                    let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))?
                 }
                 Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))
+                    let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
                 }
                 Op::Sub => {
-                    let lhs_signed = expression_signed_override(lhs)
-                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed = expression_signed_override(rhs)
-                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
-                    let signed = lhs_signed && rhs_signed;
-                    let bin_op = convert_binary_op(op, signed);
-                    let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr));
+                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
+                    let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
                     let width = {
                         let lw = get_width(l_expr, arena);
                         let rw = get_width(r_expr, arena);
@@ -2140,78 +2184,28 @@ pub fn eval_expression(
                     arena.alloc(SLTNode::Slice {
                         expr: sub_node,
                         access: BitAccess::new(0, width - 1),
-                    })
+                    })?
                 }
                 _ => {
-                    let lhs_signed = expression_signed_override(lhs)
-                        .unwrap_or_else(|| is_signed(module, l_expr, arena));
-                    let rhs_signed = expression_signed_override(rhs)
-                        .unwrap_or_else(|| is_signed(module, r_expr, arena));
-                    let signed = lhs_signed && rhs_signed;
-                    let bin_op = if matches!(op, Op::ArithShiftR) {
-                        if lhs_signed {
-                            BinaryOp::Sar
-                        } else {
-                            BinaryOp::Shr
-                        }
-                    } else {
-                        convert_binary_op(op, signed)
-                    };
-                    let res = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr));
-                    if matches!(
-                        op,
-                        Op::Less
-                            | Op::LessEq
-                            | Op::Greater
-                            | Op::GreaterEq
-                            | Op::Eq
-                            | Op::Ne
-                            | Op::EqWildcard
-                            | Op::NeWildcard
-                    ) && context_width.map(|cw| cw != 1).unwrap_or(false)
-                    {
-                        let width = context_width.unwrap();
-                        let zero = arena.alloc(SLTNode::Constant(
-                            BigUint::from(0u8),
-                            BigUint::from(0u32),
-                            width - 1,
-                            false,
-                        ));
-                        arena.alloc(SLTNode::Concat(vec![(zero, width - 1), (res, 1)]))
-                    } else if matches!(
-                        op,
-                        Op::ArithShiftL
-                            | Op::ArithShiftR
-                            | Op::LogicShiftL
-                            | Op::LogicShiftR
-                            | Op::Pow
-                    ) {
-                        let res_width = get_width(res, arena);
-                        let width = context_width.unwrap_or(res_width);
-                        if res_width > width {
-                            arena.alloc(SLTNode::Slice {
-                                expr: res,
-                                access: BitAccess::new(0, width - 1),
-                            })
-                        } else if res_width < width {
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                res_width - 1,
-                                false,
-                            ));
-                            arena.alloc(SLTNode::Concat(vec![
-                                (zero, width - res_width),
-                                (res, res_width),
-                            ]))
-                        } else {
-                            res
-                        }
-                    } else {
-                        res
-                    }
+                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
+                    arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?
                 }
             };
+
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                Some(semantics.result_width),
+                semantics.result_signed,
+            )?;
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                context_width,
+                context
+                    .map(|context| context.signed)
+                    .unwrap_or(semantics.result_signed),
+            )?;
 
             Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)))
         }
@@ -2222,7 +2216,7 @@ pub fn eval_expression(
 
             for (sub_expr, repeat) in exprs {
                 let ((part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, sub_expr, arena, None)?;
+                    eval_expression_in_context(module, store, sub_expr, arena, None)?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 let width = get_width(part_expr, arena);
 
@@ -2249,38 +2243,81 @@ pub fn eval_expression(
                     parts.push((part_expr, width));
                 }
             }
-            Ok((
-                (arena.alloc(SLTNode::Concat(parts)), total_sources),
-                all_bounds,
-            ))
+            let result = arena.alloc(SLTNode::Concat(parts))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
+            Ok(((result, total_sources), all_bounds))
         }
         Expression::Unary(op, expr, _) => {
-            let ((expr, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
+            let result_signed = expression_signed(expr);
+            let operand_context = if matches!(
+                op,
+                Op::BitAnd
+                    | Op::BitNand
+                    | Op::BitOr
+                    | Op::BitNor
+                    | Op::BitXor
+                    | Op::BitXnor
+                    | Op::LogicNot
+            ) {
+                None
+            } else {
+                context
+            };
+            let ((expr, sources), bounds) =
+                eval_expression_in_context(module, store, expr, arena, operand_context)?;
             // Reduction Nand/Nor/Xnor は既存のリダクション + Not に分解
             let result_node = match op {
                 Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))
+                    let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))?
                 }
                 Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))
+                    let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))?
                 }
                 Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr));
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))
+                    let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr))?;
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))?
                 }
-                _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr)),
+                _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr))?,
             };
+            let result_node = coerce_node_width(
+                arena,
+                result_node,
+                context_width,
+                context
+                    .map(|context| context.signed)
+                    .unwrap_or(result_signed),
+            )?;
             Ok(((result_node, sources), bounds))
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
+            let branch_width = get_expr_width(then_expr)
+                .or_else(|| then_expr.comptime().r#type.total_width())
+                .unwrap_or(1)
+                .max(
+                    get_expr_width(else_expr)
+                        .or_else(|| else_expr.comptime().r#type.total_width())
+                        .unwrap_or(1),
+                )
+                .max(context_width.unwrap_or(0));
+            let branch_context = Some(ValueContext {
+                width: branch_width,
+                signed: context.map(|context| context.signed).unwrap_or_else(|| {
+                    expression_signed(then_expr) && expression_signed(else_expr)
+                }),
+            });
             let ((cond_expr, cond_sources), cond_bounds) =
-                eval_expression(module, store, cond, arena, context_width)?;
+                eval_expression_in_context(module, store, cond, arena, None)?;
             let ((then_expr, then_sources), then_bounds) =
-                eval_expression(module, store, then_expr, arena, context_width)?;
+                eval_expression_in_context(module, store, then_expr, arena, branch_context)?;
             let ((else_expr, else_sources), else_bounds) =
-                eval_expression(module, store, else_expr, arena, context_width)?;
+                eval_expression_in_context(module, store, else_expr, arena, branch_context)?;
 
             let mut sources = cond_sources;
             sources.extend(then_sources);
@@ -2292,7 +2329,7 @@ pub fn eval_expression(
                         cond: cond_expr,
                         then_expr,
                         else_expr,
-                    }),
+                    })?,
                     sources,
                 ),
                 merge_boundaries(cond_bounds, merge_boundaries(then_bounds, else_bounds)),
@@ -2304,11 +2341,6 @@ pub fn eval_expression(
             let mut total_sources = HashSet::default();
 
             for (name, field_expr) in fields {
-                let ((mut part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, field_expr, arena, context_width)?;
-                all_bounds = merge_boundaries(all_bounds, p_bounds);
-                total_sources.extend(part_sources);
-
                 let Some(member_type) = ty.get_member_type(*name) else {
                     return Err(ParserError::unsupported(
                         67,
@@ -2328,38 +2360,97 @@ pub fn eval_expression(
                     ));
                 };
 
-                let part_width = get_width(part_expr, arena);
-                if part_width > member_width {
-                    part_expr = arena.alloc(SLTNode::Slice {
-                        expr: part_expr,
-                        access: BitAccess::new(0, member_width - 1),
-                    });
-                } else if part_width < member_width {
-                    let pad_width = member_width - part_width;
-                    let pad = arena.alloc(SLTNode::Constant(
-                        BigUint::from(0u8),
-                        BigUint::from(0u32),
-                        pad_width,
-                        false,
-                    ));
-                    part_expr = arena.alloc(SLTNode::Concat(vec![
-                        (pad, pad_width),
-                        (part_expr, part_width),
-                    ]));
-                }
+                let ((part_expr, part_sources), p_bounds) = eval_expression_in_context(
+                    module,
+                    store,
+                    field_expr,
+                    arena,
+                    Some(ValueContext {
+                        width: member_width,
+                        signed: expression_signed(field_expr),
+                    }),
+                )?;
+                all_bounds = merge_boundaries(all_bounds, p_bounds);
+                total_sources.extend(part_sources);
+                let part_expr = coerce_node_width(
+                    arena,
+                    part_expr,
+                    Some(member_width),
+                    expression_signed(field_expr),
+                )?;
+                let part_expr =
+                    if member_type.is_2state() && !field_expr.comptime().r#type.is_2state() {
+                        arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, part_expr))?
+                    } else {
+                        part_expr
+                    };
 
                 parts.push((part_expr, member_width));
             }
 
-            Ok((
-                (arena.alloc(SLTNode::Concat(parts)), total_sources),
-                all_bounds,
-            ))
+            let result = arena.alloc(SLTNode::Concat(parts))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(ty.signed),
+            )?;
+            Ok(((result, total_sources), all_bounds))
         }
         Expression::ArrayLiteral(items, _) => {
-            eval_array_literal_expression(module, store, items, None, arena)
+            let ((result, sources), bounds) =
+                eval_array_literal_expression(module, store, items, context_width, arena)?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
+            Ok(((result, sources), bounds))
         }
     }
+}
+
+/// Evaluate an expression in an assignment-like width context and guarantee
+/// that the returned root has exactly `target_width` bits.
+///
+/// Passing the width into [`eval_expression`] is necessary for operations whose
+/// operands inherit the surrounding width (for example an addition connected
+/// to a wider instance port).  The final coercion is still required because
+/// self-determined expressions and folded compound constants do not all consume
+/// that context internally.
+pub fn eval_assignment_expression(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    target_width: usize,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if target_width == 0 {
+        return Err(ParserError::illegal_context(
+            "assignment expression",
+            "target width must be nonzero",
+            Some(&expr.token_range()),
+        ));
+    }
+
+    let ((node, sources), boundaries) =
+        eval_expression(module, store, expr, arena, Some(target_width))?;
+    let source_width = get_width(node, arena);
+    if source_width == 0 {
+        return Err(ParserError::illegal_context(
+            "assignment expression",
+            "a zero-width expression cannot be assigned",
+            Some(&expr.token_range()),
+        ));
+    }
+
+    // The RHS expression controls extension.  The destination type does not
+    // turn an unsigned value into a sign-extended one.  Explicit casts and the
+    // signed/unsigned system functions are retained by the override helper.
+    let signed = expression_signed(expr);
+    let node = coerce_node_width(arena, node, Some(target_width), signed)?;
+    Ok(((node, sources), boundaries))
 }
 
 fn eval_factor(
@@ -2367,8 +2458,12 @@ fn eval_factor(
     store: &SymbolicStore<VarId>,
     factor: &Factor,
     arena: &mut SLTNodeArena<VarId>,
-    context_width: Option<usize>,
+    context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
+    let context_signed = context
+        .map(|context| context.signed)
+        .unwrap_or_else(|| crate::context_width::factor_signed(factor));
     match factor {
         Factor::Variable(var_id, index, select, comptime) => {
             // Compile-time constant (e.g. genvar inside generate block): emit a
@@ -2379,9 +2474,13 @@ fn eval_factor(
                 let is_static_sel =
                     !is_bare && crate::parser::bitaccess::is_static_access(index, select);
 
+                let constant = if is_bare {
+                    celox_value_from_comptime_in_context(comptime, context_width)
+                } else {
+                    celox_value_from_comptime(comptime)
+                };
                 if (is_bare || is_static_sel)
-                    && let Some((celox_value, mask_xz, full_width, signed)) =
-                        celox_value_from_comptime(comptime)
+                    && let Some((celox_value, mask_xz, full_width, signed)) = constant
                 {
                     let (val, mask, width) = if is_bare {
                         (celox_value, mask_xz, full_width)
@@ -2396,34 +2495,10 @@ fn eval_factor(
                         (extracted_val, extracted_mask, extracted_width)
                     };
 
-                    let mut expr =
-                        arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare));
-                    if let Some(target_width) = context_width {
-                        if width < target_width {
-                            let pad_width = target_width - width;
-                            let pad = if signed && is_bare {
-                                let msb_slice = arena.alloc(SLTNode::Slice {
-                                    expr,
-                                    access: BitAccess::new(width - 1, width - 1),
-                                });
-                                (msb_slice, pad_width)
-                            } else {
-                                let zero = arena.alloc(SLTNode::Constant(
-                                    BigUint::from(0u8),
-                                    BigUint::from(0u32),
-                                    pad_width,
-                                    false,
-                                ));
-                                (zero, pad_width)
-                            };
-                            expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, width)]));
-                        } else if width > target_width {
-                            expr = arena.alloc(SLTNode::Slice {
-                                expr,
-                                access: BitAccess::new(0, target_width - 1),
-                            });
-                        }
-                    }
+                    let expr =
+                        arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare))?;
+                    let expr =
+                        coerce_node_width(arena, expr, context_width, context_signed && is_bare)?;
                     return Ok(((expr, HashSet::default()), BoundaryMap::default()));
                 }
             }
@@ -2433,193 +2508,126 @@ fn eval_factor(
                 let access = eval_var_select(module, *var_id, index, select)?;
 
                 let mut bounds = BoundaryMap::default();
-                bounds.entry(*var_id).or_default().insert(access.lsb);
-                bounds.entry(*var_id).or_default().insert(access.msb + 1);
+                let access_end = access.msb.checked_add(1).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "static variable read",
+                        "source boundary overflows usize",
+                        Some(&comptime.token),
+                    )
+                })?;
+                let var_bounds = bounds.entry(*var_id).or_default();
+                var_bounds.insert(access.lsb);
+                var_bounds.insert(access_end);
 
-                let range_store = store.get(var_id).unwrap();
-                let parts = range_store.get_parts(access);
+                let range_store = store.get(var_id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "static variable read",
+                        "source variable is absent from the symbolic store",
+                        Some(&comptime.token),
+                    )
+                })?;
+                let parts = range_store.get_parts(access).map_err(|error| {
+                    super::range_store_error("static variable read", error, Some(&comptime.token))
+                })?;
                 // Check if any part of the requested access is unassigned (None)
                 // If so, we must depend on the variable's previous value (input).
                 // If all parts are Some(...), we only depend on the sources of those expressions.
                 let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
-                let (mut expr, mut sources) =
-                    combine_parts_with_default(*var_id, access.lsb, parts, arena);
+                let (expr, mut sources) =
+                    combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
                 if has_unassigned {
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
                 }
-                // context_widthによる拡張
-                if let Some(target_width) = context_width {
-                    let expr_width = get_width(expr, arena);
-                    if expr_width < target_width {
-                        // Slice + Concatで拡張
-                        let sign = is_signed(module, expr, arena);
-                        let pad_width = target_width - expr_width;
-                        let pad = if sign {
-                            // 符号拡張: MSBをpad
-                            let msb_slice = arena.alloc(SLTNode::Slice {
-                                expr,
-                                access: BitAccess::new(expr_width - 1, expr_width - 1),
-                            });
-                            (msb_slice, pad_width)
-                        } else {
-                            // ゼロ拡張: 0をpad
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                pad_width,
-                                false,
-                            ));
-                            (zero, pad_width)
-                        };
-                        expr = arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]));
-                    } else if expr_width > target_width {
-                        // Sliceで幅を揃える
-                        expr = arena.alloc(SLTNode::Slice {
-                            expr,
-                            access: BitAccess::new(0, target_width - 1),
-                        });
-                    }
-                }
+                // Symbolic substitution may replace this variable with an
+                // expression whose producer has different signedness. Width
+                // coercion follows the source variable's analyzer context,
+                // not the provenance of the substituted SLT node.
+                let expr = coerce_node_width(arena, expr, context_width, context_signed)?;
                 Ok(((expr, sources), bounds))
             } else {
-                let mut dynamic_indices = Vec::new();
-                let mut all_bounds = BoundaryMap::default();
                 let mut all_sources = HashSet::default();
 
                 let var = &module.variables[var_id];
                 let width = resolve_total_width(module, var)?;
-
-                // 1. Build node for offset calculation (used by both Shr and Input approaches)
-                let (_, strides, _) =
-                    crate::parser::bitaccess::get_dimensions_and_strides(module, *var_id)?;
-                let mut offset_node = arena.alloc(SLTNode::Constant(
-                    BigUint::from(0u32),
-                    BigUint::from(0u32),
-                    64,
-                    false,
-                ));
-
-                let mut index_exprs = index.0.clone();
-                index_exprs.extend(select.0.clone());
-
-                // For Colon selects (e.g. [31:0]), the last element of
-                // index_exprs is the MSB anchor—not a dimension index.
-                // Exclude it from the dynamic offset and instead encode
-                // the bit range in the Slice node.
-                // For PlusColon/MinusColon/Step, the anchor is the
-                // dynamic start position and belongs in the offset.
-                let is_colon_select = matches!(&select.1, Some((VarSelectOp::Colon, _)));
-                let dim_limit = if is_colon_select {
-                    index_exprs.len().saturating_sub(1)
-                } else {
-                    index_exprs.len()
-                };
-
-                for (dim_i, idx_expr) in index_exprs[..dim_limit].iter().enumerate() {
-                    let ((expr, sources), bounds) =
-                        eval_expression(module, store, idx_expr, arena, context_width)?;
-                    all_bounds = merge_boundaries(all_bounds, bounds);
-                    all_sources.extend(sources);
-                    let stride = strides.get(dim_i).copied().unwrap_or(1);
-                    dynamic_indices.push(SLTIndex { node: expr, stride });
-
-                    let stride_node = arena.alloc(SLTNode::Constant(
-                        BigUint::from(stride),
-                        BigUint::from(0u32),
-                        64,
-                        false,
+                if width == 0 {
+                    return Err(ParserError::illegal_context(
+                        "dynamic variable read",
+                        "source variable has zero width",
+                        Some(&comptime.token),
                     ));
-                    let term = arena.alloc(SLTNode::Binary(expr, BinaryOp::Mul, stride_node));
-                    offset_node = arena.alloc(SLTNode::Binary(offset_node, BinaryOp::Add, term));
                 }
-
-                // Compute bit-select LSB within the selected element.
-                // For Colon [msb:lsb], the LSB (range_expr) determines
-                // the slice start within the element selected by
-                // the array indices.
-                let bit_select_lsb = if let Some((VarSelectOp::Colon, range_expr)) = &select.1 {
-                    let weight = strides.get(dim_limit).copied().unwrap_or(1);
-                    let rhs = crate::parser::bitaccess::eval_constexpr(range_expr)
-                        .map(|v| v.to_u64_digits().first().copied().unwrap_or(0) as usize)
-                        .unwrap_or(0);
-                    rhs * weight
-                } else {
-                    0
-                };
+                let DynamicSelectOffset {
+                    node: offset_node,
+                    indices: dynamic_indices,
+                    sources: offset_sources,
+                    boundaries: all_bounds,
+                } = super::eval_dynamic_select_offset(
+                    module,
+                    store,
+                    *var_id,
+                    index,
+                    select,
+                    arena,
+                    Some(&comptime.token),
+                )?;
+                all_sources.extend(offset_sources);
 
                 // 2. Check SymbolicStore to determine if "already written"
-                let range_store = store.get(var_id).unwrap();
+                let range_store = store.get(var_id).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "dynamic variable read",
+                        "source variable is absent from the symbolic store",
+                        Some(&comptime.token),
+                    )
+                })?;
                 let access_full = BitAccess::new(0, width - 1);
-                let parts = range_store.get_parts(access_full);
+                let parts = range_store.get_parts(access_full).map_err(|error| {
+                    super::range_store_error("dynamic variable read", error, Some(&comptime.token))
+                })?;
                 let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
 
                 let element_width =
                     crate::parser::bitaccess::get_access_width(module, *var_id, index, select)?;
+                if element_width == 0 || element_width > width {
+                    return Err(ParserError::illegal_context(
+                        "dynamic variable read",
+                        format!("selected width {element_width} must be in 1..={width}"),
+                        Some(&comptime.token),
+                    ));
+                }
 
-                let mut extracted_expr = if is_unmodified {
+                let extracted_expr = if is_unmodified {
                     // --- Code for the approach of aligning at load time ---
-                    // Since it's still None, pack index into Input and let Load instruction handle alignment
+                    // Keep the SLT input footprint conservative for dependency analysis.
+                    // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
+                    // and emits a narrow dynamic load.
                     let raw_input = arena.alloc(SLTNode::Input {
                         variable: *var_id,
                         signed: module.variables[var_id].r#type.signed,
                         index: dynamic_indices,
                         access: BitAccess::new(0, width - 1),
-                    });
-                    // Slice from bit_select_lsb for element_width bits
+                    })?;
                     arena.alloc(SLTNode::Slice {
                         expr: raw_input,
-                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
-                    })
+                        access: BitAccess::new(0, element_width - 1),
+                    })?
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
                     let (current_expr, current_sources) =
-                        combine_parts_with_default(*var_id, 0, parts, arena);
+                        combine_parts_with_default(*var_id, 0, parts, arena)?;
                     all_sources.extend(current_sources);
 
                     let shifted =
-                        arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node));
-                    // Slice from bit_select_lsb for element_width bits
+                        arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node))?;
                     arena.alloc(SLTNode::Slice {
                         expr: shifted,
-                        access: BitAccess::new(bit_select_lsb, bit_select_lsb + element_width - 1),
-                    })
+                        access: BitAccess::new(0, element_width - 1),
+                    })?
                 };
 
-                // context_widthによる拡張
-                if let Some(target_width) = context_width {
-                    let expr_width = get_width(extracted_expr, arena);
-                    if expr_width < target_width {
-                        // Slice + Concatで拡張
-                        let sign = is_signed(module, extracted_expr, arena);
-                        let pad_width = target_width - expr_width;
-                        let pad = if sign {
-                            // 符号拡張: MSBをpad
-                            let msb_slice = arena.alloc(SLTNode::Slice {
-                                expr: extracted_expr,
-                                access: BitAccess::new(expr_width - 1, expr_width - 1),
-                            });
-                            (msb_slice, pad_width)
-                        } else {
-                            // ゼロ拡張: 0をpad
-                            let zero = arena.alloc(SLTNode::Constant(
-                                BigUint::from(0u8),
-                                BigUint::from(0u32),
-                                pad_width,
-                                false,
-                            ));
-                            (zero, pad_width)
-                        };
-                        extracted_expr =
-                            arena.alloc(SLTNode::Concat(vec![pad, (extracted_expr, expr_width)]));
-                    } else if expr_width > target_width {
-                        // Sliceで幅を揃える
-                        extracted_expr = arena.alloc(SLTNode::Slice {
-                            expr: extracted_expr,
-                            access: BitAccess::new(0, target_width - 1),
-                        });
-                    }
-                }
+                let extracted_expr =
+                    coerce_node_width(arena, extracted_expr, context_width, context_signed)?;
 
                 let prefix_access = eval_var_select(module, *var_id, index, select)?;
                 all_sources.insert(VarAtomBase::new(
@@ -2631,56 +2639,27 @@ fn eval_factor(
             }
         }
         Factor::Value(v) => {
-            let (celox_value, mask_xz, width, signed) = celox_value_from_comptime(v)
-                .expect("Factor::Value should always have a numeric value");
-            // Fill-literals (`'0`, `'1`, `'x`, `'z`) have width 0 from the
-            // analyzer (context-dependent).  Per IEEE 1800-2023 §5.7.1:
-            //   "All bits of the unsized value shall be set to the value of
-            //    the specified bit. In a self-determined context, it shall
-            //    have a width of 1 bit."
-            // Use context_width when available; fall back to 1 bit for
-            // self-determined contexts.  Without this, a 0-width Constant
-            // in the RangeStore causes Mux lowering to produce 0-bit masks
-            // that zero out the else-arm.
-            //
-            // The analyzer stores fill-literals with only bit 0 set in
-            // payload and mask_xz (e.g. '1 → payload=1, mask_xz=0).
-            // We replicate bit 0 across the full width so '1 → all-ones,
-            // 'x → all-X, etc.
-            let (celox_value, mask_xz, effective_width) = if width == 0 {
-                let ew = context_width.unwrap_or(1);
-                let fill_mask = (BigUint::from(1u64) << ew) - BigUint::from(1u64);
-                let cv = if celox_value.bit(0) {
-                    fill_mask.clone()
-                } else {
-                    BigUint::from(0u8)
-                };
-                let mxz = if mask_xz.bit(0) {
-                    fill_mask
-                } else {
-                    BigUint::from(0u8)
-                };
-                (cv, mxz, ew)
-            } else {
-                (celox_value, mask_xz, width)
-            };
-            Ok((
-                (
-                    arena.alloc(SLTNode::Constant(
-                        celox_value,
-                        mask_xz,
-                        effective_width,
-                        signed,
-                    )),
-                    HashSet::default(),
-                ),
-                BoundaryMap::default(),
-            ))
+            let (celox_value, mask_xz, effective_width, signed) =
+                celox_value_from_comptime_in_context(v, context_width)
+                    .expect("Factor::Value should always have a numeric value");
+            let node = arena.alloc(SLTNode::Constant(
+                celox_value,
+                mask_xz,
+                effective_width,
+                signed,
+            ))?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
-            eval_system_function_call(module, store, call, arena, context_width)
+            eval_system_function_call(module, store, call, arena, context)
         }
-        Factor::FunctionCall(call) => eval_function_call_expression(module, store, call, arena),
+        Factor::FunctionCall(call) => {
+            let ((node, sources), bounds) =
+                eval_function_call_expression(module, store, call, arena)?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, sources), bounds))
+        }
         Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
             67,
             LoweringPhase::CombLowering,
@@ -2691,44 +2670,9 @@ fn eval_factor(
     }
 }
 pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
-    match arena.get(expr) {
-        SLTNode::Input { access, .. } => access.msb - access.lsb + 1,
-        SLTNode::Constant(_, _, width, _) => *width,
-        SLTNode::Binary(lhs, op, rhs) => match op {
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::LtU
-            | BinaryOp::LtS
-            | BinaryOp::LeU
-            | BinaryOp::LeS
-            | BinaryOp::GtU
-            | BinaryOp::GtS
-            | BinaryOp::GeU
-            | BinaryOp::GeS
-            | BinaryOp::LogicAnd
-            | BinaryOp::LogicOr => 1,
-            BinaryOp::Sub => {
-                let lw = get_width(*lhs, arena);
-                let rw = get_width(*rhs, arena);
-                lw.max(rw)
-            }
-            BinaryOp::Sar | BinaryOp::Shl | BinaryOp::Shr => get_width(*lhs, arena),
-            _ => {
-                let lw = get_width(*lhs, arena);
-                let rw = get_width(*rhs, arena);
-                lw.max(rw)
-            }
-        },
-        SLTNode::Unary(op, inner) => match op {
-            UnaryOp::LogicNot => 1,
-            UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
-            _ => get_width(*inner, arena),
-        },
-        SLTNode::Mux { then_expr, .. } => get_width(*then_expr, arena),
-        SLTNode::ForFold { result, .. } => result.access.msb - result.access.lsb + 1,
-        SLTNode::Concat(parts) => parts.iter().map(|(_, w)| *w).sum(),
-        SLTNode::Slice { access, .. } => access.msb - access.lsb + 1,
-    }
+    arena
+        .width(expr)
+        .unwrap_or_else(|| panic!("SLT node id n{} is outside the arena", expr.0))
 }
 
 pub(super) fn merge_boundaries(
@@ -2741,29 +2685,46 @@ pub(super) fn merge_boundaries(
     base
 }
 
-fn apply_context_width(
-    arena: &mut SLTNodeArena<VarId>,
+pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
     expr: NodeId,
     target_width: Option<usize>,
     sign_extend: bool,
-) -> NodeId {
+) -> Result<NodeId, SLTNodeFactsError> {
     let Some(target_width) = target_width else {
-        return expr;
+        return Ok(expr);
     };
     let expr_width = get_width(expr, arena);
+    if expr_width == 0 && target_width != 0 {
+        return Err(SLTNodeFactsError::new(
+            "WIDTH.COERCE_SOURCE_NON_ZERO",
+            expr,
+            format!(
+                "cannot coerce zero-width n{} to width {target_width}",
+                expr.0
+            ),
+        ));
+    }
+    if target_width == 0 && expr_width != 0 {
+        return Err(SLTNodeFactsError::new(
+            "WIDTH.COERCE_TARGET_NON_ZERO",
+            expr,
+            format!("cannot coerce width-{expr_width} n{} to zero width", expr.0),
+        ));
+    }
     if expr_width < target_width {
         let pad_width = target_width - expr_width;
         let pad = if sign_extend {
             let msb_slice = arena.alloc(SLTNode::Slice {
                 expr,
                 access: BitAccess::new(expr_width - 1, expr_width - 1),
-            });
+            })?;
             let pad = if pad_width == 1 {
                 msb_slice
             } else {
                 arena.alloc(SLTNode::Concat(
                     std::iter::repeat_n((msb_slice, 1), pad_width).collect(),
-                ))
+                ))?
             };
             (pad, pad_width)
         } else {
@@ -2772,7 +2733,7 @@ fn apply_context_width(
                 BigUint::from(0u32),
                 pad_width,
                 false,
-            ));
+            ))?;
             (zero, pad_width)
         };
         arena.alloc(SLTNode::Concat(vec![pad, (expr, expr_width)]))
@@ -2782,7 +2743,7 @@ fn apply_context_width(
             access: BitAccess::new(0, target_width - 1),
         })
     } else {
-        expr
+        Ok(expr)
     }
 }
 
@@ -2791,27 +2752,40 @@ fn eval_system_function_call(
     store: &SymbolicStore<VarId>,
     call: &SystemFunctionCall,
     arena: &mut SLTNodeArena<VarId>,
-    context_width: Option<usize>,
+    context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context_width = context.map(|context| context.width);
     match &call.kind {
         SystemFunctionKind::Bits(input) => {
-            let width = system_function_input_bits_width(module, store, &input.0, arena);
+            let width = system_function_input_bits_width(module, store, &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(width),
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Size(input) => {
-            let size = system_function_input_size(module, store, &input.0, arena);
+            let size = system_function_input_size(module, store, &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(size),
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Clog2(input) => {
@@ -2822,27 +2796,33 @@ fn eval_system_function_call(
                 BigUint::from(0u8),
                 32,
                 false,
-            ));
+            ))?;
             for k in 1..=width {
                 let threshold = arena.alloc(SLTNode::Constant(
                     BigUint::from(1u8) << (k - 1),
                     BigUint::from(0u8),
                     width,
                     false,
-                ));
-                let cond = arena.alloc(SLTNode::Binary(arg, BinaryOp::GtU, threshold));
+                ))?;
+                let cond = arena.alloc(SLTNode::Binary(arg, BinaryOp::GtU, threshold))?;
                 let value = arena.alloc(SLTNode::Constant(
                     BigUint::from(k),
                     BigUint::from(0u8),
                     32,
                     false,
-                ));
+                ))?;
                 result = arena.alloc(SLTNode::Mux {
                     cond,
                     then_expr: value,
                     else_expr: result,
-                });
+                })?;
             }
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Onehot(input) => {
@@ -2853,18 +2833,24 @@ fn eval_system_function_call(
                 BigUint::from(0u8),
                 width,
                 false,
-            ));
+            ))?;
             let one = arena.alloc(SLTNode::Constant(
                 BigUint::from(1u8),
                 BigUint::from(0u8),
                 width,
                 false,
-            ));
-            let arg_minus_one = arena.alloc(SLTNode::Binary(arg, BinaryOp::Sub, one));
-            let overlap = arena.alloc(SLTNode::Binary(arg, BinaryOp::And, arg_minus_one));
-            let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero));
-            let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero));
-            let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap));
+            ))?;
+            let arg_minus_one = arena.alloc(SLTNode::Binary(arg, BinaryOp::Sub, one))?;
+            let overlap = arena.alloc(SLTNode::Binary(arg, BinaryOp::And, arg_minus_one))?;
+            let non_zero = arena.alloc(SLTNode::Binary(arg, BinaryOp::Ne, zero))?;
+            let no_overlap = arena.alloc(SLTNode::Binary(overlap, BinaryOp::Eq, zero))?;
+            let result = arena.alloc(SLTNode::Binary(non_zero, BinaryOp::LogicAnd, no_overlap))?;
+            let result = coerce_node_width(
+                arena,
+                result,
+                context_width,
+                context.map(|context| context.signed).unwrap_or(false),
+            )?;
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -2872,7 +2858,12 @@ fn eval_system_function_call(
             let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
             Ok((
                 (
-                    apply_context_width(arena, arg, context_width, signed),
+                    coerce_node_width(
+                        arena,
+                        arg,
+                        context_width,
+                        context.map(|context| context.signed).unwrap_or(signed),
+                    )?,
                     sources,
                 ),
                 bounds,
@@ -2910,15 +2901,15 @@ fn system_function_input_bits_width(
     store: &SymbolicStore<VarId>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
-) -> usize {
+) -> Result<usize, ParserError> {
     let comptime = expr.comptime();
     match &comptime.value {
-        ValueVariant::Type(ty) => system_function_type_bits_width(ty).unwrap_or(0),
-        _ => system_function_type_bits_width(&comptime.r#type).unwrap_or_else(|| {
-            eval_expression(module, store, expr, arena, None)
-                .map(|((node, _), _)| get_width(node, arena))
-                .unwrap_or(0)
-        }),
+        ValueVariant::Type(ty) => Ok(system_function_type_bits_width(ty).unwrap_or(0)),
+        _ => match system_function_type_bits_width(&comptime.r#type) {
+            Some(width) => Ok(width),
+            None => eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena)),
+        },
     }
 }
 
@@ -2927,137 +2918,74 @@ fn system_function_input_size(
     store: &SymbolicStore<VarId>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
-) -> usize {
+) -> Result<usize, ParserError> {
     let comptime = expr.comptime();
     match &comptime.value {
-        ValueVariant::Type(ty) => system_function_type_size(ty).unwrap_or(0),
-        _ => system_function_type_size(&comptime.r#type).unwrap_or_else(|| {
-            eval_expression(module, store, expr, arena, None)
-                .map(|((node, _), _)| get_width(node, arena))
-                .unwrap_or(0)
-        }),
+        ValueVariant::Type(ty) => Ok(system_function_type_size(ty).unwrap_or(0)),
+        _ => match system_function_type_size(&comptime.r#type) {
+            Some(size) => Ok(size),
+            None => eval_expression(module, store, expr, arena, None)
+                .map(|((node, _), _)| get_width(node, arena)),
+        },
     }
 }
 
-fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
+pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
     match arena.get(expr) {
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
         SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(lhs, _, _) => is_signed(module, *lhs, arena),
-        SLTNode::Unary(UnaryOp::Minus, _) => true,
-        SLTNode::Unary(_, inner) => is_signed(module, *inner, arena),
-        SLTNode::Mux { then_expr, .. } => is_signed(module, *then_expr, arena),
+        SLTNode::Binary(lhs, op, rhs) => match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::LtU
+            | BinaryOp::LtS
+            | BinaryOp::LeU
+            | BinaryOp::LeS
+            | BinaryOp::GtU
+            | BinaryOp::GtS
+            | BinaryOp::GeU
+            | BinaryOp::GeS
+            | BinaryOp::LogicAnd
+            | BinaryOp::LogicOr
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
+            | BinaryOp::DivU
+            | BinaryOp::RemU => false,
+            BinaryOp::DivS | BinaryOp::RemS => true,
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => is_signed(module, *lhs, arena),
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor => is_signed(module, *lhs, arena) && is_signed(module, *rhs, arena),
+        },
+        SLTNode::Unary(
+            UnaryOp::LogicNot
+            | UnaryOp::And
+            | UnaryOp::Or
+            | UnaryOp::Xor
+            | UnaryOp::PopCount
+            | UnaryOp::CountLeadingZeros
+            | UnaryOp::CountTrailingZeros,
+            _,
+        ) => false,
+        SLTNode::Unary(
+            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+            inner,
+        ) => is_signed(module, *inner, arena),
+        SLTNode::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => is_signed(module, *then_expr, arena) && is_signed(module, *else_expr, arena),
         SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,
-        SLTNode::Slice { expr, .. } => is_signed(module, *expr, arena),
+        SLTNode::ForFoldGroup { .. } => false,
+        SLTNode::Slice { .. } => false,
         SLTNode::Concat(_) => false,
     }
 }
 
-fn expression_signed_override(expr: &Expression) -> Option<bool> {
-    match expr {
-        Expression::Binary(_, Op::As, rhs, _) => {
-            let Expression::Term(factor) = rhs.as_ref() else {
-                return None;
-            };
-            let Factor::Value(comptime) = factor.as_ref() else {
-                return None;
-            };
-            match &comptime.value {
-                ValueVariant::Type(ty) => Some(ty.signed),
-                ValueVariant::Numeric(_) => Some(false),
-                _ => None,
-            }
-        }
-        Expression::Term(factor) => {
-            let Factor::SystemFunctionCall(call) = factor.as_ref() else {
-                return None;
-            };
-            match call.kind {
-                SystemFunctionKind::Signed(_) => Some(true),
-                SystemFunctionKind::Unsigned(_) => Some(false),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-pub fn convert_binary_op(op: &Op, use_signed: bool) -> BinaryOp {
-    match op {
-        Op::Add => BinaryOp::Add,
-        Op::Sub => BinaryOp::Sub,
-        Op::Mul => BinaryOp::Mul,
-        Op::Div => BinaryOp::Div,
-        Op::Rem => BinaryOp::Rem,
-        Op::BitAnd => BinaryOp::And,
-        Op::BitOr => BinaryOp::Or,
-        Op::BitXor => BinaryOp::Xor,
-        Op::LogicShiftL | Op::ArithShiftL => BinaryOp::Shl,
-        Op::LogicShiftR => BinaryOp::Shr,
-        Op::ArithShiftR => BinaryOp::Sar,
-        Op::Eq => BinaryOp::Eq,
-        Op::EqWildcard => BinaryOp::EqWildcard,
-        Op::Ne => BinaryOp::Ne,
-        Op::NeWildcard => BinaryOp::NeWildcard,
-        Op::Less => {
-            if use_signed {
-                BinaryOp::LtS
-            } else {
-                BinaryOp::LtU
-            }
-        }
-        Op::LessEq => {
-            if use_signed {
-                BinaryOp::LeS
-            } else {
-                BinaryOp::LeU
-            }
-        }
-        Op::Greater => {
-            if use_signed {
-                BinaryOp::GtS
-            } else {
-                BinaryOp::GtU
-            }
-        }
-        Op::GreaterEq => {
-            if use_signed {
-                BinaryOp::GeS
-            } else {
-                BinaryOp::GeU
-            }
-        }
-        Op::LogicAnd => BinaryOp::LogicAnd,
-        Op::LogicOr => BinaryOp::LogicOr,
-        // Unary-only operators
-        Op::LogicNot | Op::BitNot => {
-            unreachable!(
-                "unary operator must not be lowered by convert_binary_op: {:?}",
-                op
-            )
-        }
-        // Binary-expression nodes lowered by dedicated paths
-        Op::BitXnor | Op::BitNand | Op::BitNor => {
-            unreachable!(
-                "bitwise derived op must be lowered before convert_binary_op: {:?}",
-                op
-            )
-        }
-        Op::Ternary => unreachable!("ternary expression must not be lowered by convert_binary_op"),
-        Op::Concatenation => {
-            unreachable!("concatenation must be lowered by concat-specific path")
-        }
-        Op::ArrayLiteral => {
-            unreachable!("array literal must not be lowered by convert_binary_op")
-        }
-        Op::Condition => unreachable!("condition node must not be lowered by convert_binary_op"),
-        Op::Repeat => unreachable!("repeat node must be lowered by repeat-specific path"),
-        // Handled by pre-lowering in eval_expression.
-        Op::Pow | Op::As => {
-            unreachable!("operator must be pre-lowered before conversion: {:?}", op)
-        }
-    }
-}
 pub fn convert_unary_op(op: &Op) -> UnaryOp {
     match op {
         Op::Add => UnaryOp::Ident,

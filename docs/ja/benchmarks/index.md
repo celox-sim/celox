@@ -9,6 +9,7 @@ Celox には Rust コア、TypeScript ランタイム、および参照ベース
 このページでは主要なグラフだけを表示します。メインの順序回路ワークロード、主要なテストベンチ指標、代表的な stdlib ワークロードだけに絞っています。stdlib タブは網羅的なカタログではなく、一般的な組合せ最適化、liveness や DSE に敏感な組合せ回路、大きめの構造化データパス、順序回路/ランタイム支配の系、という観点で整理しています。必要な場合は DSE のような Celox 側の系列だけ同じグラフ内に残します。
 完全なベンチマーク行列と生データは[外部ダッシュボード](https://celox-sim.github.io/celox/dev/bench/)を見てください。
 より compiler 向けの細かいグラフは[診断用ページ](/ja/benchmarks/diagnostic)を見てください。
+長時間の外部 Veryl project ベンチは [Heliodor マクロベンチマーク](/ja/benchmarks/heliodor)を見てください。
 
 ## 測定対象
 
@@ -137,6 +138,14 @@ bash scripts/run-verilator-bench.sh
 ```
 
 `verilator` と C++ ツールチェーンが必要です。
+
+### Heliodor
+
+```bash
+bash scripts/run-heliodor-bench.sh run
+```
+
+初回は Heliodor checkout のために network access が必要です。Veryl runner には `veryl` も必要です。Celox runner はこの workspace から build します。
 
 ## CI 環境
 

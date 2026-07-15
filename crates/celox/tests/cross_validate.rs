@@ -24,6 +24,36 @@ macro_rules! cross_validate {
     }};
 }
 
+#[test]
+fn xv_wide_to_narrow_shift_keeps_the_narrow_result_width() {
+    let code = r#"
+module Top (
+    wide: input logic<128>,
+    out: output logic<32>
+) {
+    assign out = (((wide >> 127) as 1) as i32) << 31 >>> 31;
+}
+"#;
+    for value in [BigUint::from(0u8), BigUint::from(1u8) << 127usize] {
+        let mut native = Simulator::builder(code, "Top").build().unwrap();
+        let mut cranelift = Simulator::builder(code, "Top").build_cranelift().unwrap();
+        native.set_wide(native.signal("wide"), value.clone());
+        cranelift.set_wide(cranelift.signal("wide"), value.clone());
+
+        let native_out: BigUint = native.get(native.signal("out"));
+        let cranelift_out: BigUint = cranelift.get(cranelift.signal("out"));
+        assert_eq!(native_out, cranelift_out);
+        assert_eq!(
+            native_out,
+            if value == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                BigUint::from(u32::MAX)
+            }
+        );
+    }
+}
+
 // ── Basic arithmetic ──
 
 #[test]

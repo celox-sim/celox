@@ -3,12 +3,14 @@
 //! Mirrors the structure of JitBackend but compiles through
 //! ISel → MIR → regalloc → x86-64 emit instead of Cranelift.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bit_set::BitSet;
 use num_bigint::BigUint;
 
-use crate::ir::{AbsoluteAddr, Program, SignalRef};
+use crate::ir::{AbsoluteAddr, Program, SignalArrayLayout, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
@@ -97,7 +99,9 @@ fn compile_units(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
+    label: &str,
 ) -> Result<jit_mem::JitCode, SimulatorError> {
+    let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     if units.is_empty() {
         // Empty function: just return 0
         let mut empty_func = super::mir::MFunction::new(super::mir::VRegAllocator::new(), vec![]);
@@ -106,16 +110,79 @@ fn compile_units(
         empty_func.push_block(block);
         let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
             .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-        return jit_mem::JitCode::new(&empty_result.code)
+        return jit_mem::JitCode::new_named(&empty_result.code, label)
             .map_err(|e| codegen_err(format!("mmap error: {e}")));
     }
 
     // Multi-EU: compile each EU independently (ISel + regalloc), then
     // chain their machine code into a single function. Each EU's return
     // is patched to fall through to the next EU. One prologue/epilogue.
-    let chained_code = emit::emit_chained_eus(units, layout, four_state)
+    if timing {
+        eprintln!(
+            "[native-timing] compile_units start label={label} eus={}",
+            units.len()
+        );
+    }
+    let start = timing.then(crate::timing::now);
+    let emit_result = emit::emit_chained_eus(units, layout, four_state, label)
         .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-    jit_mem::JitCode::new(&chained_code).map_err(|e| codegen_err(format!("mmap error: {e}")))
+    if let Some(start) = start {
+        eprintln!(
+            "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
+            emit_result.code.len(),
+            start.elapsed()
+        );
+    }
+    let symbols = perf_symbols_for_emit_result(label, &emit_result);
+    jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))
+}
+
+fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<jit_mem::JitSymbol> {
+    let code_len = result.code.len();
+    if result.block_offsets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut blocks = result.block_offsets.clone();
+    blocks.sort_by_key(|(_, offset)| *offset);
+
+    let mut symbols = Vec::with_capacity(blocks.len() + 2);
+    let first_offset = blocks[0].1 as usize;
+    if first_offset > 0 {
+        symbols.push(jit_mem::JitSymbol {
+            offset: 0,
+            size: first_offset,
+            name: format!("{label}.prologue"),
+        });
+    }
+
+    for (idx, (block_id, offset)) in blocks.iter().enumerate() {
+        let start = *offset as usize;
+        let end = blocks
+            .get(idx + 1)
+            .map(|(_, next)| *next as usize)
+            .unwrap_or(code_len);
+        if end > start {
+            symbols.push(jit_mem::JitSymbol {
+                offset: start,
+                size: end - start,
+                name: format!("{label}.bb{}", block_id.0),
+            });
+        }
+    }
+
+    symbols
+}
+
+fn fingerprint_ff_units(
+    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for unit in units {
+        unit.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn compile_program(
@@ -129,7 +196,7 @@ fn compile_program(
     let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::new();
 
     // Compile eval_comb
-    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state)?;
+    let comb_jit = compile_units(&sir.eval_comb, layout, options.four_state, "eval_comb")?;
     let comb_func = comb_jit.fn_ptr;
     all_jit_codes.push(comb_jit);
 
@@ -140,6 +207,8 @@ fn compile_program(
     let mut event_map = HashMap::default();
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
+    let mut addr_to_id = HashMap::default();
+    let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
 
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
@@ -147,27 +216,51 @@ fn compile_program(
     >,
                             all_codes: &mut Vec<jit_mem::JitCode>,
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
+                            addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
+                            compiled_ff_cache: &mut HashMap<u64, NativeSimFunc>,
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
-                            id_to_event: &mut Vec<NativeEventRef>|
+                            id_to_event: &mut Vec<NativeEventRef>,
+                            label: &str|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
-            let code = compile_units(units, layout, options.four_state)?;
-            let func = code.fn_ptr;
-            all_codes.push(code);
+            let canonical = sir.clock_domains.get(addr).copied().unwrap_or(*addr);
+            if let Some(&event) = event_map_out.get(&canonical) {
+                event_map_out.insert(*addr, event);
+                continue;
+            }
 
-            let id = *next_id;
-            *next_id += 1;
+            let fingerprint = fingerprint_ff_units(units);
+            let func = if let Some(&func) = compiled_ff_cache.get(&fingerprint) {
+                func
+            } else {
+                let code = compile_units(units, layout, options.four_state, label)?;
+                let func = code.fn_ptr;
+                all_codes.push(code);
+                compiled_ff_cache.insert(fingerprint, func);
+                func
+            };
+
+            let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
+                (id, false)
+            } else {
+                let id = *next_id;
+                *next_id += 1;
+                addr_to_id.insert(canonical, id);
+                id_to_addr.push(canonical);
+                (id, true)
+            };
 
             let event = NativeEventRef {
                 func,
-                addr: *addr,
+                addr: canonical,
                 id,
             };
-            event_map_out.insert(*addr, event);
-
-            if !id_to_addr.contains(addr) {
-                id_to_addr.push(*addr);
+            event_map_out.insert(canonical, event);
+            if *addr != canonical {
+                event_map_out.insert(*addr, event);
+            }
+            if is_new_id {
                 id_to_event.push(event);
             }
         }
@@ -178,25 +271,34 @@ fn compile_program(
         &sir.eval_apply_ffs,
         &mut all_jit_codes,
         &mut event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "eval_apply_ff",
     )?;
     compile_ff_group(
         &sir.eval_only_ffs,
         &mut all_jit_codes,
         &mut eval_only_event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "eval_only_ff",
     )?;
     compile_ff_group(
         &sir.apply_ffs,
         &mut all_jit_codes,
         &mut apply_event_map,
+        &mut addr_to_id,
+        &mut compiled_ff_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
+        "apply_ff",
     )?;
 
     // Pre-compute 4-state initialization regions
@@ -205,8 +307,7 @@ fn compile_program(
         for (addr, &offset) in &layout.offsets {
             let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
             if is_4state {
-                let width = layout.widths[addr];
-                let allocated_size = get_byte_size(width);
+                let allocated_size = layout.plane_size(addr);
                 four_state_inits.push((offset, allocated_size));
             }
         }
@@ -214,8 +315,7 @@ fn compile_program(
             let offset = layout.working_base_offset + rel_offset;
             let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
             if is_4state {
-                let width = layout.widths[addr];
-                let allocated_size = get_byte_size(width);
+                let allocated_size = layout.plane_size(addr);
                 four_state_inits.push((offset, allocated_size));
             }
         }
@@ -331,6 +431,60 @@ impl NativeBackend {
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
+    fn read_signal_plane(&self, signal: SignalRef, mask_plane: bool) -> BigUint {
+        let bytes = self.mem_bytes();
+        let Some(array) = signal.array_layout else {
+            let byte_size = get_byte_size(signal.width);
+            let plane_offset = signal.offset + usize::from(mask_plane) * byte_size;
+            let mut value = BigUint::from_bytes_le(&bytes[plane_offset..plane_offset + byte_size]);
+            if !signal.width.is_multiple_of(8) {
+                value &= (BigUint::from(1u8) << signal.width) - BigUint::from(1u8);
+            }
+            return value;
+        };
+
+        let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+        let element_bytes = get_byte_size(array.element_width);
+        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
+        let mut value = BigUint::from(0u8);
+        for element in 0..array.element_count {
+            let start = plane_offset + element * array.element_stride;
+            let element_value =
+                BigUint::from_bytes_le(&bytes[start..start + element_bytes]) & &element_mask;
+            value |= element_value << (element * array.element_width);
+        }
+        value
+    }
+
+    fn write_signal_plane(&mut self, signal: SignalRef, mask_plane: bool, value: &BigUint) {
+        let Some(array) = signal.array_layout else {
+            let byte_size = get_byte_size(signal.width);
+            let plane_offset = signal.offset + usize::from(mask_plane) * byte_size;
+            let bytes = self.mem_bytes_mut();
+            bytes[plane_offset..plane_offset + byte_size].fill(0);
+            let value_bytes = value.to_bytes_le();
+            let copy_len = value_bytes.len().min(byte_size);
+            bytes[plane_offset..plane_offset + copy_len].copy_from_slice(&value_bytes[..copy_len]);
+            if !signal.width.is_multiple_of(8) && byte_size != 0 {
+                bytes[plane_offset + byte_size - 1] &= (1u8 << (signal.width % 8)) - 1;
+            }
+            return;
+        };
+
+        let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+        let element_bytes = get_byte_size(array.element_width);
+        let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
+        let bytes = self.mem_bytes_mut();
+        bytes[plane_offset..plane_offset + array.plane_size].fill(0);
+        for element in 0..array.element_count {
+            let element_value = (value >> (element * array.element_width)) & &element_mask;
+            let value_bytes = element_value.to_bytes_le();
+            let copy_len = value_bytes.len().min(element_bytes);
+            let start = plane_offset + element * array.element_stride;
+            bytes[start..start + copy_len].copy_from_slice(&value_bytes[..copy_len]);
+        }
+    }
+
     fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let ptr = memory.as_mut_ptr() as *mut u8;
         let ret = unsafe { func(ptr) };
@@ -366,10 +520,20 @@ impl super::super::SimBackend for NativeBackend {
         let offset = layout.offsets.get(addr).copied().unwrap_or(0);
         let width = layout.widths.get(addr).copied().unwrap_or(0);
         let is_4state = layout.is_4states.get(addr).copied().unwrap_or(false);
+        let array_layout = layout
+            .unpacked_arrays
+            .get(addr)
+            .map(|array| SignalArrayLayout {
+                element_width: array.element_width,
+                element_count: array.element_count,
+                element_stride: array.element_stride,
+                plane_size: array.plane_size,
+            });
         SignalRef {
             offset,
             width,
             is_4state,
+            array_layout,
         }
     }
 
@@ -400,6 +564,16 @@ impl super::super::SimBackend for NativeBackend {
 
         assert!(provided_size <= allocated_size);
 
+        if signal.array_layout.is_some() {
+            let value_bytes =
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, provided_size) };
+            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
+            if clear_mask {
+                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+            }
+            return;
+        }
+
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
@@ -413,7 +587,9 @@ impl super::super::SimBackend for NativeBackend {
                 return;
             }
 
-            std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            if provided_size < allocated_size {
+                std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            }
             std::ptr::write_unaligned(base_ptr as *mut T, val);
 
             if clear_mask {
@@ -424,84 +600,59 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
-        let bs = get_byte_size(signal.width);
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
-        let bytes = self.mem_bytes_mut();
-        let val_bytes = val.to_bytes_le();
-        let copy_len = val_bytes.len().min(bs);
-        bytes[signal.offset..signal.offset + bs].fill(0);
-        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
+        self.write_signal_plane(signal, false, &val);
         if clear_mask {
-            bytes[signal.offset + bs..signal.offset + bs + bs].fill(0);
+            self.write_signal_plane(signal, true, &BigUint::from(0u8));
         }
     }
 
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
-        let bs = get_byte_size(signal.width);
         let write_mask = self.compiled.options.four_state && signal.is_4state;
-        let bytes = self.mem_bytes_mut();
-
-        // Write value
-        let val_bytes = val.to_bytes_le();
-        let copy_len = val_bytes.len().min(bs);
-        bytes[signal.offset..signal.offset + bs].fill(0);
-        bytes[signal.offset..signal.offset + copy_len].copy_from_slice(&val_bytes[..copy_len]);
-
-        // Write mask (immediately after value)
+        self.write_signal_plane(signal, false, &val);
         if write_mask {
-            let mask_offset = signal.offset + bs;
-            let mask_bytes = mask.to_bytes_le();
-            let mask_copy_len = mask_bytes.len().min(bs);
-            bytes[mask_offset..mask_offset + bs].fill(0);
-            bytes[mask_offset..mask_offset + mask_copy_len]
-                .copy_from_slice(&mask_bytes[..mask_copy_len]);
+            self.write_signal_plane(signal, true, &mask);
         }
     }
 
     fn get(&self, signal: SignalRef) -> BigUint {
-        let bs = get_byte_size(signal.width);
-        let bytes = self.mem_bytes();
-        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
-        // Mask to actual width to avoid upper-bit garbage
-        let extra_bits = bs * 8 - signal.width;
-        if extra_bits > 0 {
-            val &= (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
-        }
-        val
+        self.read_signal_plane(signal, false)
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
         let bs = get_byte_size(signal.width);
+        let provided_size = std::mem::size_of::<T>();
+        if signal.array_layout.is_some() {
+            let mut val = T::default();
+            let value = self.read_signal_plane(signal, false).to_bytes_le();
+            let val_bytes = unsafe {
+                std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, provided_size)
+            };
+            let copy_len = value.len().min(val_bytes.len());
+            val_bytes[..copy_len].copy_from_slice(&value[..copy_len]);
+            return val;
+        }
+        let ptr = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
+        if provided_size <= bs {
+            return unsafe { std::ptr::read_unaligned(ptr as *const T) };
+        }
+
         let bytes = self.mem_bytes();
         let mut val = T::default();
-        let val_bytes = unsafe {
-            std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, std::mem::size_of::<T>())
-        };
+        let val_bytes =
+            unsafe { std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, provided_size) };
         let copy_len = val_bytes.len().min(bs);
         val_bytes[..copy_len].copy_from_slice(&bytes[signal.offset..signal.offset + copy_len]);
         val
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
-        let bs = get_byte_size(signal.width);
-        let bytes = self.mem_bytes();
-        let mut val = BigUint::from_bytes_le(&bytes[signal.offset..signal.offset + bs]);
-
-        let mut mask = if self.compiled.options.four_state && signal.is_4state {
-            let mask_offset = signal.offset + bs;
-            BigUint::from_bytes_le(&bytes[mask_offset..mask_offset + bs])
+        let val = self.read_signal_plane(signal, false);
+        let mask = if self.compiled.options.four_state && signal.is_4state {
+            self.read_signal_plane(signal, true)
         } else {
             BigUint::from(0u32)
         };
-
-        // Mask off extra bits beyond signal width
-        let extra_bits = bs * 8 - signal.width;
-        if extra_bits > 0 {
-            let width_mask = (BigUint::from(1u32) << signal.width) - BigUint::from(1u32);
-            val &= &width_mask;
-            mask &= &width_mask;
-        }
-
         (val, mask)
     }
 

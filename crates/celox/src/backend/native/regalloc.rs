@@ -1,131 +1,547 @@
-//! Register allocator: Braun & Hack (2009) extended MIN algorithm.
+//! Verified SSA register allocator based on Braun & Hack's extended MIN.
 //!
-//! Spilling phase reduces register pressure to ≤ k (physical register count),
-//! then assignment phase colors the SSA interference graph in linear time.
+//! The pipeline schedules pure DAG regions, constructs CSSA, plans spilling,
+//! reconstructs strict SSA, materializes late full-live Perm boundaries, and
+//! colors chordal SSA live ranges without an explicit interference graph.
 
 mod analysis;
 pub mod assignment;
+mod cfg;
+mod color;
+mod constraints;
+#[allow(dead_code)]
+mod cssa;
+#[allow(dead_code)]
+mod home_verify;
+mod legalize;
+mod next_use;
+mod pressure;
+mod reconstruct;
+mod schedule;
+mod spill_plan;
+#[cfg(test)]
 mod spilling;
+mod ssa;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
 mod unified;
+mod verify;
 
-use super::mir::MFunction;
+use std::fmt;
+
+use super::mir::{BaseReg, BlockId, MFunction, MInst, VReg};
 pub use assignment::AssignmentMap;
 
 /// Number of available general-purpose registers for allocation.
-/// x86-64: 16 GPRs - RSP - RBP - SimState base = 13
-pub const NUM_REGS: usize = 13;
+/// x86-64: 16 GPRs - RSP - SimState base = 14.
+///
+/// RBP is callee-saved, but the native backend does not use it as a frame
+/// pointer; spill slots are addressed relative to RSP after the prologue.
+pub const NUM_REGS: usize = 14;
 
 /// Result of register allocation: assignment map + spill frame size.
 pub struct RegallocResult {
     pub assignment: AssignmentMap,
     /// Bytes of stack frame needed for spill slots.
     pub spill_frame_size: u32,
+    /// Complete, independently verified phi-edge parallel-copy plan.
+    pub(crate) ssa_destruction: super::ssa_destroy::SsaDestructionPlan,
 }
 
-/// Verify that no two simultaneously-live VRegs share a PhysReg.
-#[cfg(any(debug_assertions, test))]
+/// Structured failure from a verified register-allocation phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegallocError {
+    pub phase: &'static str,
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub values: Vec<VReg>,
+    pub message: String,
+}
+
+impl RegallocError {
+    fn new(
+        phase: &'static str,
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase,
+            rule,
+            block,
+            instruction,
+            values,
+            message: message.into(),
+        }
+    }
+
+    fn mir(phase: &'static str, error: super::mir_verify::MirVerifyError) -> Self {
+        Self::new(
+            phase,
+            error.invariant,
+            error.block,
+            error.instruction,
+            Vec::new(),
+            error.message,
+        )
+    }
+}
+
+impl fmt::Display for RegallocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "register allocation {} [{}]", self.phase, self.rule)?;
+        if let Some(block) = self.block {
+            write!(f, " at {block}")?;
+        }
+        if let Some(instruction) = self.instruction {
+            write!(f, "/i{instruction}")?;
+        }
+        if !self.values.is_empty() {
+            write!(f, " values={:?}", self.values)?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for RegallocError {}
+
 fn verify_assignment(
     func: &MFunction,
     analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
-) {
-    use super::mir::VReg;
-    use assignment::PhysReg;
-    use std::collections::HashMap;
+) -> Result<(), RegallocError> {
+    verify::verify(func, analysis, assignment).map_err(|error| {
+        RegallocError::new(
+            "completed-assignment verification",
+            "ASSIGNMENT.INVALID",
+            Some(error.block),
+            error.instruction,
+            Vec::new(),
+            error.message,
+        )
+    })
+}
 
-    for (bi, block) in func.blocks.iter().enumerate() {
-        // Track live VRegs and their PhysRegs at each program point
-        let mut live: HashMap<VReg, PhysReg> = HashMap::new();
+fn constraint_error(phase: &'static str, error: constraints::ConstraintError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
 
-        // Pre-compute use positions for O(log n) dead check
-        let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
-        for (i, inst) in block.insts.iter().enumerate() {
-            for vreg in inst.uses() {
-                use_positions.entry(vreg).or_default().push(i);
-            }
-        }
+fn cfg_error(phase: &'static str, error: cfg::CfgError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        None,
+        Vec::new(),
+        error.message,
+    )
+}
 
-        // Initialize from entry_distances.
-        // Only include VRegs that have assignments AND don't conflict.
-        // VRegs that were spilled in a predecessor may still appear in
-        // entry_distances (for cross-block liveness) but no longer
-        // occupy a register.
-        for &vreg in analysis.entry_distances[bi].keys() {
-            if !use_positions.contains_key(&vreg) {
-                continue;
-            }
-            if let Some(preg) = assignment.get(vreg) {
-                // Skip if this PhysReg is already claimed by another VReg
-                if live.values().any(|&p| p == preg) {
-                    continue;
-                }
-                live.insert(vreg, preg);
-            }
-        }
+fn next_use_error(phase: &'static str, error: next_use::NextUseError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
 
-        for (inst_idx, inst) in block.insts.iter().enumerate() {
-            // Remove dead VRegs (O(log n) per VReg via binary search)
-            let dead: Vec<VReg> = live
-                .keys()
-                .copied()
-                .filter(|&v| {
-                    let from = inst_idx + 1;
-                    let has_future_use = if let Some(positions) = use_positions.get(&v) {
-                        match positions.binary_search(&from) {
-                            Ok(_) => true,
-                            Err(idx) => idx < positions.len(),
-                        }
-                    } else {
-                        false
-                    };
-                    !has_future_use && !analysis.exit_distances[bi].contains_key(&v)
-                })
-                .collect();
-            for v in dead {
-                live.remove(&v);
-            }
+fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
 
-            // Add def
-            if let Some(def) = inst.def() {
-                if let Some(preg) = assignment.get(def) {
-                    // In the unified allocator, a spilled VReg may still
-                    // have a global assignment but no longer occupies the
-                    // register. If a new def claims the same PhysReg,
-                    // evict the stale entry from live.
-                    let stale: Vec<VReg> = live
-                        .iter()
-                        .filter(|(v, p)| **v != def && **p == preg)
-                        .map(|(v, _)| *v)
-                        .collect();
-                    for v in stale {
-                        live.remove(&v);
-                    }
-                    live.insert(def, preg);
-                }
-            }
-        }
+fn ssa_destruction_error(
+    phase: &'static str,
+    error: super::ssa_destroy::SsaDestructionError,
+) -> RegallocError {
+    let mut values = Vec::with_capacity(2);
+    if let Some(destination) = error.phi_destination {
+        values.push(destination);
     }
+    if let Some(source) = error.source_value {
+        values.push(source);
+    }
+    let edge = match (error.predecessor, error.successor) {
+        (Some(predecessor), Some(successor)) => format!(" on {predecessor} -> {successor}"),
+        (None, Some(successor)) => format!(" at {successor}"),
+        _ => String::new(),
+    };
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.successor.or(error.predecessor),
+        None,
+        values,
+        format!("{}{edge}", error.message),
+    )
 }
 
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
-pub fn run_regalloc(func: &mut MFunction) -> RegallocResult {
-    // Unified single-pass: simultaneous spilling + assignment.
-    // No separate analysis → spill → re-analyze → assign pipeline.
-    // No k-1 hack — uses k = NUM_REGS directly.
-    let analysis = analysis::analyze(func);
-    let (assignment, spill_frame_size) = unified::unified_alloc(func, &analysis);
+pub fn run_regalloc(func: &mut MFunction) -> Result<RegallocResult, RegallocError> {
+    run_regalloc_with_label(func, "unknown")
+}
 
-    #[cfg(debug_assertions)]
-    {
-        let analysis = analysis::analyze(func);
-        verify_assignment(func, &analysis, &assignment);
+/// Run register allocation and optionally log per-block allocation deltas.
+pub fn run_regalloc_with_label(
+    func: &mut MFunction,
+    label: &str,
+) -> Result<RegallocResult, RegallocError> {
+    let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
+    if !matches!(requested.as_str(), "auto" | "ssa") {
+        return Err(RegallocError::new(
+            "configuration",
+            "CONFIG.IMPLEMENTATION",
+            None,
+            None,
+            Vec::new(),
+            format!("unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto or ssa"),
+        ));
     }
 
-    RegallocResult {
+    // Build the complete result privately. A structured error cannot expose
+    // CFG/scheduling/SSA mutations from a failed phase to the caller.
+    let mut working = func.clone();
+    let allocation = run_regalloc_in_place(&mut working, label)?;
+    *func = working;
+    Ok(allocation)
+}
+
+fn run_regalloc_in_place(
+    func: &mut MFunction,
+    label: &str,
+) -> Result<RegallocResult, RegallocError> {
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("input MIR verification", error))?;
+    let normalized_cfg =
+        cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
+    normalized_cfg
+        .verify(func)
+        .map_err(|error| cfg_error("CFG normalization verification", error))?;
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let total_start = timing.then(crate::timing::now);
+    let stats_start = timing.then(crate::timing::now);
+    let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
+        .is_some()
+        .then(|| collect_regalloc_block_stats(func));
+    if let Some(start) = stats_start {
+        eprintln!(
+            "[regalloc-timing] label={label} collect_before_stats elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("scheduling constraint construction", error))?;
+    scheduling_constraints
+        .verify(func)
+        .map_err(|error| constraint_error("scheduling constraint verification", error))?;
+    let schedule_analysis = analysis::analyze(func);
+    let schedule_start = timing.then(crate::timing::now);
+    let schedule_stats = schedule::schedule_for_pressure(
+        func,
+        &normalized_cfg,
+        &scheduling_constraints,
+        &schedule_analysis,
+    )
+    .map_err(|error| {
+        RegallocError::new(
+            "pressure scheduling",
+            error.rule,
+            Some(error.block),
+            None,
+            Vec::new(),
+            error.reason,
+        )
+    })?;
+    if let Some(start) = schedule_start {
+        eprintln!(
+            "[regalloc-timing] label={label} pressure_schedule changed_blocks={} max_before={} max_after={} elapsed={:?}",
+            schedule_stats.changed_blocks,
+            schedule_stats.maximum_before,
+            schedule_stats.maximum_after,
+            start.elapsed()
+        );
+    }
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
+    let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
+        .map_err(|error| cssa_error("CSSA normalization", error))?;
+    cssa::verify_cssa(func, &normalized_cfg, &cssa)
+        .map_err(|error| cssa_error("CSSA verification", error))?;
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("CSSA structural verification", error))?;
+    let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("allocation constraint construction", error))?;
+    constraints
+        .verify(func)
+        .map_err(|error| constraint_error("allocation constraint verification", error))?;
+    let next_use = next_use::analyze(func, &normalized_cfg)
+        .map_err(|error| next_use_error("next-use analysis", error))?;
+    next_use
+        .verify(func, &normalized_cfg)
+        .map_err(|error| next_use_error("next-use verification", error))?;
+    let alloc_start = timing.then(crate::timing::now);
+    let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
+    let assignment = allocation.assignment;
+    let spill_frame_size = allocation.spill_frame_size;
+    if let Some(start) = alloc_start {
+        eprintln!(
+            "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            func.blocks.len(),
+            func.blocks
+                .iter()
+                .map(|block| block.insts.len())
+                .sum::<usize>(),
+            func.vregs.count(),
+            spill_frame_size,
+            start.elapsed()
+        );
+    }
+
+    let verify_start = timing.then(crate::timing::now);
+    let analysis = analysis::analyze(func);
+    verify_assignment(func, &analysis, &assignment)?;
+    let ssa_destruction = super::ssa_destroy::SsaDestructionPlan::build(func, &assignment)
+        .map_err(|error| ssa_destruction_error("SSA destruction planning", error))?;
+    ssa_destruction
+        .verify(func, &assignment, spill_frame_size)
+        .map_err(|error| ssa_destruction_error("SSA destruction verification", error))?;
+    if let Some(start) = verify_start {
+        eprintln!(
+            "[regalloc-timing] label={label} verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    if let Some(before) = before_stats {
+        let stats_start = timing.then(crate::timing::now);
+        log_regalloc_stats(label, func, &before, spill_frame_size);
+        if let Some(start) = stats_start {
+            eprintln!(
+                "[regalloc-timing] label={label} log_stats elapsed={:?}",
+                start.elapsed()
+            );
+        }
+    }
+    if let Some(start) = total_start {
+        eprintln!(
+            "[regalloc-timing] label={label} total elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    Ok(RegallocResult {
         assignment,
         spill_frame_size,
+        ssa_destruction,
+    })
+}
+
+/// Normalize block layout to reverse postorder before the single forward
+/// allocation walk. ISel may append CFG-lowering blocks after their logical
+/// successors (for example runtime-event blocks), so numeric/block-vector
+/// order is not a valid way to distinguish forward edges from backedges.
+fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), String> {
+    use super::mir::BlockId;
+    use std::collections::{HashMap, HashSet};
+
+    let Some(entry) = func.blocks.first().map(|block| block.id) else {
+        return Ok(());
+    };
+    let successors = func
+        .blocks
+        .iter()
+        .map(|block| (block.id, block.successors()))
+        .collect::<HashMap<_, _>>();
+    let mut visited = HashSet::new();
+    let mut postorder = Vec::with_capacity(func.blocks.len());
+    let mut stack: Vec<(BlockId, usize)> = vec![(entry, 0)];
+    visited.insert(entry);
+
+    while let Some((block, next_successor)) = stack.last_mut() {
+        let succs = &successors[block];
+        if *next_successor < succs.len() {
+            let successor = succs[*next_successor];
+            *next_successor += 1;
+            if visited.insert(successor) {
+                stack.push((successor, 0));
+            }
+        } else {
+            postorder.push(*block);
+            stack.pop();
+        }
+    }
+    postorder.reverse();
+
+    // MIR verification rejects unreachable blocks, but retain them
+    // deterministically here so this normalization is total on raw inputs.
+    let mut remaining = func
+        .blocks
+        .iter()
+        .map(|block| block.id)
+        .filter(|id| !visited.contains(id))
+        .collect::<Vec<_>>();
+    remaining.sort();
+    postorder.extend(remaining);
+
+    let positions = postorder
+        .into_iter()
+        .enumerate()
+        .map(|(position, id)| (id, position))
+        .collect::<HashMap<_, _>>();
+    if positions.len() != func.blocks.len()
+        || func
+            .blocks
+            .iter()
+            .any(|block| !positions.contains_key(&block.id))
+    {
+        return Err("reverse-postorder layout is not a bijection over MIR blocks".into());
+    }
+    func.blocks
+        .sort_by_key(|block| positions.get(&block.id).copied().unwrap_or(usize::MAX));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default)]
+struct RegallocBlockStats {
+    insts: usize,
+    mov: usize,
+    load_stack: usize,
+    store_stack: usize,
+    load_imm: usize,
+}
+
+fn collect_regalloc_block_stats(
+    func: &MFunction,
+) -> Vec<(super::mir::BlockId, RegallocBlockStats)> {
+    func.blocks
+        .iter()
+        .map(|block| {
+            let mut stats = RegallocBlockStats {
+                insts: block.insts.len(),
+                ..RegallocBlockStats::default()
+            };
+            for inst in &block.insts {
+                match inst {
+                    MInst::Mov { .. } => stats.mov += 1,
+                    MInst::LoadImm { .. } => stats.load_imm += 1,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        ..
+                    } => stats.load_stack += 1,
+                    MInst::Store {
+                        base: BaseReg::StackFrame,
+                        ..
+                    } => stats.store_stack += 1,
+                    _ => {}
+                }
+            }
+            (block.id, stats)
+        })
+        .collect()
+}
+
+fn log_regalloc_stats(
+    label: &str,
+    func: &MFunction,
+    before: &[(super::mir::BlockId, RegallocBlockStats)],
+    spill_frame_size: u32,
+) {
+    let after = collect_regalloc_block_stats(func);
+    let before_by_block = before
+        .iter()
+        .copied()
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut rows = Vec::new();
+    let mut total = RegallocBlockStats::default();
+    let mut total_delta = RegallocBlockStats::default();
+
+    for (block_id, after_stats) in after {
+        let before_stats = before_by_block.get(&block_id).copied().unwrap_or_default();
+        total.insts += after_stats.insts;
+        total.mov += after_stats.mov;
+        total.load_stack += after_stats.load_stack;
+        total.store_stack += after_stats.store_stack;
+        total.load_imm += after_stats.load_imm;
+
+        let delta = RegallocBlockStats {
+            insts: after_stats.insts.saturating_sub(before_stats.insts),
+            mov: after_stats.mov.saturating_sub(before_stats.mov),
+            load_stack: after_stats
+                .load_stack
+                .saturating_sub(before_stats.load_stack),
+            store_stack: after_stats
+                .store_stack
+                .saturating_sub(before_stats.store_stack),
+            load_imm: after_stats.load_imm.saturating_sub(before_stats.load_imm),
+        };
+        total_delta.insts += delta.insts;
+        total_delta.mov += delta.mov;
+        total_delta.load_stack += delta.load_stack;
+        total_delta.store_stack += delta.store_stack;
+        total_delta.load_imm += delta.load_imm;
+        rows.push((
+            delta.load_stack + delta.store_stack + delta.mov + delta.load_imm,
+            block_id,
+            before_stats,
+            after_stats,
+            delta,
+        ));
+    }
+
+    eprintln!(
+        "[regalloc-stats] label={label} spill_frame={spill_frame_size} total_insts={} delta_insts={} total_mov={} delta_mov={} total_load_stack={} delta_load_stack={} total_store_stack={} delta_store_stack={} total_load_imm={} delta_load_imm={}",
+        total.insts,
+        total_delta.insts,
+        total.mov,
+        total_delta.mov,
+        total.load_stack,
+        total_delta.load_stack,
+        total.store_stack,
+        total_delta.store_stack,
+        total.load_imm,
+        total_delta.load_imm,
+    );
+
+    rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
+    for (rank, (_score, block_id, before_stats, after_stats, delta)) in
+        rows.into_iter().take(12).enumerate()
+    {
+        eprintln!(
+            "[regalloc-block-stats] label={label} rank={} block={} before_insts={} after_insts={} delta_insts={} delta_mov={} delta_load_stack={} delta_store_stack={} delta_load_imm={}",
+            rank + 1,
+            block_id.0,
+            before_stats.insts,
+            after_stats.insts,
+            delta.insts,
+            delta.mov,
+            delta.load_stack,
+            delta.store_stack,
+            delta.load_imm,
+        );
     }
 }

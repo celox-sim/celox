@@ -27,7 +27,8 @@ Execution Unit 0:
     r12: logic<32>
     r13: logic<32>
     r14: logic<32>
-    r15: logic<8>
+    r15: logic<32>
+    r16: logic<8>
   b0:
     r3 = Load(addr=i (region=0), offset=0, bits=2)
     r11 = Load(addr=val (region=0), offset=0, bits=8)
@@ -41,8 +42,9 @@ Execution Unit 0:
     r10 = SIRValue(0x0)
     r12 = Concat(r10, r11)
     r13 = r12 Shl r5
-    r14 = r9 Or r13
-    Store(addr=a (region=0), offset=0, bits=32, src_reg = 14)
-    r15 = Load(addr=a (region=0), offset=16, bits=8)
-    Store(addr=o (region=0), offset=0, bits=8, src_reg = 15)
+    r14 = r13 And r7
+    r15 = r9 Or r14
+    Store(addr=a (region=0), offset=0, bits=32, src_reg = 15)
+    r16 = Load(addr=a (region=0), offset=16, bits=8)
+    Store(addr=o (region=0), offset=0, bits=8, src_reg = 16)
     Return

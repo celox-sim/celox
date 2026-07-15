@@ -12,8 +12,16 @@ impl ExecutionUnitPass for BitExtractPeepholePass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        for block in eu.blocks.values_mut() {
-            optimize_bit_extracts(&mut block.instructions, &mut eu.register_map);
+        let block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+        let global_use_count = collect_global_use_counts(eu);
+        for block_id in block_ids {
+            if let Some(block) = eu.blocks.get_mut(&block_id) {
+                optimize_bit_extracts(
+                    &mut block.instructions,
+                    &mut eu.register_map,
+                    &global_use_count,
+                );
+            }
         }
     }
 }
@@ -34,10 +42,13 @@ fn mask_width(mask_val: u64) -> Option<usize> {
 fn optimize_bit_extracts(
     instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
+    global_use_count: &HashMap<RegisterId, usize>,
 ) {
     if instructions.len() < 2 {
         return;
     }
+
+    optimize_slice_loads(instructions, register_map, global_use_count);
 
     // Build def map: register -> instruction index
     let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
@@ -148,56 +159,7 @@ fn optimize_bit_extracts(
     // Collect all indices that are dead or replaced
     // But we must be careful: a "dead" instruction may be used by other instructions
     // that we are NOT replacing. Build use counts to check.
-    let mut use_count: HashMap<RegisterId, usize> = HashMap::default();
-    for inst in instructions.iter() {
-        match inst {
-            SIRInstruction::Binary(_, lhs, _, rhs) => {
-                *use_count.entry(*lhs).or_default() += 1;
-                *use_count.entry(*rhs).or_default() += 1;
-            }
-            SIRInstruction::Unary(_, _, src) => {
-                *use_count.entry(*src).or_default() += 1;
-            }
-            SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-                *use_count.entry(*off).or_default() += 1;
-                *use_count.entry(*src).or_default() += 1;
-            }
-            SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-                *use_count.entry(*src).or_default() += 1;
-            }
-            SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-                *use_count.entry(*off).or_default() += 1;
-            }
-            SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-                *use_count.entry(*off).or_default() += 1;
-            }
-            SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
-            SIRInstruction::Concat(_, args) => {
-                for arg in args {
-                    *use_count.entry(*arg).or_default() += 1;
-                }
-            }
-            SIRInstruction::Slice(_, src, _, _) => {
-                *use_count.entry(*src).or_default() += 1;
-            }
-            SIRInstruction::Mux(_, cond, then_val, else_val) => {
-                *use_count.entry(*cond).or_default() += 1;
-                *use_count.entry(*then_val).or_default() += 1;
-                *use_count.entry(*else_val).or_default() += 1;
-            }
-            SIRInstruction::RuntimeEvent { args, .. }
-            | SIRInstruction::CombCaptureEvent { args, .. } => {
-                for arg in args {
-                    *use_count.entry(*arg).or_default() += 1;
-                }
-            }
-            SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-                *use_count.entry(*old).or_default() += 1;
-                *use_count.entry(*new).or_default() += 1;
-            }
-            _ => {}
-        }
-    }
+    let mut use_count = global_use_count.clone();
 
     // For each replacement, decrement use counts for the operands we're removing
     // and only mark instructions as dead if their result has no remaining uses.
@@ -273,6 +235,167 @@ fn optimize_bit_extracts(
     *instructions = out;
 }
 
+fn optimize_slice_loads(
+    instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    global_use_count: &HashMap<RegisterId, usize>,
+) {
+    let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
+    for (idx, inst) in instructions.iter().enumerate() {
+        match inst {
+            SIRInstruction::Imm(dst, _)
+            | SIRInstruction::Binary(dst, _, _, _)
+            | SIRInstruction::Unary(dst, _, _)
+            | SIRInstruction::Load(dst, _, _, _)
+            | SIRInstruction::Concat(dst, _)
+            | SIRInstruction::Slice(dst, _, _, _) => {
+                def_map.insert(*dst, idx);
+            }
+            _ => {}
+        }
+    }
+
+    let mut replacements = Vec::new();
+    for (idx, inst) in instructions.iter().enumerate() {
+        let SIRInstruction::Slice(dst, src, bit_offset, width) = inst else {
+            continue;
+        };
+        let Some(&load_idx) = def_map.get(src) else {
+            continue;
+        };
+        let SIRInstruction::Load(_, addr, SIROffset::Static(base), load_width) =
+            instructions[load_idx]
+        else {
+            continue;
+        };
+        if bit_offset + width > load_width {
+            continue;
+        }
+        replacements.push((
+            idx,
+            SIRInstruction::Load(*dst, addr, SIROffset::Static(base + bit_offset), *width),
+            *dst,
+            *width,
+        ));
+    }
+
+    if replacements.is_empty() {
+        return;
+    }
+
+    for (idx, replacement, dst, width) in replacements {
+        instructions[idx] = replacement;
+        register_map.insert(dst, RegisterType::Logic { width });
+    }
+
+    remove_dead_loads(instructions, global_use_count);
+}
+
+fn remove_dead_loads(
+    instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    global_use_count: &HashMap<RegisterId, usize>,
+) {
+    instructions.retain(|inst| {
+        if let SIRInstruction::Load(dst, _, _, _) = inst {
+            global_use_count.get(dst).copied().unwrap_or(0) != 0
+        } else {
+            true
+        }
+    });
+}
+
+fn collect_global_use_counts(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, usize> {
+    let mut use_count: HashMap<RegisterId, usize> = HashMap::default();
+    for block in eu.blocks.values() {
+        for inst in &block.instructions {
+            record_uses(inst, &mut use_count);
+        }
+        record_terminator_uses(&block.terminator, &mut use_count);
+    }
+    use_count
+}
+
+fn record_terminator_uses(term: &SIRTerminator, use_count: &mut HashMap<RegisterId, usize>) {
+    match term {
+        SIRTerminator::Jump(_, args) => {
+            for arg in args {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            *use_count.entry(*cond).or_default() += 1;
+            for arg in &true_block.1 {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+            for arg in &false_block.1 {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+fn record_uses(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    use_count: &mut HashMap<RegisterId, usize>,
+) {
+    match inst {
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            *use_count.entry(*lhs).or_default() += 1;
+            *use_count.entry(*rhs).or_default() += 1;
+        }
+        SIRInstruction::Unary(_, _, src) => {
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Load(_, _, offset, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            for register in offset.dynamic_registers().into_iter().flatten() {
+                *use_count.entry(register).or_default() += 1;
+            }
+        }
+        SIRInstruction::Concat(_, args) => {
+            for arg in args {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRInstruction::Slice(_, src, _, _) => {
+            *use_count.entry(*src).or_default() += 1;
+        }
+        SIRInstruction::Mux(_, cond, then_val, else_val) => {
+            *use_count.entry(*cond).or_default() += 1;
+            *use_count.entry(*then_val).or_default() += 1;
+            *use_count.entry(*else_val).or_default() += 1;
+        }
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => {
+            for arg in args {
+                *use_count.entry(*arg).or_default() += 1;
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            *use_count.entry(*old).or_default() += 1;
+            *use_count.entry(*new).or_default() += 1;
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,8 +426,12 @@ mod tests {
         ];
         let mut register_map = HashMap::default();
         register_map.insert(RegisterId(4), RegisterType::Logic { width: 8 });
+        let mut use_count = HashMap::default();
+        for inst in &instructions {
+            record_uses(inst, &mut use_count);
+        }
 
-        optimize_bit_extracts(&mut instructions, &mut register_map);
+        optimize_bit_extracts(&mut instructions, &mut register_map, &use_count);
 
         assert!(instructions.iter().any(|inst| matches!(
             inst,

@@ -104,11 +104,14 @@ pub enum OptLevel {
     /// No SIR optimizations except [`SirPass::TailCallSplit`].
     /// Cranelift: `fast_compile()`. DSE: Off.
     O0,
-    /// All SIR optimizations enabled.
+    /// Production-default SIR optimizations enabled, including conservative
+    /// two-state control-flow recovery for profitable Mux regions.
     /// Cranelift: Speed / Backtracking. DSE: Off.
     #[default]
     O1,
-    /// All SIR optimizations + DSE(`PreserveTopPorts`).
+    /// Production-default SIR optimizations + DSE(`PreserveTopPorts`),
+    /// including conservative two-state control-flow recovery for profitable
+    /// Mux regions.
     /// Cranelift: Speed / Backtracking.
     O2,
 }
@@ -155,6 +158,7 @@ impl OptLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SirPass {
     StoreLoadForwarding,
+    ControlFlowSimplify,
     HoistCommonBranchLoads,
     BitExtractPeephole,
     OptimizeBlocks,
@@ -168,6 +172,7 @@ pub enum SirPass {
     ConcatFolding,
     XorChainFolding,
     VectorizeConcat,
+    BranchifyMux,
     SplitCoalescedStores,
     PartialForward,
     IdentityStoreBypass,
@@ -178,6 +183,7 @@ impl SirPass {
     /// All pass variants in definition order.
     pub const ALL: &[SirPass] = &[
         SirPass::StoreLoadForwarding,
+        SirPass::ControlFlowSimplify,
         SirPass::HoistCommonBranchLoads,
         SirPass::BitExtractPeephole,
         SirPass::OptimizeBlocks,
@@ -191,6 +197,7 @@ impl SirPass {
         SirPass::ConcatFolding,
         SirPass::XorChainFolding,
         SirPass::VectorizeConcat,
+        SirPass::BranchifyMux,
         SirPass::SplitCoalescedStores,
         SirPass::PartialForward,
         SirPass::IdentityStoreBypass,
@@ -201,6 +208,7 @@ impl SirPass {
     pub fn as_str(self) -> &'static str {
         match self {
             SirPass::StoreLoadForwarding => "store_load_forwarding",
+            SirPass::ControlFlowSimplify => "control_flow_simplify",
             SirPass::HoistCommonBranchLoads => "hoist_common_branch_loads",
             SirPass::BitExtractPeephole => "bit_extract_peephole",
             SirPass::OptimizeBlocks => "optimize_blocks",
@@ -214,6 +222,7 @@ impl SirPass {
             SirPass::ConcatFolding => "concat_folding",
             SirPass::XorChainFolding => "xor_chain_folding",
             SirPass::VectorizeConcat => "vectorize_concat",
+            SirPass::BranchifyMux => "branchify_mux",
             SirPass::SplitCoalescedStores => "split_coalesced_stores",
             SirPass::PartialForward => "partial_forward",
             SirPass::IdentityStoreBypass => "identity_store_bypass",
@@ -225,6 +234,7 @@ impl SirPass {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "store_load_forwarding" => Some(SirPass::StoreLoadForwarding),
+            "control_flow_simplify" => Some(SirPass::ControlFlowSimplify),
             "hoist_common_branch_loads" => Some(SirPass::HoistCommonBranchLoads),
             "bit_extract_peephole" => Some(SirPass::BitExtractPeephole),
             "optimize_blocks" => Some(SirPass::OptimizeBlocks),
@@ -238,6 +248,7 @@ impl SirPass {
             "concat_folding" => Some(SirPass::ConcatFolding),
             "xor_chain_folding" => Some(SirPass::XorChainFolding),
             "vectorize_concat" => Some(SirPass::VectorizeConcat),
+            "branchify_mux" => Some(SirPass::BranchifyMux),
             "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
             "partial_forward" => Some(SirPass::PartialForward),
             "identity_store_bypass" => Some(SirPass::IdentityStoreBypass),
@@ -256,9 +267,10 @@ impl SirPass {
 /// ```
 /// use celox::{OptLevel, SirPass, OptimizeOptions};
 ///
-/// // All passes enabled (default)
+/// // Production defaults enabled, including BranchifyMux.
 /// let opts = OptimizeOptions::default();
 /// assert!(opts.is_enabled(SirPass::Gvn));
+/// assert!(opts.is_enabled(SirPass::BranchifyMux));
 ///
 /// // O0 with one pass selectively enabled
 /// let opts = OptimizeOptions::new(OptLevel::O0)
@@ -289,7 +301,7 @@ impl OptimizeOptions {
         }
     }
 
-    /// All passes enabled (equivalent to `OptLevel::O1`).
+    /// All production-default passes enabled (equivalent to `OptLevel::O1`).
     pub fn all() -> Self {
         Self::new(OptLevel::O1)
     }
@@ -395,4 +407,23 @@ pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &Opti
             ..PassOptions::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OptLevel, OptimizeOptions, SirPass};
+
+    #[test]
+    fn branchify_is_enabled_by_optimization_presets() {
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::BranchifyMux));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::BranchifyMux));
+        assert!(OptimizeOptions::all().is_enabled(SirPass::BranchifyMux));
+    }
+
+    #[test]
+    fn control_flow_simplify_is_a_production_default() {
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::ControlFlowSimplify));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::ControlFlowSimplify));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::ControlFlowSimplify));
+    }
 }

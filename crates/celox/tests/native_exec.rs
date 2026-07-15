@@ -1,7 +1,38 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(target_arch = "x86_64")]
 
-use celox::{MemoryLayout, Program, Simulator, SimulatorBuilder};
+use celox::{MemoryLayout, MemoryLayoutMode, Program, Simulator, SimulatorBuilder};
+
+#[cfg(target_arch = "x86_64")]
+fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
+    use celox::native_backend::emit;
+    use celox::native_backend::jit_mem;
+    use celox::native_backend::mir::{
+        BlockId as MBlockId, MBlock, MFunction, SpillDesc, VRegAllocator,
+    };
+    use celox::native_backend::regalloc;
+
+    let mut vregs = VRegAllocator::new();
+    for _ in 0..vreg_count {
+        vregs.alloc();
+    }
+    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); vreg_count]);
+    let mut block = MBlock::new(MBlockId(0));
+    for inst in insts {
+        block.push(inst);
+    }
+    block.push(celox::native_backend::mir::MInst::Return);
+    func.blocks.push(block);
+    func.verify();
+
+    let ra = regalloc::run_regalloc(&mut func).unwrap();
+    let emit_result = emit::emit(&func, &ra.assignment, ra.spill_frame_size).expect("emit failed");
+    let jit = jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
+    let mut state = vec![0u8; 8];
+    let ret = unsafe { jit.call(&mut state) };
+    assert_eq!(ret, 0);
+    u64::from_le_bytes(state[..8].try_into().unwrap())
+}
 
 /// Helper: compile Veryl, run native backend on eval_comb[0], execute, return state.
 fn compile_and_run(
@@ -23,7 +54,7 @@ fn compile_and_run_inner(
         .trace_post_optimized_sir()
         .build_with_trace();
     let sir = trace.trace.post_optimized_sir.unwrap();
-    let layout = MemoryLayout::build(&sir, false);
+    let layout = MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
     use celox::native_backend::{emit, isel, jit_mem, regalloc};
 
@@ -34,7 +65,7 @@ fn compile_and_run_inner(
         eprintln!("=== MIR ===\n{mfunc}");
     }
 
-    let ra = regalloc::run_regalloc(&mut mfunc);
+    let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
 
     if debug {
         eprintln!("=== Assignment ===\n{:?}", ra.assignment);
@@ -70,6 +101,166 @@ fn read_u32_at(state: &[u8], sir: &Program, layout: &MemoryLayout, name: &str) -
     let addr = sir.get_addr(&[], &[name]).unwrap();
     let off = layout.offsets[&addr];
     u32::from_le_bytes(state[off..off + 4].try_into().unwrap())
+}
+
+#[test]
+fn test_native_bsr_or_zero_and_nonzero() {
+    use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
+
+    let run = |value| {
+        run_single_block_mir(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value,
+                },
+                MInst::BsrOr {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    zero_value: 63,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+            ],
+            2,
+        )
+    };
+
+    assert_eq!(run(0), 63);
+    assert_eq!(run(1), 0);
+    assert_eq!(run(0x8000_0000_0000_0000), 63);
+    assert_eq!(run(0x10), 4);
+}
+
+#[test]
+fn test_native_bsr_nonzero() {
+    use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
+
+    let run = |value| {
+        run_single_block_mir(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value,
+                },
+                MInst::Bsr {
+                    dst: VReg(1),
+                    src: VReg(0),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+            ],
+            2,
+        )
+    };
+
+    assert_eq!(run(1), 0);
+    assert_eq!(run(0x10), 4);
+    assert_eq!(run(0x8000_0000_0000_0000), 63);
+}
+
+#[test]
+fn test_native_div_zero_safe_rhs_select() {
+    use celox::native_backend::mir::{BaseReg, CmpKind, MInst, OpSize, VReg};
+
+    let run = |lhs, rhs| {
+        run_single_block_mir(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: lhs,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: rhs,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 1,
+                },
+                MInst::Cmp {
+                    dst: VReg(4),
+                    lhs: VReg(1),
+                    rhs: VReg(2),
+                    kind: CmpKind::Eq,
+                },
+                MInst::Select {
+                    dst: VReg(5),
+                    cond: VReg(4),
+                    true_val: VReg(3),
+                    false_val: VReg(1),
+                },
+                MInst::UDiv {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(6),
+                    size: OpSize::S64,
+                },
+            ],
+            7,
+        )
+    };
+
+    assert_eq!(run(42, 0), 42);
+    assert_eq!(run(42, 7), 6);
+}
+
+#[test]
+fn test_native_div_preserves_live_divisor_across_div() {
+    use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
+
+    let result = run_single_block_mir(
+        vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 100,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 2,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 50,
+            },
+            MInst::UDiv {
+                dst: VReg(3),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::UDiv {
+                dst: VReg(4),
+                lhs: VReg(2),
+                rhs: VReg(1),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(4),
+                size: OpSize::S64,
+            },
+        ],
+        5,
+    );
+
+    assert_eq!(result, 25);
 }
 
 #[test]
@@ -270,12 +461,12 @@ fn test_debug_let_bitslice_write() {
     let sir = trace.trace.post_optimized_sir.unwrap();
 
     use celox::native_backend::{emit, isel, regalloc};
-    let layout = celox::MemoryLayout::build(&sir, false);
+    let layout = celox::MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
     for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
         eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
-        let ra = regalloc::run_regalloc(&mut mfunc);
+        let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
         eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
         let emit_result =
             emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");

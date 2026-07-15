@@ -1,148 +1,813 @@
 //! Identity Store bypass: detect Store(B, identity_copy_from_A), remove the
-//! Store, and register B as an alias of A in the memory layout.
+//! Store, and register B as an alias of A in the memory layout.  When B must
+//! remain distinct, replace the register copy with an exact memory Commit.
 //!
 //! After aliasing, Load(B) reads from A's physical memory (correct because
 //! the Store was writing A's exact value to B). The Store removal cascades
 //! through DCE to eliminate the Concat chain that assembled the copy.
 //!
-//! Safety: only aliases addresses where the ONLY Store to B is the identity copy.
+//! Safety: aliases are selected only after collecting accesses from every
+//! combinational execution unit.  In particular, a store that happens to be
+//! unique inside one unit is not a unique writer of its address.
 
-use super::pass_manager::ExecutionUnitPass;
+use super::cost_model::estimate_clif_cost;
 use super::shared::{def_reg, sir_value_to_u64};
-use crate::HashMap;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
+use crate::{HashMap, HashSet};
 
-pub(super) struct IdentityStoreBypassPass {
-    /// Accumulated aliases: non-canonical → canonical address.
-    /// Populated during `run`, read by the caller after all EUs are processed.
-    pub aliases: std::cell::RefCell<HashMap<AbsoluteAddr, AbsoluteAddr>>,
+#[derive(Clone, Copy)]
+struct AddressMetadata {
+    width: usize,
+    is_4state: bool,
 }
 
-impl IdentityStoreBypassPass {
-    pub fn new() -> Self {
-        Self {
-            aliases: std::cell::RefCell::new(HashMap::default()),
+#[derive(Clone, Copy, Default)]
+struct AddressFacts {
+    reads: usize,
+    writes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct StoreCandidate {
+    eu_index: usize,
+    block: BlockId,
+    instruction_index: usize,
+    address: RegionedAbsoluteAddr,
+    width: usize,
+    source: RegisterId,
+    identity_source: Option<RegionedAbsoluteAddr>,
+    commit_is_profitable: bool,
+    shape_is_aliasable: bool,
+    effects_are_removable: bool,
+}
+
+struct GlobalIdentityFacts {
+    accesses: HashMap<AbsoluteAddr, AddressFacts>,
+    stores: Vec<StoreCandidate>,
+}
+
+/// Analyze all combinational units before selecting any Program-global address
+/// alias or memory-copy replacement. Alias selection has priority; the
+/// returned stores are still present until `Program::build_layout` validates
+/// the selected aliases.
+pub(super) fn optimize_program_identity_stores(
+    program: &mut Program,
+    four_state: bool,
+) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+    let mut metadata = HashMap::default();
+    for (&instance_id, module_id) in &program.instance_module {
+        if let Some(variables) = program.module_variables.get(module_id) {
+            for variable in variables.values() {
+                metadata.insert(
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id: variable.id,
+                    },
+                    AddressMetadata {
+                        width: variable.width,
+                        is_4state: variable.is_4state,
+                    },
+                );
+            }
+        }
+    }
+
+    // These addresses cannot safely become the removable side of an alias.
+    // FF references are rejected by MemoryLayout too, but rejecting them here
+    // keeps address_aliases itself limited to candidates that can take effect.
+    let mut blocked_aliases = ff_addresses(program);
+    blocked_aliases.extend(
+        program
+            .comb_observers
+            .iter()
+            .flat_map(|observer| observer.written_inputs.iter().copied()),
+    );
+    blocked_aliases.extend(program.initial_memory_values.iter().map(|init| init.addr));
+
+    optimize_eval_comb_identity_stores(
+        &mut program.eval_comb,
+        &metadata,
+        &blocked_aliases,
+        &program.address_aliases,
+        four_state,
+    )
+}
+
+fn optimize_eval_comb_identity_stores(
+    units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    blocked_aliases: &HashSet<AbsoluteAddr>,
+    existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+    let facts = collect_global_facts(units, metadata, four_state);
+    let aliases = select_aliases(
+        &facts,
+        metadata,
+        blocked_aliases,
+        existing_aliases,
+        four_state,
+    );
+    let commits = select_identity_commits(&facts, metadata, existing_aliases, &aliases, four_state);
+    rewrite_identity_stores_as_commits(units, &commits);
+    aliases
+}
+
+#[cfg(test)]
+fn analyze_eval_comb_aliases(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    blocked_aliases: &HashSet<AbsoluteAddr>,
+    existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+    // Phase 1: collect every read/write and every syntactic store candidate.
+    // No alias decision is made while the scan is incomplete.
+    let facts = collect_global_facts(units, metadata, four_state);
+
+    // Phase 2: require the completed global facts for both identity and
+    // duplicate-store proofs.
+    select_aliases(
+        &facts,
+        metadata,
+        blocked_aliases,
+        existing_aliases,
+        four_state,
+    )
+}
+
+fn collect_global_facts(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    four_state: bool,
+) -> GlobalIdentityFacts {
+    let mut accesses = HashMap::<AbsoluteAddr, AddressFacts>::default();
+    let mut stores = Vec::new();
+
+    for (eu_index, eu) in units.iter().enumerate() {
+        let mut defs = HashMap::default();
+        for block in eu.blocks.values() {
+            for inst in &block.instructions {
+                if let Some(dst) = def_reg(inst) {
+                    defs.insert(dst, inst);
+                }
+            }
+        }
+        // Profitability must count only definitions that the existing
+        // post-bypass DCE can actually remove. Build use counts once per EU;
+        // each candidate applies a sparse decrement map rather than cloning
+        // this whole table.
+        let use_counts = register_use_counts(eu);
+        let must_execute = must_execute_blocks(eu);
+
+        for block in eu.blocks.values() {
+            for (instruction_index, inst) in block.instructions.iter().enumerate() {
+                match inst {
+                    SIRInstruction::Load(_, address, _, _) => {
+                        increment_saturating(
+                            &mut accesses.entry(address.absolute_addr()).or_default().reads,
+                        );
+                    }
+                    SIRInstruction::Store(
+                        address,
+                        offset,
+                        width,
+                        source,
+                        triggers,
+                        capture_sites,
+                    ) => {
+                        let absolute = address.absolute_addr();
+                        increment_saturating(&mut accesses.entry(absolute).or_default().writes);
+                        let full_width = metadata
+                            .get(&absolute)
+                            .is_some_and(|info| info.width == *width);
+                        let followed_by_capture = matches!(
+                            block.instructions.get(instruction_index + 1),
+                            Some(SIRInstruction::CombCaptureEnableIfChanged { sites, .. })
+                                if !sites.is_empty()
+                        );
+                        let shape_is_aliasable = address.region == STABLE_REGION
+                            && matches!(offset, SIROffset::Static(0))
+                            && full_width
+                            && must_execute.contains(&block.id);
+                        let identity_source = shape_is_aliasable
+                            .then(|| {
+                                trace_identity_source(*source, *width, &defs, &eu.register_map)
+                            })
+                            .flatten();
+                        let commit_is_profitable = identity_source.is_some_and(|identity_source| {
+                            identity_commit_is_profitable(
+                                inst,
+                                *address,
+                                identity_source,
+                                *source,
+                                *width,
+                                &defs,
+                                &use_counts,
+                                &eu.register_map,
+                                four_state,
+                            )
+                        });
+                        stores.push(StoreCandidate {
+                            eu_index,
+                            block: block.id,
+                            instruction_index,
+                            address: *address,
+                            width: *width,
+                            source: *source,
+                            identity_source,
+                            commit_is_profitable,
+                            shape_is_aliasable,
+                            effects_are_removable: triggers.is_empty()
+                                && capture_sites.is_empty()
+                                && !followed_by_capture,
+                        });
+                    }
+                    SIRInstruction::Commit(source, destination, _, _, _) => {
+                        increment_saturating(
+                            &mut accesses.entry(source.absolute_addr()).or_default().reads,
+                        );
+                        increment_saturating(
+                            &mut accesses
+                                .entry(destination.absolute_addr())
+                                .or_default()
+                                .writes,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    stores.sort_unstable_by_key(|store| {
+        (
+            store.eu_index,
+            store.block,
+            store.instruction_index,
+            store.address,
+        )
+    });
+    GlobalIdentityFacts { accesses, stores }
+}
+
+fn identity_commit_is_profitable(
+    original_store: &SIRInstruction<RegionedAbsoluteAddr>,
+    destination: RegionedAbsoluteAddr,
+    identity_source: RegionedAbsoluteAddr,
+    source_register: RegisterId,
+    width: usize,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    use_counts: &HashMap<RegisterId, usize>,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
+) -> bool {
+    // Compare the existing lowering-calibrated costs, not a width threshold.
+    // The removable side includes only definitions that become dead after the
+    // Store's one source use disappears; shared definitions contribute zero.
+    let removed_definition_cost = removable_definition_cost_after_removing_use(
+        source_register,
+        defs,
+        use_counts,
+        register_map,
+        four_state,
+    );
+    let old_cost = estimate_clif_cost(original_store, register_map, four_state)
+        .saturating_add(removed_definition_cost);
+    let replacement = SIRInstruction::Commit(
+        identity_source,
+        destination,
+        SIROffset::Static(0),
+        width,
+        Vec::new(),
+    );
+    let replacement_cost = estimate_clif_cost(&replacement, register_map, four_state);
+    replacement_cost < old_cost
+}
+
+fn removable_definition_cost_after_removing_use(
+    root: RegisterId,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    use_counts: &HashMap<RegisterId, usize>,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
+) -> usize {
+    // Sparse reference-count simulation of the existing mark/sweep DCE. A
+    // definition is charged only when every one of its uses is removed. This
+    // handles shared and reconvergent DAGs without cloning the EU-sized count
+    // table for every Store candidate.
+    let mut removed_uses = HashMap::<RegisterId, usize>::default();
+    let mut dead = HashSet::default();
+    let mut work = vec![root];
+    let mut operands = Vec::new();
+    let mut cost = 0usize;
+
+    while let Some(register) = work.pop() {
+        let removed = removed_uses.entry(register).or_default();
+        *removed = removed.saturating_add(1);
+        let total = use_counts.get(&register).copied().unwrap_or(0);
+        if total == 0 || *removed != total {
+            continue;
+        }
+        let Some(instruction) = defs.get(&register).copied() else {
+            // Block parameters and external values have no removable defining
+            // instruction in this EU.
+            continue;
+        };
+        if !dead.insert(register) {
+            continue;
+        }
+
+        cost = cost.saturating_add(estimate_clif_cost(instruction, register_map, four_state));
+        operands.clear();
+        instruction_uses(instruction, &mut operands);
+        work.extend(operands.iter().copied());
+    }
+
+    cost
+}
+
+fn register_use_counts(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
+    let mut counts = HashMap::<RegisterId, usize>::default();
+    let mut uses = Vec::new();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            uses.clear();
+            instruction_uses(instruction, &mut uses);
+            for register in uses.iter().copied() {
+                let count = counts.entry(register).or_default();
+                *count = count.saturating_add(1);
+            }
+        }
+        uses.clear();
+        terminator_uses(&block.terminator, &mut uses);
+        for register in uses.iter().copied() {
+            let count = counts.entry(register).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+    counts
+}
+
+fn instruction_uses(
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    uses: &mut Vec<RegisterId>,
+) {
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => uses.extend([*lhs, *rhs]),
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            uses.push(*source);
+        }
+        SIRInstruction::Load(_, _, offset, _) => {
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
+        }
+        SIRInstruction::Store(_, offset, _, source, _, _) => {
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
+            uses.push(*source);
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            uses.extend(offset.dynamic_registers().into_iter().flatten());
+        }
+        SIRInstruction::Concat(_, arguments)
+        | SIRInstruction::RuntimeEvent {
+            args: arguments, ..
+        }
+        | SIRInstruction::CombCaptureEvent {
+            args: arguments, ..
+        } => uses.extend(arguments.iter().copied()),
+        SIRInstruction::Mux(_, condition, then_value, else_value) => {
+            uses.extend([*condition, *then_value, *else_value]);
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            uses.extend([*old, *new]);
         }
     }
 }
 
-impl ExecutionUnitPass for IdentityStoreBypassPass {
-    fn name(&self) -> &'static str {
-        "identity_store_bypass"
+fn terminator_uses(terminator: &SIRTerminator, uses: &mut Vec<RegisterId>) {
+    match terminator {
+        SIRTerminator::Jump(_, arguments) => uses.extend(arguments.iter().copied()),
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            uses.push(*cond);
+            uses.extend(true_block.1.iter().copied());
+            uses.extend(false_block.1.iter().copied());
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+fn select_aliases(
+    facts: &GlobalIdentityFacts,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    blocked_aliases: &HashSet<AbsoluteAddr>,
+    existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+    let mut aliases = HashMap::default();
+
+    // Store(B, identity_copy(A)): B must be globally unread and uniquely
+    // written, while A must remain stable throughout eval_comb.
+    for store in &facts.stores {
+        let alias = store.address.absolute_addr();
+        let Some(canonical_address) = store.identity_source else {
+            continue;
+        };
+        let canonical = canonical_address.absolute_addr();
+        if alias == canonical
+            || !store.shape_is_aliasable
+            || !store.effects_are_removable
+            || blocked_aliases.contains(&alias)
+            || existing_aliases.contains_key(&alias)
+            || !is_unique_unread_alias(alias, &facts.accesses)
+            || facts
+                .accesses
+                .get(&canonical)
+                .is_some_and(|access| access.writes != 0)
+            || canonical_address.region != STABLE_REGION
+            || !storage_is_compatible(alias, canonical, metadata, four_state)
+        {
+            continue;
+        }
+        aliases.insert(alias, canonical);
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        // Build global def map
-        let mut defs: HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>> =
-            HashMap::default();
-        for block in eu.blocks.values() {
-            for inst in &block.instructions {
-                if let Some(d) = def_reg(inst) {
-                    defs.insert(d, inst.clone());
-                }
-            }
+    // Store(A, src), Store(B, src): RegisterIds are local to an EU, and the
+    // same block parameter can carry different values across loop iterations.
+    // Requiring the same block proves that both stores execute together with
+    // the same dynamic source value.  The removed side must additionally be
+    // effect-free and globally unread.
+    let mut duplicate_groups =
+        HashMap::<(usize, BlockId, RegisterId, usize), Vec<usize>>::default();
+    for (index, store) in facts.stores.iter().enumerate() {
+        let address = store.address.absolute_addr();
+        if store.shape_is_aliasable
+            && facts
+                .accesses
+                .get(&address)
+                .is_some_and(|access| access.writes == 1)
+            && !aliases.contains_key(&address)
+            && !existing_aliases.contains_key(&address)
+        {
+            duplicate_groups
+                .entry((store.eu_index, store.block, store.source, store.width))
+                .or_default()
+                .push(index);
         }
+    }
 
-        // Count Stores per absolute address to ensure single-writer
-        let mut store_counts: HashMap<AbsoluteAddr, usize> = HashMap::default();
-        for block in eu.blocks.values() {
-            for inst in &block.instructions {
-                if let SIRInstruction::Store(addr, _, _, _, _, _) = inst {
-                    *store_counts.entry(addr.absolute_addr()).or_default() += 1;
-                }
-            }
+    for members in duplicate_groups.values_mut() {
+        if members.len() < 2 {
+            continue;
         }
-        let mut load_counts: HashMap<AbsoluteAddr, usize> = HashMap::default();
-        for block in eu.blocks.values() {
-            for inst in &block.instructions {
-                if let SIRInstruction::Load(_, addr, _, _) = inst {
-                    *load_counts.entry(addr.absolute_addr()).or_default() += 1;
-                }
+        // Prefer an address that is read somewhere as the retained canonical;
+        // it could not be the removable side.  Address order makes the choice
+        // deterministic when the access facts are otherwise equal.
+        members.sort_unstable_by_key(|&index| {
+            let address = facts.stores[index].address.absolute_addr();
+            let unread = facts
+                .accesses
+                .get(&address)
+                .is_none_or(|access| access.reads == 0);
+            (unread, address)
+        });
+        let canonical = facts.stores[members[0]].address.absolute_addr();
+        for &index in members.iter().skip(1) {
+            let store = facts.stores[index];
+            let alias = store.address.absolute_addr();
+            if alias == canonical
+                || aliases.contains_key(&alias)
+                || !store.effects_are_removable
+                || blocked_aliases.contains(&alias)
+                || !is_unique_unread_alias(alias, &facts.accesses)
+                || !storage_is_compatible(alias, canonical, metadata, four_state)
+            {
+                continue;
             }
+            aliases.insert(alias, canonical);
         }
+    }
 
-        // Find aliasable Stores:
-        // 1. Identity Stores: Store(B, 0, W, reg) where reg = identity_copy(A)
-        // 2. Duplicate Stores: Store(A, 0, W, reg) and Store(B, 0, W, reg)
-        //    where both A and B are single-writer addresses. This captures
-        //    pure combinational instance glue that writes the same computed
-        //    value to both a child output and a parent-local wire.
-        let mut found_aliases: Vec<(RegionedAbsoluteAddr, RegionedAbsoluteAddr)> = Vec::new();
-        let mut duplicate_store_canonicals: HashMap<(RegisterId, usize), RegionedAbsoluteAddr> =
-            HashMap::default();
+    aliases
+}
+
+fn select_identity_commits(
+    facts: &GlobalIdentityFacts,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    selected_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) -> Vec<StoreCandidate> {
+    // A Commit must not participate in either an already-established alias or
+    // one selected above. In particular, the removable alias Store keeps its
+    // old form until MemoryLayout validates and removes it.
+    let alias_addresses = existing_aliases
+        .iter()
+        .chain(selected_aliases)
+        .flat_map(|(&alias, &canonical)| [alias, canonical])
+        .collect::<HashSet<_>>();
+
+    facts
+        .stores
+        .iter()
+        .copied()
+        .filter(|store| {
+            let Some(source) = store.identity_source else {
+                return false;
+            };
+            let source_absolute = source.absolute_addr();
+            let destination_absolute = store.address.absolute_addr();
+            store.shape_is_aliasable
+                && store.effects_are_removable
+                && source != store.address
+                && !alias_addresses.contains(&source_absolute)
+                && !alias_addresses.contains(&destination_absolute)
+                && facts
+                    .accesses
+                    .get(&source_absolute)
+                    .is_some_and(|access| access.writes == 0)
+                && store.commit_is_profitable
+                && commit_storage_is_compatible(
+                    source_absolute,
+                    destination_absolute,
+                    store.width,
+                    metadata,
+                    four_state,
+                )
+        })
+        .collect()
+}
+
+fn commit_storage_is_compatible(
+    source: AbsoluteAddr,
+    destination: AbsoluteAddr,
+    width: usize,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    four_state: bool,
+) -> bool {
+    metadata
+        .get(&source)
+        .zip(metadata.get(&destination))
+        .is_some_and(|(source_info, destination_info)| {
+            source_info.width == width
+                && destination_info.width == width
+                // The identity tracer also recognizes Shr/And chunk assembly.
+                // Four-state ALU operations normalize Z to X, whereas Commit
+                // copies the raw value and mask planes.  Until the proof
+                // distinguishes raw Concat/Load copies from normalized chunks,
+                // only two-state storage is eligible in four-state execution.
+                && (!four_state || (!source_info.is_4state && !destination_info.is_4state))
+        })
+}
+
+fn rewrite_identity_stores_as_commits(
+    units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
+    candidates: &[StoreCandidate],
+) {
+    for candidate in candidates {
+        let Some(instruction) = units
+            .get_mut(candidate.eu_index)
+            .and_then(|unit| unit.blocks.get_mut(&candidate.block))
+            .and_then(|block| block.instructions.get_mut(candidate.instruction_index))
+        else {
+            continue;
+        };
+        let SIRInstruction::Store(
+            destination,
+            SIROffset::Static(0),
+            width,
+            source_register,
+            triggers,
+            capture_sites,
+        ) = instruction
+        else {
+            continue;
+        };
+        let Some(source) = candidate.identity_source else {
+            continue;
+        };
+        if *destination != candidate.address
+            || *width != candidate.width
+            || *source_register != candidate.source
+            || !triggers.is_empty()
+            || !capture_sites.is_empty()
+        {
+            continue;
+        }
+        *instruction = SIRInstruction::Commit(
+            source,
+            *destination,
+            SIROffset::Static(0),
+            *width,
+            Vec::new(),
+        );
+    }
+}
+
+fn is_unique_unread_alias(
+    address: AbsoluteAddr,
+    accesses: &HashMap<AbsoluteAddr, AddressFacts>,
+) -> bool {
+    accesses
+        .get(&address)
+        .is_some_and(|access| access.writes == 1 && access.reads == 0)
+}
+
+fn storage_is_compatible(
+    alias: AbsoluteAddr,
+    canonical: AbsoluteAddr,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    four_state: bool,
+) -> bool {
+    metadata
+        .get(&alias)
+        .zip(metadata.get(&canonical))
+        .is_some_and(|(alias_info, canonical_info)| {
+            alias_info.width <= canonical_info.width
+                && (!four_state || (!alias_info.is_4state && !canonical_info.is_4state))
+        })
+}
+
+fn increment_saturating(value: &mut usize) {
+    *value = value.saturating_add(1);
+}
+
+fn ff_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
+    let mut addresses = HashSet::default();
+    let units = program
+        .eval_apply_ffs
+        .values()
+        .flat_map(|units| units.iter())
+        .chain(
+            program
+                .eval_only_ffs
+                .values()
+                .flat_map(|units| units.iter()),
+        )
+        .chain(program.apply_ffs.values().flat_map(|units| units.iter()));
+    for eu in units {
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                let SIRInstruction::Store(
-                    addr_b,
-                    SIROffset::Static(0),
-                    width,
-                    src_reg,
-                    _triggers,
-                    _,
-                ) = inst
+                match inst {
+                    SIRInstruction::Load(_, address, _, _)
+                    | SIRInstruction::Store(address, _, _, _, _, _) => {
+                        addresses.insert(address.absolute_addr());
+                    }
+                    SIRInstruction::Commit(source, destination, _, _, _) => {
+                        addresses.insert(source.absolute_addr());
+                        addresses.insert(destination.absolute_addr());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    addresses
+}
+
+/// Return the blocks that every terminating path from the entry executes.
+/// This is the ancestor chain of the nearest common dominator of all reachable
+/// Return/Error blocks.
+fn must_execute_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<BlockId> {
+    let blocks = reverse_postorder(eu);
+    if blocks.is_empty() {
+        return HashSet::default();
+    }
+    let indices = blocks
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, block)| (block, index))
+        .collect::<HashMap<_, _>>();
+    let mut predecessors = vec![Vec::new(); blocks.len()];
+    let mut terminals = Vec::new();
+    for (index, block_id) in blocks.iter().copied().enumerate() {
+        let Some(block) = eu.blocks.get(&block_id) else {
+            return HashSet::default();
+        };
+        let successors = terminator_successors(&block.terminator);
+        if successors.is_empty() {
+            terminals.push(index);
+        }
+        for successor in successors {
+            let Some(&successor_index) = indices.get(&successor) else {
+                return HashSet::default();
+            };
+            predecessors[successor_index].push(index);
+        }
+    }
+    let Some((&first_terminal, remaining_terminals)) = terminals.split_first() else {
+        return HashSet::default();
+    };
+
+    let mut immediate_dominator = vec![None; blocks.len()];
+    immediate_dominator[0] = Some(0);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in 1..blocks.len() {
+            let mut defined_predecessors = predecessors[block]
+                .iter()
+                .copied()
+                .filter(|&predecessor| immediate_dominator[predecessor].is_some());
+            let Some(mut new_dominator) = defined_predecessors.next() else {
+                continue;
+            };
+            for predecessor in defined_predecessors {
+                let Some(intersection) =
+                    intersect_dominators(predecessor, new_dominator, &immediate_dominator)
                 else {
-                    continue;
+                    return HashSet::default();
                 };
-                // Must be the only Store to this address
-                if store_counts
-                    .get(&addr_b.absolute_addr())
-                    .copied()
-                    .unwrap_or(0)
-                    != 1
-                {
-                    continue;
-                }
-                if let Some(addr_a) = trace_identity_source(*src_reg, *width, &defs) {
-                    if addr_a.absolute_addr() != addr_b.absolute_addr() {
-                        // If B is loaded elsewhere in the same evaluation,
-                        // aliasing B to A can rewrite a required snapshot of
-                        // B's previous value into a read of A.
-                        if load_counts
-                            .get(&addr_b.absolute_addr())
-                            .copied()
-                            .unwrap_or(0)
-                            > 0
-                        {
-                            continue;
-                        }
-                        // Store(B, Load(A)) is only an alias if A is stable for the
-                        // whole evaluation. In LRM-ordered always_comb code such as
-                        // `B = A; A = next;`, B must snapshot A's previous value,
-                        // so sharing storage with A would observe the later store.
-                        if store_counts
-                            .get(&addr_a.absolute_addr())
-                            .copied()
-                            .unwrap_or(0)
-                            > 0
-                        {
-                            continue;
-                        }
-                        found_aliases.push((*addr_b, addr_a));
-                        continue;
-                    }
-                }
-
-                let key = (*src_reg, *width);
-                if let Some(addr_a) = duplicate_store_canonicals.get(&key) {
-                    if addr_a.absolute_addr() != addr_b.absolute_addr() {
-                        found_aliases.push((*addr_b, *addr_a));
-                    }
-                } else {
-                    duplicate_store_canonicals.insert(key, *addr_b);
-                }
+                new_dominator = intersection;
+            }
+            if immediate_dominator[block] != Some(new_dominator) {
+                immediate_dominator[block] = Some(new_dominator);
+                changed = true;
             }
         }
+    }
 
-        if found_aliases.is_empty() {
-            return;
-        }
+    let mut common_dominator = first_terminal;
+    for &terminal in remaining_terminals {
+        let Some(intersection) =
+            intersect_dominators(common_dominator, terminal, &immediate_dominator)
+        else {
+            return HashSet::default();
+        };
+        common_dominator = intersection;
+    }
 
-        // Register alias candidates (Store removal happens later after layout validation)
-        let mut aliases = self.aliases.borrow_mut();
-        for (addr_b, addr_a) in &found_aliases {
-            aliases.insert(addr_b.absolute_addr(), addr_a.absolute_addr());
+    let mut result = HashSet::default();
+    loop {
+        result.insert(blocks[common_dominator]);
+        let Some(parent) = immediate_dominator[common_dominator] else {
+            return HashSet::default();
+        };
+        if parent == common_dominator {
+            break;
         }
+        common_dominator = parent;
+    }
+    result
+}
+
+fn intersect_dominators(
+    mut lhs: usize,
+    mut rhs: usize,
+    immediate_dominator: &[Option<usize>],
+) -> Option<usize> {
+    while lhs != rhs {
+        while lhs > rhs {
+            lhs = *immediate_dominator.get(lhs)?.as_ref()?;
+        }
+        while rhs > lhs {
+            rhs = *immediate_dominator.get(rhs)?.as_ref()?;
+        }
+    }
+    Some(lhs)
+}
+
+fn reverse_postorder(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<BlockId> {
+    if !eu.blocks.contains_key(&eu.entry_block_id) {
+        return Vec::new();
+    }
+    let mut seen = HashSet::default();
+    let mut postorder = Vec::new();
+    let mut stack = vec![(eu.entry_block_id, false)];
+    while let Some((block_id, expanded)) = stack.pop() {
+        if expanded {
+            postorder.push(block_id);
+            continue;
+        }
+        if !seen.insert(block_id) {
+            continue;
+        }
+        let Some(block) = eu.blocks.get(&block_id) else {
+            return Vec::new();
+        };
+        stack.push((block_id, true));
+        let mut successors = terminator_successors(&block.terminator);
+        successors.reverse();
+        stack.extend(successors.into_iter().map(|successor| (successor, false)));
+    }
+    postorder.reverse();
+    postorder
+}
+
+fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
+    match terminator {
+        SIRTerminator::Jump(target, _) => vec![*target],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0, false_block.0],
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
 
@@ -151,9 +816,13 @@ impl ExecutionUnitPass for IdentityStoreBypassPass {
 fn trace_identity_source(
     reg: RegisterId,
     expected_width: usize,
-    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &HashMap<RegisterId, RegisterType>,
 ) -> Option<RegionedAbsoluteAddr> {
-    let def = defs.get(&reg)?;
+    if expected_width == 0 || register_map.get(&reg)?.width() != expected_width {
+        return None;
+    }
+    let def = defs.get(&reg).copied()?;
 
     match def {
         // Direct Load: Store(B, Load(A)) where widths match
@@ -163,17 +832,19 @@ fn trace_identity_source(
 
         // Concat of sequential 1-bit Loads from same address (MSB first)
         SIRInstruction::Concat(_, args) if args.len() == expected_width => {
-            trace_concat_identity(args, expected_width, defs)
+            trace_concat_identity(args, expected_width, defs, register_map)
         }
 
         // Concat of multi-bit chunks that together form an identity copy.
         // Pattern: Load(A,W) → Shr+And per chunk → Concat → Store(B,W)
         // (generated by atomize_logic_paths for array port glue)
-        SIRInstruction::Concat(_, args) => trace_concat_chunks_identity(args, expected_width, defs),
+        SIRInstruction::Concat(_, args) => {
+            trace_concat_chunks_identity(args, expected_width, defs, register_map)
+        }
 
         // Look through identity/cast
         SIRInstruction::Unary(_, UnaryOp::Ident, inner) => {
-            trace_identity_source(*inner, expected_width, defs)
+            trace_identity_source(*inner, expected_width, defs, register_map)
         }
 
         _ => None,
@@ -190,18 +861,16 @@ fn trace_identity_source(
 fn trace_concat_chunks_identity(
     args: &[RegisterId],
     expected_width: usize,
-    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &HashMap<RegisterId, RegisterType>,
 ) -> Option<RegionedAbsoluteAddr> {
     let mut chunks: Vec<(RegionedAbsoluteAddr, usize, usize)> = Vec::new();
     for &arg in args {
-        chunks.push(trace_chunk_source(arg, defs)?);
+        chunks.push(trace_chunk_source(arg, defs, register_map)?);
     }
 
-    let source_addr = chunks[0].0;
-    if !chunks
-        .iter()
-        .all(|(a, _, _)| a.absolute_addr() == source_addr.absolute_addr())
-    {
+    let source_addr = chunks.first()?.0;
+    if !chunks.iter().all(|(address, _, _)| *address == source_addr) {
         return None;
     }
 
@@ -223,16 +892,19 @@ fn trace_concat_chunks_identity(
 /// Trace a single chunk: (value >> shift) & mask, where value = Load(A).
 fn trace_chunk_source(
     reg: RegisterId,
-    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &HashMap<RegisterId, RegisterType>,
 ) -> Option<(RegionedAbsoluteAddr, usize, usize)> {
-    let def = defs.get(&reg)?;
+    let def = defs.get(&reg).copied()?;
     match def {
-        SIRInstruction::Load(_, addr, SIROffset::Static(offset), width) => {
+        SIRInstruction::Load(_, addr, SIROffset::Static(offset), width)
+            if register_map.get(&reg)?.width() == *width =>
+        {
             Some((*addr, *offset, *width))
         }
         // (src >> shift) & mask  or  src & mask  (shift=0)
         SIRInstruction::Binary(_, lhs, BinaryOp::And, mask_reg) => {
-            let chunk_width = match defs.get(mask_reg)? {
+            let chunk_width = match defs.get(mask_reg).copied()? {
                 SIRInstruction::Imm(_, v) => {
                     if !v.mask.to_u64_digits().is_empty() {
                         return None;
@@ -250,19 +922,37 @@ fn trace_chunk_source(
                 }
                 _ => return None,
             };
+            if register_map.get(&reg)?.width() != chunk_width {
+                return None;
+            }
 
-            match defs.get(lhs)? {
-                SIRInstruction::Load(_, addr, SIROffset::Static(0), _) => {
-                    Some((*addr, 0, chunk_width))
+            match defs.get(lhs).copied()? {
+                SIRInstruction::Load(load, addr, SIROffset::Static(load_offset), load_width)
+                    if register_map.get(load)?.width() == *load_width
+                        && *load_width >= chunk_width =>
+                {
+                    Some((*addr, *load_offset, chunk_width))
                 }
                 SIRInstruction::Binary(_, src, BinaryOp::Shr, shift_reg) => {
-                    let shift = match defs.get(shift_reg)? {
+                    if register_map.get(lhs)?.width() < chunk_width {
+                        return None;
+                    }
+                    let shift = match defs.get(shift_reg).copied()? {
                         SIRInstruction::Imm(_, v) => sir_value_to_u64(v)? as usize,
                         _ => return None,
                     };
-                    match defs.get(src)? {
-                        SIRInstruction::Load(_, addr, SIROffset::Static(0), _) => {
-                            Some((*addr, shift, chunk_width))
+                    match defs.get(src).copied()? {
+                        SIRInstruction::Load(
+                            load,
+                            addr,
+                            SIROffset::Static(load_offset),
+                            load_width,
+                        ) if register_map.get(load)?.width() == *load_width
+                            && shift
+                                .checked_add(chunk_width)
+                                .is_some_and(|end| end <= *load_width) =>
+                        {
+                            Some((*addr, load_offset.checked_add(shift)?, chunk_width))
                         }
                         _ => None,
                     }
@@ -279,13 +969,17 @@ fn trace_chunk_source(
 fn trace_concat_identity(
     args: &[RegisterId],
     width: usize,
-    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    register_map: &HashMap<RegisterId, RegisterType>,
 ) -> Option<RegionedAbsoluteAddr> {
     let mut source_addr: Option<RegionedAbsoluteAddr> = None;
 
     for (i, &arg) in args.iter().enumerate() {
+        if register_map.get(&arg)?.width() != 1 {
+            return None;
+        }
         let expected_bit = width - 1 - i; // MSB first in Concat
-        let arg_def = defs.get(&arg)?;
+        let arg_def = defs.get(&arg).copied()?;
 
         let (addr, bit) = match arg_def {
             // Direct 1-bit Load
@@ -293,7 +987,7 @@ fn trace_concat_identity(
 
             // Bit extract: (Load(A) >> K) & 1
             SIRInstruction::Binary(_, shifted, BinaryOp::And, mask_reg) => {
-                let mask_def = defs.get(mask_reg)?;
+                let mask_def = defs.get(mask_reg).copied()?;
                 let SIRInstruction::Imm(_, mask_val) = mask_def else {
                     return None;
                 };
@@ -301,22 +995,32 @@ fn trace_concat_identity(
                     return None;
                 }
 
-                match defs.get(shifted)? {
+                match defs.get(shifted).copied()? {
                     SIRInstruction::Binary(_, src, BinaryOp::Shr, shift_reg) => {
-                        let SIRInstruction::Imm(_, sv) = defs.get(shift_reg)? else {
+                        if register_map.get(shifted)?.width() < 1 {
+                            return None;
+                        }
+                        let SIRInstruction::Imm(_, sv) = defs.get(shift_reg).copied()? else {
                             return None;
                         };
                         let shift = sir_value_to_u64(sv)? as usize;
                         // src must be a Load
-                        let SIRInstruction::Load(_, addr, SIROffset::Static(0), _) =
-                            defs.get(src)?
+                        let SIRInstruction::Load(load, addr, SIROffset::Static(0), load_width) =
+                            defs.get(src).copied()?
                         else {
                             return None;
                         };
+                        if register_map.get(load)?.width() != *load_width || shift >= *load_width {
+                            return None;
+                        }
                         (*addr, shift)
                     }
                     // No shift: bit 0
-                    SIRInstruction::Load(_, addr, SIROffset::Static(0), _) => (*addr, 0),
+                    SIRInstruction::Load(load, addr, SIROffset::Static(0), load_width)
+                        if register_map.get(load)?.width() == *load_width && *load_width >= 1 =>
+                    {
+                        (*addr, 0)
+                    }
                     _ => return None,
                 }
             }
@@ -329,11 +1033,1067 @@ fn trace_concat_identity(
         }
 
         match &source_addr {
-            Some(a) if a.absolute_addr() != addr.absolute_addr() => return None,
+            Some(a) if *a != addr => return None,
             None => source_addr = Some(addr),
             _ => {}
         }
     }
 
     source_addr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veryl_analyzer::ir::VarId;
+
+    fn var_id(index: usize) -> VarId {
+        let mut id = VarId::default();
+        for _ in 0..index {
+            id.inc();
+        }
+        id
+    }
+
+    fn address(index: usize) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region: STABLE_REGION,
+            instance_id: InstanceId(0),
+            var_id: var_id(index),
+        }
+    }
+
+    fn register_map(registers: &[(usize, usize)]) -> HashMap<RegisterId, RegisterType> {
+        registers
+            .iter()
+            .map(|&(register, width)| {
+                (
+                    RegisterId(register),
+                    RegisterType::Bit {
+                        width,
+                        signed: false,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn single_block_unit(
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        registers: &[(usize, usize)],
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: register_map(registers),
+        };
+        assert!(unit.verify_result().is_ok());
+        unit
+    }
+
+    fn load(
+        register: usize,
+        address: RegionedAbsoluteAddr,
+        width: usize,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Load(RegisterId(register), address, SIROffset::Static(0), width)
+    }
+
+    fn load_at(
+        register: usize,
+        address: RegionedAbsoluteAddr,
+        offset: usize,
+        width: usize,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Load(
+            RegisterId(register),
+            address,
+            SIROffset::Static(offset),
+            width,
+        )
+    }
+
+    fn store(
+        address: RegionedAbsoluteAddr,
+        register: usize,
+        width: usize,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            address,
+            SIROffset::Static(0),
+            width,
+            RegisterId(register),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn metadata(
+        entries: &[(RegionedAbsoluteAddr, usize)],
+    ) -> HashMap<AbsoluteAddr, AddressMetadata> {
+        entries
+            .iter()
+            .map(|&(address, width)| {
+                (
+                    address.absolute_addr(),
+                    AddressMetadata {
+                        width,
+                        is_4state: false,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn metadata_with_states(
+        entries: &[(RegionedAbsoluteAddr, usize, bool)],
+    ) -> HashMap<AbsoluteAddr, AddressMetadata> {
+        entries
+            .iter()
+            .map(|&(address, width, is_4state)| {
+                (
+                    address.absolute_addr(),
+                    AddressMetadata { width, is_4state },
+                )
+            })
+            .collect()
+    }
+
+    fn aliases(
+        units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+        metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+        analyze_eval_comb_aliases(
+            units,
+            metadata,
+            &HashSet::default(),
+            &HashMap::default(),
+            false,
+        )
+    }
+
+    fn optimize_identity_stores(
+        units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
+        metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+        existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+        four_state: bool,
+    ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+        optimize_eval_comb_identity_stores(
+            units,
+            metadata,
+            &HashSet::default(),
+            existing_aliases,
+            four_state,
+        )
+    }
+
+    fn is_commit_from_to(
+        instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+        source: RegionedAbsoluteAddr,
+        destination: RegionedAbsoluteAddr,
+        width: usize,
+    ) -> bool {
+        matches!(
+            instruction,
+            SIRInstruction::Commit(
+                actual_source,
+                actual_destination,
+                SIROffset::Static(0),
+                actual_width,
+                triggers,
+            ) if *actual_source == source
+                && *actual_destination == destination
+                && *actual_width == width
+                && triggers.is_empty()
+        )
+    }
+
+    /// Shape emitted for Heliodor's 32 x 3-bit store-funct3 array: two wide
+    /// overlapping source loads, one direct boundary chunk, and 30 shifted
+    /// chunks packed by a 32-input Concat.
+    fn heliodor_funct3_identity_unit(
+        source: RegionedAbsoluteAddr,
+        destination: RegionedAbsoluteAddr,
+        second_destination: Option<RegionedAbsoluteAddr>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut instructions = vec![
+            load_at(0, source, 0, 64),
+            load_at(1, source, 63, 3),
+            load_at(2, source, 64, 64),
+            SIRInstruction::Imm(RegisterId(3), SIRValue::new(7u8)),
+        ];
+        let mut registers = vec![(0, 64), (1, 3), (2, 64), (3, 3)];
+        let mut next_register = 4usize;
+        let mut chunks_low_to_high = Vec::new();
+
+        for source_offset in (0..96).step_by(3) {
+            if source_offset == 63 {
+                chunks_low_to_high.push(RegisterId(1));
+                continue;
+            }
+
+            let (load_register, load_offset) = if source_offset < 63 {
+                (RegisterId(0), 0)
+            } else {
+                (RegisterId(2), 64)
+            };
+            let shift = source_offset - load_offset;
+            let shifted = if shift == 0 {
+                load_register
+            } else {
+                let shift_register = RegisterId(next_register);
+                next_register += 1;
+                instructions.push(SIRInstruction::Imm(
+                    shift_register,
+                    SIRValue::new(shift as u64),
+                ));
+                registers.push((shift_register.0, 7));
+
+                let shifted = RegisterId(next_register);
+                next_register += 1;
+                instructions.push(SIRInstruction::Binary(
+                    shifted,
+                    load_register,
+                    BinaryOp::Shr,
+                    shift_register,
+                ));
+                registers.push((shifted.0, 64));
+                shifted
+            };
+
+            let chunk = RegisterId(next_register);
+            next_register += 1;
+            instructions.push(SIRInstruction::Binary(
+                chunk,
+                shifted,
+                BinaryOp::And,
+                RegisterId(3),
+            ));
+            registers.push((chunk.0, 3));
+            chunks_low_to_high.push(chunk);
+        }
+
+        let packed = RegisterId(next_register);
+        instructions.push(SIRInstruction::Concat(
+            packed,
+            chunks_low_to_high.into_iter().rev().collect(),
+        ));
+        registers.push((packed.0, 96));
+        instructions.push(store(destination, packed.0, 96));
+        if let Some(second_destination) = second_destination {
+            instructions.push(store(second_destination, packed.0, 96));
+        }
+
+        single_block_unit(instructions, &registers)
+    }
+
+    #[test]
+    fn identity_store_in_common_merge_block_is_must_execute() {
+        let source = address(0);
+        let destination = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                load(1, source, 8),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let true_block = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+        };
+        let false_block = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+        };
+        let merge = BasicBlock {
+            id: BlockId(3),
+            params: Vec::new(),
+            instructions: vec![store(destination, 1, 8)],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, true_block, false_block, merge]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 1), (1, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert_eq!(
+            aliases(&[unit], &metadata(&[(source, 8), (destination, 8)]))
+                .get(&destination.absolute_addr()),
+            Some(&source.absolute_addr())
+        );
+    }
+
+    #[test]
+    fn conditional_identity_store_is_not_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                load(1, source, 8),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let true_block = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![store(destination, 1, 8)],
+            terminator: SIRTerminator::Return,
+        };
+        let false_block = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, true_block, false_block]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 1), (1, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert!(aliases(&[unit], &metadata(&[(source, 8), (destination, 8)])).is_empty());
+    }
+
+    #[test]
+    fn second_unit_load_blocks_identity_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+
+        assert!(
+            aliases(
+                &[writer, reader],
+                &metadata(&[(source, 8), (destination, 8)])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn wide_read_destination_uses_commit_and_post_bypass_dce_removes_the_value_dag() {
+        use super::super::pass_loop_idiom::LoopIdiomPass;
+        use super::super::pass_manager::ExecutionUnitPass;
+        use crate::optimizer::PassOptions;
+
+        let source = address(0);
+        let destination = address(1);
+        let mut instructions = Vec::new();
+        let mut registers = Vec::new();
+        for register in 0..32 {
+            instructions.push(load_at(register, source, (31 - register) * 64, 64));
+            registers.push((register, 64));
+        }
+        instructions.push(SIRInstruction::Concat(
+            RegisterId(32),
+            (0..32).map(RegisterId).collect(),
+        ));
+        instructions.push(store(destination, 32, 2048));
+        registers.push((32, 2048));
+        let writer = single_block_unit(instructions, &registers);
+        let reader = single_block_unit(vec![load(0, destination, 2048)], &[(0, 2048)]);
+        let mut units = vec![writer, reader];
+
+        let selected = optimize_identity_stores(
+            &mut units,
+            &metadata(&[(source, 2048), (destination, 2048)]),
+            &HashMap::default(),
+            false,
+        );
+        assert!(selected.is_empty(), "a read destination cannot be aliased");
+        assert!(is_commit_from_to(
+            units[0].blocks[&BlockId(0)].instructions.last().unwrap(),
+            source,
+            destination,
+            2048,
+        ));
+
+        // This is the existing post-IdentityStoreBypass sweep in the program
+        // pipeline. Since Commit reads memory directly, the old Load/Concat
+        // register DAG has no remaining use and must disappear.
+        LoopIdiomPass.run(&mut units[0], &PassOptions::default());
+        let instructions = &units[0].blocks[&BlockId(0)].instructions;
+        assert_eq!(instructions.len(), 1);
+        assert!(is_commit_from_to(
+            &instructions[0],
+            source,
+            destination,
+            2048,
+        ));
+        units[0].verify_result().unwrap();
+    }
+
+    #[test]
+    fn direct_small_identity_copy_is_not_replaced_by_more_expensive_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn heliodor_96_bit_chunk_assembly_remains_profitable_as_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = heliodor_funct3_identity_unit(source, destination, None);
+        let reader = single_block_unit(vec![load(0, destination, 96)], &[(0, 96)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 96), (destination, 96)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(is_commit_from_to(
+            units[0].blocks[&BlockId(0)].instructions.last().unwrap(),
+            source,
+            destination,
+            96,
+        ));
+    }
+
+    #[test]
+    fn shared_96_bit_identity_dag_is_not_charged_as_removable() {
+        let source = address(0);
+        let first_destination = address(1);
+        let second_destination = address(2);
+        let writer =
+            heliodor_funct3_identity_unit(source, first_destination, Some(second_destination));
+        let first_reader = single_block_unit(vec![load(0, first_destination, 96)], &[(0, 96)]);
+        let second_reader = single_block_unit(vec![load(0, second_destination, 96)], &[(0, 96)]);
+        let mut units = vec![writer, first_reader, second_reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[
+                    (source, 96),
+                    (first_destination, 96),
+                    (second_destination, 96),
+                ]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        let instructions = &units[0].blocks[&BlockId(0)].instructions;
+        assert!(matches!(
+            instructions[instructions.len() - 2],
+            SIRInstruction::Store(..)
+        ));
+        assert!(matches!(
+            instructions[instructions.len() - 1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn removable_cost_counts_reconvergent_definition_once() {
+        let source = address(0);
+        let destination = address(1);
+        let unit = single_block_unit(
+            vec![
+                load(0, source, 8),
+                SIRInstruction::Unary(RegisterId(1), UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Unary(RegisterId(2), UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::And, RegisterId(2)),
+                store(destination, 3, 8),
+            ],
+            &[(0, 8), (1, 8), (2, 8), (3, 8)],
+        );
+        let defs = unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| def_reg(instruction).map(|dst| (dst, instruction)))
+            .collect::<HashMap<_, _>>();
+        let use_counts = register_use_counts(&unit);
+        let expected = unit.blocks[&BlockId(0)].instructions[..4]
+            .iter()
+            .map(|instruction| estimate_clif_cost(instruction, &unit.register_map, false))
+            .fold(0usize, usize::saturating_add);
+
+        assert_eq!(
+            removable_definition_cost_after_removing_use(
+                RegisterId(3),
+                &defs,
+                &use_counts,
+                &unit.register_map,
+                false,
+            ),
+            expected,
+        );
+    }
+
+    #[test]
+    fn source_written_anywhere_rejects_identity_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let unit = single_block_unit(
+            vec![
+                load(0, source, 8),
+                store(destination, 0, 8),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(7u8)),
+                store(source, 1, 8),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+        let mut units = vec![unit];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn four_state_metadata_mismatch_rejects_identity_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let mut units = vec![writer];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata_with_states(&[(source, 8, true), (destination, 8, false)]),
+                &HashMap::default(),
+                true,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn four_state_storage_rejects_identity_commit_even_when_both_sides_match() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata_with_states(&[(source, 8, true), (destination, 8, true)]),
+                &HashMap::default(),
+                true,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn source_width_mismatch_rejects_identity_commit_in_two_state_mode() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 16), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn malformed_chunk_result_width_rejects_identity_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![
+                load(0, source, 8),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(4u8)),
+                SIRInstruction::Binary(RegisterId(2), RegisterId(0), BinaryOp::Shr, RegisterId(1)),
+                SIRInstruction::Imm(RegisterId(3), SIRValue::new(0xfu8)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(2), BinaryOp::And, RegisterId(3)),
+                SIRInstruction::Imm(RegisterId(5), SIRValue::new(0xfu8)),
+                SIRInstruction::Binary(RegisterId(6), RegisterId(0), BinaryOp::And, RegisterId(5)),
+                SIRInstruction::Concat(RegisterId(7), vec![RegisterId(4), RegisterId(6)]),
+                store(destination, 7, 8),
+            ],
+            &[
+                (0, 8),
+                (1, 3),
+                (2, 8),
+                (3, 4),
+                (4, 2),
+                (5, 4),
+                (6, 6),
+                (7, 8),
+            ],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions.last(),
+            Some(SIRInstruction::Store(..))
+        ));
+    }
+
+    #[test]
+    fn truncated_shift_result_rejects_identity_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![
+                load(0, source, 8),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(4u8)),
+                SIRInstruction::Binary(RegisterId(2), RegisterId(0), BinaryOp::Shr, RegisterId(1)),
+                SIRInstruction::Imm(RegisterId(3), SIRValue::new(0xfu8)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(2), BinaryOp::And, RegisterId(3)),
+                SIRInstruction::Imm(RegisterId(5), SIRValue::new(0xfu8)),
+                SIRInstruction::Binary(RegisterId(6), RegisterId(0), BinaryOp::And, RegisterId(5)),
+                SIRInstruction::Concat(RegisterId(7), vec![RegisterId(4), RegisterId(6)]),
+                store(destination, 7, 8),
+            ],
+            &[
+                (0, 8),
+                (1, 3),
+                (2, 2),
+                (3, 4),
+                (4, 4),
+                (5, 4),
+                (6, 4),
+                (7, 8),
+            ],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions.last(),
+            Some(SIRInstruction::Store(..))
+        ));
+    }
+
+    #[test]
+    fn existing_alias_involvement_rejects_identity_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let unrelated = address(2);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let reader = single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]);
+        let mut units = vec![writer, reader];
+        let existing_aliases = [(unrelated.absolute_addr(), source.absolute_addr())]
+            .into_iter()
+            .collect();
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8), (unrelated, 8)]),
+                &existing_aliases,
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn conditional_identity_store_is_not_replaced_by_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                load(1, source, 8),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let true_block = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![store(destination, 1, 8)],
+            terminator: SIRTerminator::Return,
+        };
+        let false_block = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, true_block, false_block]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 1), (1, 8)]),
+        };
+        unit.verify_result().unwrap();
+        let mut units = vec![unit];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(1)].instructions[0],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn effectful_identity_store_is_not_replaced_by_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let mut effectful_store = store(destination, 0, 8);
+        let SIRInstruction::Store(_, _, _, _, triggers, _) = &mut effectful_store else {
+            unreachable!()
+        };
+        triggers.push(TriggerIdWithKind {
+            kind: DomainKind::ClockPosedge,
+            id: 0,
+        });
+        let unit = single_block_unit(vec![load(0, source, 8), effectful_store], &[(0, 8)]);
+        let mut units = vec![unit];
+
+        assert!(
+            optimize_identity_stores(
+                &mut units,
+                &metadata(&[(source, 8), (destination, 8)]),
+                &HashMap::default(),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn selected_alias_keeps_the_store_instead_of_replacing_it_with_commit() {
+        let source = address(0);
+        let destination = address(1);
+        let writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let mut units = vec![writer];
+
+        let selected = optimize_identity_stores(
+            &mut units,
+            &metadata(&[(source, 8), (destination, 8)]),
+            &HashMap::default(),
+            false,
+        );
+        assert_eq!(
+            selected.get(&destination.absolute_addr()),
+            Some(&source.absolute_addr())
+        );
+        assert!(matches!(
+            units[0].blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(..)
+        ));
+    }
+
+    #[test]
+    fn second_unit_write_blocks_global_unique_store_proof() {
+        let source = address(0);
+        let destination = address(1);
+        let identity_writer = single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        );
+        let other_writer = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(7u8)),
+                store(destination, 0, 8),
+            ],
+            &[(0, 8)],
+        );
+
+        assert!(
+            aliases(
+                &[identity_writer, other_writer],
+                &metadata(&[(source, 8), (destination, 8)])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn same_register_number_in_different_units_is_not_a_duplicate_value() {
+        let lhs = address(0);
+        let rhs = address(1);
+        let lhs_writer = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                store(lhs, 0, 8),
+            ],
+            &[(0, 8)],
+        );
+        let rhs_writer = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(9u8)),
+                store(rhs, 0, 8),
+            ],
+            &[(0, 8)],
+        );
+
+        assert!(aliases(&[lhs_writer, rhs_writer], &metadata(&[(lhs, 8), (rhs, 8)])).is_empty());
+    }
+
+    #[test]
+    fn duplicate_stores_in_different_blocks_are_not_assumed_lockstep() {
+        let lhs = address(0);
+        let rhs = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                store(lhs, 0, 8),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let next = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![store(rhs, 0, 8)],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, next]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert!(aliases(&[unit], &metadata(&[(lhs, 8), (rhs, 8)])).is_empty());
+    }
+
+    #[test]
+    fn unconditional_duplicate_stores_alias_only_the_globally_unread_side() {
+        let lhs = address(0);
+        let rhs = address(1);
+        let writer = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                store(lhs, 0, 8),
+                store(rhs, 0, 8),
+            ],
+            &[(0, 8)],
+        );
+        let rhs_reader = single_block_unit(vec![load(0, rhs, 8)], &[(0, 8)]);
+
+        let result = aliases(&[writer, rhs_reader], &metadata(&[(lhs, 8), (rhs, 8)]));
+        assert_eq!(result.get(&lhs.absolute_addr()), Some(&rhs.absolute_addr()));
+        assert!(!result.contains_key(&rhs.absolute_addr()));
+    }
+
+    #[test]
+    fn conditional_duplicate_stores_are_not_aliased() {
+        let lhs = address(0);
+        let rhs = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let true_block = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(5u8)),
+                store(lhs, 1, 8),
+                store(rhs, 1, 8),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let false_block = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, true_block, false_block]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 1), (1, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert!(aliases(&[unit], &metadata(&[(lhs, 8), (rhs, 8)])).is_empty());
+    }
+
+    #[test]
+    fn partial_and_capture_enabled_stores_are_not_removable_aliases() {
+        let source = address(0);
+        let partial_destination = address(1);
+        let captured_destination = address(2);
+        let partial = single_block_unit(
+            vec![load(0, source, 4), store(partial_destination, 0, 4)],
+            &[(0, 4)],
+        );
+        let captured = single_block_unit(
+            vec![
+                load(0, source, 8),
+                store(captured_destination, 0, 8),
+                SIRInstruction::CombCaptureEnableIfChanged {
+                    old: RegisterId(0),
+                    new: RegisterId(0),
+                    sites: vec![1],
+                },
+            ],
+            &[(0, 8)],
+        );
+
+        assert!(
+            aliases(
+                &[partial, captured],
+                &metadata(&[
+                    (source, 8),
+                    (partial_destination, 8),
+                    (captured_destination, 8),
+                ])
+            )
+            .is_empty()
+        );
+    }
 }

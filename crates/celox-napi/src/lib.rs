@@ -706,7 +706,7 @@ static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Pack OptimizeOptions into a u32 bitmask for cache key hashing.
-/// Lower 18 bits: per-pass enabled flags. Upper bits: OptLevel.
+/// Lower 20 bits: per-pass enabled flags. Upper bits: OptLevel.
 fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u32 {
     let mut flags: u32 = 0;
     for (i, &pass) in celox::SirPass::ALL.iter().enumerate() {

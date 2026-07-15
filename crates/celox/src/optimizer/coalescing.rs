@@ -1,25 +1,34 @@
 use crate::ir::*;
 use crate::optimizer::{PassOptions, ProgramPass, SirPass};
+use std::fmt::Write as _;
 
 mod block_opt;
 pub(crate) mod commit_ops;
 pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
+mod pass_branchify_mux;
 mod pass_coalesce_stores;
 mod pass_commit_sinking;
 mod pass_concat_folding;
+mod pass_control_flow_simplify;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
+#[cfg(target_arch = "x86_64")]
+mod pass_global_store_load_forwarding;
+mod pass_guarded_region_sinking;
 mod pass_gvn;
 mod pass_hoist_common_branch_loads;
 mod pass_identity_store_bypass;
 mod pass_inline_commit_forwarding;
+mod pass_loop_idiom;
 mod pass_manager;
 mod pass_optimize_blocks;
+mod pass_packed_scatter_store;
 mod pass_partial_forward;
 mod pass_reschedule;
+mod pass_sparse_case_dispatch;
 mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_store_load_forwarding;
@@ -30,18 +39,61 @@ mod shared;
 
 pub use pass_tail_call_split::TailCallChunk;
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn promote_eval_apply_working_round_trips(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> bool {
+    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    pass_vectorize_concat::remove_dead_definitions(eu);
+}
+
+pub(crate) fn optimize_rooted_comb_memory(
+    program: &mut Program,
+    externally_live: &crate::HashSet<AbsoluteAddr>,
+    four_state: bool,
+    enable_tail_split: bool,
+) {
+    pass_dead_store_elimination::eliminate_dead_stores(program, externally_live);
+    for eu in &mut program.eval_comb {
+        pass_vectorize_concat::remove_dead_definitions(eu);
+    }
+
+    // The old plan refers to the pre-DSE EUs. Rebuild it from the
+    // transformed function instead of compiling stale chunks.
+    program.eval_comb_plan = None;
+    if enable_tail_split {
+        if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
+        {
+            program.eval_comb_plan = Some(EvalCombPlan::TailCallChunks(chunks));
+        } else if let Some(plan) =
+            pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
+        {
+            program.eval_comb_plan = Some(EvalCombPlan::MemorySpilled(plan));
+        }
+    }
+}
+
 use pass_bit_extract_peephole::BitExtractPeepholePass;
+use pass_branchify_mux::BranchifyMuxPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
+use pass_control_flow_simplify::ControlFlowSimplifyPass;
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
+use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
-use pass_inline_commit_forwarding::InlineCommitForwardingPass;
+use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::ExecutionUnitPassManager;
 use pass_optimize_blocks::OptimizeBlocksPass;
+use pass_packed_scatter_store::PackedScatterStorePass;
 use pass_partial_forward::PartialForwardPass;
 use pass_reschedule::ReschedulePass;
+use pass_sparse_case_dispatch::SparseCaseDispatchPass;
 use pass_split_coalesced_stores::SplitCoalescedStoresPass;
 use pass_split_wide_commits::SplitWideCommitsPass;
 use pass_store_load_forwarding::StoreLoadForwardingPass;
@@ -65,6 +117,257 @@ impl ProgramPass for CoalescingPass {
     }
 }
 
+fn optimize_unit_groups_cached(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    passes: &ExecutionUnitPassManager,
+    options: &PassOptions,
+) {
+    let mut cache: crate::HashMap<String, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
+        crate::HashMap::default();
+    for units in groups.values_mut() {
+        let key = unit_group_key(units);
+        if let Some(cached) = cache.get(&key) {
+            *units = cached.clone();
+            continue;
+        }
+        for eu in units.iter_mut() {
+            passes.run(eu, options);
+        }
+        cache.insert(key, units.clone());
+    }
+}
+
+fn unit_group_key(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> String {
+    let mut key = String::new();
+    for unit in units {
+        let _ = write!(&mut key, "{unit}");
+    }
+    key
+}
+
+fn optimize_unified_commit_groups(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    sink: bool,
+    forward: bool,
+) {
+    if !sink && !forward {
+        return;
+    }
+    for units in groups.values_mut() {
+        if units.is_empty() {
+            continue;
+        }
+        // Hazard analysis must see the complete event order, not an individual
+        // always_ff/module EU.  The actual rewrites remain local to each EU.
+        let (merged, _) = crate::ir::merge_sir_eus(units);
+        let hazards = commit_ops::direct_stable_store_hazards(&merged);
+        if sink {
+            pass_commit_sinking::run_complete_event(units, &hazards);
+        }
+        if forward {
+            pass_inline_commit_forwarding::run_complete_event(units, &hazards);
+        }
+    }
+}
+
+fn move_sparse_commits_to_event_tail(
+    groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+) {
+    for units in groups.values_mut() {
+        if units.len() <= 1 {
+            continue;
+        }
+        let mut commits = Vec::new();
+        for unit in units.iter_mut() {
+            for block in unit.blocks.values_mut() {
+                block.instructions.retain(|inst| {
+                    if matches!(
+                        inst,
+                        SIRInstruction::Commit(src, dst, ..)
+                            if src.region == SPARSE_WORKING_REGION
+                                && dst.region == STABLE_REGION
+                    ) {
+                        commits.push(inst.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        if commits.is_empty() {
+            continue;
+        }
+        let mut blocks = crate::HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: commits,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        units.push(ExecutionUnit {
+            blocks,
+            entry_block_id: BlockId(0),
+            register_map: crate::HashMap::default(),
+        });
+    }
+}
+
+fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
+    let mut rows = Vec::new();
+
+    for (eu_idx, eu) in units.iter().enumerate() {
+        for block in eu.blocks.values() {
+            let mut defs: crate::HashMap<RegisterId, usize> = crate::HashMap::default();
+            for (idx, inst) in block.instructions.iter().enumerate() {
+                if let Some(dst) = shared::def_reg(inst) {
+                    defs.insert(dst, idx);
+                }
+            }
+
+            let mut mux_else_children = crate::HashSet::default();
+            for inst in &block.instructions {
+                if let SIRInstruction::Mux(_, _, _, else_val) = inst
+                    && matches!(
+                        defs.get(else_val).map(|&i| &block.instructions[i]),
+                        Some(SIRInstruction::Mux(..))
+                    )
+                {
+                    mux_else_children.insert(*else_val);
+                }
+            }
+
+            for inst in &block.instructions {
+                let SIRInstruction::Mux(dst, ..) = inst else {
+                    continue;
+                };
+                if mux_else_children.contains(dst) {
+                    continue;
+                }
+
+                let mut len = 0usize;
+                let mut direct_case = 0usize;
+                let mut acc_guarded_priority = 0usize;
+                let mut cursor = Some(*dst);
+                while let Some(reg) = cursor {
+                    let Some(&idx) = defs.get(&reg) else {
+                        break;
+                    };
+                    let SIRInstruction::Mux(_, cond, _, else_val) = &block.instructions[idx] else {
+                        break;
+                    };
+                    len += 1;
+                    if is_direct_case_eq(*cond, &defs, &block.instructions) {
+                        direct_case += 1;
+                    }
+                    if is_acc_guarded_priority_cond(*cond, *else_val, &defs, &block.instructions) {
+                        acc_guarded_priority += 1;
+                    }
+                    cursor = match defs.get(else_val).map(|&i| &block.instructions[i]) {
+                        Some(SIRInstruction::Mux(..)) => Some(*else_val),
+                        _ => None,
+                    };
+                }
+
+                if len >= 4 {
+                    rows.push((
+                        len,
+                        direct_case,
+                        acc_guarded_priority,
+                        eu_idx,
+                        block.id,
+                        *dst,
+                    ));
+                }
+            }
+        }
+    }
+
+    rows.sort_by(|a, b| b.cmp(a));
+    for (rank, (len, direct_case, acc_guarded_priority, eu_idx, block_id, root)) in
+        rows.into_iter().take(20).enumerate()
+    {
+        eprintln!(
+            "[mux-chain-stats] rank={} eu={} block={} root=r{} len={} direct_case={} acc_guarded_priority={}",
+            rank + 1,
+            eu_idx,
+            block_id.0,
+            root.0,
+            len,
+            direct_case,
+            acc_guarded_priority
+        );
+    }
+}
+
+fn is_direct_case_eq(
+    cond: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    let Some(&idx) = defs.get(&cond) else {
+        return false;
+    };
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs) => {
+            is_zero_mask_imm(*lhs, defs, instructions) || is_zero_mask_imm(*rhs, defs, instructions)
+        }
+        _ => false,
+    }
+}
+
+fn is_acc_guarded_priority_cond(
+    cond: RegisterId,
+    prev_acc: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    let Some(&idx) = defs.get(&cond) else {
+        return false;
+    };
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd, rhs) => {
+            is_acc_eq_imm(*lhs, prev_acc, defs, instructions)
+                || is_acc_eq_imm(*rhs, prev_acc, defs, instructions)
+        }
+        _ => false,
+    }
+}
+
+fn is_acc_eq_imm(
+    reg: RegisterId,
+    prev_acc: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    let Some(&idx) = defs.get(&reg) else {
+        return false;
+    };
+    match &instructions[idx] {
+        SIRInstruction::Binary(_, lhs, BinaryOp::Eq, rhs) => {
+            (*lhs == prev_acc && is_zero_mask_imm(*rhs, defs, instructions))
+                || (*rhs == prev_acc && is_zero_mask_imm(*lhs, defs, instructions))
+        }
+        _ => false,
+    }
+}
+
+fn is_zero_mask_imm(
+    reg: RegisterId,
+    defs: &crate::HashMap<RegisterId, usize>,
+    instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
+) -> bool {
+    defs.get(&reg).is_some_and(|&idx| {
+        matches!(
+            &instructions[idx],
+            SIRInstruction::Imm(_, value) if value.mask == num_bigint::BigUint::ZERO
+        )
+    })
+}
+
 fn optimize_with_options(
     program: &mut Program,
     max_inflight_loads: usize,
@@ -84,6 +387,11 @@ fn optimize_with_options(
     // Helper closure to check pass enablement.
     let on = |pass: SirPass| opt.is_enabled(pass);
 
+    // Sparse next-state data must stay invisible until every evaluator for the
+    // event has sampled STABLE.  Keep the commit in the same unified generated
+    // function, but place it in a final EU after all evaluator EUs.
+    move_sparse_commits_to_event_tail(&mut program.eval_apply_ffs);
+
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
     let mut ff_passes = ExecutionUnitPassManager::new();
@@ -92,6 +400,9 @@ fn optimize_with_options(
     // Per-EU elimination is NOT safe without dependency analysis.
     if on(SirPass::StoreLoadForwarding) {
         ff_passes.add_pass(StoreLoadForwardingPass);
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        ff_passes.add_pass(ControlFlowSimplifyPass);
     }
     if on(SirPass::Gvn) {
         ff_passes.add_pass(GvnPass);
@@ -119,32 +430,26 @@ fn optimize_with_options(
     if on(SirPass::SplitWideCommits) {
         ff_passes.add_pass(SplitWideCommitsPass);
     }
-    if on(SirPass::CommitSinking) {
-        ff_passes.add_pass(CommitSinkingPass);
-    }
-    if on(SirPass::InlineCommitForwarding) {
-        ff_passes.add_pass(InlineCommitForwardingPass);
-    }
+    let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
+    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_passes, &options);
+    optimize_unified_commit_groups(
+        &mut program.eval_apply_ffs,
+        on(SirPass::CommitSinking),
+        on(SirPass::InlineCommitForwarding),
+    );
+    let mut ff_post_passes = ExecutionUnitPassManager::new();
     if on(SirPass::EliminateDeadWorkingStores) {
-        ff_passes.add_pass(EliminateDeadWorkingStoresPass);
+        ff_post_passes.add_pass(EliminateDeadWorkingStoresPass);
     }
     if on(SirPass::Reschedule) {
-        ff_passes.add_pass(ReschedulePass);
+        ff_post_passes.add_pass(ReschedulePass);
     }
-    // Split wide Concat+Store back into individual stores after reschedule.
-    // Coalesce_stores combines for fewer memory ops, but for large arrays
-    // the Concat forces all values live simultaneously → spill hell.
-    // Splitting + hoisting stores next to their defs minimizes live ranges.
+    // Coalescing reduces memory ops, but keeping a wide Concat live until its
+    // Store can create unnecessary pressure.  Split it after scheduling.
     if on(SirPass::SplitCoalescedStores) {
-        ff_passes.add_pass(SplitCoalescedStoresPass);
+        ff_post_passes.add_pass(SplitCoalescedStoresPass);
     }
-
-    let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
-    for units in program.eval_apply_ffs.values_mut() {
-        for eu in units {
-            ff_passes.run(eu, &options);
-        }
-    }
+    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_post_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
@@ -155,6 +460,9 @@ fn optimize_with_options(
     let mut eval_only_passes = ExecutionUnitPassManager::new();
     if on(SirPass::StoreLoadForwarding) {
         eval_only_passes.add_pass(StoreLoadForwardingPass);
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        eval_only_passes.add_pass(ControlFlowSimplifyPass);
     }
     if on(SirPass::Gvn) {
         eval_only_passes.add_pass(GvnPass);
@@ -184,11 +492,7 @@ fn optimize_with_options(
     }
 
     let eu_count: usize = program.eval_only_ffs.values().map(|v| v.len()).sum();
-    for units in program.eval_only_ffs.values_mut() {
-        for eu in units {
-            eval_only_passes.run(eu, &options);
-        }
-    }
+    optimize_unit_groups_cached(&mut program.eval_only_ffs, &eval_only_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
@@ -198,6 +502,9 @@ fn optimize_with_options(
     let mut apply_passes = ExecutionUnitPassManager::new();
     if on(SirPass::StoreLoadForwarding) {
         apply_passes.add_pass(StoreLoadForwardingPass);
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        apply_passes.add_pass(ControlFlowSimplifyPass);
     }
     if on(SirPass::HoistCommonBranchLoads) {
         apply_passes.add_pass(HoistCommonBranchLoadsPass);
@@ -242,6 +549,9 @@ fn optimize_with_options(
             comb_passes.add_pass(PartialForwardPass);
         }
     }
+    if on(SirPass::ControlFlowSimplify) {
+        comb_passes.add_pass(ControlFlowSimplifyPass);
+    }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass);
     }
@@ -254,8 +564,14 @@ fn optimize_with_options(
     if on(SirPass::HoistCommonBranchLoads) {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
     }
+    if on(SirPass::BranchifyMux) {
+        comb_passes.add_pass(BranchifyMuxPass);
+    }
     if on(SirPass::BitExtractPeephole) {
         comb_passes.add_pass(BitExtractPeepholePass);
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        comb_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::OptimizeBlocks) {
         comb_passes.add_pass(OptimizeBlocksPass {
@@ -267,6 +583,11 @@ fn optimize_with_options(
     }
     if on(SirPass::VectorizeConcat) {
         comb_passes.add_pass(VectorizeConcatPass);
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        // Vectorization exposes the wide source of predicate concats.  A
+        // second idiom/DCE sweep removes the scalar predicates it replaced.
+        comb_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization
@@ -285,18 +606,58 @@ fn optimize_with_options(
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
     }
 
-    // Identity Store bypass: detect Store(B, identity_copy_from_A), remove it,
-    // and register B→A alias for memory layout sharing.
+    // Identity Store bypass: share storage when B is unread; otherwise lower
+    // a profitable exact copy directly from A's storage.
     if on(SirPass::IdentityStoreBypass) {
-        let identity_pass = pass_identity_store_bypass::IdentityStoreBypassPass::new();
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&identity_pass, eu, &options);
-        }
-        let identity_aliases = identity_pass.aliases.into_inner();
+        let identity_aliases = pass_identity_store_bypass::optimize_program_identity_stores(
+            program,
+            options.four_state,
+        );
         if !identity_aliases.is_empty() {
             // Store alias candidates in program for memory layout validation
             program.address_aliases.extend(identity_aliases);
         }
+    }
+
+    // Identity-store bypass runs after the main comb pipeline and can make an
+    // entire expression DAG dead.  Sweep those definitions before estimating
+    // or lowering native code; otherwise removed local-variable stores leave
+    // their unrolled loop recurrences in every simulation tick.
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        let packed_scatter_store = PackedScatterStorePass::for_program(program);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, &options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, &options);
+        }
+    }
+    // The preceding comb passes can expose new pure arm regions (notably after
+    // priority recovery and sparse dispatch). Re-run the same verified local
+    // CFG transform at the final SIR boundary so those regions do not fall
+    // through to branchless native selects merely because they were created by
+    // a later pass. BranchifyMux is monotone: it only removes profitable Mux
+    // definitions and its worklist terminates on the finite input EU.
+    if on(SirPass::BranchifyMux) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, &options);
+        }
+    }
+    if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
+        dump_mux_chain_stats(&program.eval_comb);
     }
 
     // 5. Tail-call chain splitting for eval_comb.

@@ -1,10 +1,10 @@
 ---
 source: crates/celox/tests/native_mir.rs
-assertion_line: 69
 expression: output
 ---
+=== MIR (all native execution units) ===
 === MIR (eval_comb) ===
-Execution Unit 0 (before regalloc):
+Execution Unit eval_comb[0] (before regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v10 = load.i32 [sim + 88]
@@ -14,101 +14,101 @@ bb0:
   v29 = load.i32 [sim + 136]
   v49 = load.i32 [sim + 188]
   v8 = load.i32 [sim + 80]
-  v20 = xor v0, v10
+  v20 = xor.w32 v0, v10
   v28 = load.i32 [sim + 132]
   v48 = load.i32 [sim + 184]
-  v40 = xor v20, v30
+  v40 = xor.w32 v20, v30
   v7 = load.i32 [sim + 76]
-  v59 = xor v40, v50
+  v59 = xor.w32 v40, v50
   v27 = load.i32 [sim + 128]
-  v19 = xor v59, v9
+  v19 = xor.w32 v59, v9
   v47 = load.i32 [sim + 180]
-  v39 = xor v19, v29
+  v39 = xor.w32 v19, v29
   v6 = load.i32 [sim + 72]
-  v58 = xor v39, v49
+  v58 = xor.w32 v39, v49
   v26 = load.i32 [sim + 124]
-  v18 = xor v58, v8
+  v18 = xor.w32 v58, v8
   v46 = load.i32 [sim + 176]
-  v38 = xor v18, v28
+  v38 = xor.w32 v18, v28
   v5 = load.i32 [sim + 68]
-  v57 = xor v38, v48
+  v57 = xor.w32 v38, v48
   v25 = load.i32 [sim + 120]
-  v17 = xor v57, v7
+  v17 = xor.w32 v57, v7
   v45 = load.i32 [sim + 172]
-  v37 = xor v17, v27
+  v37 = xor.w32 v17, v27
   v4 = load.i32 [sim + 64]
-  v56 = xor v37, v47
-  v16 = xor v56, v6
-  v36 = xor v16, v26
-  v55 = xor v36, v46
-  v15 = xor v55, v5
-  v35 = xor v15, v25
-  v54 = xor v35, v45
-  v14 = xor v54, v4
+  v56 = xor.w32 v37, v47
+  v16 = xor.w32 v56, v6
+  v36 = xor.w32 v16, v26
+  v55 = xor.w32 v36, v46
+  v15 = xor.w32 v55, v5
+  v35 = xor.w32 v15, v25
+  v54 = xor.w32 v35, v45
+  v14 = xor.w32 v54, v4
   store.i32 [sim + 36], v14
-  v60 = add v14, v0
-  v34 = and v60, 0xffffffff
+  v60 = add.w32 v14, v0
+  v34 = and.w32 v60, 0xffffffff
   store.i32 [sim + 116], v34
-  v61 = add v14, v10
-  v44 = and v61, 0xffffffff
+  v61 = add.w32 v14, v10
+  v44 = and.w32 v61, 0xffffffff
   store.i32 [sim + 168], v44
-  v62 = add v14, v30
-  v53 = and v62, 0xffffffff
+  v62 = add.w32 v14, v30
+  v53 = and.w32 v62, 0xffffffff
   store.i32 [sim + 60], v53
-  v63 = add v14, v50
-  v3 = and v63, 0xffffffff
+  v63 = add.w32 v14, v50
+  v3 = and.w32 v63, 0xffffffff
   store.i32 [sim + 112], v3
-  v64 = add v14, v9
-  v13 = and v64, 0xffffffff
+  v64 = add.w32 v14, v9
+  v13 = and.w32 v64, 0xffffffff
   store.i32 [sim + 164], v13
-  v65 = add v14, v29
-  v23 = and v65, 0xffffffff
+  v65 = add.w32 v14, v29
+  v23 = and.w32 v65, 0xffffffff
   store.i32 [sim + 56], v23
-  v66 = add v14, v49
-  v33 = and v66, 0xffffffff
+  v66 = add.w32 v14, v49
+  v33 = and.w32 v66, 0xffffffff
   store.i32 [sim + 108], v33
-  v67 = add v14, v8
-  v43 = and v67, 0xffffffff
+  v67 = add.w32 v14, v8
+  v43 = and.w32 v67, 0xffffffff
   store.i32 [sim + 160], v43
-  v68 = add v14, v28
-  v52 = and v68, 0xffffffff
+  v68 = add.w32 v14, v28
+  v52 = and.w32 v68, 0xffffffff
   store.i32 [sim + 52], v52
-  v69 = add v14, v48
-  v2 = and v69, 0xffffffff
+  v69 = add.w32 v14, v48
+  v2 = and.w32 v69, 0xffffffff
   store.i32 [sim + 104], v2
-  v70 = add v14, v7
-  v12 = and v70, 0xffffffff
+  v70 = add.w32 v14, v7
+  v12 = and.w32 v70, 0xffffffff
   store.i32 [sim + 156], v12
-  v71 = add v14, v27
-  v22 = and v71, 0xffffffff
+  v71 = add.w32 v14, v27
+  v22 = and.w32 v71, 0xffffffff
   store.i32 [sim + 48], v22
-  v72 = add v14, v47
-  v32 = and v72, 0xffffffff
+  v72 = add.w32 v14, v47
+  v32 = and.w32 v72, 0xffffffff
   store.i32 [sim + 100], v32
-  v73 = add v14, v6
-  v42 = and v73, 0xffffffff
+  v73 = add.w32 v14, v6
+  v42 = and.w32 v73, 0xffffffff
   store.i32 [sim + 152], v42
-  v74 = add v14, v26
-  v51 = and v74, 0xffffffff
+  v74 = add.w32 v14, v26
+  v51 = and.w32 v74, 0xffffffff
   store.i32 [sim + 44], v51
-  v75 = add v14, v46
-  v1 = and v75, 0xffffffff
+  v75 = add.w32 v14, v46
+  v1 = and.w32 v75, 0xffffffff
   store.i32 [sim + 96], v1
-  v76 = add v14, v5
-  v11 = and v76, 0xffffffff
+  v76 = add.w32 v14, v5
+  v11 = and.w32 v76, 0xffffffff
   store.i32 [sim + 148], v11
-  v77 = add v14, v25
-  v21 = and v77, 0xffffffff
+  v77 = add.w32 v14, v25
+  v21 = and.w32 v77, 0xffffffff
   store.i32 [sim + 40], v21
-  v78 = add v14, v45
-  v31 = and v78, 0xffffffff
+  v78 = add.w32 v14, v45
+  v31 = and.w32 v78, 0xffffffff
   store.i32 [sim + 92], v31
-  v79 = add v14, v4
-  v41 = and v79, 0xffffffff
+  v79 = add.w32 v14, v4
+  v41 = and.w32 v79, 0xffffffff
   store.i32 [sim + 144], v41
   ret
 
-Execution Unit 0 (after regalloc):
+Execution Unit eval_comb[0] (after regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v10 = load.i32 [sim + 88]
@@ -118,197 +118,195 @@ bb0:
   v29 = load.i32 [sim + 136]
   v49 = load.i32 [sim + 188]
   v8 = load.i32 [sim + 80]
-  v20 = xor v0, v10
+  v20 = xor.w32 v0, v10
   v28 = load.i32 [sim + 132]
   v48 = load.i32 [sim + 184]
-  v40 = xor v20, v30
+  v40 = xor.w32 v20, v30
   v7 = load.i32 [sim + 76]
-  v59 = xor v40, v50
+  v59 = xor.w32 v40, v50
   v27 = load.i32 [sim + 128]
-  store.i64 [sp + 0], v50
-  v19 = xor v59, v9
+  v19 = xor.w32 v59, v9
   v47 = load.i32 [sim + 180]
-  store.i64 [sp + 8], v9
-  v39 = xor v19, v29
+  store.i64 [sp + 16], v9
+  v39 = xor.w32 v19, v29
   v6 = load.i32 [sim + 72]
-  store.i64 [sp + 16], v29
-  v58 = xor v39, v49
+  store.i64 [sp + 40], v29
+  v58 = xor.w32 v39, v49
   v26 = load.i32 [sim + 124]
-  store.i64 [sp + 24], v49
-  v18 = xor v58, v8
+  store.i64 [sp + 56], v49
+  v18 = xor.w32 v58, v8
   v46 = load.i32 [sim + 176]
-  store.i64 [sp + 32], v8
-  v38 = xor v18, v28
+  store.i64 [sp + 8], v8
+  v38 = xor.w32 v18, v28
   v5 = load.i32 [sim + 68]
-  store.i64 [sp + 40], v28
-  v57 = xor v38, v48
+  store.i64 [sp + 32], v28
+  v57 = xor.w32 v38, v48
   v25 = load.i32 [sim + 120]
   store.i64 [sp + 48], v48
-  v17 = xor v57, v7
+  v17 = xor.w32 v57, v7
   v45 = load.i32 [sim + 172]
-  store.i64 [sp + 56], v7
-  v37 = xor v17, v27
+  store.i64 [sp + 0], v7
+  v37 = xor.w32 v17, v27
   v4 = load.i32 [sim + 64]
-  store.i64 [sp + 64], v27
-  v56 = xor v37, v47
-  v16 = xor v56, v6
-  v36 = xor v16, v26
-  v55 = xor v36, v46
-  v15 = xor v55, v5
-  v35 = xor v15, v25
-  v54 = xor v35, v45
-  v14 = xor v54, v4
+  store.i64 [sp + 24], v27
+  v56 = xor.w32 v37, v47
+  v16 = xor.w32 v56, v6
+  v36 = xor.w32 v16, v26
+  v55 = xor.w32 v36, v46
+  v15 = xor.w32 v55, v5
+  v35 = xor.w32 v15, v25
+  v54 = xor.w32 v35, v45
+  v14 = xor.w32 v54, v4
   store.i32 [sim + 36], v14
-  v60 = add v14, v0
-  v34 = and v60, 0xffffffff
+  v60 = add.w32 v14, v0
+  v34 = and.w32 v60, 0xffffffff
   store.i32 [sim + 116], v34
-  v61 = add v14, v10
-  v44 = and v61, 0xffffffff
+  v61 = add.w32 v14, v10
+  v44 = and.w32 v61, 0xffffffff
   store.i32 [sim + 168], v44
-  v62 = add v14, v30
-  v53 = and v62, 0xffffffff
+  v62 = add.w32 v14, v30
+  v53 = and.w32 v62, 0xffffffff
   store.i32 [sim + 60], v53
-  v80 = load.i64 [sp + 0]
-  v63 = add v14, v80
-  v3 = and v63, 0xffffffff
+  v63 = add.w32 v14, v50
+  v3 = and.w32 v63, 0xffffffff
   store.i32 [sim + 112], v3
-  v81 = load.i64 [sp + 8]
-  v64 = add v14, v81
-  v13 = and v64, 0xffffffff
+  v80 = load.i64 [sp + 16]
+  v64 = add.w32 v14, v80
+  v13 = and.w32 v64, 0xffffffff
   store.i32 [sim + 164], v13
-  v82 = load.i64 [sp + 16]
-  v65 = add v14, v82
-  v23 = and v65, 0xffffffff
+  v81 = load.i64 [sp + 40]
+  v65 = add.w32 v14, v81
+  v23 = and.w32 v65, 0xffffffff
   store.i32 [sim + 56], v23
-  v83 = load.i64 [sp + 24]
-  v66 = add v14, v83
-  v33 = and v66, 0xffffffff
+  v82 = load.i64 [sp + 56]
+  v66 = add.w32 v14, v82
+  v33 = and.w32 v66, 0xffffffff
   store.i32 [sim + 108], v33
-  v84 = load.i64 [sp + 32]
-  v67 = add v14, v84
-  v43 = and v67, 0xffffffff
+  v83 = load.i64 [sp + 8]
+  v67 = add.w32 v14, v83
+  v43 = and.w32 v67, 0xffffffff
   store.i32 [sim + 160], v43
-  v85 = load.i64 [sp + 40]
-  v68 = add v14, v85
-  v52 = and v68, 0xffffffff
+  v84 = load.i64 [sp + 32]
+  v68 = add.w32 v14, v84
+  v52 = and.w32 v68, 0xffffffff
   store.i32 [sim + 52], v52
-  v86 = load.i64 [sp + 48]
-  v69 = add v14, v86
-  v2 = and v69, 0xffffffff
+  v85 = load.i64 [sp + 48]
+  v69 = add.w32 v14, v85
+  v2 = and.w32 v69, 0xffffffff
   store.i32 [sim + 104], v2
-  v87 = load.i64 [sp + 56]
-  v70 = add v14, v87
-  v12 = and v70, 0xffffffff
+  v86 = load.i64 [sp + 0]
+  v70 = add.w32 v14, v86
+  v12 = and.w32 v70, 0xffffffff
   store.i32 [sim + 156], v12
-  v88 = load.i64 [sp + 64]
-  v71 = add v14, v88
-  v22 = and v71, 0xffffffff
+  v87 = load.i64 [sp + 24]
+  v71 = add.w32 v14, v87
+  v22 = and.w32 v71, 0xffffffff
   store.i32 [sim + 48], v22
-  v72 = add v14, v47
-  v32 = and v72, 0xffffffff
+  v72 = add.w32 v14, v47
+  v32 = and.w32 v72, 0xffffffff
   store.i32 [sim + 100], v32
-  v73 = add v14, v6
-  v42 = and v73, 0xffffffff
+  v73 = add.w32 v14, v6
+  v42 = and.w32 v73, 0xffffffff
   store.i32 [sim + 152], v42
-  v74 = add v14, v26
-  v51 = and v74, 0xffffffff
+  v74 = add.w32 v14, v26
+  v51 = and.w32 v74, 0xffffffff
   store.i32 [sim + 44], v51
-  v75 = add v14, v46
-  v1 = and v75, 0xffffffff
+  v75 = add.w32 v14, v46
+  v1 = and.w32 v75, 0xffffffff
   store.i32 [sim + 96], v1
-  v76 = add v14, v5
-  v11 = and v76, 0xffffffff
+  v76 = add.w32 v14, v5
+  v11 = and.w32 v76, 0xffffffff
   store.i32 [sim + 148], v11
-  v77 = add v14, v25
-  v21 = and v77, 0xffffffff
+  v77 = add.w32 v14, v25
+  v21 = and.w32 v77, 0xffffffff
   store.i32 [sim + 40], v21
-  v78 = add v14, v45
-  v31 = and v78, 0xffffffff
+  v78 = add.w32 v14, v45
+  v31 = and.w32 v78, 0xffffffff
   store.i32 [sim + 92], v31
-  v79 = add v14, v4
-  v41 = and v79, 0xffffffff
+  v79 = add.w32 v14, v4
+  v41 = and.w32 v79, 0xffffffff
   store.i32 [sim + 144], v41
   ret
   Register assignment:
     v0 -> rax
-    v1 -> r10
-    v2 -> rdx
-    v3 -> rdx
-    v4 -> r13
+    v1 -> rax
+    v2 -> rax
+    v3 -> rax
+    v4 -> r12
     v5 -> r11
-    v6 -> r8
-    v7 -> r13
+    v6 -> rcx
+    v7 -> r12
     v8 -> r11
     v9 -> r8
     v10 -> rdx
-    v11 -> r11
-    v12 -> rdx
-    v13 -> rdx
-    v14 -> rcx
-    v15 -> rcx
-    v16 -> rcx
-    v17 -> rcx
-    v18 -> rcx
+    v11 -> rax
+    v12 -> rax
+    v13 -> rax
+    v14 -> r8
+    v15 -> r8
+    v16 -> r8
+    v17 -> r8
+    v18 -> r8
     v19 -> rcx
     v20 -> rcx
-    v21 -> rbx
-    v22 -> rdx
-    v23 -> rdx
+    v21 -> rax
+    v22 -> rax
+    v23 -> rax
     v25 -> rbx
     v26 -> r9
-    v27 -> r14
+    v27 -> r13
     v28 -> rbx
     v29 -> r9
     v30 -> rsi
-    v31 -> r12
-    v32 -> rdi
-    v33 -> rdx
+    v31 -> rax
+    v32 -> rax
+    v33 -> rax
     v34 -> rax
-    v35 -> rcx
-    v36 -> rcx
-    v37 -> rcx
-    v38 -> rcx
-    v39 -> rcx
+    v35 -> r8
+    v36 -> r8
+    v37 -> r8
+    v38 -> r8
+    v39 -> r8
     v40 -> rcx
-    v41 -> rcx
-    v42 -> r8
-    v43 -> rdx
-    v44 -> rdx
-    v45 -> r12
+    v41 -> rax
+    v42 -> rax
+    v43 -> rax
+    v44 -> rax
+    v45 -> rbp
     v46 -> r10
-    v47 -> rdi
-    v48 -> r12
+    v47 -> r14
+    v48 -> rbp
     v49 -> r10
     v50 -> rdi
-    v51 -> r9
-    v52 -> rdx
-    v53 -> rsi
-    v54 -> rcx
-    v55 -> rcx
-    v56 -> rcx
-    v57 -> rcx
-    v58 -> rcx
+    v51 -> rax
+    v52 -> rax
+    v53 -> rax
+    v54 -> r8
+    v55 -> r8
+    v56 -> r8
+    v57 -> r8
+    v58 -> r8
     v59 -> rcx
     v60 -> rax
-    v61 -> rdx
-    v62 -> rsi
-    v63 -> rdx
-    v64 -> rdx
-    v65 -> rdx
-    v66 -> rdx
-    v67 -> rdx
-    v68 -> rdx
-    v69 -> rdx
-    v70 -> rdx
-    v71 -> rdx
-    v72 -> rdi
-    v73 -> r8
-    v74 -> r9
-    v75 -> r10
-    v76 -> r11
-    v77 -> rbx
-    v78 -> r12
-    v79 -> rcx
+    v61 -> rax
+    v62 -> rax
+    v63 -> rax
+    v64 -> rax
+    v65 -> rax
+    v66 -> rax
+    v67 -> rax
+    v68 -> rax
+    v69 -> rax
+    v70 -> rax
+    v71 -> rax
+    v72 -> rax
+    v73 -> rax
+    v74 -> rax
+    v75 -> rax
+    v76 -> rax
+    v77 -> rax
+    v78 -> rax
+    v79 -> rax
     v80 -> rax
     v81 -> rax
     v82 -> rax
@@ -317,149 +315,151 @@ bb0:
     v85 -> rax
     v86 -> rax
     v87 -> rax
-    v88 -> rax
   x86-64 disassembly:
   0x00000000  push rbx
-  0x00000001  push r12
-  0x00000003  push r13
-  0x00000005  push r14
-  0x00000007  push r15
-  0x00000009  sub rsp,48h
-  0x0000000d  mov r15,rdi
-  0x00000010  mov eax,[r15+20h]
-  0x00000014  mov edx,[r15+58h]
-  0x00000018  mov esi,[r15+8Ch]
-  0x0000001f  mov edi,[r15+0C0h]
-  0x00000026  mov r8d,[r15+54h]
-  0x0000002a  mov r9d,[r15+88h]
-  0x00000031  mov r10d,[r15+0BCh]
-  0x00000038  mov r11d,[r15+50h]
-  0x0000003c  mov ecx,eax
-  0x0000003e  xor ecx,edx
-  0x00000040  mov ebx,[r15+84h]
-  0x00000047  mov r12d,[r15+0B8h]
-  0x0000004e  xor ecx,esi
-  0x00000050  mov r13d,[r15+4Ch]
-  0x00000054  xor ecx,edi
-  0x00000056  mov r14d,[r15+80h]
-  0x0000005d  mov [rsp],rdi
-  0x00000061  xor ecx,r8d
-  0x00000064  mov edi,[r15+0B4h]
-  0x0000006b  mov [rsp+8],r8
-  0x00000070  xor ecx,r9d
-  0x00000073  mov r8d,[r15+48h]
-  0x00000077  mov [rsp+10h],r9
-  0x0000007c  xor ecx,r10d
+  0x00000001  push rbp
+  0x00000002  push r12
+  0x00000004  push r13
+  0x00000006  push r14
+  0x00000008  push r15
+  0x0000000a  sub rsp,40h
+  0x0000000e  mov r15,rdi
+  0x00000011  mov eax,[r15+20h]
+  0x00000015  mov edx,[r15+58h]
+  0x00000019  mov esi,[r15+8Ch]
+  0x00000020  mov edi,[r15+0C0h]
+  0x00000027  mov r8d,[r15+54h]
+  0x0000002b  mov r9d,[r15+88h]
+  0x00000032  mov r10d,[r15+0BCh]
+  0x00000039  mov r11d,[r15+50h]
+  0x0000003d  mov ecx,eax
+  0x0000003f  xor ecx,edx
+  0x00000041  mov ebx,[r15+84h]
+  0x00000048  mov ebp,[r15+0B8h]
+  0x0000004f  xor ecx,esi
+  0x00000051  mov r12d,[r15+4Ch]
+  0x00000055  xor ecx,edi
+  0x00000057  mov r13d,[r15+80h]
+  0x0000005e  xor ecx,r8d
+  0x00000061  mov r14d,[r15+0B4h]
+  0x00000068  mov [rsp+10h],r8
+  0x0000006d  mov r8d,ecx
+  0x00000070  xor r8d,r9d
+  0x00000073  mov ecx,[r15+48h]
+  0x00000077  mov [rsp+28h],r9
+  0x0000007c  xor r8d,r10d
   0x0000007f  mov r9d,[r15+7Ch]
-  0x00000083  mov [rsp+18h],r10
-  0x00000088  xor ecx,r11d
+  0x00000083  mov [rsp+38h],r10
+  0x00000088  xor r8d,r11d
   0x0000008b  mov r10d,[r15+0B0h]
-  0x00000092  mov [rsp+20h],r11
-  0x00000097  xor ecx,ebx
-  0x00000099  mov r11d,[r15+44h]
-  0x0000009d  mov [rsp+28h],rbx
-  0x000000a2  xor ecx,r12d
-  0x000000a5  mov ebx,[r15+78h]
-  0x000000a9  mov [rsp+30h],r12
-  0x000000ae  xor ecx,r13d
-  0x000000b1  mov r12d,[r15+0ACh]
-  0x000000b8  mov [rsp+38h],r13
-  0x000000bd  xor ecx,r14d
-  0x000000c0  mov r13d,[r15+40h]
-  0x000000c4  mov [rsp+40h],r14
-  0x000000c9  xor ecx,edi
-  0x000000cb  xor ecx,r8d
-  0x000000ce  xor ecx,r9d
-  0x000000d1  xor ecx,r10d
-  0x000000d4  xor ecx,r11d
-  0x000000d7  xor ecx,ebx
-  0x000000d9  xor ecx,r12d
-  0x000000dc  xor ecx,r13d
-  0x000000df  mov [r15+24h],ecx
-  0x000000e3  add rax,rcx
-  0x000000e6  and eax,0FFFFFFFFh
-  0x000000eb  mov [r15+74h],eax
-  0x000000ef  add rdx,rcx
-  0x000000f2  and edx,0FFFFFFFFh
-  0x000000f5  mov [r15+0A8h],edx
-  0x000000fc  add rsi,rcx
-  0x000000ff  and esi,0FFFFFFFFh
-  0x00000102  mov [r15+3Ch],esi
-  0x00000106  mov rax,[rsp]
-  0x0000010a  mov rdx,rcx
-  0x0000010d  add rdx,rax
-  0x00000110  and edx,0FFFFFFFFh
-  0x00000113  mov [r15+70h],edx
-  0x00000117  mov rax,[rsp+8]
-  0x0000011c  mov rdx,rcx
-  0x0000011f  add rdx,rax
-  0x00000122  and edx,0FFFFFFFFh
-  0x00000125  mov [r15+0A4h],edx
-  0x0000012c  mov rax,[rsp+10h]
-  0x00000131  mov rdx,rcx
-  0x00000134  add rdx,rax
-  0x00000137  and edx,0FFFFFFFFh
-  0x0000013a  mov [r15+38h],edx
-  0x0000013e  mov rax,[rsp+18h]
-  0x00000143  mov rdx,rcx
-  0x00000146  add rdx,rax
-  0x00000149  and edx,0FFFFFFFFh
-  0x0000014c  mov [r15+6Ch],edx
-  0x00000150  mov rax,[rsp+20h]
-  0x00000155  mov rdx,rcx
-  0x00000158  add rdx,rax
-  0x0000015b  and edx,0FFFFFFFFh
-  0x0000015e  mov [r15+0A0h],edx
-  0x00000165  mov rax,[rsp+28h]
-  0x0000016a  mov rdx,rcx
-  0x0000016d  add rdx,rax
-  0x00000170  and edx,0FFFFFFFFh
-  0x00000173  mov [r15+34h],edx
-  0x00000177  mov rax,[rsp+30h]
-  0x0000017c  mov rdx,rcx
-  0x0000017f  add rdx,rax
-  0x00000182  and edx,0FFFFFFFFh
-  0x00000185  mov [r15+68h],edx
-  0x00000189  mov rax,[rsp+38h]
-  0x0000018e  mov rdx,rcx
-  0x00000191  add rdx,rax
-  0x00000194  and edx,0FFFFFFFFh
-  0x00000197  mov [r15+9Ch],edx
-  0x0000019e  mov rax,[rsp+40h]
-  0x000001a3  mov rdx,rcx
-  0x000001a6  add rdx,rax
-  0x000001a9  and edx,0FFFFFFFFh
-  0x000001ac  mov [r15+30h],edx
-  0x000001b0  add rdi,rcx
-  0x000001b3  and edi,0FFFFFFFFh
-  0x000001b6  mov [r15+64h],edi
-  0x000001ba  add r8,rcx
-  0x000001bd  and r8d,0FFFFFFFFh
-  0x000001c1  mov [r15+98h],r8d
-  0x000001c8  add r9,rcx
-  0x000001cb  and r9d,0FFFFFFFFh
-  0x000001cf  mov [r15+2Ch],r9d
-  0x000001d3  add r10,rcx
-  0x000001d6  and r10d,0FFFFFFFFh
-  0x000001da  mov [r15+60h],r10d
-  0x000001de  add r11,rcx
-  0x000001e1  and r11d,0FFFFFFFFh
-  0x000001e5  mov [r15+94h],r11d
-  0x000001ec  add rbx,rcx
-  0x000001ef  and ebx,0FFFFFFFFh
-  0x000001f2  mov [r15+28h],ebx
-  0x000001f6  add r12,rcx
-  0x000001f9  and r12d,0FFFFFFFFh
-  0x000001fd  mov [r15+5Ch],r12d
-  0x00000201  add rcx,r13
-  0x00000204  and ecx,0FFFFFFFFh
-  0x00000207  mov [r15+90h],ecx
-  0x0000020e  xor eax,eax
-  0x00000210  jmp short 0000000000000212h
-  0x00000212  add rsp,48h
-  0x00000216  pop r15
-  0x00000218  pop r14
-  0x0000021a  pop r13
-  0x0000021c  pop r12
-  0x0000021e  pop rbx
-  0x0000021f  ret
+  0x00000092  mov [rsp+8],r11
+  0x00000097  xor r8d,ebx
+  0x0000009a  mov r11d,[r15+44h]
+  0x0000009e  mov [rsp+20h],rbx
+  0x000000a3  xor r8d,ebp
+  0x000000a6  mov ebx,[r15+78h]
+  0x000000aa  mov [rsp+30h],rbp
+  0x000000af  xor r8d,r12d
+  0x000000b2  mov ebp,[r15+0ACh]
+  0x000000b9  mov [rsp],r12
+  0x000000bd  xor r8d,r13d
+  0x000000c0  mov r12d,[r15+40h]
+  0x000000c4  mov [rsp+18h],r13
+  0x000000c9  xor r8d,r14d
+  0x000000cc  xor r8d,ecx
+  0x000000cf  xor r8d,r9d
+  0x000000d2  xor r8d,r10d
+  0x000000d5  xor r8d,r11d
+  0x000000d8  xor r8d,ebx
+  0x000000db  xor r8d,ebp
+  0x000000de  xor r8d,r12d
+  0x000000e1  mov [r15+24h],r8d
+  0x000000e5  add eax,r8d
+  0x000000e8  and eax,0FFFFFFFFh
+  0x000000ed  mov [r15+74h],eax
+  0x000000f1  mov eax,r8d
+  0x000000f4  add eax,edx
+  0x000000f6  and eax,0FFFFFFFFh
+  0x000000fb  mov [r15+0A8h],eax
+  0x00000102  mov eax,r8d
+  0x00000105  add eax,esi
+  0x00000107  and eax,0FFFFFFFFh
+  0x0000010c  mov [r15+3Ch],eax
+  0x00000110  mov eax,r8d
+  0x00000113  add eax,edi
+  0x00000115  and eax,0FFFFFFFFh
+  0x0000011a  mov [r15+70h],eax
+  0x0000011e  mov eax,r8d
+  0x00000121  add eax,[rsp+10h]
+  0x00000125  and eax,0FFFFFFFFh
+  0x0000012a  mov [r15+0A4h],eax
+  0x00000131  mov eax,r8d
+  0x00000134  add eax,[rsp+28h]
+  0x00000138  and eax,0FFFFFFFFh
+  0x0000013d  mov [r15+38h],eax
+  0x00000141  mov eax,r8d
+  0x00000144  add eax,[rsp+38h]
+  0x00000148  and eax,0FFFFFFFFh
+  0x0000014d  mov [r15+6Ch],eax
+  0x00000151  mov eax,r8d
+  0x00000154  add eax,[rsp+8]
+  0x00000158  and eax,0FFFFFFFFh
+  0x0000015d  mov [r15+0A0h],eax
+  0x00000164  mov eax,r8d
+  0x00000167  add eax,[rsp+20h]
+  0x0000016b  and eax,0FFFFFFFFh
+  0x00000170  mov [r15+34h],eax
+  0x00000174  mov eax,r8d
+  0x00000177  add eax,[rsp+30h]
+  0x0000017b  and eax,0FFFFFFFFh
+  0x00000180  mov [r15+68h],eax
+  0x00000184  mov eax,r8d
+  0x00000187  add eax,[rsp]
+  0x0000018a  and eax,0FFFFFFFFh
+  0x0000018f  mov [r15+9Ch],eax
+  0x00000196  mov eax,r8d
+  0x00000199  add eax,[rsp+18h]
+  0x0000019d  and eax,0FFFFFFFFh
+  0x000001a2  mov [r15+30h],eax
+  0x000001a6  mov eax,r8d
+  0x000001a9  add eax,r14d
+  0x000001ac  and eax,0FFFFFFFFh
+  0x000001b1  mov [r15+64h],eax
+  0x000001b5  mov eax,r8d
+  0x000001b8  add eax,ecx
+  0x000001ba  and eax,0FFFFFFFFh
+  0x000001bf  mov [r15+98h],eax
+  0x000001c6  mov eax,r8d
+  0x000001c9  add eax,r9d
+  0x000001cc  and eax,0FFFFFFFFh
+  0x000001d1  mov [r15+2Ch],eax
+  0x000001d5  mov eax,r8d
+  0x000001d8  add eax,r10d
+  0x000001db  and eax,0FFFFFFFFh
+  0x000001e0  mov [r15+60h],eax
+  0x000001e4  mov eax,r8d
+  0x000001e7  add eax,r11d
+  0x000001ea  and eax,0FFFFFFFFh
+  0x000001ef  mov [r15+94h],eax
+  0x000001f6  mov eax,r8d
+  0x000001f9  add eax,ebx
+  0x000001fb  and eax,0FFFFFFFFh
+  0x00000200  mov [r15+28h],eax
+  0x00000204  mov eax,r8d
+  0x00000207  add eax,ebp
+  0x00000209  and eax,0FFFFFFFFh
+  0x0000020e  mov [r15+5Ch],eax
+  0x00000212  mov eax,r8d
+  0x00000215  add eax,r12d
+  0x00000218  and eax,0FFFFFFFFh
+  0x0000021d  mov [r15+90h],eax
+  0x00000224  xor eax,eax
+  0x00000226  jmp short 0000000000000228h
+  0x00000228  add rsp,40h
+  0x0000022c  pop r15
+  0x0000022e  pop r14
+  0x00000230  pop r13
+  0x00000232  pop r12
+  0x00000234  pop rbp
+  0x00000235  pop rbx
+  0x00000236  ret

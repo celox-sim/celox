@@ -45,6 +45,8 @@ fn analyze(
         errors.append(&mut analyzer.analyze_pass1("prj", &parsed.veryl));
         parsers.push(parsed);
     }
+    let loop_sources =
+        parser::loop_provenance::LoopSourceTable::collect(parsers.iter().map(|x| &x.veryl));
 
     // Global post-pass1
     errors.append(&mut Analyzer::analyze_post_pass1());
@@ -77,6 +79,7 @@ fn analyze(
         ));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    let loop_provenance = loop_sources.match_unrolled(&ir);
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -89,6 +92,7 @@ fn analyze(
     let sir = parser::parse(
         &top,
         &ir,
+        &loop_provenance,
         &build_config,
         ignored_loops,
         true_loops,
@@ -498,6 +502,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// Consumes self.
     fn into_sir(
         self,
+        layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> Result<
         (
             crate::ir::Program,
@@ -507,6 +512,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         ),
         SimulatorError,
     > {
+        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let compile_start = phase_timing.then(crate::timing::now);
         let (mut program, warnings) = compile_to_sir(
             &self.sources,
             self.top,
@@ -521,19 +528,38 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             &self.param_overrides,
             &self.options.optimize_options,
         )?;
+        if let Some(start) = compile_start {
+            eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
+        }
 
         // Register testbench runtime-event sites before layout fixes the ring geometry.
+        let runtime_sites_start = phase_timing.then(crate::timing::now);
         crate::testbench::register_runtime_event_sites(&mut program);
+        if let Some(start) = runtime_sites_start {
+            eprintln!(
+                "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
+                start.elapsed(),
+                program.runtime_event_sites.len(),
+                program.comb_observers.len()
+            );
+        }
 
         // Build memory layout (consumes address_aliases for offset sharing)
-        program.build_layout(self.options.four_state);
+        let layout_start = phase_timing.then(crate::timing::now);
+        program.build_layout_with_mode(self.options.four_state, layout_mode);
+        if let Some(start) = layout_start {
+            eprintln!("[phase-timing] build_layout: {:?}", start.elapsed());
+        }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(
-                &mut program,
-                &self.live_signals,
-                self.options.dead_store_policy,
-            );
+            let dse_start = phase_timing.then(crate::timing::now);
+            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
+            if let Some(start) = dse_start {
+                eprintln!(
+                    "[phase-timing] dead_store_elimination: {:?}",
+                    start.elapsed()
+                );
+            }
         }
 
         Ok((program, warnings, self.options, self.vcd_path))
@@ -557,7 +583,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
         let phase_start = phase_timing.then(crate::timing::now);
 
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
         if let Some(s) = phase_start {
             eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
@@ -586,8 +613,18 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let sir_start = phase_timing.then(crate::timing::now);
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::ElementStrided)?;
+        if let Some(start) = sir_start {
+            eprintln!("[phase-timing] into_sir total: {:?}", start.elapsed());
+        }
+        let backend_start = phase_timing.then(crate::timing::now);
         let backend = crate::backend::native::NativeBackend::new(&program, &options)?;
+        if let Some(start) = backend_start {
+            eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
+        }
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
@@ -595,8 +632,16 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
+        let apply_initial_start = phase_timing.then(crate::timing::now);
         sim.apply_initial_values();
+        if let Some(start) = apply_initial_start {
+            eprintln!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+        }
+        let settle_start = phase_timing.then(crate::timing::now);
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        if let Some(start) = settle_start {
+            eprintln!("[phase-timing] initial_settle: {:?}", start.elapsed());
+        }
         Ok(sim)
     }
 
@@ -604,7 +649,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_wasm(
         self,
     ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-        let (program, warnings, options, vcd_path) = self.into_sir()?;
+        let (program, warnings, options, vcd_path) =
+            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
         let backend = crate::backend::wasm_runtime::WasmBackend::new(&program, &options)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         if let Some(path) = vcd_path {
@@ -620,16 +666,18 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles and runs a native testbench (`#[test]` module).
     pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        let mut sim = self.build()?;
-        let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
-            SimulatorError::new(SimulatorErrorKind::Codegen(
-                "no initial block found — this module is not a native testbench".into(),
-            ))
-        })?;
-        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-        tb_builder.build_event_map(&initial_stmts);
-        let tb_stmts = tb_builder.convert(&initial_stmts);
-        Ok(crate::testbench::run_testbench(&mut sim, &tb_stmts))
+        run_test_with_sim(self.build()?)
+    }
+
+    /// Compiles and runs a testbench using the Cranelift JIT backend.
+    pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+        run_test_with_sim(self.build_cranelift()?)
+    }
+
+    /// Compiles and runs a testbench using the custom native backend.
+    #[cfg(target_arch = "x86_64")]
+    pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+        run_test_with_sim(self.build_native()?)
     }
 
     /// Compiles and runs a native testbench, returning assertion results
@@ -672,47 +720,28 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Register testbench runtime-event sites before layout fixes the ring geometry.
             crate::testbench::register_runtime_event_sites(&mut program);
 
-            program.build_layout(self.options.four_state);
+            #[cfg(target_arch = "x86_64")]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+            #[cfg(not(target_arch = "x86_64"))]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            program.build_layout_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(
-                    &mut program,
-                    &self.live_signals,
-                    self.options.dead_store_policy,
-                );
+                run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
             }
 
             // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             #[cfg(target_arch = "x86_64")]
             if self.options.trace.mir {
-                use crate::backend::native::{emit, isel, mir_opt, regalloc};
                 let layout = program
                     .layout
                     .as_ref()
                     .expect("layout must be built before MIR trace");
-                let mut mir_output = String::new();
-
-                mir_output.push_str("=== MIR (eval_comb) ===\n");
-                for (idx, eu) in program.eval_comb.iter().enumerate() {
-                    let mut mfunc = isel::lower_execution_unit(eu, layout, self.options.four_state);
-                    crate::backend::native::mir_legalize::legalize(&mut mfunc);
-                    mir_opt::optimize(&mut mfunc);
-                    mir_output.push_str(&format!("Execution Unit {idx} (before regalloc):\n"));
-                    mir_output.push_str(&format!("{mfunc}\n"));
-                    let ra = regalloc::run_regalloc(&mut mfunc);
-                    mir_output.push_str(&format!("Execution Unit {idx} (after regalloc):\n"));
-                    mir_output.push_str(&format!("{mfunc}"));
-                    mir_output.push_str("  Register assignment:\n");
-                    for (vreg, preg) in ra.assignment.sorted_entries() {
-                        mir_output.push_str(&format!("    {vreg} -> {preg}\n"));
-                    }
-                    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
-                        mir_output.push_str("  x86-64 disassembly:\n");
-                        mir_output.push_str(&emit::disassemble(&result.code, 0));
-                    }
-                    mir_output.push('\n');
-                }
-                trace.mir = Some(mir_output);
+                trace.mir = Some(format_native_mir(
+                    &program,
+                    layout,
+                    self.options.four_state,
+                )?);
             }
 
             #[cfg(target_arch = "x86_64")]
@@ -735,6 +764,101 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             trace,
         }
     }
+}
+
+/// Format every native MIR execution unit in the compiled Program.
+///
+/// This is deliberately behind the explicit `trace_mir` option.  The normal
+/// build path does not stringify or duplicate MIR.  Keep the group order and
+/// trigger labels here in sync with the native backend's three FF maps.
+#[cfg(target_arch = "x86_64")]
+fn format_native_mir(
+    program: &Program,
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+) -> Result<String, SimulatorError> {
+    let mut output = String::new();
+    output.push_str("=== MIR (all native execution units) ===\n");
+
+    output.push_str("=== MIR (eval_comb) ===\n");
+    for (idx, eu) in program.eval_comb.iter().enumerate() {
+        append_native_mir_unit(&mut output, "eval_comb", idx, eu, layout, four_state)?;
+    }
+
+    for (group, groups) in [
+        ("eval_apply_ffs", &program.eval_apply_ffs),
+        ("eval_only_ffs", &program.eval_only_ffs),
+        ("apply_ffs", &program.apply_ffs),
+    ] {
+        let mut entries = groups.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(addr, _)| **addr);
+        for (addr, units) in entries {
+            output.push_str(&format!(
+                "=== MIR ({group}) Trigger: {} ===\n",
+                program.get_path(addr)
+            ));
+            for (idx, eu) in units.iter().enumerate() {
+                append_native_mir_unit(&mut output, group, idx, eu, layout, four_state)?;
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn append_native_mir_unit(
+    output: &mut String,
+    group: &str,
+    index: usize,
+    eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+) -> Result<(), SimulatorError> {
+    use crate::backend::native::{emit, isel, mir_opt, regalloc};
+
+    let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
+    crate::backend::native::mir_legalize::legalize(&mut mfunc);
+    mir_opt::optimize(&mut mfunc);
+    output.push_str(&format!(
+        "Execution Unit {group}[{index}] (before regalloc):\n{mfunc}\n"
+    ));
+    let label = format!("trace_{group}_{index}");
+    let ra = regalloc::run_regalloc_with_label(&mut mfunc, &label)
+        .map_err(|error| SimulatorError::from(error.to_string()))?;
+    output.push_str(&format!(
+        "Execution Unit {group}[{index}] (after regalloc):\n{mfunc}"
+    ));
+    output.push_str("  Register assignment:\n");
+    for (vreg, preg) in ra.assignment.sorted_entries() {
+        output.push_str(&format!("    {vreg} -> {preg}\n"));
+    }
+    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
+        output.push_str("  x86-64 disassembly:\n");
+        output.push_str(&emit::disassemble(&result.code, 0));
+    }
+    output.push('\n');
+    Ok(())
+}
+
+fn run_test_with_sim<B: crate::backend::SimBackend>(
+    mut sim: Simulator<B>,
+) -> Result<crate::testbench::TestResult, SimulatorError> {
+    let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let testbench_start = phase_timing.then(crate::timing::now);
+    let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+        SimulatorError::new(SimulatorErrorKind::Codegen(
+            "no initial block found — this module is not a native testbench".into(),
+        ))
+    })?;
+    let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
+    tb_builder.build_event_map(&initial_stmts);
+    let tb_stmts = tb_builder.convert(&initial_stmts);
+    let result = crate::testbench::run_testbench(&mut sim, &tb_stmts);
+    if let Some(start) = testbench_start {
+        eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
+    }
+    Ok(result)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -790,14 +914,14 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.param_overrides,
             &self.options.optimize_options,
         )?;
-        program.build_layout(self.options.four_state);
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        program.build_layout_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(
-                &mut program,
-                &self.live_signals,
-                self.options.dead_store_policy,
-            );
+            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
         }
         #[cfg(target_arch = "x86_64")]
         let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
@@ -822,11 +946,16 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 fn run_dead_store_elimination(
     program: &mut Program,
     live_signals: &[(Vec<(String, usize)>, Vec<String>)],
-    policy: DeadStorePolicy,
+    options: &SimulatorOptions,
 ) {
     use crate::HashSet;
     use crate::ir::{AbsoluteAddr, InstancePath};
     let mut externally_live = HashSet::default();
+
+    // Native testbench expressions bypass SIR and read simulator memory
+    // directly. Their inputs are therefore external DSE roots just like
+    // signals named with `live_signal()`.
+    externally_live.extend(crate::testbench::initial_read_addresses(program));
 
     // User-specified live signals
     for (inst_path, var_path) in live_signals {
@@ -838,7 +967,7 @@ fn run_dead_store_elimination(
     }
 
     // PreserveTopPorts: auto-collect top module port addresses
-    if policy == DeadStorePolicy::PreserveTopPorts {
+    if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
         if let Some(&top_instance_id) = program.instance_ids.get(&InstancePath(vec![])) {
             if let Some(&top_module_id) = program.instance_module.get(&top_instance_id) {
                 if let Some(top_vars) = program.module_variables.get(&top_module_id) {
@@ -856,7 +985,7 @@ fn run_dead_store_elimination(
     }
 
     // PreserveAllPorts: collect port addresses from every instance
-    if policy == DeadStorePolicy::PreserveAllPorts {
+    if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
         for (&instance_id, &module_id) in &program.instance_module {
             if let Some(vars) = program.module_variables.get(&module_id) {
                 for info in vars.values() {
@@ -871,8 +1000,12 @@ fn run_dead_store_elimination(
         }
     }
 
-    crate::optimizer::coalescing::pass_dead_store_elimination::eliminate_dead_stores(
+    crate::optimizer::coalescing::optimize_rooted_comb_memory(
         program,
         &externally_live,
+        options.four_state,
+        options
+            .optimize_options
+            .is_enabled(crate::optimizer::SirPass::TailCallSplit),
     );
 }

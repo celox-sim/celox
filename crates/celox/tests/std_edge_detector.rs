@@ -136,13 +136,10 @@ all_backends! {
 
     }
 
-    // Multi-bit edge detection (WIDTH=4) using o_edge output.
-    //
-    // Note: o_edge uses XOR and correctly reflects per-bit changes.
-    // o_posedge/o_negedge use AND with 1-bit ~i_clear which limits multi-bit
-    // behavior due to zero-extension. We test o_edge for multi-bit correctness.
+    // Multi-bit edge detection (WIDTH=4) using o_edge output. The assignment
+    // context propagates WIDTH into the bitwise expression, so the one-bit
+    // i_clear operand is widened before `~` is applied.
     fn test_edge_detector_multibit(sim) {
-        @ignore_on(veryl);
         @setup { let top = r#"
 module Top (
 clk      : input  clock,
@@ -196,12 +193,11 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["edge_detector",
     // Change to 0b1010: all 4 bits change
     sim.modify(|io| io.set(i_data, 0b1010u8)).unwrap();
     sim.eval_comb().unwrap();
-    // o_edge = 1010 ^ (0101 & 0001) = 1010 ^ 0001 = 1011
-    // Note: due to 1-bit clear masking, o_edge doesn't equal i_data ^ data for bits > 0
+    // o_edge = 1010 ^ (0101 & 1111) = 1111
     assert_eq!(
         sim.get_as::<u8>(o_edge),
-        0b1011,
-        "edge reflects XOR with masked data"
+        0b1111,
+        "all changed bits should report an edge"
     );
 
     // Tick to latch 0b1010
@@ -209,12 +205,11 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["edge_detector",
 
     // No change: i_data=0b1010, data=0b1010
     sim.eval_comb().unwrap();
-    // o_edge = 1010 ^ (1010 & 0001) = 1010 ^ 0000 = 1010
-    // Due to masking, "no change" still shows edges on upper bits
+    // o_edge = 1010 ^ (1010 & 1111) = 0000
     assert_eq!(
         sim.get_as::<u8>(o_edge),
-        0b1010,
-        "steady state: upper bits reflect masking artifact"
+        0,
+        "steady state should report no edges"
     );
 
     }

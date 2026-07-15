@@ -437,7 +437,7 @@ fn test_for_loop_expression_bound_stepped_non_progress_fails() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 1..cnt step *= 1 {{
+                for _i in (cnt - cnt)..cnt step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -524,7 +524,7 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 1..cnt step *= 1 {{
+                for _i in (cnt - cnt)..cnt step *= 2 {{
                     clk.next();
                 }}
                 $finish();
@@ -552,7 +552,7 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 0..=0 step *= 2 {{
+                for _i in (cnt - cnt)..=(cnt - cnt) step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -640,7 +640,7 @@ fn test_for_loop_dynamic_signed_bound_preserves_negative_value() {
                 for _i in start..=1 {
                     hits += 1;
                 }
-                $assert(hits == 32'd3);
+                $assert(hits == 32'd3, "start=%d hits=%d", start, hits);
                 $finish();
             }
         }
@@ -665,6 +665,139 @@ fn test_for_loop_dynamic_wide_signed_bound_small_value_still_runs() {
                     hits += 1;
                 }
                 $assert(hits == 32'd3);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_expression_vm_preserves_width_signedness_and_casts() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            const NAMED: signed logic<5> = 5'sh19;
+            var s8a: signed logic<8>;
+            var s8b: signed logic<8>;
+            var s5: signed logic<5>;
+            var unsigned8: logic<8>;
+            var one8: logic<8>;
+            var num_cast: logic<16>;
+            var unsigned_cast: logic<16>;
+            var signed_cast: logic<16>;
+            var implicit_widen: logic<16>;
+            var ternary_widen: logic<16>;
+            var named_cast: logic<16>;
+            initial {
+                s8a = 8'shF9;
+                s8b = 8'sh02;
+                s5 = 5'sh19;
+                unsigned8 = 8'h02;
+                one8 = 8'h01;
+
+                $assert(
+                    s8a / s8b == 8'shFD,
+                    "signed div: a=%h b=%h q=%h",
+                    s8a,
+                    s8b,
+                    s8a / s8b,
+                );
+                $assert(s8a % s8b == 8'shFF, "signed rem");
+                $assert(s8a <: s8b, "signed compare");
+                $assert(s8a >>> 1 == 8'shFC, "narrow signed shift");
+                $assert(
+                    s5 / unsigned8 == 8'h0C,
+                    "mixed div: a=%h b=%h q=%h",
+                    s5,
+                    unsigned8,
+                    s5 / unsigned8,
+                );
+                $assert(s5 % unsigned8 == 8'h01, "mixed rem");
+                $assert(!(s5 <: unsigned8), "mixed compare");
+
+                $assert(8'hFF + 8'd1 == 8'h00, "add wraps at expression width");
+                $assert((8'd0 - 8'd1) >> 7 == 8'h01, "sub wraps at expression width");
+                $assert((8'h80 << 1) >> 1 == 8'h00, "shift truncates at lhs width");
+                $assert(-one8 == 8'hFF, "unary minus");
+                $assert(|8'h02, "reduce or");
+                $assert(!(^8'h03), "reduce xor");
+                $assert(&8'hFF, "reduce and");
+                $assert(~&8'h00, "reduce nand");
+                $assert(~|8'h00, "reduce nor");
+                $assert(~^8'h03, "reduce xnor");
+                $assert(3 ** 4 == 32'd81, "power");
+                $assert((8'hAA ~^ 8'hFF) == 8'hAA, "binary xnor");
+                $assert(8'hAA ==? 8'hAA, "wildcard equality on two-state values");
+                $assert(8'hAA !=? 8'h55, "wildcard inequality on two-state values");
+                $assert($signed(s8a as u8) <: 8'sh01, "$signed reinterpretation");
+                $assert(!($unsigned(s8a) <: 8'h01), "$unsigned reinterpretation");
+
+                num_cast = s5 as 8;
+                unsigned_cast = s5 as u8;
+                signed_cast = s5 as i8;
+                implicit_widen = s5;
+                ternary_widen = if one8 ? s5 : 5'sh00;
+                named_cast = NAMED as 8;
+                $assert(num_cast == 16'hFFF9, "numeric cast keeps source signedness");
+                $assert(unsigned_cast == 16'h00F9, "unsigned type cast reinterprets after resize");
+                $assert(signed_cast == 16'hFFF9, "signed type cast remains signed");
+                $assert(implicit_widen == 16'hFFF9, "assignment widens from rhs signedness");
+                $assert(ternary_widen == 16'hFFF9, "ternary arms use their common context");
+                $assert(
+                    named_cast == 16'hFFF9,
+                    "named constants retain cast signedness: named=%h cast=%h",
+                    NAMED,
+                    named_cast,
+                );
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_expression_vm_preserves_wide_fixed_width_semantics() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var zero: logic<128>;
+            var all_ones: logic<128>;
+            var inverted: logic<128>;
+            var signed_value: signed logic<128>;
+            var shifted: logic<128>;
+            var concatenated: logic<136>;
+            initial {
+                zero = 0;
+                all_ones = zero - 128'd1;
+                inverted = ~zero;
+                signed_value = 128'sh8000_0000_0000_0000_0000_0000_0000_0000;
+                shifted = signed_value >>> 1;
+                concatenated = {8'hAA, zero};
+
+                $assert(
+                    all_ones == 128'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF,
+                    "wide subtraction wraps",
+                );
+                $assert(
+                    inverted == 128'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF,
+                    "wide bitnot uses the expression width",
+                );
+                $assert(
+                    shifted == 128'hC000_0000_0000_0000_0000_0000_0000_0000,
+                    "wide arithmetic shift sign-extends",
+                );
+                $assert(
+                    concatenated == 136'hAA_0000_0000_0000_0000_0000_0000_0000_0000,
+                    "wide concatenation preserves the high part",
+                );
                 $finish();
             }
         }
@@ -937,7 +1070,13 @@ fn test_dynamic_array_index_in_for() {
                 clk.next(1);
                 // arr[0]=10, arr[1]=11, arr[2]=12, arr[3]=13
                 for i in 0..4 {
-                    $assert(arr[i] == i as u8 + 8'd10);
+                    $assert(
+                        arr[i] == i as u8 + 8'd10,
+                        "i=%d arr=%d expected=%d",
+                        i,
+                        arr[i],
+                        i as u8 + 8'd10,
+                    );
                 }
                 $finish();
             }
@@ -1048,7 +1187,7 @@ fn test_run_test_preserves_runtime_error_after_assert_continue_failures() {
                 rst.assert(clk);
                 $assert_continue(1'b0, "first");
                 clk.next(2);
-                for _i in 1..cnt step *= 1 {{
+                for _i in (cnt - cnt)..cnt step *= 2 {{
                     clk.next();
                 }}
                 $finish();

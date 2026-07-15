@@ -13,6 +13,49 @@ fn next_register_id(
     RegisterId(*counter)
 }
 
+/// Append the canonical four-state-to-control conversion required by SIR
+/// `Branch`, returning an unsigned one-bit condition register.
+pub(super) fn normalize_branch_condition<A>(
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    instructions: &mut Vec<SIRInstruction<A>>,
+    cond: RegisterId,
+    reg_counter: &mut usize,
+) -> RegisterId {
+    let cond_type = register_map[&cond].clone();
+    if matches!(
+        cond_type,
+        RegisterType::Bit {
+            width: 1,
+            signed: false
+        }
+    ) {
+        return cond;
+    }
+
+    let truth = if cond_type.width() == 1 {
+        cond
+    } else {
+        let truth = next_register_id(register_map, reg_counter);
+        register_map.insert(truth, RegisterType::Logic { width: 1 });
+        instructions.push(SIRInstruction::Unary(truth, UnaryOp::Or, cond));
+        truth
+    };
+    let normalized = next_register_id(register_map, reg_counter);
+    register_map.insert(
+        normalized,
+        RegisterType::Bit {
+            width: 1,
+            signed: false,
+        },
+    );
+    instructions.push(SIRInstruction::Unary(
+        normalized,
+        UnaryOp::ToTwoState,
+        truth,
+    ));
+    normalized
+}
+
 /// Returns `Some(RegisterId)` for instructions that define a register.
 pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
     match inst {
@@ -90,21 +133,16 @@ fn collect_used_regs_into(
         SIRInstruction::Unary(_, _, src) => {
             out.insert(*src);
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-            out.insert(*off);
+        SIRInstruction::Load(_, _, offset, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-            out.insert(*off);
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
             out.insert(*src);
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-            out.insert(*src);
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            out.extend(offset.dynamic_registers().into_iter().flatten());
         }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-            out.insert(*off);
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
         SIRInstruction::Concat(_, args) => {
             out.extend(args.iter().copied());
         }
@@ -350,6 +388,34 @@ pub(super) fn hoist_common_branch_loads(eu: &mut ExecutionUnit<RegionedAbsoluteA
     }
 }
 
+pub(super) fn replace_offset_registers(
+    offset: &mut SIROffset,
+    map: &HashMap<RegisterId, RegisterId>,
+) {
+    match offset {
+        SIROffset::Static(_) => {}
+        SIROffset::Dynamic(register) => {
+            if let Some(&replacement) = map.get(register) {
+                *register = replacement;
+            }
+        }
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            if let Some(&replacement) = map.get(index) {
+                *index = replacement;
+            }
+            if let Some(dynamic) = dynamic_bit_offset
+                && let Some(&replacement) = map.get(dynamic)
+            {
+                *dynamic = replacement;
+            }
+        }
+    }
+}
+
 pub(super) fn batch_replace_in_inst(
     inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
     map: &HashMap<RegisterId, RegisterId>,
@@ -369,31 +435,14 @@ pub(super) fn batch_replace_in_inst(
                 *src = to;
             }
         }
-        SIRInstruction::Load(_, _, SIROffset::Dynamic(off), _) => {
-            if let Some(&to) = map.get(off) {
-                *off = to;
-            }
-        }
-        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {}
-        SIRInstruction::Store(_, SIROffset::Dynamic(off), _, src, _, _) => {
-            if let Some(&to) = map.get(off) {
-                *off = to;
-            }
+        SIRInstruction::Load(_, _, offset, _) => replace_offset_registers(offset, map),
+        SIRInstruction::Store(_, offset, _, src, _, _) => {
+            replace_offset_registers(offset, map);
             if let Some(&to) = map.get(src) {
                 *src = to;
             }
         }
-        SIRInstruction::Store(_, SIROffset::Static(_), _, src, _, _) => {
-            if let Some(&to) = map.get(src) {
-                *src = to;
-            }
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Dynamic(off), _, _) => {
-            if let Some(&to) = map.get(off) {
-                *off = to;
-            }
-        }
-        SIRInstruction::Commit(_, _, SIROffset::Static(_), _, _) => {}
+        SIRInstruction::Commit(_, _, offset, _, _) => replace_offset_registers(offset, map),
         SIRInstruction::Concat(_, args) => {
             for arg in args {
                 if let Some(&to) = map.get(arg) {

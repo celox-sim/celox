@@ -51,7 +51,7 @@ Key features of the native backend:
 
 -   **MIR**: A word-level SSA IR with virtual registers (`VReg`). Instructions operate on 64-bit values; bit-level access information is preserved in `SpillDesc` side-tables for cost-aware spill decisions.
 -   **MIR Optimization**: Constant folding, copy propagation, algebraic simplification, GVN, DCE, if-conversion (Branch → Select/cmov), CFG simplification, PEXT fusion for XOR chains, and more. An adaptive pipeline runs the full pass set iteratively for high-pressure functions (VRegs > 40) and a lightweight variant for small functions.
--   **Register Allocator**: A unified single-pass allocator based on the Braun & Hack (2009) extended MIN algorithm. Performs simultaneous spilling and assignment in one forward pass with cost-aware eviction. Supports three spill kinds: SimState (reload from simulation memory), Stack, and Remat (rematerialize immediates).
+-   **Register Allocator**: A verified SSA pipeline based on Braun & Hack's extended MIN spill planning. It normalizes CSSA, reconstructs split live ranges with iterated dominance frontiers, materializes machine constraints as late full-live permutations, and colors chordal SSA live ranges in dominance order without an explicit interference graph. Spill homes support SimState, Stack, and immediate rematerialization.
 -   **EU Merge**: Multiple execution units are merged into a single function with shared prologue/epilogue and `jmp`-linked boundaries, reducing call overhead.
 -   **Cmp+Branch Fusion**: When a comparison result only feeds a branch, the `setcc`+`movzx`+`test` sequence is replaced by a direct `cmp`+`jcc`.
 
