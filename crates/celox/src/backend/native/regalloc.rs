@@ -231,8 +231,11 @@ fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
 ) -> Result<RegallocResult, RegallocError> {
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     func.verify_result()
         .map_err(|error| RegallocError::mir("input MIR verification", error))?;
+    let cfg_start = timing.then(crate::timing::now);
     let normalized_cfg =
         cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
     normalized_cfg
@@ -240,8 +243,13 @@ fn run_regalloc_in_place(
         .map_err(|error| cfg_error("CFG normalization verification", error))?;
     func.verify_result()
         .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
-    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    if let Some(start) = cfg_start {
+        eprintln!(
+            "[regalloc-timing] label={label} cfg_normalize blocks={} elapsed={:?}",
+            func.blocks.len(),
+            start.elapsed()
+        );
+    }
     let total_start = timing.then(crate::timing::now);
     let stats_start = timing.then(crate::timing::now);
     let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
@@ -288,22 +296,57 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
+    let cssa_start = timing.then(crate::timing::now);
     let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
         .map_err(|error| cssa_error("CSSA normalization", error))?;
+    if let Some(start) = cssa_start {
+        eprintln!(
+            "[regalloc-timing] label={label} cssa_normalize elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let cssa_verify_start = timing.then(crate::timing::now);
     cssa::verify_cssa(func, &normalized_cfg, &cssa)
         .map_err(|error| cssa_error("CSSA verification", error))?;
     func.verify_result()
         .map_err(|error| RegallocError::mir("CSSA structural verification", error))?;
+    if let Some(start) = cssa_verify_start {
+        eprintln!(
+            "[regalloc-timing] label={label} cssa_verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let constraint_start = timing.then(crate::timing::now);
     let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
         .map_err(|error| constraint_error("allocation constraint construction", error))?;
     constraints
         .verify(func)
         .map_err(|error| constraint_error("allocation constraint verification", error))?;
+    if let Some(start) = constraint_start {
+        eprintln!(
+            "[regalloc-timing] label={label} allocation_constraints elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let next_use_start = timing.then(crate::timing::now);
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
+    if let Some(start) = next_use_start {
+        eprintln!(
+            "[regalloc-timing] label={label} next_use_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let next_use_verify_start = timing.then(crate::timing::now);
     next_use
         .verify(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use verification", error))?;
+    if let Some(start) = next_use_verify_start {
+        eprintln!(
+            "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
     let alloc_start = timing.then(crate::timing::now);
     let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
     let assignment = allocation.assignment;

@@ -274,6 +274,34 @@ Mem2reg exposes values; it does not promise that they remain in physical
 registers. Move all pressure decisions into the machine backend and remove the
 threshold-based MIR splitting pre-pass.
 
+Execution slices:
+
+1. **3a -- allocator contract and phase baseline (complete).** Keep the
+   generated program unchanged, expose timings for CFG normalization, CSSA,
+   constraints, next-use production/verification, and allocation, then run all
+   focused allocator tests. With cross-phase forwarding staged, the N=128
+   sorter took 5.31 s: maximum scheduled pressure was 792, next-use analysis
+   took 29.5 ms, and total register allocation took 390 ms. Enabling the
+   forwarding rewrite only for diagnosis raised pressure to 2,785; next-use
+   production and its independent verifier took 5.14 s and 3.58 s, spill
+   planning took 3.31 s, total allocation took 14.27 s, and N=128 took 24.69 s.
+   This ties the regression to unsplit state-backed live ranges rather than
+   CSSA (47 ms) or CFG normalization (55 ms). All 101 allocator tests passed
+   after the timing boundaries were added.
+2. **3b -- reload recipes and validity proof (in progress).** Replace the
+   overloaded spill descriptor with explicit constant, state-version, pure
+   recomputation, and stack recipes. State recipes use physical MIR load shape
+   plus a MemorySSA version; an independent verifier rejects every reload not
+   dominated by that still-current version.
+3. **3c -- allocator-owned split placement (pending).** Select recipes at
+   actual pressure points and reconstruct strict SSA at instruction, CFG-edge,
+   and loop boundaries. Keep state-backed values out of global next-use maps
+   once their live ranges have been split, and run post-split cleanup.
+4. **3d -- retire the old split pass and enable forwarding (pending).** Delete
+   `mir_opt::split_live_ranges` and its VReg/gap thresholds, enable cross-phase
+   stable forwarding, and require unchanged sorter thresholds plus the common
+   and Linux gates.
+
 Deliverables:
 
 - a reload-recipe model distinguishing constants, valid state versions, cheap
