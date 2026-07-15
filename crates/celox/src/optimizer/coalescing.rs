@@ -15,6 +15,7 @@ mod pass_control_flow_simplify;
 pub(crate) mod pass_dead_store_elimination;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
+#[cfg(target_arch = "x86_64")]
 mod pass_global_store_load_forwarding;
 mod pass_guarded_region_sinking;
 mod pass_gvn;
@@ -38,12 +39,14 @@ mod shared;
 
 pub use pass_tail_call_split::TailCallChunk;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> bool {
     pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     pass_vectorize_concat::remove_dead_definitions(eu);
 }
