@@ -3178,12 +3178,10 @@ fn specialize_binary_constant(
             Some(_) => BigUint::from(0u8),
             None => return None,
         },
-        BinaryOp::Sar => match shift {
-            Some(shift) => {
-                signed_to_bits(bits_to_signed(&lhs.value, lhs.width) >> shift, result_width)?
-            }
-            None => return None,
-        },
+        BinaryOp::Sar => {
+            let shift = shift?;
+            signed_to_bits(bits_to_signed(&lhs.value, lhs.width) >> shift, result_width)?
+        }
         BinaryOp::Eq | BinaryOp::EqWildcard => bool_value(comparison_lhs == comparison_rhs),
         BinaryOp::Ne | BinaryOp::NeWildcard => bool_value(comparison_lhs != comparison_rhs),
         BinaryOp::LtU => bool_value(comparison_lhs < comparison_rhs),
