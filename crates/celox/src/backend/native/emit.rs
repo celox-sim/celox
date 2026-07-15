@@ -3429,7 +3429,34 @@ pub fn emit_chained_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
+    emit_chained_eu_groups(&[units], layout, four_state, label, None)
+}
+
+/// Compile combinational evaluation followed by one eval/apply FF domain as
+/// one SIR/MIR function.
+pub fn emit_comb_eval_apply_eus(
+    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_chained_eu_groups(&[comb_units, ff_units], layout, four_state, label, None)
+}
+
+fn emit_chained_eu_groups(
+    groups: &[&[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>]],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    stable_load_suffix: Option<usize>,
+) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
+    let units = groups
+        .iter()
+        .flat_map(|group| group.iter())
+        .collect::<Vec<_>>();
+    assert!(!units.is_empty(), "cannot emit an empty chained EU list");
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
     let copy_stats = timing
@@ -3441,9 +3468,9 @@ pub fn emit_chained_eus(
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
     let (mut sir_eu, sir_boundaries) = if units.len() > 1 {
-        crate::ir::merge_sir_eus(units)
+        crate::ir::merge_sir_eu_refs(&units)
     } else {
-        (units[0].clone(), vec![])
+        ((*units[0]).clone(), vec![])
     };
     if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
         crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
@@ -3453,6 +3480,18 @@ pub fn emit_chained_eus(
         &mut sir_eu,
         &sir_boundaries,
     );
+    if let Some(first_suffix_unit) = stable_load_suffix {
+        let suffix_entry = if first_suffix_unit == 0 {
+            sir_eu.entry_block_id
+        } else {
+            sir_boundaries[first_suffix_unit - 1]
+        };
+        if crate::optimizer::coalescing::forward_stable_static_slots_from(&mut sir_eu, suffix_entry)
+        {
+            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        }
+    }
+    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu);
     sir_eu
         .verify_result()
         .map_err(|error| ChainedEmitError::Sir {

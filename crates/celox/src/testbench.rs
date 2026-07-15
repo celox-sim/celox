@@ -3382,7 +3382,7 @@ fn drain_runtime_assertions<B: SimBackend>(
         tb_time: Some(ctx.current_time),
         scope: None,
     };
-    for event in sim.drain_runtime_events_with_context(format_ctx) {
+    for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
         match event {
             RuntimeEvent::AssertContinue { message } => {
                 last_message = Some(message.clone());
@@ -3453,7 +3453,7 @@ fn exec_one_detailed<B: SimBackend>(
                 Ok(n) => {
                     let progress_every = testbench_progress_every();
                     for _ in 0..n {
-                        if let Err(e) = sim.tick(*clock_event) {
+                        if let Err(e) = sim.tick_deferred_comb(*clock_event) {
                             ctx.current_time = ctx.current_time.saturating_add(1);
                             let drained = drain_runtime_assertions(sim, ctx, None);
                             if let Some(message) = drained.fatal_message {
@@ -3484,7 +3484,7 @@ fn exec_one_detailed<B: SimBackend>(
         } => {
             sim_set_u64(sim, *reset_signal, (*assert_value).into());
             for _ in 0..*duration {
-                if let Err(e) = sim.tick(*clock_event) {
+                if let Err(e) = sim.tick_deferred_comb(*clock_event) {
                     ctx.current_time = ctx.current_time.saturating_add(1);
                     let drained = drain_runtime_assertions(sim, ctx, None);
                     if let Some(message) = drained.fatal_message {

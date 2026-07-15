@@ -798,8 +798,19 @@ impl SimModule {
 /// BlockId of the i-th EU's entry block in the merged EU (for i > 0).
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    let units = units.iter().collect::<Vec<_>>();
+    merge_sir_eu_refs(&units)
+}
+
+/// Reference-based variant of [`merge_sir_eus`] used when one compilation
+/// unit is assembled from multiple Program-owned EU slices.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn merge_sir_eu_refs<A: Clone>(
+    units: &[&ExecutionUnit<A>],
+) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    assert!(!units.is_empty(), "cannot merge an empty SIR EU list");
     if units.len() == 1 {
-        return (units[0].clone(), vec![]);
+        return ((*units[0]).clone(), vec![]);
     }
 
     let mut merged_blocks = crate::HashMap::default();
@@ -906,6 +917,201 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
         },
         eu_boundary_blocks,
     )
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn inline_single_predecessor_jumps<A: Clone>(eu: &mut ExecutionUnit<A>) -> bool {
+    fn successors(terminator: &SIRTerminator) -> Vec<BlockId> {
+        match terminator {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        }
+    }
+
+    let mut changed = false;
+    loop {
+        let mut predecessor_count = crate::HashMap::<BlockId, usize>::default();
+        for block in eu.blocks.values() {
+            for successor in successors(&block.terminator) {
+                *predecessor_count.entry(successor).or_default() += 1;
+            }
+        }
+
+        let mut inline = None;
+        let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+        block_ids.sort_unstable();
+        for block_id in block_ids {
+            let Some(block) = eu.blocks.get(&block_id) else {
+                continue;
+            };
+            let SIRTerminator::Jump(target, args) = &block.terminator else {
+                continue;
+            };
+            if *target == block_id || predecessor_count.get(target).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(target_block) = eu.blocks.get(target) else {
+                continue;
+            };
+            if target_block.params.len() != args.len() {
+                continue;
+            }
+            inline = Some((block_id, *target, args.clone()));
+            break;
+        }
+
+        let Some((block_id, target_id, args)) = inline else {
+            break;
+        };
+        let target = eu
+            .blocks
+            .remove(&target_id)
+            .expect("inline target exists when selected");
+        let replacements = target
+            .params
+            .iter()
+            .copied()
+            .zip(args)
+            .collect::<crate::HashMap<_, _>>();
+        let mut instructions = target.instructions;
+        let mut terminator = target.terminator;
+        for instruction in &mut instructions {
+            replace_sir_uses(instruction, &replacements);
+        }
+        replace_sir_terminator_uses(&mut terminator, &replacements);
+
+        let block = eu
+            .blocks
+            .get_mut(&block_id)
+            .expect("inline predecessor exists when selected");
+        block.instructions.extend(instructions);
+        block.terminator = terminator;
+        changed = true;
+    }
+    changed
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_offset_uses(
+    offset: &mut SIROffset,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    match offset {
+        SIROffset::Static(_) => {}
+        SIROffset::Dynamic(register) => {
+            if let Some(&replacement) = replacements.get(register) {
+                *register = replacement;
+            }
+        }
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            if let Some(&replacement) = replacements.get(index) {
+                *index = replacement;
+            }
+            if let Some(register) = dynamic_bit_offset {
+                if let Some(&replacement) = replacements.get(register) {
+                    *register = replacement;
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_uses<A>(
+    instruction: &mut SIRInstruction<A>,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    let replace = |register: &mut RegisterId| {
+        if let Some(&replacement) = replacements.get(register) {
+            *register = replacement;
+        }
+    };
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            replace(lhs);
+            replace(rhs);
+        }
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            replace(source);
+        }
+        SIRInstruction::Load(_, _, offset, _) => {
+            replace_sir_offset_uses(offset, replacements);
+        }
+        SIRInstruction::Store(_, offset, _, source, _, _) => {
+            replace_sir_offset_uses(offset, replacements);
+            replace(source);
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            replace_sir_offset_uses(offset, replacements);
+        }
+        SIRInstruction::Concat(_, sources) => {
+            for source in sources {
+                replace(source);
+            }
+        }
+        SIRInstruction::Mux(_, condition, then_value, else_value) => {
+            replace(condition);
+            replace(then_value);
+            replace(else_value);
+        }
+        SIRInstruction::RuntimeEvent { args, .. } => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRInstruction::CombCaptureEvent { args, .. } => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            replace(old);
+            replace(new);
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_terminator_uses(
+    terminator: &mut SIRTerminator,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    let replace = |register: &mut RegisterId| {
+        if let Some(&replacement) = replacements.get(register) {
+            *register = replacement;
+        }
+    };
+    match terminator {
+        SIRTerminator::Jump(_, args) => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            replace(cond);
+            for arg in &mut true_block.1 {
+                replace(arg);
+            }
+            for arg in &mut false_block.1 {
+                replace(arg);
+            }
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
 }
 
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]

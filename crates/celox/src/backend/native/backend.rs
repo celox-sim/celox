@@ -30,6 +30,7 @@ pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
 #[derive(Clone, Copy)]
 pub struct NativeEventRef {
     pub func: NativeSimFunc,
+    pub comb_apply_func: NativeSimFunc,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -38,6 +39,7 @@ impl std::fmt::Debug for NativeEventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeEventRef")
             .field("func", &(self.func as usize))
+            .field("comb_apply_func", &(self.comb_apply_func as usize))
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -138,6 +140,21 @@ fn compile_units(
         .map_err(|e| codegen_err(format!("mmap error: {e}")))
 }
 
+fn compile_comb_eval_apply_units(
+    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &MemoryLayout,
+    four_state: bool,
+    label: &str,
+) -> Result<jit_mem::JitCode, SimulatorError> {
+    let emit_result =
+        emit::emit_comb_eval_apply_eus(comb_units, ff_units, layout, four_state, label)
+            .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+    let symbols = perf_symbols_for_emit_result(label, &emit_result);
+    jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))
+}
+
 fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<jit_mem::JitSymbol> {
     let code_len = result.code.len();
     if result.block_offsets.is_empty() {
@@ -209,6 +226,7 @@ fn compile_program(
     let mut apply_event_map = HashMap::default();
     let mut addr_to_id = HashMap::default();
     let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
+    let mut compiled_comb_apply_cache: HashMap<u64, NativeSimFunc> = HashMap::default();
 
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
@@ -218,10 +236,12 @@ fn compile_program(
                             event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
                             addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
                             compiled_ff_cache: &mut HashMap<u64, NativeSimFunc>,
+                            compiled_comb_apply_cache: &mut HashMap<u64, NativeSimFunc>,
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
                             id_to_event: &mut Vec<NativeEventRef>,
-                            label: &str|
+                            label: &str,
+                            compile_comb_prefix: bool|
      -> Result<(), SimulatorError> {
         for (addr, units) in ff_map {
             let canonical = sir.clock_domains.get(addr).copied().unwrap_or(*addr);
@@ -240,6 +260,25 @@ fn compile_program(
                 compiled_ff_cache.insert(fingerprint, func);
                 func
             };
+            let comb_apply_func = if compile_comb_prefix {
+                if let Some(&func) = compiled_comb_apply_cache.get(&fingerprint) {
+                    func
+                } else {
+                    let code = compile_comb_eval_apply_units(
+                        &sir.eval_comb,
+                        units,
+                        layout,
+                        options.four_state,
+                        "eval_comb_apply_ff",
+                    )?;
+                    let func = code.fn_ptr;
+                    all_codes.push(code);
+                    compiled_comb_apply_cache.insert(fingerprint, func);
+                    func
+                }
+            } else {
+                func
+            };
 
             let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
                 (id, false)
@@ -253,6 +292,7 @@ fn compile_program(
 
             let event = NativeEventRef {
                 func,
+                comb_apply_func,
                 addr: canonical,
                 id,
             };
@@ -273,10 +313,12 @@ fn compile_program(
         &mut event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
+        &mut compiled_comb_apply_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
         "eval_apply_ff",
+        true,
     )?;
     compile_ff_group(
         &sir.eval_only_ffs,
@@ -284,10 +326,12 @@ fn compile_program(
         &mut eval_only_event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
+        &mut compiled_comb_apply_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
         "eval_only_ff",
+        false,
     )?;
     compile_ff_group(
         &sir.apply_ffs,
@@ -295,10 +339,12 @@ fn compile_program(
         &mut apply_event_map,
         &mut addr_to_id,
         &mut compiled_ff_cache,
+        &mut compiled_comb_apply_cache,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
         "apply_ff",
+        false,
     )?;
 
     // Pre-compute 4-state initialization regions
@@ -505,6 +551,10 @@ impl super::super::SimBackend for NativeBackend {
 
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         Self::call_func(&mut self.memory, event.func)
+    }
+
+    fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        Self::call_func(&mut self.memory, event.comb_apply_func)
     }
 
     fn eval_only_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {

@@ -112,6 +112,17 @@ pub trait SimBackend {
     /// Evaluate and apply a flip-flop domain for the given event.
     fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
 
+    /// Evaluate combinational logic and then evaluate/apply one flip-flop
+    /// domain. Backends may override this to compile the two phases as one
+    /// function; the default preserves the same ordering with two calls.
+    fn eval_comb_apply_ff_at(
+        &mut self,
+        event: Self::Event,
+    ) -> Result<(), super::SimulatorErrorCode> {
+        self.eval_comb()?;
+        self.eval_apply_ff_at(event)
+    }
+
     /// Evaluate FF domain without applying (for cascaded clocks).
     fn eval_only_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
 

@@ -669,6 +669,28 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
+        self.collect_formatted_runtime_events(ctx)
+    }
+
+    pub(crate) fn drain_runtime_events_deferred_with_context(
+        &mut self,
+        ctx: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
+        assert!(
+            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+        );
+        if !self.program.comb_observers.is_empty() && self.dirty {
+            self.eval_comb_checked().unwrap();
+            self.dirty = false;
+        }
+        self.collect_formatted_runtime_events(ctx)
+    }
+
+    fn collect_formatted_runtime_events(
+        &mut self,
+        ctx: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
         if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq() {
             return Vec::new();
         }
@@ -948,6 +970,15 @@ impl<B: SimBackend> Simulator<B> {
             .map_err(|e| self.decorate_runtime_error(e))
     }
 
+    pub(crate) fn eval_comb_apply_ff_at_checked(
+        &mut self,
+        event: B::Event,
+    ) -> Result<(), RuntimeErrorCode> {
+        self.backend
+            .eval_comb_apply_ff_at(event)
+            .map_err(|e| self.decorate_runtime_error(e))
+    }
+
     pub(crate) fn eval_only_ff_at_checked(
         &mut self,
         event: B::Event,
@@ -999,6 +1030,22 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked()?;
         }
         self.dirty = false;
+        Ok(())
+    }
+
+    /// Advance one event while deferring the post-edge combinational settle.
+    /// Native testbenches use this between observable expressions so the
+    /// preceding comb phase and this FF phase can share one compiled function.
+    pub(crate) fn tick_deferred_comb(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        if !self.program.comb_observers.is_empty() {
+            return self.tick(event);
+        }
+        if self.dirty {
+            self.eval_comb_apply_ff_at_checked(event)?;
+        } else {
+            self.eval_apply_ff_at_checked(event)?;
+        }
+        self.dirty = true;
         Ok(())
     }
 

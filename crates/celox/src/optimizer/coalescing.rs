@@ -47,8 +47,31 @@ pub(crate) fn promote_eval_apply_working_round_trips(
 }
 
 #[cfg(target_arch = "x86_64")]
+pub(crate) fn forward_stable_static_slots_from(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    entry: BlockId,
+) -> bool {
+    pass_global_store_load_forwarding::forward_stable_static_slots_from(eu, entry)
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     pass_vectorize_concat::remove_dead_definitions(eu);
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn optimize_native_merged_chain(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let mut changed = false;
+    if crate::ir::inline_single_predecessor_jumps(eu) {
+        changed = true;
+    }
+    OptimizeBlocksPass {
+        skip_final_schedule: false,
+    }
+    .run(eu, &PassOptions::default());
+    if changed {
+        pass_vectorize_concat::remove_dead_definitions(eu);
+    }
 }
 
 pub(crate) fn optimize_rooted_comb_memory(
@@ -88,7 +111,7 @@ use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_loop_idiom::LoopIdiomPass;
-use pass_manager::ExecutionUnitPassManager;
+use pass_manager::{ExecutionUnitPass, ExecutionUnitPassManager};
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_packed_scatter_store::PackedScatterStorePass;
 use pass_partial_forward::PartialForwardPass;
