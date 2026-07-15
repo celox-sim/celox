@@ -274,6 +274,9 @@ pub(super) struct StateSsa {
     pub slots: Vec<StateSsaSlot>,
     pub accesses: Vec<MemoryAccess>,
     effects: HashMap<(BlockId, usize), InstructionEffects>,
+    read_versions: HashMap<(BlockId, usize, RegisterId), (usize, MemoryVersionId)>,
+    entry_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
+    exit_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +416,31 @@ impl StateSsa {
         region: u32,
         eligible_load_blocks: Option<&HashSet<BlockId>>,
         phases: &StatePhaseMap,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(eu, cfg, region, eligible_load_blocks, phases, false)
+    }
+
+    /// Build state versions for every exact load shape, including state which
+    /// is never written in this execution unit.  Forwarding deliberately uses
+    /// the narrower `analyze` entry point; placement needs a LiveOnEntry token
+    /// even for read-only state so two source occurrences are still identified
+    /// by the state version they observe.
+    pub fn analyze_all_loads(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        phases: &StatePhaseMap,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(eu, cfg, region, None, phases, true)
+    }
+
+    fn analyze_selected(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        eligible_load_blocks: Option<&HashSet<BlockId>>,
+        phases: &StatePhaseMap,
+        include_read_only: bool,
     ) -> Result<Self, StateSsaError> {
         let mut raw = HashMap::<StateLocation, RawSlot>::default();
 
@@ -628,7 +656,8 @@ impl StateSsa {
             .iter()
             .enumerate()
             .filter_map(|(index, facts)| {
-                (!facts.invalid && facts.has_load && facts.has_store).then_some(index)
+                (!facts.invalid && facts.has_load && (include_read_only || facts.has_store))
+                    .then_some(index)
             })
             .collect::<Vec<_>>();
         let mut remap = vec![None; facts.len()];
@@ -705,6 +734,9 @@ impl StateSsa {
             slots,
             accesses: Vec::new(),
             effects,
+            read_versions: HashMap::default(),
+            entry_versions: HashMap::default(),
+            exit_versions: HashMap::default(),
         };
         state_ssa.build_access_graph(eu, cfg)?;
         state_ssa.verify(cfg)?;
@@ -830,6 +862,21 @@ impl StateSsa {
                         versions[slot].push(access);
                         pushed.push(slot);
                     }
+                    self.entry_versions.insert(
+                        block_id,
+                        versions
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, versions)| {
+                                versions.last().copied().ok_or(
+                                    StateSsaError::MissingReachingVersion {
+                                        block: block_id,
+                                        slot,
+                                    },
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
                     for instruction in 0..eu.blocks[&block_id].instructions.len() {
                         let Some(accesses) =
                             instruction_accesses.get(&(block_id, instruction)).cloned()
@@ -861,6 +908,21 @@ impl StateSsa {
                             pushed.push(slot);
                         }
                     }
+                    self.exit_versions.insert(
+                        block_id,
+                        versions
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, versions)| {
+                                versions.last().copied().ok_or(
+                                    StateSsaError::MissingReachingVersion {
+                                        block: block_id,
+                                        slot,
+                                    },
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
                     for &successor in &cfg.successors[block] {
                         for &(slot, phi) in &phi_accesses[successor] {
                             let version = versions[slot].last().copied().ok_or(
@@ -883,6 +945,29 @@ impl StateSsa {
                         visits.push(Visit::Enter(child));
                     }
                 }
+            }
+        }
+        for access in &self.accesses {
+            let MemoryAccessKind::Use {
+                destination: Some(destination),
+                reaching,
+            } = access.kind
+            else {
+                continue;
+            };
+            let (Some(block), Some(instruction)) = (access.block, access.instruction) else {
+                return Err(StateSsaError::InvalidAccess(
+                    "register-producing state use has no instruction location",
+                ));
+            };
+            if self
+                .read_versions
+                .insert((block, instruction, destination), (access.slot, reaching))
+                .is_some()
+            {
+                return Err(StateSsaError::InvalidAccess(
+                    "state load has more than one exact version",
+                ));
             }
         }
         for access in &mut self.accesses {
@@ -988,6 +1073,25 @@ impl StateSsa {
             .into_iter()
             .flat_map(|effects| effects.defs.iter())
             .filter_map(|effect| matches!(effect.kind, DefEffectKind::Kill).then_some(effect.slot))
+    }
+
+    pub fn read_version(
+        &self,
+        block: BlockId,
+        instruction: usize,
+        destination: RegisterId,
+    ) -> Option<(usize, MemoryVersionId)> {
+        self.read_versions
+            .get(&(block, instruction, destination))
+            .copied()
+    }
+
+    pub fn entry_version(&self, block: BlockId, slot: usize) -> Option<MemoryVersionId> {
+        self.entry_versions.get(&block)?.get(slot).copied()
+    }
+
+    pub fn exit_version(&self, block: BlockId, slot: usize) -> Option<MemoryVersionId> {
+        self.exit_versions.get(&block)?.get(slot).copied()
     }
 }
 

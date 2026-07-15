@@ -396,7 +396,7 @@ Execution slices:
    make identical optimized SIR produce identical native output: stabilize
    memory layout, SIR-to-MIR VReg allocation, wide block-parameter allocation,
    overlapping-load forwarding choices, and allocator edge reconstruction.
-2. **4b -- value occurrence and execution-safety model (pending).** Build
+2. **4b -- value occurrence and execution-safety model (complete).** Build
    occurrence-aware value identities, state/effect tokens, and legal
    ScheduleEarly/ScheduleLate bounds over the full CFG.
 3. **4c -- atomic binary and multiway placement (pending).** Select complete
@@ -470,7 +470,45 @@ Acceptance:
 This slice establishes a reproducible baseline and shared analysis substrate;
 it does not claim that whole-region placement is implemented.
 
-Status: **in progress (4a complete; 4b pending)**.
+4b result:
+
+- added one deterministic `ValueOccurrence` per SIR block parameter or
+  instruction definition. Equal expressions and repeated loads remain distinct
+  occurrences; uses retain their instruction operand or predecessor-edge
+  position instead of collapsing to a source DAG identity;
+- extended StateSSA with a placement-only analysis mode which versions every
+  exact load, including read-only LiveOnEntry state, while leaving the existing
+  forwarding selection unchanged. A state-read occurrence carries its exact
+  fragment and reaching MemorySSA version; dynamic or structurally invalid
+  loads are pinned;
+- retained per-block StateSSA entry/exit versions so a prospective move to a
+  block entry or newly split edge is accepted only when it observes the same
+  version. Exact, partial, and dynamically aliasing writes close that execution
+  domain;
+- built a separate effect SSA chain for Store, Commit, runtime/capture events,
+  capture-enable operations, and Error terminators. Dominance-frontier phis
+  preserve branch/merge ordering, and every observable occurrence retains its
+  original control-dependence domain;
+- implemented ScheduleEarly/ScheduleLate sinking bounds over the shared
+  dominator tree. Phi operands are uses on predecessor edges, values shared by
+  both arms stay above the branch, and cyclic-SCC crossings are conservatively
+  rejected until a loop-value proof exists. This slice only computes and
+  verifies placement facts; it does not yet rewrite a decision region;
+- focused tests passed: placement analysis 9/9 and existing StateSSA 7/7,
+  covering distinct occurrences, read-only and write-separated state tokens,
+  partial alias kills, unchanged and changed edge versions, merge parameters,
+  effect phis/control domains, and unversioned dynamic loads. Common gates
+  passed with 701/701 library tests, 60/60 native testbench tests, and 9/9
+  native/Cranelift/Wasm counter tests; documented upstream/Veryl cases remained
+  ignored; and
+- the clean pinned Heliodor full non-LTO run took `204.925 s` process time and
+  `204.764 s` runner-reported time. The log contains exactly one
+  native/O2/two-state/full configuration, `reboot: Power down`,
+  `cy=9ab960 x3=aa pass=1`, and final pass result in
+  `target/heliodor/results/20260715T193059Z_celox_test_soc_linux_boot.log`.
+  The Heliodor checkout remained clean at commit `7ad830fc`.
+
+Status: **in progress (4a--4b complete; 4c pending)**.
 
 ## Step 5: End-to-end qualification
 
@@ -501,8 +539,9 @@ Status: **not started**.
 | 1 | `e3dfa119` | CFG 9/9; forwarding 11/11 | lib 645/645; native 60/60; counter 6/6 | pass: `cy=9ab960 x3=aa pass=1` | 233.042 s | complete |
 | 2 | `75bf2636` | StateSSA 7/7; promotion 18/18 | lib 661/661; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.172 s | complete |
 | 3 | `d4cdb0f7` | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
-| 4a | pending | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
-| 4b--4d | pending | pending | pending | pending | pending | in progress |
+| 4a | `f213119a` | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
+| 4b | pending | placement 9/9; StateSSA 7/7 | lib 701/701; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 204.925 s | complete |
+| 4c--4d | pending | pending | pending | pending | pending | in progress |
 | 5 | pending | pending | pending | pending | pending | not started |
 
 ## Related design records
