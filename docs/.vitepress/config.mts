@@ -141,6 +141,10 @@ export default defineConfig({
             { text: "IR Reference", link: "/internals/ir-reference" },
             { text: "Optimizations", link: "/internals/optimizations" },
             { text: "JIT Roadmap", link: "/internals/jit-roadmap" },
+            {
+              text: "Native Throughput Plan",
+              link: "/internals/native-throughput-execution-plan",
+            },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",
