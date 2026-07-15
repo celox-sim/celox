@@ -399,12 +399,17 @@ Execution slices:
 2. **4b -- value occurrence and execution-safety model (complete).** Build
    occurrence-aware value identities, state/effect tokens, and legal
    ScheduleEarly/ScheduleLate bounds over the full CFG.
-3. **4c -- atomic binary and multiway placement (pending).** Select complete
-   binary and multiway decision regions bottom-up, place shared pure values
-   once, and apply one verified whole-unit plan.
-4. **4d -- generated-code and full-run evaluation (pending).** Prove that
+3. **4c1 -- atomic residual priority-spine placement (complete).** Select
+   complete contiguous priority spines bottom-up from one whole-unit analysis,
+   place shared pure values once at their leaf or lowest common decision, and
+   apply all disjoint regions as one preflighted plan.
+4. **4c2 -- cross-block binary and grouped multiway placement (pending).**
+   Extend region recognition beyond a contiguous same-block Mux spine, while
+   retaining explicit MemorySSA/effect-domain restrictions.
+5. **4d -- generated-code and full-run evaluation (in progress).** Prove that
    untaken pure work is absent from executed paths, run the common and Linux
-   gates, and retain the placement only if full runtime improves.
+   gates after each retained 4c slice, and retain placement only if full
+   runtime improves.
 
 Deliverables:
 
@@ -508,7 +513,44 @@ it does not claim that whole-region placement is implemented.
   `target/heliodor/results/20260715T193059Z_celox_test_soc_linux_boot.log`.
   The Heliodor checkout remained clean at commit `7ad830fc`.
 
-Status: **in progress (4a--4b complete; 4c pending)**.
+4c1 result:
+
+- recognized each maximal contiguous residual priority spine as one decision
+  region instead of independently branchifying its Mux leaves. Candidates are
+  ordered bottom-up by dominator depth and selected from one placement-analysis
+  snapshot; overlapping blocks or value occurrences are rejected before any
+  mutation;
+- computed a terminal-leaf execution mask for every movable pure definition.
+  A leaf-only value is delayed to that leaf, a value shared by several leaves
+  is emitted once at their lowest common decision, and a value with any use
+  outside the region stays in the head. State reads and observable operations
+  remain pinned rather than being treated as pure work;
+- preflighted block-ID capacity for the complete plan and then emitted each
+  selected spine as its full decision/leaf/merge CFG. No partial region is
+  applied when preflight fails;
+- verified the relevant Heliodor optimized SIR directly. In the 4b form, an
+  expensive `CountLeadingZeros` path was evaluated before the final priority
+  Mux spine. In the retained form, outer predicates branch first and that work
+  exists only below the required fall-through decisions. Surrounding residual
+  Muxes outside the contiguous spine remain, which is why 4c2 is still pending;
+- confirmed that temporary plan observation did not change generated code,
+  removed that observation, and regenerated the complete trace. The resulting
+  pre-SIR, post-SIR, and MIR are byte-identical to the unobserved successful
+  candidate. Their SHA-256 values are respectively
+  `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`,
+  `9b4ddb6393497fac3f7b749b494f06f84e42217a83c5a8bb853d8947e2d67f75`,
+  and `5599b01c31b0a82905669b98af00c24966cd74bd75d8dd2cad9433ccb2150040`;
+- focused branchification tests passed 35/35. Common gates passed with 708/708
+  library tests, 60 native-testbench passes, and 9 native/Cranelift/Wasm
+  counter passes; the documented upstream/Veryl cases remained ignored; and
+- the clean pinned Heliodor full non-LTO run took `201.262 s` process time and
+  `201.059 s` runner-reported time, improving on the 4b `204.925 s` process
+  result. The log contains exactly one native/O2/two-state/full configuration,
+  `reboot: Power down`, `cy=9ab960 x3=aa pass=1`, and the final pass result in
+  `target/heliodor/results/20260715T205844Z_celox_test_soc_linux_boot.log`.
+  The cleanup trace's byte identity ties this run to the final generated code.
+
+Status: **in progress (4a--4c1 complete; 4c2 pending)**.
 
 ## Step 5: End-to-end qualification
 
@@ -540,8 +582,9 @@ Status: **not started**.
 | 2 | `75bf2636` | StateSSA 7/7; promotion 18/18 | lib 661/661; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.172 s | complete |
 | 3 | `d4cdb0f7` | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
 | 4a | `f213119a` | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
-| 4b | pending | placement 9/9; StateSSA 7/7 | lib 701/701; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 204.925 s | complete |
-| 4c--4d | pending | pending | pending | pending | pending | in progress |
+| 4b | `47006336` | placement 9/9; StateSSA 7/7 | lib 701/701; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 204.925 s | complete |
+| 4c1 | this commit | branchify 35/35 | lib 708/708; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 201.262 s | complete |
+| 4c2--4d | pending | pending | pending | pending | pending | in progress |
 | 5 | pending | pending | pending | pending | pending | not started |
 
 ## Related design records
