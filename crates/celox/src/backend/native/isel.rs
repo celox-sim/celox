@@ -69,7 +69,8 @@ fn find_sparse_worklist_run(
         return None;
     }
 
-    for (&block_id, block) in &eu.blocks {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         let mut start = 0usize;
         while start < block.instructions.len() {
             let is_sparse_commit = |instruction: &SIRInstruction<RegionedAbsoluteAddr>| {
@@ -142,9 +143,11 @@ pub fn lower_execution_unit(
     let max_sir_regs = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
     let mut reg_map = RegMap::new(max_sir_regs);
     let trace_regs = parse_trace_sir_regs();
+    let mut sir_registers = eu.register_map.keys().copied().collect::<Vec<_>>();
+    sir_registers.sort_unstable_by_key(|register| register.0);
 
     // Pre-allocate a VReg for each SIR register
-    for sir_reg_id in eu.register_map.keys() {
+    for sir_reg_id in &sir_registers {
         let vreg = vregs.alloc();
         reg_map.set(*sir_reg_id, vreg);
         if trace_regs.contains(sir_reg_id) {
@@ -199,7 +202,7 @@ pub fn lower_execution_unit(
     let mut mask_map = RegMap::new(max_sir_regs);
     // Pre-allocate mask VRegs for 4-state
     if four_state {
-        for sir_reg_id in eu.register_map.keys() {
+        for sir_reg_id in &sir_registers {
             let mvreg = func.vregs.alloc();
             mask_map.set(*sir_reg_id, mvreg);
             func.spill_descs.push(SpillDesc::transient());
@@ -226,7 +229,8 @@ pub fn lower_execution_unit(
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
-    for sir_block in eu.blocks.values() {
+    for &sir_block_id in &block_ids {
+        let sir_block = &eu.blocks[&sir_block_id];
         for &param_reg in &sir_block.params {
             let width = eu.register_map[&param_reg].width();
             let num_chunks = width.div_ceil(64).max(1);
@@ -1769,7 +1773,8 @@ fn collect_exact_sir_constants(
 ) -> HashMap<RegisterId, ExactSirConstant> {
     let mut constants = HashMap::default();
     let mut ambiguous = HashSet::default();
-    for block in eu.blocks.values() {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         for inst in &block.instructions {
             let SIRInstruction::Imm(dst, value) = inst else {
                 continue;
@@ -2098,18 +2103,19 @@ fn collect_sir_use_sites(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, Vec<SirUseSite>> {
     let mut uses: HashMap<RegisterId, Vec<SirUseSite>> = HashMap::default();
-    for (block_id, block) in &eu.blocks {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             collect_sir_inst_uses(inst, |reg| {
                 uses.entry(reg).or_default().push(SirUseSite {
-                    block: *block_id,
+                    block: block_id,
                     inst_idx: Some(inst_idx),
                 });
             });
         }
         collect_sir_term_uses(&block.terminator, |reg| {
             uses.entry(reg).or_default().push(SirUseSite {
-                block: *block_id,
+                block: block_id,
                 inst_idx: None,
             });
         });
@@ -11539,6 +11545,157 @@ mod tests {
     use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
     use num_bigint::BigUint;
     use veryl_analyzer::ir::VarId;
+
+    fn empty_layout() -> MemoryLayout {
+        MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: HashMap::default(),
+            widths: HashMap::default(),
+            is_4states: HashMap::default(),
+            total_size: 0,
+            working_offsets: HashMap::default(),
+            working_base_offset: 0,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 0,
+            sparse_layouts: HashMap::default(),
+            sparse_active_count_offset: 0,
+            sparse_active_flags_offset: 0,
+            sparse_active_list_offset: 0,
+            sparse_active_capacity: 0,
+            merged_total_size: 0,
+            triggered_bits_offset: 0,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 0,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        }
+    }
+
+    #[test]
+    fn preallocates_vregs_in_sir_register_order() {
+        let low = RegisterId(2);
+        let middle = RegisterId(7);
+        let high = RegisterId(9);
+        let register_type = RegisterType::Bit {
+            width: 64,
+            signed: false,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(middle, SIRValue::new(7u8)),
+                        SIRInstruction::Imm(low, SIRValue::new(2u8)),
+                        SIRInstruction::Binary(high, low, BinaryOp::Add, middle),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            // Deliberately insert in neither source nor RegisterId order.
+            register_map: [
+                (high, register_type.clone()),
+                (low, register_type.clone()),
+                (middle, register_type),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let function = lower_execution_unit(&eu, &empty_layout(), false);
+        let instructions = &function.blocks[0].insts;
+        assert!(matches!(
+            instructions[0],
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 7
+            }
+        ));
+        assert!(matches!(
+            instructions[1],
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 2
+            }
+        ));
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.def() == Some(VReg(2))),
+            "r9 must use the third preallocated VReg: {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn wide_block_parameter_preallocation_ignores_block_map_order() {
+        let source = RegisterId(0);
+        let first_param = RegisterId(1);
+        let second_param = RegisterId(2);
+        let entry = BasicBlock {
+            id: SirBlockId(0),
+            params: vec![],
+            instructions: vec![SIRInstruction::Imm(
+                source,
+                SIRValue::new(BigUint::from(0x1234u64)),
+            )],
+            terminator: SIRTerminator::Jump(SirBlockId(2), vec![source]),
+        };
+        let first = BasicBlock {
+            id: SirBlockId(1),
+            params: vec![first_param],
+            instructions: vec![],
+            terminator: SIRTerminator::Return,
+        };
+        let second = BasicBlock {
+            id: SirBlockId(2),
+            params: vec![second_param],
+            instructions: vec![],
+            terminator: SIRTerminator::Jump(SirBlockId(1), vec![second_param]),
+        };
+        let register_map = [source, first_param, second_param]
+            .into_iter()
+            .map(|register| {
+                (
+                    register,
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let make_eu = |blocks: Vec<(SirBlockId, BasicBlock<RegionedAbsoluteAddr>)>| ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: blocks.into_iter().collect(),
+            register_map: register_map.clone(),
+        };
+        let forward = make_eu(vec![
+            (SirBlockId(0), entry.clone()),
+            (SirBlockId(1), first.clone()),
+            (SirBlockId(2), second.clone()),
+        ]);
+        let reverse = make_eu(vec![
+            (SirBlockId(2), second),
+            (SirBlockId(1), first),
+            (SirBlockId(0), entry),
+        ]);
+
+        let forward = lower_execution_unit(&forward, &empty_layout(), false);
+        let reverse = lower_execution_unit(&reverse, &empty_layout(), false);
+
+        assert_eq!(forward.to_string(), reverse.to_string());
+    }
 
     fn execute_unaligned_64_bit_load(dynamic: bool) -> u64 {
         let input_var = VarId::default();

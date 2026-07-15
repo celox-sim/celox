@@ -1,6 +1,18 @@
 use crate::HashMap;
 use crate::ir::{AbsoluteAddr, Program, SIRInstruction, SIROffset};
 
+type LayoutVariable = (AbsoluteAddr, usize, bool, usize, usize);
+
+fn sort_layout_variables(variables: &mut [LayoutVariable]) {
+    // Packing by decreasing alignment avoids padding.  Equal-alignment values
+    // must also have a stable order: both Program maps use randomized hashers,
+    // and preserving their iteration order makes every physical offset (and
+    // consequently native MIR/code shape) vary between identical builds.
+    variables.sort_unstable_by_key(|(address, _, _, _, alignment)| {
+        (std::cmp::Reverse(*alignment), *address)
+    });
+}
+
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
@@ -134,7 +146,7 @@ impl MemoryLayout {
             }
         }
 
-        stable_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        sort_layout_variables(&mut stable_vars_to_layout);
 
         let mut offsets = HashMap::default();
         let mut widths = HashMap::default();
@@ -166,25 +178,24 @@ impl MemoryLayout {
 
         // Compact working region: only variables actually written in WORKING region.
         let working_addrs = program.collect_working_region_addrs();
-        let mut working_vars_to_layout: Vec<(AbsoluteAddr, usize, bool, usize, usize)> =
-            working_addrs
-                .iter()
-                .map(|addr| {
-                    let width = widths[addr];
-                    let is_4state = is_4states[addr];
-                    let size = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.plane_size)
-                        .unwrap_or_else(|| get_byte_size(width));
-                    let align = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.element_stride.min(8))
-                        .unwrap_or_else(|| get_alignment(width));
-                    (*addr, width, is_4state, size, align)
-                })
-                .collect();
+        let mut working_vars_to_layout: Vec<LayoutVariable> = working_addrs
+            .iter()
+            .map(|addr| {
+                let width = widths[addr];
+                let is_4state = is_4states[addr];
+                let size = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.plane_size)
+                    .unwrap_or_else(|| get_byte_size(width));
+                let align = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.element_stride.min(8))
+                    .unwrap_or_else(|| get_alignment(width));
+                (*addr, width, is_4state, size, align)
+            })
+            .collect();
 
-        working_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        sort_layout_variables(&mut working_vars_to_layout);
 
         let mut working_offsets = HashMap::default();
         let mut working_current_offset = 0;
@@ -200,23 +211,22 @@ impl MemoryLayout {
         }
 
         let sparse_addrs = program.collect_sparse_working_region_addrs();
-        let mut sparse_vars_to_layout: Vec<(AbsoluteAddr, usize, bool, usize, usize)> =
-            sparse_addrs
-                .iter()
-                .map(|addr| {
-                    let width = widths[addr];
-                    let size = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.plane_size)
-                        .unwrap_or_else(|| get_byte_size(width));
-                    let align = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.element_stride.min(8))
-                        .unwrap_or_else(|| get_alignment(width));
-                    (*addr, width, is_4states[addr], size, align)
-                })
-                .collect();
-        sparse_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        let mut sparse_vars_to_layout: Vec<LayoutVariable> = sparse_addrs
+            .iter()
+            .map(|addr| {
+                let width = widths[addr];
+                let size = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.plane_size)
+                    .unwrap_or_else(|| get_byte_size(width));
+                let align = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.element_stride.min(8))
+                    .unwrap_or_else(|| get_alignment(width));
+                (*addr, width, is_4states[addr], size, align)
+            })
+            .collect();
+        sort_layout_variables(&mut sparse_vars_to_layout);
         let mut sparse_offsets = HashMap::default();
         let mut sparse_current_offset = 0usize;
         for (addr, _width, _is_4state, size, align) in sparse_vars_to_layout {
@@ -285,7 +295,10 @@ impl MemoryLayout {
         // - Alias width fits within canonical width
         // - Neither address is used in FF execution units (FF timing requires separate storage)
         let ff_addrs = collect_ff_addresses(program);
-        for (alias_addr, canonical_addr) in &program.address_aliases {
+        let mut address_aliases = program.address_aliases.iter().collect::<Vec<_>>();
+        address_aliases
+            .sort_unstable_by_key(|(alias_addr, canonical_addr)| (**alias_addr, **canonical_addr));
+        for (alias_addr, canonical_addr) in address_aliases {
             // In 4-state mode, skip 4-state variables: aliasing only shares
             // the value offset, but 4-state also needs mask offset sharing.
             // In 2-state mode (four_state=false), masks are not allocated so all types are safe.
@@ -529,5 +542,40 @@ fn get_alignment(width: usize) -> usize {
         size.next_power_of_two()
     } else {
         8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::InstanceId;
+    use veryl_analyzer::ir::VarId;
+
+    fn variable(instance: usize, variable: u32, alignment: usize) -> LayoutVariable {
+        (
+            AbsoluteAddr {
+                instance_id: InstanceId(instance),
+                var_id: VarId::from_raw(variable),
+            },
+            alignment * 8,
+            false,
+            alignment,
+            alignment,
+        )
+    }
+
+    #[test]
+    fn layout_order_is_independent_of_hash_iteration_order() {
+        let high_address = variable(3, 9, 8);
+        let low_address = variable(1, 2, 8);
+        let less_aligned = variable(0, 0, 4);
+        let mut forward = vec![high_address, less_aligned, low_address];
+        let mut reverse = forward.iter().copied().rev().collect::<Vec<_>>();
+
+        sort_layout_variables(&mut forward);
+        sort_layout_variables(&mut reverse);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, vec![low_address, high_address, less_aligned]);
     }
 }

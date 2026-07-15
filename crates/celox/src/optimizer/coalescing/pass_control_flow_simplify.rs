@@ -14,6 +14,7 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{collect_all_used_registers, def_reg};
+use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
@@ -171,8 +172,9 @@ fn simplify_dominated_muxes(
     }) {
         return false;
     }
-    let predecessors = super::pass_guarded_region_sinking::predecessor_map(eu);
-    let dominators = super::pass_guarded_region_sinking::Dominators::compute(eu, &predecessors);
+    let Ok(cfg) = SirCfg::analyze(eu) else {
+        return false;
+    };
     let parameter_facts = collect_edge_parameter_facts(eu);
     let mut branch_facts = HashMap::<RegisterId, Vec<(BlockId, BlockId, bool)>>::default();
     for block in eu.blocks.values() {
@@ -207,13 +209,7 @@ fn simplify_dominated_muxes(
                 if let Some(facts) = branch_facts.get(&root) {
                     for &(source, successor, truth) in facts {
                         if source != block_id
-                            && branch_edge_dominates_block(
-                                &predecessors,
-                                &dominators,
-                                source,
-                                successor,
-                                block_id,
-                            )
+                            && branch_edge_dominates_block(&cfg, source, successor, block_id)
                         {
                             let truth = truth ^ inverted;
                             if proven.is_some_and(|previous| previous != truth) {
@@ -271,22 +267,20 @@ fn simplify_dominated_muxes(
 /// successor for the first time.  Combined with ordinary node dominance for a
 /// descendant, this proves the edge was traversed on every path to `block`.
 fn branch_edge_dominates_block(
-    predecessors: &std::collections::BTreeMap<BlockId, std::collections::BTreeSet<BlockId>>,
-    dominators: &super::pass_guarded_region_sinking::Dominators,
+    cfg: &SirCfg,
     source: BlockId,
     successor: BlockId,
     block: BlockId,
 ) -> bool {
-    if source == successor
-        || dominators.dominates(successor, source)
-        || !dominators.dominates(successor, block)
-    {
+    if source == successor || cfg.dominates(successor, source) || !cfg.dominates(successor, block) {
         return false;
     }
-    predecessors.get(&successor).is_some_and(|incoming| {
-        incoming.iter().all(|predecessor| {
-            *predecessor == source || dominators.dominates(successor, *predecessor)
-        })
+    let (Some(source), Some(successor)) = (cfg.block_index(source), cfg.block_index(successor))
+    else {
+        return false;
+    };
+    cfg.predecessors[successor].iter().all(|&predecessor| {
+        predecessor == source || cfg.dominates(cfg.block_ids[successor], cfg.block_ids[predecessor])
     })
 }
 

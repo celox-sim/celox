@@ -1,7 +1,7 @@
 //! Braun--Hack sections 4.2 and 4.3: W/S states and coupling plan.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::backend::native::mir::{BlockId, MFunction, VReg};
 
@@ -48,7 +48,7 @@ pub(super) struct SpillPlan {
     pub logical: LogicalValues,
     pub homes: PhiCongruenceClasses,
     pub point_ops: Vec<(ProgramPoint, PlannedOp)>,
-    pub edge_ops: HashMap<(usize, usize), Vec<PlannedOp>>,
+    pub edge_ops: BTreeMap<(usize, usize), Vec<PlannedOp>>,
     pub w_entry: Vec<BTreeSet<LogicalValue>>,
     pub w_exit: Vec<BTreeSet<LogicalValue>>,
     pub s_entry: Vec<BTreeSet<LogicalValue>>,
@@ -400,7 +400,7 @@ pub(super) fn plan_with_recipe_costs(
         logical,
         homes,
         point_ops: Vec::new(),
-        edge_ops: HashMap::new(),
+        edge_ops: BTreeMap::new(),
         w_entry: vec![BTreeSet::new(); func.blocks.len()],
         w_exit: vec![BTreeSet::new(); func.blocks.len()],
         s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -724,7 +724,12 @@ fn init_usual(
         .copied()
         .filter(|value| !take.contains(value))
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    candidates.sort_by_key(|value| {
+        (
+            logical_entry_distance(next_use, &plan.logical, block, *value),
+            *value,
+        )
+    });
     let room = registers.saturating_sub(take.len());
     take.extend(candidates.into_iter().take(room));
     take

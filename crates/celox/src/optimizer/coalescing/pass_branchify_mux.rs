@@ -1,12 +1,13 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, normalize_branch_condition};
+use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator,
 };
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 pub(super) struct BranchifyMuxPass;
 
@@ -48,8 +49,8 @@ struct DistributedStore {
 /// function-wide: it uses the complete predecessor graph, dominators and a
 /// post-dominator tree to identify the controlled join in linear-ish time.
 struct CfgAnalysis {
-    dominators: super::pass_guarded_region_sinking::Dominators,
-    postdominators: PostDominatorTree,
+    graph: SirCfg,
+    incoming_edges: Vec<Vec<(BlockId, Option<bool>)>>,
     path_facts: PathFacts,
 }
 
@@ -308,7 +309,7 @@ fn find_cross_block_priority_chain_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockPriorityChainPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = CfgAnalysis::compute(eu)?;
     let locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -601,7 +602,7 @@ fn find_cross_block_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = CfgAnalysis::compute(eu)?;
     let def_locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -795,7 +796,7 @@ fn moved_defs_insertion_index(
 fn find_cross_block_group_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<CrossBlockGroupBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = CfgAnalysis::compute(eu)?;
     let def_locations = instruction_def_locations(eu);
     let def_blocks = all_def_blocks(eu);
     let use_locations = register_use_locations(eu);
@@ -992,7 +993,7 @@ fn collect_cross_group_defs(
         if block == mux_block && index >= first_mux_idx {
             return;
         }
-        if !cfg.dominators.dominates(block, mux_block) {
+        if !cfg.graph.dominates(block, mux_block) {
             return;
         }
         let instruction = eu.blocks[&block].instructions[index].clone();
@@ -1118,12 +1119,12 @@ fn cross_group_value_available(
         if moved.contains(&(block, index)) {
             return true;
         }
-        return cfg.dominators.dominates(block, mux_block)
+        return cfg.graph.dominates(block, mux_block)
             && (block != mux_block || index < first_mux_idx);
     }
     def_blocks
         .get(&register)
-        .is_some_and(|block| cfg.dominators.dominates(*block, mux_block))
+        .is_some_and(|block| cfg.graph.dominates(*block, mux_block))
 }
 
 fn cross_group_branch_is_profitable(
@@ -1220,7 +1221,7 @@ fn collect_cross_arm_defs(
     if block_id == mux_block && index >= mux_idx {
         return None;
     }
-    if !cfg.dominators.dominates(block_id, mux_block) {
+    if !cfg.graph.dominates(block_id, mux_block) {
         return None;
     }
     if use_counts.get(&root).copied().unwrap_or(0) != 1 {
@@ -1241,7 +1242,7 @@ fn collect_cross_arm_defs(
                 .get(&operand)
                 .is_some_and(|&(operand_block, operand_idx)| {
                     (operand_block != mux_block || operand_idx < mux_idx)
-                        && cfg.dominators.dominates(operand_block, mux_block)
+                        && cfg.graph.dominates(operand_block, mux_block)
                 });
         if can_attempt_move
             && use_counts.get(&operand).copied().unwrap_or(0) == 1
@@ -1561,7 +1562,9 @@ fn apply_cross_block_branchify(
 }
 
 fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let cfg = CfgAnalysis::compute(eu);
+    let Some(cfg) = CfgAnalysis::compute(eu) else {
+        return;
+    };
     let def_blocks = all_def_blocks(eu);
     let def_locations = instruction_def_locations(eu);
     let mut branches_by_root = HashMap::<RegisterId, Vec<BranchInfo>>::default();
@@ -1686,9 +1689,9 @@ fn plan_controlled_join_mux(
     false_val: RegisterId,
 ) -> Option<ControlledMuxPlan> {
     if branch.source == join
-        || !cfg.dominators.dominates(branch.source, join)
-        || !cfg.postdominators.postdominates(join, branch.true_target)
-        || !cfg.postdominators.postdominates(join, branch.false_target)
+        || !cfg.graph.dominates(branch.source, join)
+        || !cfg.graph.postdominates(join, branch.true_target)
+        || !cfg.graph.postdominates(join, branch.false_target)
     {
         return None;
     }
@@ -1703,7 +1706,7 @@ fn plan_controlled_join_mux(
         return None;
     }
 
-    let incoming_edges = incoming_edges_to(eu, join);
+    let incoming_edges = cfg.incoming_edges(join)?.to_vec();
     if incoming_edges.is_empty() {
         return None;
     }
@@ -1728,7 +1731,7 @@ fn plan_controlled_join_mux(
         let selected = known_condition_truth(eu, def_locations, &facts, condition)?;
         let selected_value = if selected { true_val } else { false_val };
         let def_block = def_blocks.get(&selected_value)?;
-        if !cfg.dominators.dominates(*def_block, predecessor) {
+        if !cfg.graph.dominates(*def_block, predecessor) {
             return None;
         }
 
@@ -1769,7 +1772,7 @@ fn plan_path_conditioned_join_mux(
     {
         return None;
     }
-    let incoming_edges = incoming_edges_to(eu, join);
+    let incoming_edges = cfg.incoming_edges(join)?.to_vec();
     if incoming_edges.is_empty() {
         return None;
     }
@@ -1790,7 +1793,7 @@ fn plan_path_conditioned_join_mux(
         let select_true = condition_truth ^ condition_inverted;
         let selected_value = if select_true { true_val } else { false_val };
         let def_block = def_blocks.get(&selected_value)?;
-        if !cfg.dominators.dominates(*def_block, predecessor) {
+        if !cfg.graph.dominates(*def_block, predecessor) {
             return None;
         }
         incoming.push(ControlledIncomingEdge {
@@ -1832,37 +1835,6 @@ fn append_controlled_edge_argument(
         },
         _ => {}
     }
-}
-
-fn incoming_edges_to(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    target: BlockId,
-) -> Vec<(BlockId, Option<bool>)> {
-    let mut edges = Vec::new();
-    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-    block_ids.sort_unstable_by_key(|id| id.0);
-    for block_id in block_ids {
-        match &eu.blocks[&block_id].terminator {
-            SIRTerminator::Jump(destination, _) if *destination == target => {
-                edges.push((block_id, None));
-            }
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                if true_block.0 == target {
-                    edges.push((block_id, Some(true)));
-                }
-                if false_block.0 == target {
-                    edges.push((block_id, Some(false)));
-                }
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-            _ => {}
-        }
-    }
-    edges
 }
 
 fn all_def_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, BlockId> {
@@ -1924,85 +1896,85 @@ fn resolve_boolean_alias(
 }
 
 impl CfgAnalysis {
-    fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
-        let predecessors = super::pass_guarded_region_sinking::predecessor_map(eu);
-        let dominators = super::pass_guarded_region_sinking::Dominators::compute(eu, &predecessors);
+    fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<Self> {
+        let graph = SirCfg::analyze(eu).ok()?;
         let def_locations = instruction_def_locations(eu);
-        let mut successors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        for (&block_id, block) in &eu.blocks {
-            let mut outgoing = match &block.terminator {
-                SIRTerminator::Jump(target, _) => vec![*target],
+        let incoming_edges = indexed_incoming_edges(eu, &graph);
+        let path_facts = PathFacts::compute(eu, &def_locations, &graph, &incoming_edges);
+
+        Some(Self {
+            graph,
+            incoming_edges,
+            path_facts,
+        })
+    }
+
+    fn incoming_edges(&self, target: BlockId) -> Option<&[(BlockId, Option<bool>)]> {
+        self.graph
+            .block_index(target)
+            .and_then(|block| self.incoming_edges.get(block))
+            .map(Vec::as_slice)
+    }
+}
+
+fn indexed_incoming_edges(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    graph: &SirCfg,
+) -> Vec<Vec<(BlockId, Option<bool>)>> {
+    let mut incoming = vec![Vec::new(); graph.block_ids.len()];
+    for (target, predecessors) in graph.predecessors.iter().enumerate() {
+        let target_id = graph.block_ids[target];
+        for &predecessor in predecessors {
+            let predecessor_id = graph.block_ids[predecessor];
+            match &eu.blocks[&predecessor_id].terminator {
+                SIRTerminator::Jump(destination, _) if *destination == target_id => {
+                    incoming[target].push((predecessor_id, None));
+                }
                 SIRTerminator::Branch {
                     true_block,
                     false_block,
                     ..
-                } => vec![true_block.0, false_block.0],
-                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-            };
-            outgoing.sort_unstable_by_key(|id| id.0);
-            outgoing.dedup();
-            successors.insert(block_id, outgoing);
-        }
-
-        let virtual_exit = BlockId(
-            eu.blocks
-                .keys()
-                .map(|id| id.0)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1),
-        );
-        let exits = successors
-            .iter()
-            .filter_map(|(&block, outgoing)| outgoing.is_empty().then_some(block))
-            .collect::<Vec<_>>();
-        let mut reverse_successors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        reverse_successors.insert(virtual_exit, exits);
-        for (&block, outgoing) in &successors {
-            reverse_successors.entry(block).or_default();
-            for &successor in outgoing {
-                reverse_successors.entry(successor).or_default().push(block);
+                } => {
+                    if true_block.0 == target_id {
+                        incoming[target].push((predecessor_id, Some(true)));
+                    }
+                    if false_block.0 == target_id {
+                        incoming[target].push((predecessor_id, Some(false)));
+                    }
+                }
+                _ => {}
             }
         }
-        let postdominators = PostDominatorTree::compute(virtual_exit, reverse_successors);
-        let path_facts = PathFacts::compute(eu, &def_locations);
-
-        Self {
-            dominators,
-            postdominators,
-            path_facts,
-        }
     }
+    incoming
 }
 
 impl PathFacts {
     fn compute(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+        graph: &SirCfg,
+        indexed_incoming: &[Vec<(BlockId, Option<bool>)>],
     ) -> Self {
-        let reachable = reachable_block_ids(eu);
         let mut entry_facts = HashMap::<BlockId, HashMap<PathFactKey, bool>>::default();
-        for block_id in &reachable {
-            entry_facts.insert(*block_id, HashMap::default());
+        for &block_id in &graph.block_ids {
+            entry_facts.insert(block_id, HashMap::default());
         }
 
         let mut incoming = HashMap::<BlockId, Vec<(BlockId, Option<bool>)>>::default();
         let mut successors = HashMap::<BlockId, Vec<BlockId>>::default();
-        for &block_id in &reachable {
-            let edges = incoming_edges_to(eu, block_id)
-                .into_iter()
-                .filter(|(predecessor, _)| reachable.contains(predecessor))
-                .collect::<Vec<_>>();
-            incoming.insert(block_id, edges);
-            successors.entry(block_id).or_default();
-        }
-        for (&target, edges) in &incoming {
-            for &(predecessor, _) in edges {
-                successors.entry(predecessor).or_default().push(target);
-            }
+        for (block, &block_id) in graph.block_ids.iter().enumerate() {
+            incoming.insert(block_id, indexed_incoming[block].clone());
+            successors.insert(
+                block_id,
+                graph.successors[block]
+                    .iter()
+                    .map(|&successor| graph.block_ids[successor])
+                    .collect(),
+            );
         }
 
-        let mut worklist = VecDeque::from_iter(reachable.iter().copied());
+        let mut worklist = VecDeque::from_iter(graph.block_ids.iter().copied());
         while let Some(predecessor) = worklist.pop_front() {
             let targets = successors.get(&predecessor).cloned().unwrap_or_default();
             for target in targets {
@@ -2253,203 +2225,6 @@ fn immediate_value(
         }
     }
     None
-}
-
-fn reachable_block_ids(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<BlockId> {
-    let mut reachable = HashSet::default();
-    let mut worklist = vec![eu.entry_block_id];
-    while let Some(block_id) = worklist.pop() {
-        if !reachable.insert(block_id) {
-            continue;
-        }
-        let Some(block) = eu.blocks.get(&block_id) else {
-            continue;
-        };
-        match &block.terminator {
-            SIRTerminator::Jump(target, _) => worklist.push(*target),
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                worklist.push(true_block.0);
-                worklist.push(false_block.0);
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-        }
-    }
-    reachable
-}
-
-struct PostDominatorTree {
-    virtual_exit: BlockId,
-    tree: SimpleDominatorTree,
-}
-
-impl PostDominatorTree {
-    fn compute(entry: BlockId, successors: BTreeMap<BlockId, Vec<BlockId>>) -> Self {
-        let mut predecessors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        for (&block, outgoing) in &successors {
-            predecessors.entry(block).or_default();
-            for &successor in outgoing {
-                predecessors.entry(successor).or_default().push(block);
-            }
-        }
-        let tree = SimpleDominatorTree::compute(entry, successors, predecessors);
-        Self {
-            virtual_exit: entry,
-            tree,
-        }
-    }
-
-    fn postdominates(&self, postdominator: BlockId, block: BlockId) -> bool {
-        self.tree.dominates(postdominator, block)
-    }
-
-    #[allow(dead_code)]
-    fn common_postdominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
-        let candidate = self.tree.lca(left, right)?;
-        (candidate != self.virtual_exit).then_some(candidate)
-    }
-}
-
-struct SimpleDominatorTree {
-    idom: HashMap<BlockId, BlockId>,
-    rpo_index: HashMap<BlockId, usize>,
-    depth: HashMap<BlockId, usize>,
-}
-
-impl SimpleDominatorTree {
-    fn compute(
-        entry: BlockId,
-        successors: BTreeMap<BlockId, Vec<BlockId>>,
-        predecessors: BTreeMap<BlockId, Vec<BlockId>>,
-    ) -> Self {
-        let mut postorder = Vec::new();
-        let mut visited = HashSet::default();
-        let mut stack = vec![(entry, 0usize)];
-        visited.insert(entry);
-        while let Some((block, next_successor)) = stack.last_mut() {
-            let outgoing = successors.get(block).map(Vec::as_slice).unwrap_or(&[]);
-            if *next_successor == outgoing.len() {
-                postorder.push(*block);
-                stack.pop();
-                continue;
-            }
-            let successor = outgoing[*next_successor];
-            *next_successor += 1;
-            if visited.insert(successor) {
-                stack.push((successor, 0));
-            }
-        }
-        postorder.reverse();
-        let rpo_index = postorder
-            .iter()
-            .enumerate()
-            .map(|(index, &block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut idom = HashMap::default();
-        idom.insert(entry, entry);
-
-        loop {
-            let mut changed = false;
-            for &block in postorder.iter().skip(1) {
-                let mut processed = predecessors
-                    .get(&block)
-                    .into_iter()
-                    .flatten()
-                    .filter(|predecessor| idom.contains_key(predecessor));
-                let Some(first) = processed.next().copied() else {
-                    continue;
-                };
-                let next = processed.fold(first, |current, predecessor| {
-                    intersect_idoms(current, *predecessor, &idom, &rpo_index)
-                });
-                if idom.insert(block, next) != Some(next) {
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut depth = HashMap::default();
-        depth.insert(entry, 0);
-        for &block in postorder.iter().skip(1) {
-            let mut current = block;
-            let mut distance = 0usize;
-            while current != entry {
-                let Some(&parent) = idom.get(&current) else {
-                    break;
-                };
-                current = parent;
-                distance += 1;
-            }
-            depth.insert(block, distance);
-        }
-
-        Self {
-            idom,
-            rpo_index,
-            depth,
-        }
-    }
-
-    fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
-        if !self.rpo_index.contains_key(&dominator) || !self.idom.contains_key(&block) {
-            return false;
-        }
-        let mut candidate = block;
-        loop {
-            if candidate == dominator {
-                return true;
-            }
-            let Some(&parent) = self.idom.get(&candidate) else {
-                return false;
-            };
-            if parent == candidate {
-                return false;
-            }
-            candidate = parent;
-        }
-    }
-
-    fn lca(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
-        if !self.depth.contains_key(&left) || !self.depth.contains_key(&right) {
-            return None;
-        }
-        let mut left = left;
-        let mut right = right;
-        while self.depth[&left] > self.depth[&right] {
-            left = *self.idom.get(&left)?;
-        }
-        while self.depth[&right] > self.depth[&left] {
-            right = *self.idom.get(&right)?;
-        }
-        while left != right {
-            left = *self.idom.get(&left)?;
-            right = *self.idom.get(&right)?;
-        }
-        Some(left)
-    }
-}
-
-fn intersect_idoms(
-    mut left: BlockId,
-    mut right: BlockId,
-    idom: &HashMap<BlockId, BlockId>,
-    rpo_index: &HashMap<BlockId, usize>,
-) -> BlockId {
-    while left != right {
-        while rpo_index[&left] > rpo_index[&right] {
-            left = idom[&left];
-        }
-        while rpo_index[&right] > rpo_index[&left] {
-            right = idom[&right];
-        }
-    }
-    left
 }
 
 fn find_branchify_mux_in_block(

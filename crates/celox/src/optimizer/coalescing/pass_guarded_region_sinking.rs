@@ -9,10 +9,11 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, normalize_branch_condition};
+use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 pub(super) struct GuardedRegionSinkingPass;
 
@@ -105,8 +106,9 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // sinking transform remains independent and can consume either an
         // original branch or a branch introduced above.
 
-        let predecessors = predecessor_map(eu);
-        let dominators = Dominators::compute(eu, &predecessors);
+        let Ok(cfg) = SirCfg::analyze(eu) else {
+            return;
+        };
         let uses = collect_uses(eu);
         let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
         block_ids.sort_unstable_by_key(|id| id.0);
@@ -116,7 +118,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // independent of function size or any iteration budget.
         let plans = block_ids
             .into_iter()
-            .filter_map(|block_id| plan_block(eu, block_id, &predecessors, &dominators, &uses))
+            .filter_map(|block_id| plan_block(eu, block_id, &cfg, &uses))
             .collect::<Vec<_>>();
         if plans.is_empty() {
             return;
@@ -943,8 +945,7 @@ fn instruction_is_same_predicate_region_value(inst: &SIRInstruction<RegionedAbso
 fn plan_block(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block_id: BlockId,
-    predecessors: &BTreeMap<BlockId, BTreeSet<BlockId>>,
-    dominators: &Dominators,
+    cfg: &SirCfg,
     uses: &HashMap<RegisterId, Vec<UseSite>>,
 ) -> Option<GuardedRegionPlan> {
     let block = eu.blocks.get(&block_id)?;
@@ -956,15 +957,13 @@ fn plan_block(
     else {
         return None;
     };
+    let block_index = cfg.block_index(block_id)?;
+    let true_index = cfg.block_index(true_block.0)?;
     if eu.register_map.get(cond).map(RegisterType::width) != Some(1)
         || true_block.0 == false_block.0
         || true_block.0 == eu.entry_block_id
-        || dominators.dominates(true_block.0, block_id)
-        || predecessors
-            .get(&true_block.0)?
-            .iter()
-            .copied()
-            .ne([block_id])
+        || cfg.dominates(true_block.0, block_id)
+        || cfg.predecessors[true_index].as_slice() != [block_index]
     {
         return None;
     }
@@ -1075,7 +1074,7 @@ fn plan_block(
         true_block.0,
         &local_defs,
         uses,
-        dominators,
+        cfg,
         &distributed,
         &removable_muxes,
         &safe_to_move,
@@ -1095,9 +1094,12 @@ fn plan_block(
             .filter(|reg| local_defs.contains_key(reg)),
     );
     for &reg in local_defs.keys() {
-        if uses.get(&reg).into_iter().flatten().any(|site| {
-            site.block() != block_id && dominators.dominates(true_block.0, site.block())
-        }) {
+        if uses
+            .get(&reg)
+            .into_iter()
+            .flatten()
+            .any(|site| site.block() != block_id && cfg.dominates(true_block.0, site.block()))
+        {
             seeds.push_back(reg);
         }
     }
@@ -1177,7 +1179,7 @@ fn plan_block(
                 &moved,
                 &distributed,
                 &removable_muxes,
-                dominators,
+                cfg,
             )
         }) {
             return None;
@@ -1203,7 +1205,7 @@ fn compute_moveable_definitions(
     true_target: BlockId,
     local_defs: &HashMap<RegisterId, usize>,
     uses: &HashMap<RegisterId, Vec<UseSite>>,
-    dominators: &Dominators,
+    cfg: &SirCfg,
     distributed: &[DistributedStore],
     removable_muxes: &HashSet<usize>,
     safe_to_move: &[bool],
@@ -1227,7 +1229,7 @@ fn compute_moveable_definitions(
                 &result,
                 distributed,
                 removable_muxes,
-                dominators,
+                cfg,
             )
         });
     }
@@ -1245,7 +1247,7 @@ fn use_can_follow_true_edge(
     moveable: &[bool],
     distributed: &[DistributedStore],
     removable_muxes: &HashSet<usize>,
-    dominators: &Dominators,
+    cfg: &SirCfg,
 ) -> bool {
     match site {
         UseSite::Instruction { block, index } if block == source_block => {
@@ -1266,7 +1268,7 @@ fn use_can_follow_true_edge(
         {
             false
         }
-        _ => dominators.dominates(true_target, site.block()),
+        _ => cfg.dominates(true_target, site.block()),
     }
 }
 
@@ -1280,7 +1282,7 @@ fn use_is_owned_by_true_edge(
     moved: &HashSet<usize>,
     distributed: &[DistributedStore],
     removable_muxes: &HashSet<usize>,
-    dominators: &Dominators,
+    cfg: &SirCfg,
 ) -> bool {
     match site {
         UseSite::Instruction {
@@ -1302,7 +1304,7 @@ fn use_is_owned_by_true_edge(
         {
             false
         }
-        _ => dominators.dominates(true_target, site.block()),
+        _ => cfg.dominates(true_target, site.block()),
     }
 }
 
@@ -1513,147 +1515,6 @@ fn collect_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId,
         }
     }
     result
-}
-
-pub(super) fn predecessor_map<A>(eu: &ExecutionUnit<A>) -> BTreeMap<BlockId, BTreeSet<BlockId>> {
-    let mut predecessors = eu
-        .blocks
-        .keys()
-        .copied()
-        .map(|id| (id, BTreeSet::new()))
-        .collect::<BTreeMap<_, _>>();
-    for block in eu.blocks.values() {
-        for successor in successors(&block.terminator) {
-            if let Some(entries) = predecessors.get_mut(&successor) {
-                entries.insert(block.id);
-            }
-        }
-    }
-    predecessors
-}
-
-fn successors(terminator: &SIRTerminator) -> Vec<BlockId> {
-    match terminator {
-        SIRTerminator::Jump(target, _) => vec![*target],
-        SIRTerminator::Branch {
-            true_block,
-            false_block,
-            ..
-        } => vec![true_block.0, false_block.0],
-        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-    }
-}
-
-pub(super) struct Dominators {
-    index: HashMap<BlockId, usize>,
-    enter: Vec<usize>,
-    exit: Vec<usize>,
-}
-
-impl Dominators {
-    pub(super) fn compute<A>(
-        eu: &ExecutionUnit<A>,
-        predecessors: &BTreeMap<BlockId, BTreeSet<BlockId>>,
-    ) -> Self {
-        let mut successor_map = eu
-            .blocks
-            .keys()
-            .copied()
-            .map(|id| (id, successors(&eu.blocks[&id].terminator)))
-            .collect::<BTreeMap<_, _>>();
-        for entries in successor_map.values_mut() {
-            entries.sort_unstable_by_key(|id| id.0);
-        }
-
-        let entry = eu.entry_block_id;
-        let mut visited = BTreeSet::new();
-        let mut postorder = Vec::with_capacity(eu.blocks.len());
-        visited.insert(entry);
-        let mut stack = vec![(entry, 0usize)];
-        while let Some((block, next)) = stack.last_mut() {
-            if *next == successor_map[block].len() {
-                postorder.push(*block);
-                stack.pop();
-                continue;
-            }
-            let successor = successor_map[block][*next];
-            *next += 1;
-            if visited.insert(successor) {
-                stack.push((successor, 0));
-            }
-        }
-        postorder.reverse();
-        let index = postorder
-            .iter()
-            .enumerate()
-            .map(|(index, &block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut immediate = vec![None; postorder.len()];
-        immediate[0] = Some(0);
-        let intersect = |mut left: usize, mut right: usize, idom: &[Option<usize>]| {
-            while left != right {
-                while left > right {
-                    left = idom[left].expect("verified predecessor must be processed");
-                }
-                while right > left {
-                    right = idom[right].expect("verified predecessor must be processed");
-                }
-            }
-            left
-        };
-        loop {
-            let mut changed = false;
-            for block_index in 1..postorder.len() {
-                let block = postorder[block_index];
-                let mut processed = predecessors[&block]
-                    .iter()
-                    .filter_map(|predecessor| index.get(predecessor).copied())
-                    .filter(|predecessor| immediate[*predecessor].is_some());
-                let Some(first) = processed.next() else {
-                    continue;
-                };
-                let next = processed.fold(first, |current, predecessor| {
-                    intersect(current, predecessor, &immediate)
-                });
-                if immediate[block_index] != Some(next) {
-                    immediate[block_index] = Some(next);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut children = vec![Vec::new(); postorder.len()];
-        for (block, parent) in immediate.iter().enumerate().skip(1) {
-            children[parent.expect("verified reachable block must have an idom")].push(block);
-        }
-        let mut enter = vec![0usize; postorder.len()];
-        let mut exit = vec![0usize; postorder.len()];
-        let mut time = 0usize;
-        let mut events = vec![(0usize, false)];
-        while let Some((block, leaving)) = events.pop() {
-            if leaving {
-                exit[block] = time;
-                time += 1;
-            } else {
-                enter[block] = time;
-                time += 1;
-                events.push((block, true));
-                events.extend(children[block].iter().rev().map(|child| (*child, false)));
-            }
-        }
-        Self { index, enter, exit }
-    }
-
-    pub(super) fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
-        let (Some(&dominator), Some(&block)) = (self.index.get(&dominator), self.index.get(&block))
-        else {
-            return false;
-        };
-        self.enter[dominator] <= self.enter[block] && self.exit[block] <= self.exit[dominator]
-    }
 }
 
 #[cfg(test)]

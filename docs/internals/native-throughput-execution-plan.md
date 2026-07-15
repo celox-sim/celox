@@ -387,6 +387,25 @@ Replace leaf-only cleanup decisions with a verified whole-unit placement plan.
 Profitability selects decision regions; dominance-aware placement owns shared
 pure work and emits each value once.
 
+Execution slices:
+
+1. **4a -- shared analysis migration and reproducible baseline (complete).**
+   Migrate guarded-region sinking, control-flow simplification, and mux
+   branchification from private predecessor/dominator scans to the shared SIR
+   CFG. Index incoming edges once for path facts. Before evaluating placement,
+   make identical optimized SIR produce identical native output: stabilize
+   memory layout, SIR-to-MIR VReg allocation, wide block-parameter allocation,
+   overlapping-load forwarding choices, and allocator edge reconstruction.
+2. **4b -- value occurrence and execution-safety model (pending).** Build
+   occurrence-aware value identities, state/effect tokens, and legal
+   ScheduleEarly/ScheduleLate bounds over the full CFG.
+3. **4c -- atomic binary and multiway placement (pending).** Select complete
+   binary and multiway decision regions bottom-up, place shared pure values
+   once, and apply one verified whole-unit plan.
+4. **4d -- generated-code and full-run evaluation (pending).** Prove that
+   untaken pure work is absent from executed paths, run the common and Linux
+   gates, and retain the placement only if full runtime improves.
+
 Deliverables:
 
 - occurrence- and state-token-aware value identities rather than raw `NodeId`
@@ -421,7 +440,37 @@ Acceptance:
 - retain the change only when full-run wall time improves under identical
   non-LTO conditions.
 
-Status: **not started**.
+4a result:
+
+- migrated the three remaining control-flow consumers to `SirCfg`; path-fact
+  construction now uses indexed predecessor/successor tables instead of
+  repeatedly scanning every block for incoming edges;
+- Heliodor pre-optimization and post-optimization SIR remained byte-identical
+  across the migration. Their SHA-256 values are respectively
+  `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`
+  and `ab2c1377c5100ad80c4666f27748bac1ae81da9e878ae3f0f3359d0dc4b6f711`;
+- removed five sources of randomized native output: equal-alignment memory
+  layout order, SIR register and block-parameter VReg order, arbitrary
+  selection among overlapping covering loads, and HashMap-ordered allocator
+  edge reload reconstruction. Two independent full traces now match byte for
+  byte through pre-SIR, post-SIR, optimized MIR, reconstructed MIR, physical
+  assignments, and x86 disassembly; the complete MIR SHA-256 is
+  `8bc93950da1d92a96f53bf1dbb491a6e28ce6863041c02b08b50243fd915815e`;
+- focused tests passed: shared CFG 9/9, control-flow simplification 6/6,
+  guarded-region sinking 20/20, branchification 28/28, and register allocation
+  129/129. Common gates passed with 692/692 library tests, 60/60 native
+  testbench tests, 9/9 native/Cranelift/Wasm counter tests, and 7/7 sorter
+  scaling tests; documented upstream/Veryl cases remained ignored;
+- the clean pinned Heliodor compile-only run took `45.397 s`. The full non-LTO
+  run took `209.742 s` process time and `209.527 s` runner-reported time, with
+  exactly one native/O2/two-state/full configuration and the required
+  `reboot: Power down`, `cy=9ab960 x3=aa pass=1`, and final pass markers in
+  `target/heliodor/results/20260715T191014Z_celox_test_soc_linux_boot.log`.
+
+This slice establishes a reproducible baseline and shared analysis substrate;
+it does not claim that whole-region placement is implemented.
+
+Status: **in progress (4a complete; 4b pending)**.
 
 ## Step 5: End-to-end qualification
 
@@ -451,8 +500,9 @@ Status: **not started**.
 | 0 | `8f908ca2` | VitePress build passed | documentation-only step | pass: `cy=9ab960 x3=aa pass=1` | 229.855 s | complete |
 | 1 | `e3dfa119` | CFG 9/9; forwarding 11/11 | lib 645/645; native 60/60; counter 6/6 | pass: `cy=9ab960 x3=aa pass=1` | 233.042 s | complete |
 | 2 | `75bf2636` | StateSSA 7/7; promotion 18/18 | lib 661/661; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.172 s | complete |
-| 3 | pending | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
-| 4 | pending | pending | pending | pending | pending | not started |
+| 3 | `d4cdb0f7` | allocator 129/129; sorter 7/7 | lib 688/688; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 232.008 s | complete |
+| 4a | pending | CFG 9/9; CFS 6/6; sinking 20/20; branchify 28/28; allocator 129/129 | lib 692/692; native 60/60; counter 9/9; sorter 7/7 | pass: `cy=9ab960 x3=aa pass=1` | 209.742 s | complete |
+| 4b--4d | pending | pending | pending | pending | pending | in progress |
 | 5 | pending | pending | pending | pending | pending | not started |
 
 ## Related design records

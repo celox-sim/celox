@@ -3139,7 +3139,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         continue;
                     }
                     if let Some((covering_slot, src)) =
-                        find_covering_store(&available, base, offset, size)
+                        find_best_covering_value(&available, base, offset, size)
                     {
                         emit_partial_load_forward(
                             &mut rewritten,
@@ -3197,7 +3197,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
     }
 }
 
-fn find_covering_store(
+fn find_best_covering_value(
     available: &HashMap<MemorySlot, VReg>,
     base: BaseReg,
     offset: i32,
@@ -3205,18 +3205,28 @@ fn find_covering_store(
 ) -> Option<(MemorySlot, VReg)> {
     let load_start = offset as i64;
     let load_end = load_start + i64::from(size.bytes());
-    available.iter().find_map(|(slot, &src)| {
-        if slot.base != base {
-            return None;
-        }
-        let store_start = slot.offset as i64;
-        let store_end = store_start + i64::from(slot.size.bytes());
-        if store_start <= load_start && load_end <= store_end {
-            Some((*slot, src))
-        } else {
-            None
-        }
-    })
+    available
+        .iter()
+        .filter_map(|(slot, &src)| {
+            if slot.base != base {
+                return None;
+            }
+            let value_start = slot.offset as i64;
+            let value_end = value_start + i64::from(slot.size.bytes());
+            (value_start <= load_start && load_end <= value_end).then_some((*slot, src))
+        })
+        // Several earlier loads/stores can cover the same narrow load.  Hash
+        // iteration order is randomized, so select the cheapest extraction
+        // explicitly: least over-read first, then least right shift.  The
+        // final fields make equal-cost selection reproducible as well.
+        .min_by_key(|(slot, src)| {
+            (
+                slot.size.bytes(),
+                load_start - i64::from(slot.offset),
+                slot.offset,
+                src.0,
+            )
+        })
 }
 
 fn emit_partial_load_forward(
@@ -5136,6 +5146,60 @@ mod tests {
             )),
             "{insts:#?}"
         );
+    }
+
+    #[test]
+    fn partial_load_uses_smallest_covering_value() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 6,
+                    size: OpSize::S16,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 7,
+                    size: OpSize::S8,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        forward_local_store_loads(&mut func);
+
+        let insts = &func.blocks[0].insts;
+        assert!(insts.iter().any(|inst| matches!(
+            inst,
+            MInst::ShrImm {
+                src: VReg(0),
+                imm: 8,
+                ..
+            }
+        )));
+        assert!(!insts.iter().any(|inst| matches!(
+            inst,
+            MInst::ShrImm {
+                src: VReg(1),
+                imm: 56,
+                ..
+            }
+        )));
     }
 
     #[test]
