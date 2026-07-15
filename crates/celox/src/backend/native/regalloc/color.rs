@@ -868,7 +868,7 @@ mod tests {
             BlockId(0),
             Some(0),
             destination,
-            &ALLOCATABLE_REGS,
+            ALLOCATABLE_REGS,
             &required,
             &forbidden,
             [Some(source), None],

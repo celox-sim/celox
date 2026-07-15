@@ -1261,7 +1261,7 @@ fn slt_tree_reads_any_variable<A: Hash + Eq + Clone>(
             SLTNode::Input {
                 variable, index, ..
             } => {
-                if variables.iter().any(|candidate| *candidate == variable) {
+                if variables.contains(&variable) {
                     return true;
                 }
                 work.extend(index.iter().map(|entry| entry.node));
@@ -1407,9 +1407,7 @@ fn match_slt_scan_indexed_input<A: Hash + Eq + Clone>(
     };
     if entry.stride != 1
         || variable == spec.loop_var
-        || state_variables
-            .iter()
-            .any(|candidate| *candidate == variable)
+        || state_variables.contains(&variable)
         || !slt_is_scan_loop_value(entry.node, spec, arena)
     {
         return None;
@@ -8109,9 +8107,9 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: target.clone(),
+                result: target,
                 initials: vec![crate::logic_tree::comb::SLTForUpdate {
-                    target: target.clone(),
+                    target,
                     expr: initial,
                 }],
                 updates: vec![crate::logic_tree::comb::SLTForUpdate {

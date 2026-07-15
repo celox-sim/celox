@@ -527,7 +527,7 @@ fn log_regalloc_stats(
         total_delta.load_imm,
     );
 
-    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
     for (rank, (_score, block_id, before_stats, after_stats, delta)) in
         rows.into_iter().take(12).enumerate()
     {

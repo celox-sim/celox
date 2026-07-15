@@ -8,8 +8,8 @@ Execution Unit eval_comb[0] (before regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 40]
-  v3 = add v0, v1
-  v2 = and v3, 0xffffffff
+  v3 = add.w32 v0, v1
+  v2 = and.w32 v3, 0xffffffff
   store.i32 [sim + 36], v2
   ret
 
@@ -17,8 +17,8 @@ Execution Unit eval_comb[0] (after regalloc):
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 40]
-  v3 = add v0, v1
-  v2 = and v3, 0xffffffff
+  v3 = add.w32 v0, v1
+  v2 = and.w32 v3, 0xffffffff
   store.i32 [sim + 36], v2
   ret
   Register assignment:
@@ -32,11 +32,11 @@ bb0:
   0x00000006  mov r15,rdi
   0x00000009  mov eax,[r15+20h]
   0x0000000d  mov edx,[r15+28h]
-  0x00000011  add rax,rdx
-  0x00000014  and eax,0FFFFFFFFh
-  0x00000019  mov [r15+24h],eax
-  0x0000001d  xor eax,eax
-  0x0000001f  jmp short 0000000000000021h
-  0x00000021  add rsp,8
-  0x00000025  pop r15
-  0x00000027  ret
+  0x00000011  add eax,edx
+  0x00000013  and eax,0FFFFFFFFh
+  0x00000018  mov [r15+24h],eax
+  0x0000001c  xor eax,eax
+  0x0000001e  jmp short 0000000000000020h
+  0x00000020  add rsp,8
+  0x00000024  pop r15
+  0x00000026  ret

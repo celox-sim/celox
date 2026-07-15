@@ -84,24 +84,6 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
             ),
         ));
     }
-    if !func.value_widths.is_empty() && func.value_widths.len() != vreg_count {
-        return Err(MirVerifyError::function(
-            "SIDETABLE.VALUE_WIDTHS_COMPLETE",
-            format!(
-                "{} VRegs were allocated but value_widths has {} entries",
-                vreg_count,
-                func.value_widths.len()
-            ),
-        ));
-    }
-    for (index, width) in func.value_widths.iter().enumerate() {
-        if matches!(width, Some(65..)) {
-            return Err(MirVerifyError::function(
-                "SIDETABLE.VALUE_WIDTH_VALID",
-                format!("v{index} has invalid known width {width:?}"),
-            ));
-        }
-    }
     for (index, table) in func.constant_tables().iter().enumerate() {
         if table.is_empty() {
             return Err(MirVerifyError::function(

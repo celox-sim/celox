@@ -450,7 +450,7 @@ impl<'a> FfParser<'a> {
     fn get_constant_procedural_truth(expr: &Expression) -> Option<bool> {
         let comptime = expr.comptime();
         let is_value = matches!(expr, Expression::Term(factor) if matches!(factor.as_ref(), veryl_analyzer::ir::Factor::Value(_)));
-        if !comptime.is_const && !(is_value && comptime.evaluated) {
+        if !(comptime.is_const || is_value && comptime.evaluated) {
             return None;
         }
 

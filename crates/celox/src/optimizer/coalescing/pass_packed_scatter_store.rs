@@ -2136,8 +2136,10 @@ mod tests {
     fn leaves_four_state_selector_ladder_unchanged() {
         let mut fixture = fixture(&canonical_keys(), Vec::new(), false);
         let before = format!("{}", fixture.eu);
-        let mut options = PassOptions::default();
-        options.four_state = true;
+        let options = PassOptions {
+            four_state: true,
+            ..Default::default()
+        };
         PackedScatterStorePass::default().run(&mut fixture.eu, &options);
         assert_eq!(format!("{}", fixture.eu), before);
         fixture.eu.verify();

@@ -77,18 +77,30 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         fs::create_dir_all(&output_dir)?;
         let trace_result = builder
+            .trace_pre_optimized_sir()
             .trace_post_optimized_sir()
             .trace_mir()
             .build_with_trace();
+        let pre_optimized_sir = trace_result
+            .trace
+            .format_pre_optimized_sir()
+            .ok_or("pre-optimized SIR trace was not captured")?;
         let sir = trace_result
             .trace
             .format_post_optimized_sir()
             .ok_or("post-optimized SIR trace was not captured")?;
         let mir = trace_result.trace.mir.ok_or("MIR trace was not captured")?;
+        let pre_sir_path = output_dir.join("pre_optimized.sir");
         let sir_path = output_dir.join("post_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
+        fs::write(&pre_sir_path, &pre_optimized_sir)?;
         fs::write(&sir_path, &sir)?;
         fs::write(&mir_path, &mir)?;
+        eprintln!(
+            "wrote pre-optimized SIR ({} bytes) to {}",
+            pre_optimized_sir.len(),
+            pre_sir_path.display()
+        );
         eprintln!(
             "wrote post-optimized SIR ({} bytes) to {}",
             sir.len(),

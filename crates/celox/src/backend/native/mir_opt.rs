@@ -127,7 +127,6 @@ pub fn optimize(func: &mut MFunction) {
         "refresh_constant_spill_descs",
         refresh_constant_spill_descs(func)
     );
-    pass!("compute_value_widths", compute_value_widths(func));
     if cfg!(debug_assertions) || std::env::var_os("CELOX_MIR_VERIFY").is_some() {
         if let Err(error) = func.verify_result() {
             panic!("after MIR optimizer: {error}");
@@ -369,7 +368,7 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
         let mut remove = vec![false; block.insts.len()];
         let mut replacements: HashMap<usize, MInst> = HashMap::new();
 
-        for idx in 0..block.insts.len() {
+        for (idx, remove_imm) in remove.iter_mut().enumerate() {
             let MInst::LoadImm {
                 dst: imm_vreg,
                 value,
@@ -387,7 +386,7 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
                     continue;
                 }
                 if let Some(folded) = fold_imm_use(&block.insts[use_idx], imm_vreg, value) {
-                    remove[idx] = true;
+                    *remove_imm = true;
                     replacements.insert(use_idx, folded);
                 }
                 break;
@@ -403,7 +402,6 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
         }
         block.insts = rewritten;
     }
-    compute_value_widths(func);
 }
 
 fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
@@ -983,12 +981,14 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
                 _ => None,
             }
         }
-        MInst::Add { lhs, rhs, .. } | MInst::Sub { lhs, rhs, .. } => {
-            match (known.get(lhs), known.get(rhs)) {
-                (Some(&l), Some(&r)) => Some((l.max(r) + 1).min(64)),
-                _ => None,
-            }
-        }
+        MInst::Add { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
+            (Some(&l), Some(&r)) => Some((l.max(r) + 1).min(64)),
+            _ => None,
+        },
+        // Bit widths alone do not bound a subtraction result: `0 - 1`
+        // produces all one bits.  In particular, do not use an unsigned
+        // input-width estimate to remove a following mask.
+        MInst::Sub { .. } => None,
         MInst::Mul { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
             (Some(&l), Some(&r)) => Some((l + r).min(64)),
             _ => None,
@@ -2270,138 +2270,6 @@ fn lower_to_imm_forms(func: &mut MFunction) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Value width computation (for 32-bit emit)
-// ────────────────────────────────────────────────────────────────
-
-/// Compute value widths for all VRegs and store in func.value_widths.
-/// This enables the emit phase to use 32-bit registers when width ≤ 32.
-fn compute_value_widths(func: &mut MFunction) {
-    let n = func.vregs.count() as usize;
-    let mut widths: Vec<Option<u8>> = vec![None; n];
-
-    // Forward pass per block
-    for block in &func.blocks {
-        // Phi nodes: conservative (unknown)
-        for phi in &block.phis {
-            widths[phi.dst.0 as usize] = None; // could refine later
-        }
-
-        for inst in &block.insts {
-            let w: Option<u8> = match inst {
-                MInst::LoadImm { value, .. } => {
-                    if *value == 0 {
-                        Some(0)
-                    } else {
-                        Some((64 - value.leading_zeros()) as u8)
-                    }
-                }
-                MInst::LoadConstantTableAddr { .. } => Some(64),
-                MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
-                    Some((size.bytes() * 8) as u8)
-                }
-                MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
-                MInst::Popcnt { .. } => Some(7),
-                MInst::Bsr { .. } => Some(6),
-                MInst::BsrOr { .. } => Some(6),
-                MInst::Mov { src, .. } => widths.get(src.0 as usize).copied().flatten(),
-                MInst::AndImm { src, imm, .. } => {
-                    let imm_w = if *imm == 0 {
-                        0
-                    } else {
-                        (64 - imm.leading_zeros()) as u8
-                    };
-                    let src_w = widths.get(src.0 as usize).copied().flatten().unwrap_or(64);
-                    Some(src_w.min(imm_w))
-                }
-                MInst::OrImm { src, imm, .. } => {
-                    let imm_w = if *imm == 0 {
-                        0
-                    } else {
-                        (64 - imm.leading_zeros()) as u8
-                    };
-                    let src_w = widths.get(src.0 as usize).copied().flatten().unwrap_or(64);
-                    Some(src_w.max(imm_w))
-                }
-                MInst::ShrImm { src, imm, .. } => widths
-                    .get(src.0 as usize)
-                    .copied()
-                    .flatten()
-                    .map(|w| w.saturating_sub(*imm)),
-                MInst::ShlImm { src, imm, .. } => widths
-                    .get(src.0 as usize)
-                    .copied()
-                    .flatten()
-                    .map(|w| (w as u16 + *imm as u16).min(64) as u8),
-                MInst::And { lhs, rhs, .. } => match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                    (Some(l), Some(r)) => Some(l.min(r)),
-                    (Some(l), None) => Some(l),
-                    (None, Some(r)) => Some(r),
-                    _ => None,
-                },
-                MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
-                    match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                        (Some(l), Some(r)) => Some(l.max(r)),
-                        _ => None,
-                    }
-                }
-                MInst::Add { lhs, rhs, .. } | MInst::Sub { lhs, rhs, .. } => {
-                    match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                        (Some(l), Some(r)) => Some((l.max(r) + 1).min(64)),
-                        _ => None,
-                    }
-                }
-                MInst::AddImm { src, .. } | MInst::SubImm { src, .. } => widths
-                    .get(src.0 as usize)
-                    .copied()
-                    .flatten()
-                    .map(|w| (w + 1).min(64)),
-                MInst::Mul { lhs, rhs, .. } => match (get_w(&widths, *lhs), get_w(&widths, *rhs)) {
-                    (Some(l), Some(r)) => Some(((l as u16) + (r as u16)).min(64) as u8),
-                    _ => None,
-                },
-                MInst::Select {
-                    true_val,
-                    false_val,
-                    ..
-                }
-                | MInst::CmpSelect {
-                    true_val,
-                    false_val,
-                    ..
-                }
-                | MInst::CmpImmSelect {
-                    true_val,
-                    false_val,
-                    ..
-                }
-                | MInst::GuardedCmpSelect {
-                    true_val,
-                    false_val,
-                    ..
-                } => match (get_w(&widths, *true_val), get_w(&widths, *false_val)) {
-                    (Some(t), Some(f)) => Some(t.max(f)),
-                    _ => None,
-                },
-                MInst::Pext { .. } | MInst::Pdep { .. } => Some(64),
-                _ => None,
-            };
-
-            if let Some(d) = inst.def() {
-                if (d.0 as usize) < n {
-                    widths[d.0 as usize] = w;
-                }
-            }
-        }
-    }
-
-    func.value_widths = widths;
-}
-
-fn get_w(widths: &[Option<u8>], vreg: VReg) -> Option<u8> {
-    widths.get(vreg.0 as usize).copied().flatten()
-}
-
-// ────────────────────────────────────────────────────────────────
 // Existing passes
 // ────────────────────────────────────────────────────────────────
 
@@ -2577,7 +2445,7 @@ fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
 
             let Some(src) = source_reg else { continue };
             let total_width: usize = chunks.iter().map(|(_, width, _)| *width as usize).sum();
-            if total_width < 8 || total_width > 64 {
+            if !(8..=64).contains(&total_width) {
                 continue;
             }
             chunks.sort_unstable();
@@ -2843,7 +2711,7 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
 
             let Some(src) = source_reg else { continue };
             let total_width: usize = chunks.iter().map(|(_, width, _)| *width as usize).sum();
-            if total_width < 8 || total_width > 64 {
+            if !(8..=64).contains(&total_width) {
                 continue;
             }
             chunks.sort_unstable_by_key(|(src_lsb, _, _)| *src_lsb);
@@ -3869,6 +3737,48 @@ mod tests {
         assert!(matches!(
             func.spill_desc(constant).map(|desc| &desc.kind),
             Some(SpillKind::Remat { value: 12 })
+        ));
+    }
+
+    #[test]
+    fn redundant_mask_elimination_keeps_mask_after_subtraction() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::Sub {
+                    dst: VReg(2),
+                    lhs: VReg(1),
+                    rhs: VReg(0),
+                },
+                MInst::AndImm {
+                    dst: VReg(3),
+                    src: VReg(2),
+                    imm: 0x1ff,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        redundant_mask_eliminate(&mut func);
+
+        // `0 - 1` is all ones, not a nine-bit result.  The mask is needed.
+        assert!(matches!(
+            func.blocks[0].insts[3],
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: 0x1ff,
+            }
         ));
     }
 

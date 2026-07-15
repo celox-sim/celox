@@ -175,92 +175,6 @@ fn forward_and_simplify(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
-
-    fn address() -> RegionedAbsoluteAddr {
-        RegionedAbsoluteAddr {
-            region: STABLE_REGION,
-            instance_id: InstanceId(0),
-            var_id: VarId::default(),
-        }
-    }
-
-    fn bit(width: usize) -> RegisterType {
-        RegisterType::Bit {
-            width,
-            signed: false,
-        }
-    }
-
-    #[test]
-    fn does_not_forward_a_truncated_store_as_a_wider_source_register() {
-        let addr = address();
-        let mut instructions = vec![
-            SIRInstruction::Store(
-                addr,
-                SIROffset::Static(0),
-                32,
-                RegisterId(0),
-                Vec::new(),
-                Vec::new(),
-            ),
-            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
-            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
-        ];
-        let register_map = [
-            (RegisterId(0), bit(64)),
-            (RegisterId(1), bit(32)),
-            (RegisterId(2), bit(32)),
-            (RegisterId(3), bit(1)),
-        ]
-        .into_iter()
-        .collect();
-
-        forward_and_simplify(&mut instructions, &register_map);
-
-        assert!(matches!(
-            instructions[2],
-            SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
-        ));
-    }
-
-    #[test]
-    fn forwards_a_store_when_source_and_load_types_match() {
-        let addr = address();
-        let mut instructions = vec![
-            SIRInstruction::Store(
-                addr,
-                SIROffset::Static(0),
-                32,
-                RegisterId(0),
-                Vec::new(),
-                Vec::new(),
-            ),
-            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
-            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
-        ];
-        let register_map = [
-            (RegisterId(0), bit(32)),
-            (RegisterId(1), bit(32)),
-            (RegisterId(2), bit(32)),
-            (RegisterId(3), bit(1)),
-        ]
-        .into_iter()
-        .collect();
-
-        forward_and_simplify(&mut instructions, &register_map);
-
-        assert!(matches!(
-            instructions[2],
-            SIRInstruction::Binary(_, RegisterId(0), BinaryOp::Eq, RegisterId(2))
-        ));
-    }
-}
-
 fn apply_aliases_to_inst(
     inst: &mut SIRInstruction<RegionedAbsoluteAddr>,
     aliases: &HashMap<RegisterId, RegisterId>,
@@ -360,5 +274,91 @@ fn dead_code_eliminate(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         if !changed {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{InstanceId, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
+
+    fn address() -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region: STABLE_REGION,
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        }
+    }
+
+    fn bit(width: usize) -> RegisterType {
+        RegisterType::Bit {
+            width,
+            signed: false,
+        }
+    }
+
+    #[test]
+    fn does_not_forward_a_truncated_store_as_a_wider_source_register() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(64)),
+            (RegisterId(1), bit(32)),
+            (RegisterId(2), bit(32)),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map);
+
+        assert!(matches!(
+            instructions[2],
+            SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
+        ));
+    }
+
+    #[test]
+    fn forwards_a_store_when_source_and_load_types_match() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(32)),
+            (RegisterId(1), bit(32)),
+            (RegisterId(2), bit(32)),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map);
+
+        assert!(matches!(
+            instructions[2],
+            SIRInstruction::Binary(_, RegisterId(0), BinaryOp::Eq, RegisterId(2))
+        ));
     }
 }

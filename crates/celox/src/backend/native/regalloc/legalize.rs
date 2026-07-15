@@ -466,14 +466,12 @@ fn all_color_bits() -> u16 {
 fn alloc_copy(
     vregs: &mut crate::backend::native::mir::VRegAllocator,
     spill_descs: &mut Vec<SpillDesc>,
-    value_widths: &mut Vec<Option<u8>>,
     source: VReg,
 ) -> Result<VReg, PermError> {
     let desc = spill_descs
         .get(source.0 as usize)
         .map(SpillDesc::copy_for_snapshot)
         .unwrap_or_else(SpillDesc::transient);
-    let width = value_widths.get(source.0 as usize).copied().flatten();
     let fresh = vregs.try_alloc().map_err(|error| {
         PermError::new(
             "PERM.VREG_EXHAUSTED",
@@ -483,9 +481,7 @@ fn alloc_copy(
             error.to_string(),
         )
     })?;
-    if fresh.0 as usize != spill_descs.len()
-        || (!value_widths.is_empty() && fresh.0 as usize != value_widths.len())
-    {
+    if fresh.0 as usize != spill_descs.len() {
         return Err(PermError::new(
             "PERM.SIDETABLE_APPEND_POSITION",
             None,
@@ -495,9 +491,6 @@ fn alloc_copy(
         ));
     }
     spill_descs.push(desc);
-    if !value_widths.is_empty() {
-        value_widths.push(width);
-    }
     Ok(fresh)
 }
 
@@ -631,12 +624,7 @@ fn split_constraint_blocks(
                     ));
                 };
                 for &source in sources {
-                    let destination = alloc_copy(
-                        &mut func.vregs,
-                        &mut func.spill_descs,
-                        &mut func.value_widths,
-                        source,
-                    )?;
+                    let destination = alloc_copy(&mut func.vregs, &mut func.spill_descs, source)?;
                     let Some(&logical) = logical_for_vreg.get(source.0 as usize) else {
                         return Err(PermError::new(
                             "PERM.LOGICAL_SIDETABLE_COVERS_VREG",
@@ -760,12 +748,7 @@ fn insert_permutation_merge_phis(
                 if !live_in[frontier].contains(&logical) || !has_phi.insert(frontier) {
                     continue;
                 }
-                let fresh = alloc_copy(
-                    &mut func.vregs,
-                    &mut func.spill_descs,
-                    &mut func.value_widths,
-                    logical,
-                )?;
+                let fresh = alloc_copy(&mut func.vregs, &mut func.spill_descs, logical)?;
                 logical_for_vreg.push(logical);
                 func.blocks[frontier].phis.push(PhiNode {
                     dst: fresh,
@@ -916,10 +899,7 @@ mod tests {
         let mut vregs = VRegAllocator::new();
         vregs.set_next_for_test(u32::MAX);
         let mut spill_descs = Vec::new();
-        let mut value_widths = Vec::new();
-
-        let error =
-            alloc_copy(&mut vregs, &mut spill_descs, &mut value_widths, VReg(0)).unwrap_err();
+        let error = alloc_copy(&mut vregs, &mut spill_descs, VReg(0)).unwrap_err();
 
         assert_eq!(error.rule, "PERM.VREG_EXHAUSTED");
         assert_eq!(vregs.count(), u32::MAX);

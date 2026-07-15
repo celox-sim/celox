@@ -206,7 +206,15 @@ fn simplify_dominated_muxes(
                     .map(|truth| truth ^ inverted);
                 if let Some(facts) = branch_facts.get(&root) {
                     for &(source, successor, truth) in facts {
-                        if source != block_id && dominators.dominates(successor, block_id) {
+                        if source != block_id
+                            && branch_edge_dominates_block(
+                                &predecessors,
+                                &dominators,
+                                source,
+                                successor,
+                                block_id,
+                            )
+                        {
                             let truth = truth ^ inverted;
                             if proven.is_some_and(|previous| previous != truth) {
                                 proven = None;
@@ -246,6 +254,40 @@ fn simplify_dominated_muxes(
         }
     }
     changed
+}
+
+/// Whether one particular control-flow edge proves a predicate at `block`.
+///
+/// Node dominance of the edge's successor alone is insufficient.  A branch
+/// target can also be a loop exit / join target: the target dominates itself,
+/// while a back or side edge can reach it without taking this branch edge.
+/// That was enough for the old check to fold a Mux to the branch's default
+/// arm, even when the loop path reached the same block with the opposite
+/// predicate value.
+///
+/// An edge `source -> successor` dominates `successor` exactly when every
+/// other predecessor of `successor` is already dominated by `successor`.
+/// Such predecessors are loop-back edges, so they cannot be used to enter the
+/// successor for the first time.  Combined with ordinary node dominance for a
+/// descendant, this proves the edge was traversed on every path to `block`.
+fn branch_edge_dominates_block(
+    predecessors: &std::collections::BTreeMap<BlockId, std::collections::BTreeSet<BlockId>>,
+    dominators: &super::pass_guarded_region_sinking::Dominators,
+    source: BlockId,
+    successor: BlockId,
+    block: BlockId,
+) -> bool {
+    if source == successor
+        || dominators.dominates(successor, source)
+        || !dominators.dominates(successor, block)
+    {
+        return false;
+    }
+    predecessors.get(&successor).is_some_and(|incoming| {
+        incoming.iter().all(|predecessor| {
+            *predecessor == source || dominators.dominates(successor, *predecessor)
+        })
+    })
 }
 
 /// Prove a predicate carried through an SSA block argument.  Every incoming
@@ -1000,6 +1042,43 @@ mod tests {
                 .instructions
                 .iter()
                 .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        );
+    }
+
+    #[test]
+    fn does_not_fold_a_branch_successor_that_is_also_a_join() {
+        let mut eu = constant_branch_unit();
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions[0] =
+            SIRInstruction::Load(RegisterId(0), address(), SIROffset::Static(0), 1);
+        // `b2` is the false edge of the branch, but it is also reachable from
+        // the true edge through `b1`.  The condition is therefore not known
+        // at b2.  This is the CFG shape emitted for a guarded loop exit: a
+        // direct disabled path joins the path that evaluated the loop.
+        eu.blocks.get_mut(&BlockId(1)).unwrap().instructions.clear();
+        eu.blocks.get_mut(&BlockId(1)).unwrap().terminator =
+            SIRTerminator::Jump(BlockId(2), Vec::new());
+        eu.blocks.get_mut(&BlockId(2)).unwrap().instructions = vec![
+            SIRInstruction::Mux(RegisterId(3), RegisterId(0), RegisterId(1), RegisterId(2)),
+            SIRInstruction::Store(
+                address(),
+                SIROffset::Static(0),
+                1,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+        eu.verify_result().unwrap();
+
+        ControlFlowSimplifyPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        assert!(
+            eu.blocks[&BlockId(2)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..))),
+            "a direct branch successor is not necessarily an edge-dominated block",
         );
     }
 

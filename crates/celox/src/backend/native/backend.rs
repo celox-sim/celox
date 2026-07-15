@@ -437,7 +437,7 @@ impl NativeBackend {
             let byte_size = get_byte_size(signal.width);
             let plane_offset = signal.offset + usize::from(mask_plane) * byte_size;
             let mut value = BigUint::from_bytes_le(&bytes[plane_offset..plane_offset + byte_size]);
-            if signal.width % 8 != 0 {
+            if !signal.width.is_multiple_of(8) {
                 value &= (BigUint::from(1u8) << signal.width) - BigUint::from(1u8);
             }
             return value;
@@ -465,7 +465,7 @@ impl NativeBackend {
             let value_bytes = value.to_bytes_le();
             let copy_len = value_bytes.len().min(byte_size);
             bytes[plane_offset..plane_offset + copy_len].copy_from_slice(&value_bytes[..copy_len]);
-            if signal.width % 8 != 0 && byte_size != 0 {
+            if !signal.width.is_multiple_of(8) && byte_size != 0 {
                 bytes[plane_offset + byte_size - 1] &= (1u8 << (signal.width % 8)) - 1;
             }
             return;

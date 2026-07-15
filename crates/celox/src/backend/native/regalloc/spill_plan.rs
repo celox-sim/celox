@@ -1363,14 +1363,16 @@ mod tests {
         let condition = vregs.alloc();
         let mut expected = Vec::with_capacity(PREDECESSORS * PHIS);
         let mut phis = Vec::with_capacity(PHIS);
-        let mut leaf_definitions = vec![Vec::with_capacity(PHIS); PREDECESSORS];
+        let mut leaf_definitions = (0..PREDECESSORS)
+            .map(|_| Vec::with_capacity(PHIS))
+            .collect::<Vec<_>>();
         for _ in 0..PHIS {
             let mut sources = Vec::with_capacity(PREDECESSORS);
-            for predecessor in 0..PREDECESSORS {
+            for (predecessor, definitions) in leaf_definitions.iter_mut().enumerate() {
                 let source = vregs.alloc();
                 let predecessor_id = BlockId((INTERNAL_BLOCKS + predecessor) as u32);
                 sources.push((predecessor_id, source));
-                leaf_definitions[predecessor].push(source);
+                definitions.push(source);
             }
             let destination = vregs.alloc();
             expected.extend(
@@ -1403,10 +1405,10 @@ mod tests {
             });
             func.blocks.push(block);
         }
-        for predecessor in 0..PREDECESSORS {
+        for (predecessor, definitions) in leaf_definitions.iter().enumerate() {
             let predecessor_id = BlockId((INTERNAL_BLOCKS + predecessor) as u32);
             let mut block = MBlock::new(predecessor_id);
-            for &source in &leaf_definitions[predecessor] {
+            for &source in definitions {
                 block.push(MInst::LoadImm {
                     dst: source,
                     value: source.0 as u64,

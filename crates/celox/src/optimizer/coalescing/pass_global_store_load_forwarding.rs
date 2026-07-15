@@ -1027,10 +1027,7 @@ fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAd
     }
 
     let mut changed = false;
-    loop {
-        let Some(cfg) = Cfg::new(eu) else {
-            break;
-        };
+    while let Some(cfg) = Cfg::new(eu) {
         let use_counts = count_register_uses(eu);
         let mut rewrite = None;
 

@@ -125,7 +125,7 @@ fn exact_iteration_chunks(
     let trip_count = candidate.unrolled.iterations.len();
     if trip_count < 2
         || statements.is_empty()
-        || statements.len() % trip_count != 0
+        || !statements.len().is_multiple_of(trip_count)
         || statements
             .iter()
             .any(|statement| !statement_in_range(statement, candidate.source.body_token))

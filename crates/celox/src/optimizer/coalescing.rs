@@ -309,9 +309,7 @@ fn is_direct_case_eq(
         return false;
     };
     match &instructions[idx] {
-        SIRInstruction::Binary(_, lhs, op, rhs)
-            if matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard) =>
-        {
+        SIRInstruction::Binary(_, lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs) => {
             is_zero_mask_imm(*lhs, defs, instructions) || is_zero_mask_imm(*rhs, defs, instructions)
         }
         _ => false,
@@ -328,7 +326,7 @@ fn is_acc_guarded_priority_cond(
         return false;
     };
     match &instructions[idx] {
-        SIRInstruction::Binary(_, lhs, op, rhs) if matches!(op, BinaryOp::LogicAnd) => {
+        SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd, rhs) => {
             is_acc_eq_imm(*lhs, prev_acc, defs, instructions)
                 || is_acc_eq_imm(*rhs, prev_acc, defs, instructions)
         }

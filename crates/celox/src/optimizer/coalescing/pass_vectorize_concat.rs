@@ -515,8 +515,8 @@ fn lane_binary_shape(
         if lane_op.is_some_and(|lane_op| lane_op != op) {
             return None;
         }
-        if !register_map.get(lhs).is_some_and(|rt| rt.width() == 1)
-            || !register_map.get(rhs).is_some_and(|rt| rt.width() == 1)
+        if register_map.get(lhs).is_none_or(|rt| rt.width() != 1)
+            || register_map.get(rhs).is_none_or(|rt| rt.width() != 1)
         {
             return None;
         }
@@ -545,9 +545,9 @@ fn lane_unary_shape(
         if lane_op.is_some_and(|lane_op| lane_op != op) {
             return None;
         }
-        if !register_map
+        if register_map
             .get(inner)
-            .is_some_and(|register| register.width() == 1)
+            .is_none_or(|register| register.width() != 1)
         {
             return None;
         }

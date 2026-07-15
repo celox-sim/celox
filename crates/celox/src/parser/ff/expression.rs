@@ -1940,7 +1940,7 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
-        let branch_context = Some(ValueContext {
+        let branch_context = ValueContext {
             width: self
                 .get_expression_width(then)
                 .max(self.get_expression_width(els))
@@ -1948,8 +1948,8 @@ impl<'a> FfParser<'a> {
             signed: context
                 .map(|context| context.signed)
                 .unwrap_or_else(|| expression_signed(then) && expression_signed(els)),
-        });
-        let result_width = branch_context.unwrap().width;
+        };
+        let result_width = branch_context.width;
         self.parse_expression_in_context(
             cond, targets, domain, convert, sources, ir_builder, None,
         )?;
@@ -1963,7 +1963,7 @@ impl<'a> FfParser<'a> {
                 convert,
                 sources,
                 ir_builder,
-                branch_context,
+                Some(branch_context),
             )?;
             let then_val = self.stack.pop_back().unwrap();
             self.parse_expression_in_context(
@@ -1973,7 +1973,7 @@ impl<'a> FfParser<'a> {
                 convert,
                 sources,
                 ir_builder,
-                branch_context,
+                Some(branch_context),
             )?;
             let else_val = self.stack.pop_back().unwrap();
             let result = ir_builder.alloc_logic(result_width);
@@ -2036,7 +2036,7 @@ impl<'a> FfParser<'a> {
             convert,
             sources,
             ir_builder,
-            branch_context,
+            Some(branch_context),
         )?;
         let then_val = self.stack.pop_back().unwrap();
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_ternary_defined.clone());
@@ -2056,7 +2056,7 @@ impl<'a> FfParser<'a> {
             convert,
             sources,
             ir_builder,
-            branch_context,
+            Some(branch_context),
         )?;
         let else_val = self.stack.pop_back().unwrap();
         let else_defined = std::mem::take(&mut self.defined_ranges);

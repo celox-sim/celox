@@ -272,15 +272,12 @@ pub(super) fn normalize_to_cssa(
         ));
     }
     let value_count = func.vregs.count() as usize;
-    if func.spill_descs.len() != value_count
-        || (!func.value_widths.is_empty() && func.value_widths.len() != value_count)
-    {
+    if func.spill_descs.len() != value_count {
         return Err(CssaError::function(
             "CSSA.SIDETABLE_APPEND_POSITION",
             format!(
-                "VReg allocator has {value_count} values but spill/value-width side tables have {}/{} entries",
-                func.spill_descs.len(),
-                func.value_widths.len()
+                "VReg allocator has {value_count} values but spill descriptors has {} entries",
+                func.spill_descs.len()
             ),
         ));
     }
@@ -390,18 +387,12 @@ pub(super) fn normalize_to_cssa(
 }
 
 fn alloc_snapshot(func: &mut MFunction, source: VReg, block: BlockId) -> Result<VReg, CssaError> {
-    let (vregs, spill_descs, value_widths) = (
-        &mut func.vregs,
-        &mut func.spill_descs,
-        &mut func.value_widths,
-    );
-    alloc_snapshot_from_parts(vregs, spill_descs, value_widths, source, block)
+    alloc_snapshot_from_parts(&mut func.vregs, &mut func.spill_descs, source, block)
 }
 
 fn alloc_snapshot_from_parts(
     vregs: &mut VRegAllocator,
     spill_descs: &mut Vec<SpillDesc>,
-    value_widths: &mut Vec<Option<u8>>,
     source: VReg,
     block: BlockId,
 ) -> Result<VReg, CssaError> {
@@ -409,7 +400,6 @@ fn alloc_snapshot_from_parts(
         .get(source.0 as usize)
         .map(SpillDesc::copy_for_snapshot)
         .unwrap_or_else(SpillDesc::transient);
-    let width = value_widths.get(source.0 as usize).copied().flatten();
     let fresh = vregs.try_alloc().map_err(|error| {
         CssaError::new(
             "CSSA.VREG_EXHAUSTED",
@@ -420,9 +410,7 @@ fn alloc_snapshot_from_parts(
             error.to_string(),
         )
     })?;
-    if fresh.0 as usize != spill_descs.len()
-        || (!value_widths.is_empty() && fresh.0 as usize != value_widths.len())
-    {
+    if fresh.0 as usize != spill_descs.len() {
         return Err(CssaError::new(
             "CSSA.SIDETABLE_APPEND_POSITION",
             Some(block),
@@ -433,9 +421,6 @@ fn alloc_snapshot_from_parts(
         ));
     }
     spill_descs.push(descriptor);
-    if !value_widths.is_empty() {
-        value_widths.push(width);
-    }
     Ok(fresh)
 }
 
@@ -952,16 +937,8 @@ mod tests {
         let mut vregs = VRegAllocator::new();
         vregs.set_next_for_test(u32::MAX);
         let mut spill_descs = Vec::new();
-        let mut value_widths = Vec::new();
-
-        let error = alloc_snapshot_from_parts(
-            &mut vregs,
-            &mut spill_descs,
-            &mut value_widths,
-            VReg(0),
-            BlockId(0),
-        )
-        .unwrap_err();
+        let error = alloc_snapshot_from_parts(&mut vregs, &mut spill_descs, VReg(0), BlockId(0))
+            .unwrap_err();
 
         assert_eq!(error.rule, "CSSA.VREG_EXHAUSTED");
         assert_eq!(vregs.count(), u32::MAX);

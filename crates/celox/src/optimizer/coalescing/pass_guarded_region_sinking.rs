@@ -1166,9 +1166,7 @@ fn plan_block(
     // fixed-point implementation and makes every external use proof local to
     // the completed plan.
     for &index in &moved {
-        let Some(dst) = def_reg(&block.instructions[index]) else {
-            return None;
-        };
+        let dst = def_reg(&block.instructions[index])?;
         if uses.get(&dst).into_iter().flatten().any(|site| {
             !use_is_owned_by_true_edge(
                 *site,
@@ -2440,8 +2438,10 @@ mod tests {
     fn four_state_mode_is_non_destructive() {
         let mut eu = shared_dag_unit();
         let before = eu.clone();
-        let mut options = PassOptions::default();
-        options.four_state = true;
+        let options = PassOptions {
+            four_state: true,
+            ..Default::default()
+        };
 
         GuardedRegionSinkingPass.run(&mut eu, &options);
 

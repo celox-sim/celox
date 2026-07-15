@@ -371,9 +371,11 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
     }
     reverse.reverse();
     let dependency_verified = dependency_order_valid(&dependencies, &reverse);
-    let instructions = dependency_verified
-        .then(|| reverse.iter().map(|&index| region[index].clone()).collect())
-        .unwrap_or_default();
+    let instructions = if dependency_verified {
+        reverse.iter().map(|&index| region[index].clone()).collect()
+    } else {
+        Default::default()
+    };
     RegionSchedule {
         instructions,
         dependency_verified,

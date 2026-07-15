@@ -120,14 +120,14 @@ impl NormalizedCfg {
                 ));
             }
         }
-        for block in 0..blocks {
-            if self.predecessors[block] != expected_predecessors[block] {
+        for (block, expected) in expected_predecessors.iter().enumerate() {
+            if self.predecessors[block] != *expected {
                 return Err(CfgError::new(
                     "CFG.EDGE_RECIPROCITY",
                     Some(func.blocks[block].id),
                     format!(
                         "normalized predecessors {:?} differ from incoming successor edges {:?}",
-                        self.predecessors[block], expected_predecessors[block]
+                        self.predecessors[block], expected
                     ),
                 ));
             }
@@ -1139,9 +1139,11 @@ mod tests {
             idom[block] = Some(block - 1);
         }
         let tail = DEPTH;
-        for header in 1..=DEPTH {
+        for (header, header_predecessors) in
+            predecessors.iter_mut().enumerate().take(DEPTH + 1).skip(1)
+        {
             successors[tail].push(header);
-            predecessors[header].push(tail);
+            header_predecessors.push(tail);
         }
 
         let (loops, work) = natural_loops_with_work(&predecessors, &successors, &idom).unwrap();
@@ -1155,9 +1157,9 @@ mod tests {
         assert!(work.predecessor_edges_visited <= memberships * 2);
         assert_eq!(work.parent_header_lookups, DEPTH);
         assert_eq!(work.parent_membership_updates, memberships);
-        for child in 0..DEPTH - 1 {
-            assert_eq!(loops[child].parent, Some(child + 1));
-            assert_eq!(loops[child].header, DEPTH - child);
+        for (child, loop_info) in loops.iter().enumerate().take(DEPTH - 1) {
+            assert_eq!(loop_info.parent, Some(child + 1));
+            assert_eq!(loop_info.header, DEPTH - child);
         }
         assert_eq!(loops[DEPTH - 1].header, 1);
         assert_eq!(loops[DEPTH - 1].parent, None);

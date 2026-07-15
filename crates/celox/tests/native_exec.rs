@@ -1,7 +1,7 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(target_arch = "x86_64")]
 
-use celox::{MemoryLayout, Program, Simulator, SimulatorBuilder};
+use celox::{MemoryLayout, MemoryLayoutMode, Program, Simulator, SimulatorBuilder};
 
 #[cfg(target_arch = "x86_64")]
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
@@ -54,7 +54,7 @@ fn compile_and_run_inner(
         .trace_post_optimized_sir()
         .build_with_trace();
     let sir = trace.trace.post_optimized_sir.unwrap();
-    let layout = MemoryLayout::build(&sir, false);
+    let layout = MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
     use celox::native_backend::{emit, isel, jit_mem, regalloc};
 
@@ -461,7 +461,7 @@ fn test_debug_let_bitslice_write() {
     let sir = trace.trace.post_optimized_sir.unwrap();
 
     use celox::native_backend::{emit, isel, regalloc};
-    let layout = celox::MemoryLayout::build(&sir, false);
+    let layout = celox::MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
     for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);

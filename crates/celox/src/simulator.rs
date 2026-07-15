@@ -49,7 +49,7 @@ fn record_tick_timing(eval_apply_ns: u64, eval_comb_ns: u64) {
     let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     let apply_total = EVAL_APPLY_NS.fetch_add(eval_apply_ns, Ordering::Relaxed) + eval_apply_ns;
     let comb_total = EVAL_COMB_NS.fetch_add(eval_comb_ns, Ordering::Relaxed) + eval_comb_ns;
-    if ticks % every == 0 {
+    if ticks.is_multiple_of(every) {
         eprintln!(
             "[tick-timing] ticks={ticks} eval_apply_ms={:.3} eval_comb_ms={:.3} avg_apply_us={:.3} avg_comb_us={:.3}",
             apply_total as f64 / 1_000_000.0,

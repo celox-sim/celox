@@ -1526,7 +1526,7 @@ fn parse_memory_write_runs(
             && last.bit_offset + last.bit_width == bit_offset
             && last.bit_offset % 8 == 0
             && last.bit_width % 8 == 0
-            && width % 8 == 0
+            && width.is_multiple_of(8)
         {
             last.bit_width += width;
             last.value_bytes.extend(value_bytes);
@@ -1560,7 +1560,7 @@ fn biguint_to_fixed_le_bytes(value: &BigUint, width: usize) -> Vec<u8> {
     let src = value.to_bytes_le();
     let copy_len = src.len().min(byte_len);
     out[..copy_len].copy_from_slice(&src[..copy_len]);
-    if width % 8 != 0 && !out.is_empty() {
+    if !width.is_multiple_of(8) && !out.is_empty() {
         let keep = (1u8 << (width % 8)) - 1;
         *out.last_mut().unwrap() &= keep;
     }

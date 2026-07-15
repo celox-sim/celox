@@ -368,24 +368,32 @@ fn next_use_bucket(next_use: u32) -> &'static str {
 
 fn inst_opcode(inst: &MInst) -> &'static str {
     match inst {
-        MInst::Mov { .. } => "mov",
+        MInst::Mov { .. } => "mov.w64",
+        MInst::Mov32 { .. } => "mov.w32",
         MInst::LoadImm { .. } => "imm",
         MInst::LoadConstantTableAddr { .. } => "constant_table_addr",
         MInst::Load { .. } => "load",
         MInst::LoadPtr { .. } => "load_ptr",
         MInst::LoadIndexed { .. } => "load_indexed",
         MInst::LoadPtrIndexed { .. } => "load_ptr_indexed",
-        MInst::Add { .. } => "add",
-        MInst::Sub { .. } => "sub",
-        MInst::Mul { .. } => "mul",
+        MInst::Add { .. } => "add.w64",
+        MInst::Add32 { .. } => "add.w32",
+        MInst::Sub { .. } => "sub.w64",
+        MInst::Sub32 { .. } => "sub.w32",
+        MInst::Mul { .. } => "mul.w64",
+        MInst::Mul32 { .. } => "mul.w32",
         MInst::UMulHi { .. } => "umulhi",
-        MInst::And { .. } => "and",
-        MInst::Or { .. } => "or",
-        MInst::Xor { .. } => "xor",
+        MInst::And { .. } => "and.w64",
+        MInst::And32 { .. } => "and.w32",
+        MInst::Or { .. } => "or.w64",
+        MInst::Or32 { .. } => "or.w32",
+        MInst::Xor { .. } => "xor.w64",
+        MInst::Xor32 { .. } => "xor.w32",
         MInst::Shr { .. } => "shr",
         MInst::Shl { .. } => "shl",
         MInst::Sar { .. } => "sar",
-        MInst::AndImm { .. } => "and_imm",
+        MInst::AndImm { .. } => "and_imm.w64",
+        MInst::AndImm32 { .. } => "and_imm.w32",
         MInst::OrImm { .. } => "or_imm",
         MInst::ShrImm { .. } => "shr_imm",
         MInst::ShlImm { .. } => "shl_imm",
@@ -970,7 +978,6 @@ fn process_block(
                                         .unwrap_or(SpillDesc::transient()),
                                 );
                             }
-                            copy_value_width(func, fresh_occ, occupant);
                             new_insts.push(MInst::Mov {
                                 dst: fresh_occ,
                                 src: occupant,
@@ -1004,7 +1011,6 @@ fn process_block(
                                     .unwrap_or(SpillDesc::transient()),
                             );
                         }
-                        copy_value_width(func, fresh, use_vreg);
                         new_insts.push(MInst::Mov {
                             dst: fresh,
                             src: use_vreg,
@@ -1023,7 +1029,6 @@ fn process_block(
                                     .unwrap_or(SpillDesc::transient()),
                             );
                         }
-                        copy_value_width(func, fresh, use_vreg);
                         let mut reload = make_reload(use_vreg, func, slots);
                         if let Some(trace) = trace.as_deref_mut() {
                             trace.record_reload(use_vreg, func, "fixed-reload", 0, &reload);
@@ -1055,8 +1060,6 @@ fn process_block(
                                 .unwrap_or(SpillDesc::transient()),
                         );
                     }
-                    copy_value_width(func, fresh, use_vreg);
-
                     // Find a free register (respecting shift blocked set)
                     let blocked = compute_blocked_for_vreg(
                         fresh,
@@ -1456,7 +1459,6 @@ fn materialize_phi_edge_homes(
         // slot without pinning unrelated phi sources.
         let edge_value = func.vregs.alloc();
         func.spill_descs.push(SpillDesc::transient());
-        copy_value_width(func, edge_value, source);
         let preg = find_or_evict_free(
             rf,
             s,
@@ -1516,14 +1518,6 @@ fn emit_spill(
         }
         s.insert(vreg);
     }
-}
-
-fn copy_value_width(func: &mut MFunction, dst: VReg, src: VReg) {
-    let width = func.value_widths.get(src.0 as usize).copied().flatten();
-    while func.value_widths.len() <= dst.0 as usize {
-        func.value_widths.push(None);
-    }
-    func.value_widths[dst.0 as usize] = width;
 }
 
 fn evict_farthest(

@@ -1191,6 +1191,214 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
     }
 }
 
+/// Display implementation for SLTNode - provides human-readable tree structure
+///
+/// This implementation formats the Signal Logic Tree (SLT) as a hierarchical ASCII tree,
+/// making it easy to visualize the expression structure. Each node type displays relevant
+/// information:
+///
+/// - **Input**: Shows variable ID, dynamic indices (if any), and bit range [lsb:msb]
+/// - **Constant**: Displays the value in hexadecimal and width in bits
+/// - **Binary**: Shows the operation and recursively formats both operands with indentation
+/// - **Unary**: Shows the operation and recursively formats the inner expression
+/// - **Mux**: Displays condition, then-branch, and else-branch with clear labels
+/// - **Concat**: Lists concatenated parts with their widths
+/// - **Slice**: Shows the bit range extraction with the inner expression
+///
+/// # Example
+///
+/// A binary expression `a + b` would display as:
+/// ```text
+/// Binary(Add)
+///   Const(0x1, 32bits)
+///   Const(0x2, 32bits)
+/// ```
+///
+/// A more complex expression `(a + b) * (c - d)` would show:
+/// ```text
+/// Binary(Mul)
+///   Binary(Add)
+///     Const(0x1, 32bits)
+///     Const(0x2, 32bits)
+///   Binary(Sub)
+///     Const(0x3, 32bits)
+///     Const(0x4, 32bits)
+/// ```
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
+    pub fn fmt_display(&self, f: &mut fmt::Formatter<'_>, arena: &SLTNodeArena<A>) -> fmt::Result {
+        self.fmt_recursive(f, 0, arena)
+    }
+}
+
+impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
+    fn fmt_recursive(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        depth: usize,
+        arena: &SLTNodeArena<A>,
+    ) -> fmt::Result {
+        let indent = "  ".repeat(depth);
+        let child_indent = "  ".repeat(depth + 1);
+        match self {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => {
+                write!(f, "{}Input({:?}", indent, variable)?;
+                if !index.is_empty() {
+                    write!(f, "[")?;
+                    for (i, idx) in index.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "n{}:...", idx.node.0)?;
+                        if idx.stride > 1 {
+                            write!(f, "*{}", idx.stride)?;
+                        }
+                    }
+                    write!(f, "]")?;
+                }
+                write!(f, "[{}:{}]", access.lsb, access.msb)?;
+                write!(f, ")")
+            }
+            SLTNode::Constant(val, _mask, width, _signed) => {
+                write!(f, "{}Const({:#x}, {}bits)", indent, val, width)
+            }
+            SLTNode::Binary(lhs, op, rhs) => {
+                let op_str = format!("{:?}", op); // Just use Debug for simplicity
+                writeln!(f, "{}Binary({})", indent, op_str)?;
+                arena.get(*lhs).fmt_recursive(f, depth + 1, arena)?;
+                writeln!(f)?; // Insert empty line between left and right expressions
+                arena.get(*rhs).fmt_recursive(f, depth + 1, arena)
+            }
+            SLTNode::Unary(op, inner) => {
+                writeln!(f, "{}Unary({:?})", indent, op)?;
+                arena.get(*inner).fmt_recursive(f, depth + 1, arena)
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                writeln!(f, "{}Mux", indent)?;
+                writeln!(f, "{}cond:", child_indent)?;
+                arena.get(*cond).fmt_recursive(f, depth + 2, arena)?;
+                writeln!(f, "\n{}then:", child_indent)?;
+                arena.get(*then_expr).fmt_recursive(f, depth + 2, arena)?;
+                writeln!(f, "\n{}else:", child_indent)?;
+                arena.get(*else_expr).fmt_recursive(f, depth + 2, arena)
+            }
+            SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+            } => {
+                writeln!(
+                    f,
+                    "{}ForFold(loop_var={}, width={}, signed={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
+                    indent,
+                    loop_var,
+                    loop_width,
+                    loop_signed,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    result
+                )?;
+                writeln!(f, "{}start: {:?}", child_indent, start)?;
+                writeln!(f, "{}end: {:?}", child_indent, end)?;
+                for init in initials {
+                    writeln!(f, "{}init {}:", child_indent, init.target)?;
+                    arena.get(init.expr).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
+                for update in updates {
+                    writeln!(f, "{}update {}:", child_indent, update.target)?;
+                    arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
+                for effect in effects {
+                    writeln!(f, "{}effect site={}:", child_indent, effect.site_id)?;
+                    if let Some(guard) = effect.guard {
+                        writeln!(f, "{}guard:", child_indent)?;
+                        arena.get(guard).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
+                    for arg in &effect.args {
+                        writeln!(f, "{}arg:", child_indent)?;
+                        arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
+                        writeln!(f)?;
+                    }
+                }
+                writeln!(f, "{}continue:", child_indent)?;
+                arena
+                    .get(*continue_cond)
+                    .fmt_recursive(f, depth + 2, arena)?;
+                Ok(())
+            }
+            SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start,
+                step,
+                trip_count,
+                entry_guard,
+                states,
+            } => {
+                writeln!(
+                    f,
+                    "{}ForFoldGroup(loop_var={}, width={}, signed={}, start={}, step={}, trip_count={})",
+                    indent, loop_var, loop_width, loop_signed, start, step, trip_count,
+                )?;
+                writeln!(f, "{}entry guard:", child_indent)?;
+                arena.get(*entry_guard).fmt_recursive(f, depth + 2, arena)?;
+                writeln!(f)?;
+                for state in states {
+                    writeln!(f, "{}state {} initial:", child_indent, state.target)?;
+                    arena
+                        .get(state.initial)
+                        .fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                    writeln!(f, "{}state {} update:", child_indent, state.target)?;
+                    arena.get(state.update).fmt_recursive(f, depth + 2, arena)?;
+                    writeln!(f)?;
+                }
+                Ok(())
+            }
+            SLTNode::Concat(parts) => {
+                writeln!(f, "{}Concat", indent)?;
+                for (i, (part, width)) in parts.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    writeln!(f, "{}[{}bits]:", child_indent, width)?;
+                    arena.get(*part).fmt_recursive(f, depth + 2, arena)?;
+                }
+                Ok(())
+            }
+            SLTNode::Slice { expr, access } => {
+                writeln!(f, "{}Slice[{}:{}]", indent, access.lsb, access.msb)?;
+                arena.get(*expr).fmt_recursive(f, depth + 1, arena)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1652,213 +1860,5 @@ mod tests {
             error,
             SLTNodeArenaEditError::RangeOutOfBounds { .. }
         ));
-    }
-}
-
-/// Display implementation for SLTNode - provides human-readable tree structure
-///
-/// This implementation formats the Signal Logic Tree (SLT) as a hierarchical ASCII tree,
-/// making it easy to visualize the expression structure. Each node type displays relevant
-/// information:
-///
-/// - **Input**: Shows variable ID, dynamic indices (if any), and bit range [lsb:msb]
-/// - **Constant**: Displays the value in hexadecimal and width in bits
-/// - **Binary**: Shows the operation and recursively formats both operands with indentation
-/// - **Unary**: Shows the operation and recursively formats the inner expression
-/// - **Mux**: Displays condition, then-branch, and else-branch with clear labels
-/// - **Concat**: Lists concatenated parts with their widths
-/// - **Slice**: Shows the bit range extraction with the inner expression
-///
-/// # Example
-///
-/// A binary expression `a + b` would display as:
-/// ```text
-/// Binary(Add)
-///   Const(0x1, 32bits)
-///   Const(0x2, 32bits)
-/// ```
-///
-/// A more complex expression `(a + b) * (c - d)` would show:
-/// ```text
-/// Binary(Mul)
-///   Binary(Add)
-///     Const(0x1, 32bits)
-///     Const(0x2, 32bits)
-///   Binary(Sub)
-///     Const(0x3, 32bits)
-///     Const(0x4, 32bits)
-/// ```
-impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
-    pub fn fmt_display(&self, f: &mut fmt::Formatter<'_>, arena: &SLTNodeArena<A>) -> fmt::Result {
-        self.fmt_recursive(f, 0, arena)
-    }
-}
-
-impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
-    fn fmt_recursive(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        depth: usize,
-        arena: &SLTNodeArena<A>,
-    ) -> fmt::Result {
-        let indent = "  ".repeat(depth);
-        let child_indent = "  ".repeat(depth + 1);
-        match self {
-            SLTNode::Input {
-                variable,
-                index,
-                access,
-                ..
-            } => {
-                write!(f, "{}Input({:?}", indent, variable)?;
-                if !index.is_empty() {
-                    write!(f, "[")?;
-                    for (i, idx) in index.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "n{}:...", idx.node.0)?;
-                        if idx.stride > 1 {
-                            write!(f, "*{}", idx.stride)?;
-                        }
-                    }
-                    write!(f, "]")?;
-                }
-                write!(f, "[{}:{}]", access.lsb, access.msb)?;
-                write!(f, ")")
-            }
-            SLTNode::Constant(val, _mask, width, _signed) => {
-                write!(f, "{}Const({:#x}, {}bits)", indent, val, width)
-            }
-            SLTNode::Binary(lhs, op, rhs) => {
-                let op_str = format!("{:?}", op); // Just use Debug for simplicity
-                writeln!(f, "{}Binary({})", indent, op_str)?;
-                arena.get(*lhs).fmt_recursive(f, depth + 1, arena)?;
-                writeln!(f)?; // Insert empty line between left and right expressions
-                arena.get(*rhs).fmt_recursive(f, depth + 1, arena)
-            }
-            SLTNode::Unary(op, inner) => {
-                writeln!(f, "{}Unary({:?})", indent, op)?;
-                arena.get(*inner).fmt_recursive(f, depth + 1, arena)
-            }
-            SLTNode::Mux {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                writeln!(f, "{}Mux", indent)?;
-                writeln!(f, "{}cond:", child_indent)?;
-                arena.get(*cond).fmt_recursive(f, depth + 2, arena)?;
-                writeln!(f, "\n{}then:", child_indent)?;
-                arena.get(*then_expr).fmt_recursive(f, depth + 2, arena)?;
-                writeln!(f, "\n{}else:", child_indent)?;
-                arena.get(*else_expr).fmt_recursive(f, depth + 2, arena)
-            }
-            SLTNode::ForFold {
-                loop_var,
-                loop_width,
-                loop_signed,
-                start,
-                end,
-                inclusive,
-                step,
-                step_op,
-                reverse,
-                result,
-                initials,
-                updates,
-                effects,
-                continue_cond,
-            } => {
-                writeln!(
-                    f,
-                    "{}ForFold(loop_var={}, width={}, signed={}, inclusive={}, step={}, step_op={:?}, reverse={}, result={})",
-                    indent,
-                    loop_var,
-                    loop_width,
-                    loop_signed,
-                    inclusive,
-                    step,
-                    step_op,
-                    reverse,
-                    result
-                )?;
-                writeln!(f, "{}start: {:?}", child_indent, start)?;
-                writeln!(f, "{}end: {:?}", child_indent, end)?;
-                for init in initials {
-                    writeln!(f, "{}init {}:", child_indent, init.target)?;
-                    arena.get(init.expr).fmt_recursive(f, depth + 2, arena)?;
-                    writeln!(f)?;
-                }
-                for update in updates {
-                    writeln!(f, "{}update {}:", child_indent, update.target)?;
-                    arena.get(update.expr).fmt_recursive(f, depth + 2, arena)?;
-                    writeln!(f)?;
-                }
-                for effect in effects {
-                    writeln!(f, "{}effect site={}:", child_indent, effect.site_id)?;
-                    if let Some(guard) = effect.guard {
-                        writeln!(f, "{}guard:", child_indent)?;
-                        arena.get(guard).fmt_recursive(f, depth + 2, arena)?;
-                        writeln!(f)?;
-                    }
-                    for arg in &effect.args {
-                        writeln!(f, "{}arg:", child_indent)?;
-                        arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
-                        writeln!(f)?;
-                    }
-                }
-                writeln!(f, "{}continue:", child_indent)?;
-                arena
-                    .get(*continue_cond)
-                    .fmt_recursive(f, depth + 2, arena)?;
-                Ok(())
-            }
-            SLTNode::ForFoldGroup {
-                loop_var,
-                loop_width,
-                loop_signed,
-                start,
-                step,
-                trip_count,
-                entry_guard,
-                states,
-            } => {
-                writeln!(
-                    f,
-                    "{}ForFoldGroup(loop_var={}, width={}, signed={}, start={}, step={}, trip_count={})",
-                    indent, loop_var, loop_width, loop_signed, start, step, trip_count,
-                )?;
-                writeln!(f, "{}entry guard:", child_indent)?;
-                arena.get(*entry_guard).fmt_recursive(f, depth + 2, arena)?;
-                writeln!(f)?;
-                for state in states {
-                    writeln!(f, "{}state {} initial:", child_indent, state.target)?;
-                    arena
-                        .get(state.initial)
-                        .fmt_recursive(f, depth + 2, arena)?;
-                    writeln!(f)?;
-                    writeln!(f, "{}state {} update:", child_indent, state.target)?;
-                    arena.get(state.update).fmt_recursive(f, depth + 2, arena)?;
-                    writeln!(f)?;
-                }
-                Ok(())
-            }
-            SLTNode::Concat(parts) => {
-                writeln!(f, "{}Concat", indent)?;
-                for (i, (part, width)) in parts.iter().enumerate() {
-                    if i > 0 {
-                        writeln!(f)?;
-                    }
-                    writeln!(f, "{}[{}bits]:", child_indent, width)?;
-                    arena.get(*part).fmt_recursive(f, depth + 2, arena)?;
-                }
-                Ok(())
-            }
-            SLTNode::Slice { expr, access } => {
-                writeln!(f, "{}Slice[{}:{}]", indent, access.lsb, access.msb)?;
-                arena.get(*expr).fmt_recursive(f, depth + 1, arena)
-            }
-        }
     }
 }

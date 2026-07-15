@@ -13,12 +13,7 @@ pub fn legalize(func: &mut MFunction) {
 /// a sign fill. Every variable shift selects the architectural result only when
 /// the unsigned count is below 64; the raw x86 shift is never exposed directly.
 pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
-    let (blocks, vregs, spill_descs, value_widths) = (
-        &mut func.blocks,
-        &mut func.vregs,
-        &mut func.spill_descs,
-        &mut func.value_widths,
-    );
+    let (blocks, vregs, spill_descs) = (&mut func.blocks, &mut func.vregs, &mut func.spill_descs);
 
     for block in blocks {
         let legalization_count = block
@@ -39,8 +34,8 @@ pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
         for inst in std::mem::take(&mut block.insts) {
             match inst {
                 MInst::Shr { dst, lhs, rhs } => {
-                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
-                    let zero = alloc_shift_temp(vregs, spill_descs, value_widths, Some(0), true);
+                    let raw = alloc_shift_temp(vregs, spill_descs, false);
+                    let zero = alloc_shift_temp(vregs, spill_descs, true);
                     rewritten.push(MInst::Shr { dst: raw, lhs, rhs });
                     rewritten.push(MInst::LoadImm {
                         dst: zero,
@@ -56,8 +51,8 @@ pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
                     });
                 }
                 MInst::Shl { dst, lhs, rhs } => {
-                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
-                    let zero = alloc_shift_temp(vregs, spill_descs, value_widths, Some(0), true);
+                    let raw = alloc_shift_temp(vregs, spill_descs, false);
+                    let zero = alloc_shift_temp(vregs, spill_descs, true);
                     rewritten.push(MInst::Shl { dst: raw, lhs, rhs });
                     rewritten.push(MInst::LoadImm {
                         dst: zero,
@@ -73,8 +68,8 @@ pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
                     });
                 }
                 MInst::Sar { dst, lhs, rhs } => {
-                    let raw = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
-                    let sign_fill = alloc_shift_temp(vregs, spill_descs, value_widths, None, false);
+                    let raw = alloc_shift_temp(vregs, spill_descs, false);
+                    let sign_fill = alloc_shift_temp(vregs, spill_descs, false);
                     rewritten.push(MInst::Sar { dst: raw, lhs, rhs });
                     rewritten.push(MInst::SarImm {
                         dst: sign_fill,
@@ -100,8 +95,6 @@ pub(crate) fn legalize_variable_shift_counts(func: &mut MFunction) {
 fn alloc_shift_temp(
     vregs: &mut VRegAllocator,
     spill_descs: &mut Vec<SpillDesc>,
-    value_widths: &mut Vec<Option<u8>>,
-    width: Option<u8>,
     rematerialize_zero: bool,
 ) -> VReg {
     let vreg = vregs.alloc();
@@ -111,10 +104,6 @@ fn alloc_shift_temp(
     } else {
         SpillDesc::transient()
     });
-    if !value_widths.is_empty() {
-        debug_assert_eq!(value_widths.len(), vreg.0 as usize);
-        value_widths.push(width);
-    }
     vreg
 }
 
@@ -267,7 +256,6 @@ mod tests {
         let shr = vregs.alloc();
         let sar = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
-        func.value_widths = vec![Some(64), Some(7), None, None, None];
 
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm {
@@ -300,7 +288,6 @@ mod tests {
 
         assert_eq!(func.vregs.count(), 11);
         assert_eq!(func.spill_descs.len(), 11);
-        assert_eq!(func.value_widths.len(), 11);
         assert_eq!(
             func.blocks[0]
                 .insts
@@ -327,7 +314,6 @@ mod tests {
         let count = vregs.alloc();
         let dst = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
-        func.value_widths = vec![Some(1), Some(6), None];
 
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm { dst: lhs, value: 1 });

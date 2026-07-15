@@ -978,7 +978,13 @@ impl<'a> ISelContext<'a> {
             self.known_bits.insert(dst, out_bits);
         }
 
-        if (signed >= i32::MIN as i64 && signed <= i32::MAX as i64) || imm <= u32::MAX as u64 {
+        if imm <= u32::MAX as u64 {
+            block.push(MInst::AndImm32 {
+                dst,
+                src,
+                imm: imm as u32,
+            });
+        } else if signed >= i32::MIN as i64 && signed <= i32::MAX as i64 {
             block.push(MInst::AndImm { dst, src, imm });
         } else {
             // 64-bit immediate: decompose into LoadImm + And
@@ -999,7 +1005,12 @@ impl<'a> ISelContext<'a> {
         if dst == src {
             return;
         }
-        block.push(MInst::Mov { dst, src });
+        let narrow32 = self.known_bits.get(&src).is_some_and(|&bits| bits <= 32);
+        if narrow32 {
+            block.push(MInst::Mov32 { dst, src });
+        } else {
+            block.push(MInst::Mov { dst, src });
+        }
         if let Some(desc) = self.spill_descs.get(src.0 as usize).cloned() {
             self.spill_descs[dst.0 as usize] = desc.copy_for_snapshot();
         }
@@ -1014,7 +1025,12 @@ impl<'a> ISelContext<'a> {
         if dst == src {
             return;
         }
-        block.push(MInst::Mov { dst, src });
+        let narrow32 = self.known_bits.get(&src).is_some_and(|&bits| bits <= 32);
+        if narrow32 {
+            block.push(MInst::Mov32 { dst, src });
+        } else {
+            block.push(MInst::Mov { dst, src });
+        }
         if let Some(desc) = self.spill_descs.get(src.0 as usize).cloned() {
             self.spill_descs[dst.0 as usize] = match desc.kind {
                 SpillKind::SimState {
@@ -2009,10 +2025,7 @@ fn match_dense_lookup_condition(
 ) -> Option<DenseLookupCondition> {
     let mut cursor = cond;
     let mut covered_indices = HashSet::default();
-    loop {
-        let Some(&idx) = defs.get(&cursor) else {
-            break;
-        };
+    while let Some(&idx) = defs.get(&cursor) {
         match &block.instructions[idx] {
             SIRInstruction::Unary(_, UnaryOp::Ident, inner) => {
                 covered_indices.insert(idx);
@@ -5806,13 +5819,29 @@ fn lower_instruction(
                     } else {
                         dst_vreg
                     };
+                    let narrow32 = d_width <= 32;
                     match op {
+                        BinaryOp::Add if narrow32 => block.push(MInst::Add32 {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
                         BinaryOp::Add => block.push(MInst::Add {
                             dst: raw,
                             lhs: lhs_vreg,
                             rhs: rhs_vreg,
                         }),
+                        BinaryOp::Sub if narrow32 => block.push(MInst::Sub32 {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
                         BinaryOp::Sub => block.push(MInst::Sub {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
+                        BinaryOp::Mul if narrow32 => block.push(MInst::Mul32 {
                             dst: raw,
                             lhs: lhs_vreg,
                             rhs: rhs_vreg,
@@ -5857,13 +5886,29 @@ fn lower_instruction(
                     } else {
                         dst_vreg
                     };
+                    let narrow32 = d_width <= 32;
                     match op {
+                        BinaryOp::And if narrow32 => block.push(MInst::And32 {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
                         BinaryOp::And => block.push(MInst::And {
                             dst: raw,
                             lhs: lhs_vreg,
                             rhs: rhs_vreg,
                         }),
+                        BinaryOp::Or if narrow32 => block.push(MInst::Or32 {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
                         BinaryOp::Or => block.push(MInst::Or {
+                            dst: raw,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        }),
+                        BinaryOp::Xor if narrow32 => block.push(MInst::Xor32 {
                             dst: raw,
                             lhs: lhs_vreg,
                             rhs: rhs_vreg,
@@ -7337,7 +7382,7 @@ fn wide_sign_bit(
     }
     let sign_index = width - 1;
     let source = ctx.wide_chunk_or_zero(chunks, sign_index / 64, block);
-    let shifted = if sign_index % 64 == 0 {
+    let shifted = if sign_index.is_multiple_of(64) {
         source
     } else {
         let shifted = ctx.alloc_vreg(SpillDesc::transient());
@@ -7418,11 +7463,11 @@ fn conditional_negate_wide_chunks(
     block.push(MInst::LoadImm { dst: one, value: 1 });
     let mut carry = one;
     let mut negated = Vec::with_capacity(num_chunks);
-    for index in 0..num_chunks {
+    for &chunk in chunks.iter().take(num_chunks) {
         let inverted = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::BitNot {
             dst: inverted,
-            src: chunks[index],
+            src: chunk,
         });
         let sum = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Add {

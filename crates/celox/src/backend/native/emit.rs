@@ -1331,19 +1331,15 @@ fn emit_planned(
             None
         };
 
-        let fallthrough_continuation = next_block_id
-            .filter(|&next| {
+        let fallthrough_continuation = block.insts[..block.insts.len() - 1]
+            .iter()
+            .rposition(|inst| !instruction_emits_no_code(inst, assignment))
+            .zip(next_block_id.filter(|&next| {
                 matches!(block.terminator(), Some(MInst::Jump { target }) if *target == next)
                     && !plan
                         .edge(block.id, next)
                         .is_some_and(|edge| edge.has_effective_copies())
-            })
-            .and_then(|next| {
-                block.insts[..block.insts.len() - 1]
-                    .iter()
-                    .rposition(|inst| !instruction_emits_no_code(inst, assignment))
-                    .map(|instruction| (instruction, next))
-            })
+            }))
             .map(|(instruction, next)| block_labels.index(next).map(|label| (instruction, label)))
             .transpose()?;
 
@@ -1571,7 +1567,7 @@ fn emit_inst_with_stack_mem(
     stack_vreg: VReg,
     stack_offset: i32,
     assignment: &AssignmentMap,
-    func: &MFunction,
+    _func: &MFunction,
 ) -> Result<bool, IcedError> {
     match inst {
         MInst::Mov { dst, src } if *src == stack_vreg => {
@@ -1579,11 +1575,27 @@ fn emit_inst_with_stack_mem(
             asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
             Ok(true)
         }
+        MInst::Mov32 { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg32(resolve(assignment, *dst));
+            asm.mov(d, dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            Ok(true)
+        }
         MInst::Add { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::Add,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Add32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::Add,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1593,8 +1605,19 @@ fn emit_inst_with_stack_mem(
         MInst::Sub { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::Sub,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Sub32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::Sub,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1604,8 +1627,19 @@ fn emit_inst_with_stack_mem(
         MInst::Mul { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::Mul,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Mul32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::Mul,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1615,8 +1649,19 @@ fn emit_inst_with_stack_mem(
         MInst::And { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::And,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::And32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::And,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1626,8 +1671,19 @@ fn emit_inst_with_stack_mem(
         MInst::Or { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::Or,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Or32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::Or,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1637,8 +1693,19 @@ fn emit_inst_with_stack_mem(
         MInst::Xor { dst, lhs, rhs } => emit_binop_stack_mem(
             asm,
             assignment,
-            func,
             BinOp::Xor,
+            false,
+            *dst,
+            *lhs,
+            *rhs,
+            stack_vreg,
+            stack_offset,
+        ),
+        MInst::Xor32 { dst, lhs, rhs } => emit_binop_stack_mem(
+            asm,
+            assignment,
+            BinOp::Xor,
+            true,
             *dst,
             *lhs,
             *rhs,
@@ -1649,6 +1716,12 @@ fn emit_inst_with_stack_mem(
             let d = preg_to_reg64(resolve(assignment, *dst));
             asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
             emit_and_imm64(asm, d, *imm)?;
+            Ok(true)
+        }
+        MInst::AndImm32 { dst, src, imm } if *src == stack_vreg => {
+            let d = preg_to_reg32(resolve(assignment, *dst));
+            asm.mov(d, dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.and(d, *imm as i32)?;
             Ok(true)
         }
         MInst::OrImm { dst, src, imm } if *src == stack_vreg => {
@@ -1778,12 +1851,15 @@ fn emit_inst(
             let d_preg = resolve(assignment, *dst);
             let s_preg = resolve(assignment, *src);
             if d_preg != s_preg {
-                if func.is_narrow32(*src) {
-                    asm.mov(preg_to_reg32(d_preg), preg_to_reg32(s_preg))?;
-                } else {
-                    asm.mov(preg_to_reg64(d_preg), preg_to_reg64(s_preg))?;
-                }
+                asm.mov(preg_to_reg64(d_preg), preg_to_reg64(s_preg))?;
             }
+        }
+        MInst::Mov32 { dst, src } => {
+            let d = preg_to_reg32(resolve(assignment, *dst));
+            let s = preg_to_reg32(resolve(assignment, *src));
+            // `mov r32, r32` is required even for an assigned self-copy: it
+            // is the zero-extension specified by Mov32.
+            asm.mov(d, s)?;
         }
 
         MInst::LoadImm { dst, value } => {
@@ -2267,18 +2343,25 @@ fn emit_inst(
 
         // ── ALU 3-operand → 2-operand ──
         // x86: dst = dst OP src. If dst != lhs, insert mov dst, lhs first.
-        // Use 32-bit registers when all operands are known to be ≤ 32 bits.
+        // The opcode, selected by ISel, carries the x86 word width.  Do not
+        // recover it from a VReg-side dataflow fact here.
         MInst::Add { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Add, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Add, false)?;
+        }
+        MInst::Add32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Add, true)?;
         }
         MInst::Sub { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Sub, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Sub, false)?;
+        }
+        MInst::Sub32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Sub, true)?;
         }
         MInst::Mul { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul, false)?;
+        }
+        MInst::Mul32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul, true)?;
         }
         MInst::UMulHi { dst, lhs, rhs } => {
             // x86-64: mul r64 → RDX:RAX = RAX × r64. We want RDX (high 64).
@@ -2304,16 +2387,22 @@ fn emit_inst(
             }
         }
         MInst::And { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::And, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::And, false)?;
+        }
+        MInst::And32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::And, true)?;
         }
         MInst::Or { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Or, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Or, false)?;
+        }
+        MInst::Or32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Or, true)?;
         }
         MInst::Xor { dst, lhs, rhs } => {
-            let n32 = func.is_narrow32(*dst);
-            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Xor, n32)?;
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Xor, false)?;
+        }
+        MInst::Xor32 { dst, lhs, rhs } => {
+            emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Xor, true)?;
         }
 
         // Variable shifts use BMI2's arbitrary-count three-operand form when
@@ -2352,23 +2441,22 @@ fn emit_inst(
             )?;
         }
 
-        // Immediate ALU — use 32-bit regs when result fits
+        // Immediate ALU widths are explicit for the same reason as binary ALU.
         MInst::AndImm { dst, src, imm } => {
-            if func.is_narrow32(*dst) && *imm <= u32::MAX as u64 {
-                let d = preg_to_reg32(resolve(assignment, *dst));
-                let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                asm.and(d, *imm as i32)?;
-            } else {
-                let d = preg_to_reg64(resolve(assignment, *dst));
-                let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                emit_and_imm64(asm, d, *imm)?;
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            if d != s {
+                asm.mov(d, s)?;
             }
+            emit_and_imm64(asm, d, *imm)?;
+        }
+        MInst::AndImm32 { dst, src, imm } => {
+            let d = preg_to_reg32(resolve(assignment, *dst));
+            let s = preg_to_reg32(resolve(assignment, *src));
+            if d != s {
+                asm.mov(d, s)?;
+            }
+            asm.and(d, *imm as i32)?;
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -2379,41 +2467,20 @@ fn emit_inst(
             emit_or_imm64(asm, d, *imm)?;
         }
         MInst::ShrImm { dst, src, imm } => {
-            // A 32-bit x86 shift masks the count modulo 32. MIR shifts are
-            // 64-bit word operations, so counts 32..63 must use the 64-bit
-            // encoding even when the source's upper half is known zero.
-            if func.is_narrow32(*src) && *imm < 32 {
-                let d = preg_to_reg32(resolve(assignment, *dst));
-                let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                asm.shr(d, *imm as u32)?;
-            } else {
-                let d = preg_to_reg64(resolve(assignment, *dst));
-                let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                asm.shr(d, *imm as u32)?;
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            if d != s {
+                asm.mov(d, s)?;
             }
+            asm.shr(d, *imm as u32)?;
         }
         MInst::ShlImm { dst, src, imm } => {
-            if func.is_narrow32(*dst) && *imm < 32 {
-                let d = preg_to_reg32(resolve(assignment, *dst));
-                let s = preg_to_reg32(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                asm.shl(d, *imm as u32)?;
-            } else {
-                let d = preg_to_reg64(resolve(assignment, *dst));
-                let s = preg_to_reg64(resolve(assignment, *src));
-                if d != s {
-                    asm.mov(d, s)?;
-                }
-                asm.shl(d, *imm as u32)?;
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            if d != s {
+                asm.mov(d, s)?;
             }
+            asm.shl(d, *imm as u32)?;
         }
         MInst::SarImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -3078,15 +3145,14 @@ fn emit_binop_rr(
 fn emit_binop_stack_mem(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
-    func: &MFunction,
     op: BinOp,
+    narrow32: bool,
     dst: VReg,
     lhs: VReg,
     rhs: VReg,
     stack_vreg: VReg,
     stack_offset: i32,
 ) -> Result<bool, IcedError> {
-    let narrow32 = func.is_narrow32(dst);
     if rhs == stack_vreg {
         let other = lhs;
         if narrow32 {
@@ -3444,6 +3510,7 @@ pub fn emit_chained_eus(
             start.elapsed()
         );
     }
+    dump_native_block_context(label, "after_legalize", &sir_eu, &mfunc);
     if timing {
         eprintln!("[native-timing] emit_chained verify after_legalize label={label}");
     }
@@ -3591,7 +3658,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         phi += block.phis.len();
         for inst in &block.insts {
             match inst {
-                MInst::Mov { .. } => mov += 1,
+                MInst::Mov { .. } | MInst::Mov32 { .. } => mov += 1,
                 MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                 MInst::Load { base, .. } => match base {
                     BaseReg::SimState => load_sim += 1,
@@ -3612,16 +3679,23 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::SparseMarkActive { .. }
                 | MInst::SparseCommitWorklist { .. } => memcopy += 1,
                 MInst::Add { .. }
+                | MInst::Add32 { .. }
                 | MInst::Sub { .. }
+                | MInst::Sub32 { .. }
                 | MInst::Mul { .. }
+                | MInst::Mul32 { .. }
                 | MInst::UMulHi { .. }
                 | MInst::And { .. }
+                | MInst::And32 { .. }
                 | MInst::Or { .. }
+                | MInst::Or32 { .. }
                 | MInst::Xor { .. }
+                | MInst::Xor32 { .. }
                 | MInst::Shr { .. }
                 | MInst::Shl { .. }
                 | MInst::Sar { .. } => alu += 1,
                 MInst::AndImm { .. }
+                | MInst::AndImm32 { .. }
                 | MInst::OrImm { .. }
                 | MInst::ShrImm { .. }
                 | MInst::ShlImm { .. }
@@ -3693,16 +3767,23 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     MInst::MemCopy { .. } => memcopy += 1,
                     MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                     MInst::Add { .. }
+                    | MInst::Add32 { .. }
                     | MInst::Sub { .. }
+                    | MInst::Sub32 { .. }
                     | MInst::Mul { .. }
+                    | MInst::Mul32 { .. }
                     | MInst::UMulHi { .. }
                     | MInst::And { .. }
+                    | MInst::And32 { .. }
                     | MInst::Or { .. }
+                    | MInst::Or32 { .. }
                     | MInst::Xor { .. }
+                    | MInst::Xor32 { .. }
                     | MInst::Shr { .. }
                     | MInst::Shl { .. }
                     | MInst::Sar { .. } => alu += 1,
                     MInst::AndImm { .. }
+                    | MInst::AndImm32 { .. }
                     | MInst::OrImm { .. }
                     | MInst::ShrImm { .. }
                     | MInst::ShlImm { .. }

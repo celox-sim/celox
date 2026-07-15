@@ -250,7 +250,7 @@ pub(super) fn reconstruct(
         &children,
         &reconstruction_phis,
         &stack_offsets,
-        &mut logical_for_vreg,
+        &logical_for_vreg,
         &mut insertions,
         &mut stacks,
     )?;
@@ -532,7 +532,7 @@ fn rename_block(
     children: &[Vec<usize>],
     reconstruction_phis: &HashMap<(usize, LogicalValue), VReg>,
     stack_offsets: &HashMap<SpillHome, i32>,
-    logical_for_vreg: &mut Vec<LogicalValue>,
+    logical_for_vreg: &[LogicalValue],
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
 ) -> Result<(), ReconstructError> {
@@ -768,7 +768,6 @@ fn alloc_fresh(
     logical_for_vreg: &mut Vec<LogicalValue>,
     logical: LogicalValue,
 ) -> Result<VReg, ReconstructError> {
-    let width = func.value_widths.get(logical.0 as usize).copied().flatten();
     let fresh = func.vregs.try_alloc().map_err(|error| {
         ReconstructError::new(
             "RECONSTRUCT.VREG_EXHAUSTED",
@@ -778,10 +777,7 @@ fn alloc_fresh(
             error.to_string(),
         )
     })?;
-    if fresh.0 as usize != func.spill_descs.len()
-        || (!func.value_widths.is_empty() && fresh.0 as usize != func.value_widths.len())
-        || fresh.0 as usize != logical_for_vreg.len()
-    {
+    if fresh.0 as usize != func.spill_descs.len() || fresh.0 as usize != logical_for_vreg.len() {
         return Err(ReconstructError::new(
             "RECONSTRUCT.SIDETABLE_APPEND_POSITION",
             None,
@@ -791,9 +787,6 @@ fn alloc_fresh(
         ));
     }
     func.spill_descs.push(SpillDesc::transient());
-    if !func.value_widths.is_empty() {
-        func.value_widths.push(width);
-    }
     logical_for_vreg.push(logical);
     Ok(fresh)
 }
@@ -922,17 +915,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_representative_inherits_the_logical_value_width() {
+    fn fresh_representative_tracks_the_logical_value() {
         let mut vregs = VRegAllocator::new();
         let original = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
-        func.value_widths = vec![Some(17)];
         let mut logical_for_vreg = vec![LogicalValue(original.0)];
 
         let fresh =
             alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(original.0)).unwrap();
 
-        assert_eq!(func.value_widths[fresh.0 as usize], Some(17));
         assert_eq!(logical_for_vreg[fresh.0 as usize], LogicalValue(original.0));
     }
 
@@ -974,7 +965,7 @@ mod tests {
             &children,
             &reconstruction_phis,
             &HashMap::new(),
-            &mut logical_for_vreg,
+            &logical_for_vreg,
             &mut HashMap::new(),
             &mut HashMap::new(),
         )

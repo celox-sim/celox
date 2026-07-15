@@ -113,6 +113,10 @@ pub(crate) enum TestbenchStatement<B: SimBackend> {
         message: Option<AssertMessage>,
         location: Option<SourceLocation>,
     },
+    Display {
+        message: Option<AssertMessage>,
+        newline: bool,
+    },
     If {
         expr: CompiledExpr,
         then_block: Vec<TestbenchStatement<B>>,
@@ -1462,8 +1466,8 @@ fn eval_typed_unop(op: Op, value: &TbValue, operand_width: usize, result_width: 
             Op::BitNand => u64::from(bits != width_mask_u64(operand_width)),
             Op::BitOr => u64::from(bits != 0),
             Op::BitNor => u64::from(bits == 0),
-            Op::BitXor => u64::from(bits.count_ones() % 2 != 0),
-            Op::BitXnor => u64::from(bits.count_ones() % 2 == 0),
+            Op::BitXor => u64::from(!bits.count_ones().is_multiple_of(2)),
+            Op::BitXnor => u64::from(bits.count_ones().is_multiple_of(2)),
             Op::Add => bits & width_mask_u64(result_width),
             Op::Sub => bits.wrapping_neg() & width_mask_u64(result_width),
             Op::BitNot => !bits & width_mask_u64(result_width),
@@ -2417,6 +2421,14 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     })
                 }
                 SystemFunctionKind::Finish => Some(TestbenchStatement::Finish),
+                SystemFunctionKind::Display(args) => Some(TestbenchStatement::Display {
+                    message: compile_assert_message(args, ec),
+                    newline: true,
+                }),
+                SystemFunctionKind::Write(args) => Some(TestbenchStatement::Display {
+                    message: compile_assert_message(args, ec),
+                    newline: false,
+                }),
                 _ => None,
             },
             Statement::If(s) => Some(TestbenchStatement::If {
@@ -3266,6 +3278,21 @@ struct DrainedAssertionEvents {
     fatal_message: Option<String>,
 }
 
+/// Forward testbench `$display` / `$write` output without contaminating the
+/// machine-readable test result emitted by the CLI on stdout.  In particular,
+/// UART models commonly use one `$write("%c", ...)` per transmitted byte, so
+/// preserve the event text verbatim and flush it promptly.
+fn forward_display(message: &str, newline: bool) {
+    use std::io::Write as _;
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(message.as_bytes());
+    if newline {
+        let _ = stderr.write_all(b"\n");
+    }
+    let _ = stderr.flush();
+}
+
 fn publish_tb_assert_event<B: SimBackend>(
     sim: &mut Simulator<B>,
     site_id: u32,
@@ -3385,7 +3412,7 @@ fn drain_runtime_assertions<B: SimBackend>(
                     location: None,
                 });
             }
-            RuntimeEvent::Display { .. } => {}
+            RuntimeEvent::Display { message } => forward_display(&message, false),
         }
     }
     DrainedAssertionEvents {
@@ -3437,7 +3464,7 @@ fn exec_one_detailed<B: SimBackend>(
                         ctx.current_time = ctx.current_time.saturating_add(1);
                         if let Some(every) = progress_every
                             && every != 0
-                            && ctx.current_time % every == 0
+                            && ctx.current_time.is_multiple_of(every)
                         {
                             eprintln!("[testbench-progress] tick={}", ctx.current_time);
                         }
@@ -3504,6 +3531,16 @@ fn exec_one_detailed<B: SimBackend>(
                     ExecResult::Continue
                 }
             }
+        }
+        TestbenchStatement::Display { message, newline } => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            let rendered =
+                render_assert_message(message, ptr, ctx.current_time).unwrap_or_default();
+            forward_display(&rendered, *newline);
+            ExecResult::Continue
         }
         TestbenchStatement::If {
             expr,
@@ -3589,5 +3626,31 @@ mod tests {
             run_compiled_testbench(&mut sim, &tb),
             TestResult::Fail("continue failure".to_string()),
         );
+    }
+
+    #[test]
+    fn compiles_initial_display_and_write() {
+        let code = r#"
+            #[test(t)]
+            module t {
+                initial {
+                    $display("answer=%h", 8'h2a);
+                    $write("!");
+                    $finish();
+                }
+            }
+        "#;
+        let sim = Simulator::builder(code, "t").build_with_trace().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+
+        assert!(matches!(
+            tb.stmts.first(),
+            Some(TestbenchStatement::Display { newline: true, .. })
+        ));
+        assert!(matches!(
+            tb.stmts.get(1),
+            Some(TestbenchStatement::Display { newline: false, .. })
+        ));
+        assert!(matches!(tb.stmts.get(2), Some(TestbenchStatement::Finish)));
     }
 }

@@ -432,8 +432,10 @@ impl SparseCommitDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MInst {
     // ── Data movement ──────────────────────────────────────────
-    /// dst = src
+    /// dst = src (full 64-bit word copy)
     Mov { dst: VReg, src: VReg },
+    /// dst = zero_extend(src[31:0])
+    Mov32 { dst: VReg, src: VReg },
     /// dst = immediate
     LoadImm { dst: VReg, value: u64 },
     /// dst = address of an immutable function-local constant table
@@ -561,20 +563,32 @@ pub enum MInst {
     },
 
     // ── ALU (3-operand SSA) ────────────────────────────────────
-    /// dst = lhs + rhs
+    /// dst = lhs + rhs modulo 2^64
     Add { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs - rhs
+    /// dst = zero_extend((lhs + rhs)[31:0])
+    Add32 { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs - rhs modulo 2^64
     Sub { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs * rhs (lower 64 bits)
+    /// dst = zero_extend((lhs - rhs)[31:0])
+    Sub32 { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs * rhs modulo 2^64
     Mul { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = zero_extend((lhs * rhs)[31:0])
+    Mul32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = upper 64 bits of lhs * rhs (unsigned)
     UMulHi { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs & rhs
+    /// dst = lhs & rhs (full 64-bit word)
     And { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs | rhs
+    /// dst = zero_extend((lhs & rhs)[31:0])
+    And32 { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs | rhs (full 64-bit word)
     Or { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = lhs ^ rhs
+    /// dst = zero_extend((lhs | rhs)[31:0])
+    Or32 { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = lhs ^ rhs (full 64-bit word)
     Xor { dst: VReg, lhs: VReg, rhs: VReg },
+    /// dst = zero_extend((lhs ^ rhs)[31:0])
+    Xor32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs >> rhs (logical)
     Shr { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs << rhs
@@ -583,8 +597,12 @@ pub enum MInst {
     Sar { dst: VReg, lhs: VReg, rhs: VReg },
 
     // ── ALU with immediate ─────────────────────────────────────
-    /// dst = src & imm
+    /// dst = src & imm (full 64-bit word)
     AndImm { dst: VReg, src: VReg, imm: u64 },
+    /// dst = zero_extend((src & imm)[31:0])
+    ///
+    /// `imm` must fit in u32.
+    AndImm32 { dst: VReg, src: VReg, imm: u32 },
     /// dst = src | imm
     OrImm { dst: VReg, src: VReg, imm: u64 },
     /// dst = src >> imm (logical)
@@ -708,7 +726,8 @@ pub enum MInst {
 impl fmt::Display for MInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MInst::Mov { dst, src } => write!(f, "{dst} = mov {src}"),
+            MInst::Mov { dst, src } => write!(f, "{dst} = mov.w64 {src}"),
+            MInst::Mov32 { dst, src } => write!(f, "{dst} = mov.w32 {src}"),
             MInst::LoadImm { dst, value } => write!(f, "{dst} = imm {value:#x}"),
             MInst::LoadConstantTableAddr { dst, table } => {
                 write!(f, "{dst} = constant_table_addr {table}")
@@ -812,13 +831,19 @@ impl fmt::Display for MInst {
                 f,
                 "sparse_commit_worklist table={descriptor_table}, capacity={active_capacity}"
             ),
-            MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add {lhs}, {rhs}"),
-            MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub {lhs}, {rhs}"),
-            MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul {lhs}, {rhs}"),
+            MInst::Add { dst, lhs, rhs } => write!(f, "{dst} = add.w64 {lhs}, {rhs}"),
+            MInst::Add32 { dst, lhs, rhs } => write!(f, "{dst} = add.w32 {lhs}, {rhs}"),
+            MInst::Sub { dst, lhs, rhs } => write!(f, "{dst} = sub.w64 {lhs}, {rhs}"),
+            MInst::Sub32 { dst, lhs, rhs } => write!(f, "{dst} = sub.w32 {lhs}, {rhs}"),
+            MInst::Mul { dst, lhs, rhs } => write!(f, "{dst} = mul.w64 {lhs}, {rhs}"),
+            MInst::Mul32 { dst, lhs, rhs } => write!(f, "{dst} = mul.w32 {lhs}, {rhs}"),
             MInst::UMulHi { dst, lhs, rhs } => write!(f, "{dst} = umulhi {lhs}, {rhs}"),
-            MInst::And { dst, lhs, rhs } => write!(f, "{dst} = and {lhs}, {rhs}"),
-            MInst::Or { dst, lhs, rhs } => write!(f, "{dst} = or {lhs}, {rhs}"),
-            MInst::Xor { dst, lhs, rhs } => write!(f, "{dst} = xor {lhs}, {rhs}"),
+            MInst::And { dst, lhs, rhs } => write!(f, "{dst} = and.w64 {lhs}, {rhs}"),
+            MInst::And32 { dst, lhs, rhs } => write!(f, "{dst} = and.w32 {lhs}, {rhs}"),
+            MInst::Or { dst, lhs, rhs } => write!(f, "{dst} = or.w64 {lhs}, {rhs}"),
+            MInst::Or32 { dst, lhs, rhs } => write!(f, "{dst} = or.w32 {lhs}, {rhs}"),
+            MInst::Xor { dst, lhs, rhs } => write!(f, "{dst} = xor.w64 {lhs}, {rhs}"),
+            MInst::Xor32 { dst, lhs, rhs } => write!(f, "{dst} = xor.w32 {lhs}, {rhs}"),
             MInst::Shr { dst, lhs, rhs } => write!(f, "{dst} = shr {lhs}, {rhs}"),
             MInst::Shl { dst, lhs, rhs } => write!(f, "{dst} = shl {lhs}, {rhs}"),
             MInst::Sar { dst, lhs, rhs } => write!(f, "{dst} = sar {lhs}, {rhs}"),
@@ -826,7 +851,10 @@ impl fmt::Display for MInst {
             MInst::URem { dst, lhs, rhs } => write!(f, "{dst} = urem {lhs}, {rhs}"),
             MInst::SDiv { dst, lhs, rhs } => write!(f, "{dst} = sdiv {lhs}, {rhs}"),
             MInst::SRem { dst, lhs, rhs } => write!(f, "{dst} = srem {lhs}, {rhs}"),
-            MInst::AndImm { dst, src, imm } => write!(f, "{dst} = and {src}, {imm:#x}"),
+            MInst::AndImm { dst, src, imm } => write!(f, "{dst} = and.w64 {src}, {imm:#x}"),
+            MInst::AndImm32 { dst, src, imm } => {
+                write!(f, "{dst} = and.w32 {src}, {imm:#x}")
+            }
             MInst::OrImm { dst, src, imm } => write!(f, "{dst} = or {src}, {imm:#x}"),
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
             MInst::ShlImm { dst, src, imm } => write!(f, "{dst} = shl {src}, {imm}"),
@@ -967,6 +995,7 @@ impl MInst {
     pub fn def(&self) -> Option<VReg> {
         match self {
             MInst::Mov { dst, .. }
+            | MInst::Mov32 { dst, .. }
             | MInst::LoadImm { dst, .. }
             | MInst::LoadConstantTableAddr { dst, .. }
             | MInst::Load { dst, .. }
@@ -974,16 +1003,23 @@ impl MInst {
             | MInst::LoadIndexed { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
+            | MInst::Add32 { dst, .. }
             | MInst::Sub { dst, .. }
+            | MInst::Sub32 { dst, .. }
             | MInst::Mul { dst, .. }
+            | MInst::Mul32 { dst, .. }
             | MInst::UMulHi { dst, .. }
             | MInst::And { dst, .. }
+            | MInst::And32 { dst, .. }
             | MInst::Or { dst, .. }
+            | MInst::Or32 { dst, .. }
             | MInst::Xor { dst, .. }
+            | MInst::Xor32 { dst, .. }
             | MInst::Shr { dst, .. }
             | MInst::Shl { dst, .. }
             | MInst::Sar { dst, .. }
             | MInst::AndImm { dst, .. }
+            | MInst::AndImm32 { dst, .. }
             | MInst::OrImm { dst, .. }
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
@@ -1029,7 +1065,7 @@ impl MInst {
     /// Returns the VRegs used by this instruction (max 3, no heap allocation).
     pub fn uses(&self) -> Uses {
         match self {
-            MInst::Mov { src, .. } => Uses::one(*src),
+            MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
             MInst::LoadImm { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
@@ -1051,12 +1087,18 @@ impl MInst {
                 ptr, index, src, ..
             } => Uses::three(*ptr, *index, *src),
             MInst::Add { lhs, rhs, .. }
+            | MInst::Add32 { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
+            | MInst::Sub32 { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
+            | MInst::Mul32 { lhs, rhs, .. }
             | MInst::UMulHi { lhs, rhs, .. }
             | MInst::And { lhs, rhs, .. }
+            | MInst::And32 { lhs, rhs, .. }
             | MInst::Or { lhs, rhs, .. }
+            | MInst::Or32 { lhs, rhs, .. }
             | MInst::Xor { lhs, rhs, .. }
+            | MInst::Xor32 { lhs, rhs, .. }
             | MInst::Shr { lhs, rhs, .. }
             | MInst::Shl { lhs, rhs, .. }
             | MInst::Sar { lhs, rhs, .. }
@@ -1067,6 +1109,7 @@ impl MInst {
             | MInst::SRem { lhs, rhs, .. } => Uses::two(*lhs, *rhs),
             MInst::Pext { src, mask, .. } | MInst::Pdep { src, mask, .. } => Uses::two(*src, *mask),
             MInst::AndImm { src, .. }
+            | MInst::AndImm32 { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
@@ -1114,7 +1157,7 @@ impl MInst {
     /// Replace all occurrences of `old` with `new` in the use operands.
     pub fn rewrite_use(&mut self, old: VReg, new: VReg) {
         match self {
-            MInst::Mov { src, .. } => {
+            MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
                 if *src == old {
                     *src = new;
                 }
@@ -1193,12 +1236,18 @@ impl MInst {
                 }
             }
             MInst::Add { lhs, rhs, .. }
+            | MInst::Add32 { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
+            | MInst::Sub32 { lhs, rhs, .. }
             | MInst::Mul { lhs, rhs, .. }
+            | MInst::Mul32 { lhs, rhs, .. }
             | MInst::UMulHi { lhs, rhs, .. }
             | MInst::And { lhs, rhs, .. }
+            | MInst::And32 { lhs, rhs, .. }
             | MInst::Or { lhs, rhs, .. }
+            | MInst::Or32 { lhs, rhs, .. }
             | MInst::Xor { lhs, rhs, .. }
+            | MInst::Xor32 { lhs, rhs, .. }
             | MInst::Shr { lhs, rhs, .. }
             | MInst::Shl { lhs, rhs, .. }
             | MInst::Sar { lhs, rhs, .. }
@@ -1215,6 +1264,7 @@ impl MInst {
                 }
             }
             MInst::AndImm { src, .. }
+            | MInst::AndImm32 { src, .. }
             | MInst::OrImm { src, .. }
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
@@ -1412,9 +1462,6 @@ pub struct MFunction {
     pub spill_descs: Vec<SpillDesc>,
     /// VReg allocator (for the spilling phase to allocate reload regs).
     pub vregs: VRegAllocator,
-    /// Known value widths for each VReg (None = unknown/64-bit).
-    /// When Some(w) with w <= 32, the emit phase can use 32-bit registers.
-    pub value_widths: Vec<Option<u8>>,
     /// Immutable u64 lookup tables embedded in the emitted function body.
     constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
@@ -1427,7 +1474,6 @@ impl MFunction {
             blocks: Vec::new(),
             spill_descs,
             vregs,
-            value_widths: Vec::new(),
             constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
         }
@@ -1455,14 +1501,6 @@ impl MFunction {
     /// Resolve a constant-table identity without panicking on malformed MIR.
     pub fn constant_table(&self, id: ConstantTableId) -> Option<&[u64]> {
         self.constant_tables.get(id.0).map(Vec::as_slice)
-    }
-
-    /// Returns true if VReg is known to fit in 32 bits (upper 32 guaranteed zero).
-    pub fn is_narrow32(&self, vreg: VReg) -> bool {
-        self.value_widths
-            .get(vreg.0 as usize)
-            .and_then(|w| *w)
-            .is_some_and(|w| w <= 32)
     }
 
     pub fn push_block(&mut self, block: MBlock) {

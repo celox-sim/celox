@@ -100,6 +100,17 @@ module Mux4 (
 }
 `;
 
+const FOUR_STATE_MUX_SOURCE = `
+module MuxX (
+    sel: input logic,
+    a: input logic<8>,
+    b: input logic<8>,
+    y: output logic<8>,
+) {
+    assign y = if sel ? a : b;
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Simulator (event-based) e2e tests — fromSource API
 // ---------------------------------------------------------------------------
@@ -916,8 +927,8 @@ describe("E2E: 4-state high-level DUT API", () => {
 	test("multiplexer with X selector produces X output", () => {
 		const addon = loadNativeAddon();
 		const raw = new addon.NativeSimulatorHandle(
-			[{ content: MULTIPLEXER_SOURCE, path: "" }],
-			"Mux4",
+			[{ content: FOUR_STATE_MUX_SOURCE, path: "" }],
+			"MuxX",
 			{
 				fourState: true,
 			},
@@ -927,16 +938,19 @@ describe("E2E: 4-state high-level DUT API", () => {
 		const view = new DataView(buf);
 
 		const sigSel = layout.forDut.sel;
-		const sigD0 = layout.forDut.d0;
+		const sigA = layout.forDut.a;
+		const sigB = layout.forDut.b;
 		const sigY = layout.forDut.y;
 
-		// Set d0 = 0xAA (defined)
-		view.setUint8(sigD0.offset, 0xaa);
-		view.setUint8(sigD0.offset + sigD0.byteSize, 0);
+		// Use complementary defined arms so every output bit differs.
+		view.setUint8(sigA.offset, 0xaa);
+		view.setUint8(sigA.offset + sigA.byteSize, 0);
+		view.setUint8(sigB.offset, 0x55);
+		view.setUint8(sigB.offset + sigB.byteSize, 0);
 
 		// Set sel = X
 		view.setUint8(sigSel.offset, 0);
-		view.setUint8(sigSel.offset + sigSel.byteSize, 0x03);
+		view.setUint8(sigSel.offset + sigSel.byteSize, 0x01);
 
 		raw.evalComb();
 
