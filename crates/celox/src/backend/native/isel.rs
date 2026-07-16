@@ -1152,6 +1152,45 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    /// Materialize the declared SIR width after an operation with wide inputs
+    /// produced a scalar result.
+    ///
+    /// `set_wide_chunks` keeps chunk zero in `reg_map` for narrow destinations,
+    /// but that machine word may still contain bits above the destination's SIR
+    /// width.  Consumers are allowed to trust `known_bits`, so merely recording
+    /// the narrow width would make those upper bits observable when a later mask
+    /// is eliminated.
+    fn canonicalize_narrow_wide_result(&mut self, block: &mut MBlock, reg: RegisterId) {
+        let width = self.sir_width(&reg);
+        if width >= 64 {
+            return;
+        }
+
+        let raw = self.reg_map.get(reg);
+        let canonical = self.alloc_vreg(SpillDesc::transient());
+        let mask = mask_for_width(width);
+        if mask <= u32::MAX as u64 {
+            block.push(MInst::AndImm32 {
+                dst: canonical,
+                src: raw,
+                imm: mask as u32,
+            });
+        } else {
+            let mask_reg = self.alloc_vreg(SpillDesc::remat(mask));
+            block.push(MInst::LoadImm {
+                dst: mask_reg,
+                value: mask,
+            });
+            block.push(MInst::And {
+                dst: canonical,
+                lhs: raw,
+                rhs: mask_reg,
+            });
+        }
+        self.reg_map.set(reg, canonical);
+        self.known_bits.insert(canonical, width);
+    }
+
     /// Check the representation invariant for value chunks.
     ///
     /// `wide_regs` is deliberately a value-only map: every entry must have a
@@ -5775,6 +5814,7 @@ fn lower_instruction(
                     lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
                     normalize_wide_value(ctx, block, *dst);
                 }
+                ctx.canonicalize_narrow_wide_result(block, *dst);
                 return;
             }
             // Constant folding: if both operands are known constants, compute result
@@ -6460,6 +6500,7 @@ fn lower_instruction(
                         normalize_wide_value(ctx, block, *dst);
                     }
                 }
+                ctx.canonicalize_narrow_wide_result(block, *dst);
                 return;
             }
             let dst_vreg = ctx.reg_map.get(*dst);
@@ -13335,6 +13376,156 @@ mod tests {
         state[15] = 0x80;
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(&state[16..20], &u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn wide_shift_result_is_canonical_before_mux_condition() {
+        let input_var = VarId::default();
+        let output_var = VarId::from_raw(1);
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: input_var,
+        };
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+
+        let wide = RegisterId(0);
+        let bit_index = RegisterId(1);
+        let gate = RegisterId(2);
+        let then_value = RegisterId(3);
+        let else_value = RegisterId(4);
+        let selected = RegisterId(5);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(wide, input_addr, SIROffset::Static(0), 128),
+                        SIRInstruction::Imm(bit_index, SIRValue::new(65u8)),
+                        SIRInstruction::Binary(gate, wide, BinaryOp::Shr, bit_index),
+                        SIRInstruction::Imm(then_value, SIRValue::new(u32::MAX)),
+                        SIRInstruction::Imm(else_value, SIRValue::new(0u8)),
+                        SIRInstruction::Mux(selected, gate, then_value, else_value),
+                        SIRInstruction::Store(
+                            output_addr,
+                            SIROffset::Static(0),
+                            32,
+                            selected,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    wide,
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                ),
+                (
+                    bit_index,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    gate,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (
+                    then_value,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    else_value,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    selected,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let layout = MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: [(input_abs, 0), (output_abs, 16)].into_iter().collect(),
+            widths: [(input_abs, 128), (output_abs, 32)].into_iter().collect(),
+            is_4states: [(input_abs, false), (output_abs, false)]
+                .into_iter()
+                .collect(),
+            total_size: 24,
+            working_offsets: HashMap::default(),
+            working_base_offset: 24,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 24,
+            sparse_layouts: HashMap::default(),
+            sparse_active_count_offset: 24,
+            sparse_active_flags_offset: 24,
+            sparse_active_list_offset: 24,
+            sparse_active_capacity: 0,
+            merged_total_size: 24,
+            triggered_bits_offset: 24,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 24,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        };
+
+        let mut function = lower_execution_unit(&eu, &layout, false);
+        function.verify();
+        mir_legalize::legalize(&mut function);
+        function.verify();
+        mir_opt::optimize(&mut function);
+        function.verify();
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; 24];
+        state[8] = 0x04; // bit 66 = 1, bit 65 = 0
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[16..20], &0u32.to_le_bytes());
     }
 
     #[test]
