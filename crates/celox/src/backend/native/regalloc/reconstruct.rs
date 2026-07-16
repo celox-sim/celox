@@ -82,7 +82,6 @@ pub(super) fn reconstruct(
         .collect::<Vec<_>>();
     let mut insertions = HashMap::<(usize, usize), Vec<MaterializedOp>>::new();
     let mut reload_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
-    let mut reload_definitions = BTreeSet::<VReg>::new();
     let spilled_phis = plan
         .point_ops
         .iter()
@@ -154,7 +153,6 @@ pub(super) fn reconstruct(
             &mut logical_for_vreg,
             &mut insertions,
             &mut reload_blocks,
-            &mut reload_definitions,
             recipe,
         )?;
     }
@@ -196,7 +194,6 @@ pub(super) fn reconstruct(
                 &mut logical_for_vreg,
                 &mut insertions,
                 &mut reload_blocks,
-                &mut reload_definitions,
                 recipe,
             )?;
         }
@@ -286,8 +283,7 @@ pub(super) fn reconstruct(
         &recipe_homes,
         &mut recipe_reloads,
     )?;
-    eliminate_dead_phis(func);
-    eliminate_dead_reloads(func, &reload_definitions, &mut recipe_reloads);
+    eliminate_dead_definitions(func, &mut recipe_reloads);
 
     let frame_size = u32::try_from(stack_offsets.len())
         .ok()
@@ -465,110 +461,63 @@ fn reload_recipe_on_edge(
         })
 }
 
-/// Remove phi webs which no longer reach an instruction after SSA renaming.
+/// Mark every SSA definition reachable from an observable instruction and
+/// remove the rest after spill reconstruction.
 ///
-/// Reconstruction deliberately rewrites uses away from pre-spill Perm rows.
-/// Keeping those now-dead rows would be more than a space leak: parallel-copy
-/// emission would still assign their destinations physical registers and could
-/// clobber live values.  Marking from instruction operands, then following phi
-/// inputs backwards, also removes dead cyclic phi webs which a use-count queue
-/// cannot discover.
-fn eliminate_dead_phis(func: &mut MFunction) -> usize {
-    let phi_sources = func
-        .blocks
-        .iter()
-        .flat_map(|block| {
-            block.phis.iter().map(|phi| {
-                (
-                    phi.dst,
-                    phi.sources
-                        .iter()
-                        .map(|(_, source)| *source)
-                        .collect::<Vec<_>>(),
-                )
-            })
-        })
-        .collect::<HashMap<_, _>>();
+/// Reconstruction can replace every use of an original state-backed value by
+/// point reloads. Limiting cleanup to the newly inserted reload definitions
+/// leaves that original load (and any pure producer chain feeding it) in the
+/// emitted program even though its value is overwritten immediately. Marking
+/// through both instruction and phi definitions removes those chains and dead
+/// cyclic phi webs in one linear graph walk.
+fn eliminate_dead_definitions(
+    func: &mut MFunction,
+    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+) -> BTreeSet<VReg> {
+    let mut definition_inputs = HashMap::<VReg, Vec<VReg>>::new();
+    let mut work = Vec::<VReg>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            definition_inputs.insert(
+                phi.dst,
+                phi.sources.iter().map(|(_, source)| *source).collect(),
+            );
+        }
+        for instruction in &block.insts {
+            let inputs = instruction.uses().into_iter().collect::<Vec<_>>();
+            if let Some(definition) = instruction.def() {
+                definition_inputs.insert(definition, inputs);
+            } else {
+                work.extend(inputs);
+            }
+        }
+    }
+
     let mut required = BTreeSet::<VReg>::new();
-    let mut work = func
-        .blocks
-        .iter()
-        .flat_map(|block| block.insts.iter().flat_map(MInst::uses))
-        .collect::<Vec<_>>();
     while let Some(value) = work.pop() {
         if !required.insert(value) {
             continue;
         }
-        if let Some(sources) = phi_sources.get(&value) {
-            work.extend(sources.iter().copied());
+        if let Some(inputs) = definition_inputs.get(&value) {
+            work.extend(inputs.iter().copied());
         }
     }
-    let before = phi_sources.len();
-    for block in &mut func.blocks {
-        block.phis.retain(|phi| required.contains(&phi.dst));
-    }
-    before
-        - func
-            .blocks
-            .iter()
-            .map(|block| block.phis.len())
-            .sum::<usize>()
-}
 
-fn eliminate_dead_reloads(
-    func: &mut MFunction,
-    reloads: &BTreeSet<VReg>,
-    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
-) -> BTreeSet<VReg> {
-    let value_count = func.vregs.count() as usize;
-    let mut use_counts = vec![0usize; value_count];
-    let mut definitions = HashMap::<VReg, (usize, usize)>::new();
-    for (block, mir_block) in func.blocks.iter().enumerate() {
-        for phi in &mir_block.phis {
-            for &(_, source) in &phi.sources {
-                use_counts[source.0 as usize] += 1;
-            }
-        }
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            for source in inst.uses() {
-                use_counts[source.0 as usize] += 1;
-            }
-            if let Some(definition) = inst.def()
-                && reloads.contains(&definition)
-            {
-                definitions.insert(definition, (block, instruction));
-            }
-        }
-    }
-    let mut queue = definitions
+    let removed = definition_inputs
         .keys()
         .copied()
-        .filter(|value| use_counts[value.0 as usize] == 0)
-        .collect::<VecDeque<_>>();
-    let mut removed = BTreeSet::new();
-    while let Some(definition) = queue.pop_front() {
-        if !removed.insert(definition) {
-            continue;
-        }
-        let (block, instruction) = definitions[&definition];
-        for source in func.blocks[block].insts[instruction].uses() {
-            let count = &mut use_counts[source.0 as usize];
-            debug_assert_ne!(*count, 0);
-            *count = count.saturating_sub(1);
-            if *count == 0 && definitions.contains_key(&source) {
-                queue.push_back(source);
-            }
-        }
-    }
+        .filter(|definition| !required.contains(definition))
+        .collect::<BTreeSet<_>>();
     for block in &mut func.blocks {
+        block.phis.retain(|phi| required.contains(&phi.dst));
         block.insts.retain(|instruction| {
             instruction
                 .def()
-                .is_none_or(|definition| !removed.contains(&definition))
+                .is_none_or(|definition| required.contains(&definition))
         });
     }
     // These definitions were intentionally erased, so they no longer denote
-    // materialized reloads in final MIR.  Retain every other expectation: a
+    // materialized reloads in final MIR. Retain every other expectation: a
     // definition missing for any other reason must still fail the independent
     // verifier instead of being hidden here.
     recipe_reloads.retain(|reload| !removed.contains(&reload.reload));
@@ -733,7 +682,6 @@ fn materialize_operation(
     logical_for_vreg: &mut Vec<LogicalValue>,
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
-    reload_definitions: &mut BTreeSet<VReg>,
     recipe: Option<ResolvedRecipe>,
 ) -> Result<(), ReconstructError> {
     let operation = match operation {
@@ -743,13 +691,9 @@ fn materialize_operation(
         PlannedOp::Reload { value, home } => {
             let (fresh, recipe) = if let Some(recipe) = recipe {
                 let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, value, recipe)?;
-                for definition in prepared.instructions.iter().filter_map(MInst::def) {
-                    reload_definitions.insert(definition);
-                }
                 (fresh, Some(prepared))
             } else {
                 let fresh = alloc_fresh(func, logical_for_vreg, value)?;
-                reload_definitions.insert(fresh);
                 (fresh, None)
             };
             reload_blocks.entry(value).or_default().insert(block);
@@ -1234,22 +1178,39 @@ mod tests {
             dst: output,
             src: live,
         });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: output,
+            size: OpSize::S64,
+        });
         block.push(MInst::Return);
         func.push_block(block);
 
-        assert_eq!(eliminate_dead_phis(&mut func), 2);
+        let mut recipe_reloads = Vec::new();
+        assert_eq!(
+            eliminate_dead_definitions(&mut func, &mut recipe_reloads),
+            BTreeSet::from([dead_left, dead_right])
+        );
         assert_eq!(func.blocks[0].phis.len(), 1);
         assert_eq!(func.blocks[0].phis[0].dst, live);
     }
 
     #[test]
-    fn removes_only_unused_planned_reload_definitions() {
+    fn removes_unused_original_and_planned_definitions() {
         let mut vregs = VRegAllocator::new();
+        let original_dead = vregs.alloc();
         let dead = vregs.alloc();
         let live = vregs.alloc();
         let output = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
         let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: original_dead,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
         block.push(MInst::Load {
             dst: dead,
             base: BaseReg::StackFrame,
@@ -1265,6 +1226,12 @@ mod tests {
         block.push(MInst::Mov {
             dst: output,
             src: live,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: output,
+            size: OpSize::S64,
         });
         block.push(MInst::Return);
         func.push_block(block);
@@ -1286,14 +1253,10 @@ mod tests {
             },
         ];
         assert_eq!(
-            eliminate_dead_reloads(
-                &mut func,
-                &BTreeSet::from([dead, live]),
-                &mut recipe_reloads,
-            ),
-            BTreeSet::from([dead])
+            eliminate_dead_definitions(&mut func, &mut recipe_reloads),
+            BTreeSet::from([original_dead, dead])
         );
-        assert_eq!(func.blocks[0].insts.len(), 3);
+        assert_eq!(func.blocks[0].insts.len(), 4);
         assert_eq!(func.blocks[0].insts[0].def(), Some(live));
         assert_eq!(recipe_reloads.len(), 1);
         assert_eq!(recipe_reloads[0].reload, live);
@@ -1682,7 +1645,7 @@ mod tests {
                     }
                 ))
                 .count(),
-            2
+            1
         );
     }
 
@@ -1702,7 +1665,7 @@ mod tests {
                 .iter()
                 .filter(|inst| matches!(inst, MInst::ShrImm { imm: 3, .. }))
                 .count(),
-            2
+            1
         );
     }
 

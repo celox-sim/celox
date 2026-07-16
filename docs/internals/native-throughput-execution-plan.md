@@ -811,6 +811,46 @@ Process time remains a separately reported end-to-end metric. Result-schema,
 migration, parser, and fixed-gate fixtures cover the split records before the
 next code-generation experiment begins.
 
+### Step 7: Remove definitions made dead by spill reconstruction
+
+The exact native trace exposed an allocator cleanup error independently of the
+spill decision itself. A state-backed value could be replaced at every use by
+a valid point reload, but reconstruction removed only unused definitions which
+it had inserted as reloads. The original load and its pure producer chain then
+remained in emitted x86 even when no use named them. In the fused Heliodor MIR,
+one concrete dead chain was `load.i16 [sim + 133767] -> shr 7 -> and.w32 7`.
+
+Reconstruction now marks definitions backwards from observable, definitionless
+MIR instructions through both instruction and phi operands. It removes every
+unmarked pure definition in one graph walk, including original definitions,
+materialized recipe steps, and cyclic phi webs. Expected-reload records are
+removed only for definitions deliberately erased by this walk, so the
+independent recipe verifier still rejects any other missing reload.
+
+Two scheduling trials were separated from this change and rejected:
+
+- merely admitting the previously omitted 32-bit MIR operations to the
+  pressure-only scheduler reduced the fused spill frame from 46,192 to 44,552
+  bytes, but serialized independent extraction work with the Mux/reduction
+  spine and slowed execution from 137.675 s to 146.651 s;
+- adding entry/exit dependency depth ahead of pressure restored instruction
+  parallelism and, together with dead-definition cleanup, executed in
+  136.464 s, but expanded the fused spill frame to 96,736 bytes, the eval/apply
+  frame to 57,944 bytes, and the eval-only frame to 129,976 bytes. That is not
+  a valid allocator improvement, so none of the scheduling trial remains in
+  the retained tree.
+
+The retained DCE-only result keeps the original scheduling and all spill-frame
+sizes. Focused reconstruction tests passed 11/11 and exact native MIR tests
+passed 6/6. The common non-LTO gates passed with 715/715 library tests, 60
+native-testbench tests, and 9 native/Cranelift/Wasm counter tests. The clean
+pinned Heliodor run completed at the exact `cy=9ae070 x3=aa pass=1` marker with
+40.097 s compile time and 137.349 s execution time, compared with the Step 6
+Celox baseline of 40.450 s and 137.675 s respectively. The accepted log is
+`target/heliodor/results/20260716T034302Z_celox_test_soc_linux_boot.log`.
+
+Status: **complete; scheduler redesign remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -828,6 +868,7 @@ next code-generation experiment begins.
 | semantic repair | `138f46eb` | wide shift to one-bit Mux regression; prior SAR regression | lib 715/715; native 60/60; counter 9/9 | pass once: `cy=9ae070 x3=aa pass=1` | 198.235 s | complete |
 | 5 | `138f46eb`--`e917489e` | repair regression; Heliodor result/gate fixtures | lib 715/715; native 60/60; counter 9/9 | non-LTO Celox twice and final release/LTO pair passed at `cy=9ae070 x3=aa pass=1` | non-LTO: Veryl 76.446 s, Celox 184.652 s; release/LTO gate: Veryl 68.409 s, Celox 178.223 s | qualification complete; performance failed (2.605x) |
 | 6 | split timing | result/gate fixtures passed | lib 715/715; native 60/60; counter 9/9; docs build passed | non-LTO Celox and cold synchronous Veryl AOT-C passed at `cy=9ae070 x3=aa pass=1` | compile: Celox 40.450 s, Veryl 58.354 s; execute: Celox 137.675 s, Veryl 54.282 s | generated-code gap isolated at 2.536x |
+| 7 | post-reconstruction DCE | reconstruction 11/11; native MIR 6/6 | lib 715/715; native 60/60; counter 9/9 | pass: `cy=9ae070 x3=aa pass=1` | compile 40.097 s; execute 137.349 s | complete; scheduling trials rejected |
 
 ## Related design records
 
