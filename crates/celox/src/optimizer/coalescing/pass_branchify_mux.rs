@@ -1108,13 +1108,10 @@ fn find_existing_cfg_placement(
         let ValueOrigin::Instruction { block, index } = occurrence.origin else {
             continue;
         };
-        let Some(instruction) = eu
+        let instruction = eu
             .blocks
             .get(&block)
-            .and_then(|block| block.instructions.get(index))
-        else {
-            return None;
-        };
+            .and_then(|block| block.instructions.get(index))?;
         if def_reg(instruction) != Some(occurrence.register) {
             return None;
         }
