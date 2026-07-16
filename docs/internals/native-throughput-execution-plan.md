@@ -43,6 +43,11 @@ same-workload performance comparison.
    caps as correctness or termination mechanisms.
 7. Use one focused commit per completed step. Record the exact tests and Linux
    result in this document before starting the next step.
+8. Measure code generation and execution in the same full-test process but as
+   disjoint intervals. `compile_ns` ends after native simulator and initial
+   testbench construction; `execute_ns` covers only the already-compiled
+   testbench run. Do not infer execution by subtracting separate runs or use
+   process time to accept a generated-code throughput change.
 
 ## Compiler/HDL boundary
 
@@ -786,9 +791,9 @@ a native code-generation change improved the hot simulator. The benchmark now
 records `compile_elapsed_ns` and `execute_elapsed_ns` independently for Celox,
 and provides a `veryl-cc-sync` runner using Veryl 0.20.2's deterministic
 synchronous AOT-C configuration. Every Veryl-CC measurement uses a fresh empty
-AOT cache so a shared `.so` hit cannot contaminate compiler latency. The
-official asynchronous Veryl CLI remains available for the end-to-end acceptance
-gate.
+AOT cache so a shared `.so` hit cannot contaminate compiler latency. The fixed
+acceptance gate also uses this synchronous runner; the asynchronous Veryl CLI
+remains available only as an additional diagnostic runner.
 
 The split point is the call into the already-lowered testbench on both runners.
 Consequently the compile interval includes simulator initialization and
@@ -810,6 +815,18 @@ Subsequent native runtime steps are retained or rejected using full successful
 Process time remains a separately reported end-to-end metric. Result-schema,
 migration, parser, and fixed-gate fixtures cover the split records before the
 next code-generation experiment begins.
+
+The fixed gate requires positive split intervals and exact full-boot markers
+from both runners. Its throughput decision compares only `execute_elapsed_ns`;
+it reports `compile_elapsed_ns` separately. A fixture proves that slower compile
+time alone does not fail execution throughput, while slower execution fails even
+when Celox has the shorter total process time.
+
+The real non-LTO runners were also exercised on CPU 0 with the same Heliodor
+`test_alu` source set. Both full tests passed. Veryl reported 3.175876163 s
+compile and 21.603 us execute; Celox reported 2.683722835 s compile and 57.211 us
+execute. This short test qualifies the split boundary and log plumbing only; its
+microsecond execution interval is not used as a throughput decision.
 
 ### Step 7: Remove definitions made dead by spill reconstruction
 

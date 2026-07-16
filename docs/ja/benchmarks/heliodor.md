@@ -2,7 +2,10 @@
 
 Heliodor は Veryl で書かれた大規模な RISC-V プロセッサで、Linux boot の ignored test を持っています。プロジェクト読み込み、`$readmemh` による大きなメモリ初期化、native testbench scheduling、長時間の順序回路シミュレーションをまとめて踏むので、Celox を Veryl native simulator として見るためのマクロベンチに向いています。
 
-このベンチは通常 CI には含めません。Heliodor を `target/heliodor/source` に checkout し、`veryl` が無い場合は `target/heliodor/tools` に自動インストールし、Celox runner を測定前に build します。デフォルトでは Veryl baseline を先に測ってから Celox を走らせ、TSV サマリとフルログを `target/heliodor/results` に出します。
+このベンチは通常 CI には含めません。Heliodor を
+`target/heliodor/source` に checkout し、計測前に時間分離版 Veryl runner と
+Celox runner を build します。デフォルトでは Veryl baseline を先に測ってから
+Celox を走らせ、TSV サマリとフルログを `target/heliodor/results` に出します。
 
 ## 実行
 
@@ -14,7 +17,9 @@ scripts/run-heliodor-bench.sh run
 `run` は構成を変更できる診断用コマンドです。測定値を追記しますが、Celox
 が性能要件を満たすかは判定しません。その判定には固定構成の `gate` を使います。
 
-デフォルトでは `test_soc_linux_boot` を Veryl Cranelift、Veryl cc、Celox の順に走らせます。Celox はその test で成功した最速 Veryl baseline の `HELIODOR_CELOX_TIMEOUT_MULTIPLIER` 倍で timeout します。
+デフォルトでは `test_soc_linux_boot` を同期 Veryl AOT-C、Celox の順に走らせます。
+Celox はその test で成功した Veryl baseline の
+`HELIODOR_CELOX_TIMEOUT_MULTIPLIER` 倍で timeout します。
 
 ```bash
 HELIODOR_TESTS="test_soc_linux_boot test_soc_smp_linux_boot_2hart" \
@@ -26,7 +31,8 @@ scripts/run-heliodor-bench.sh run
 
 ## コード生成時間と実行時間の分離
 
-生成コードの throughput を調べるときは、同期 Veryl-CC runner を使います。
+デフォルトの同期 Veryl-CC runner は、生成コードの throughput と compiler
+latency を分離します。
 
 ```bash
 HELIODOR_RUNNERS="veryl-cc-sync celox" \
@@ -61,7 +67,7 @@ end-to-end process 比であり、実行だけの比ではありません。nati
 
 ## Acceptance gate
 
-clean かつ commit 済みの Celox checkout から、再現可能な end-to-end 比較を
+clean かつ commit 済みの Celox checkout から、再現可能な throughput 比較を
 実行します。
 
 ```bash
@@ -72,11 +78,12 @@ gate の構成は変更できません。以下をすべて固定します。
 
 - 公式 repository の Heliodor commit
   `7ad830fc0f8506c934b61a853ce2eadfa5926b82` と clean な checkout
-- benchmark 所有ディレクトリにある Veryl `0.20.2`。`PATH` や
-  `VERYL_BIN` は使わず、固定 path と `--version` の完全一致で選択
-- clean で途中に変化しない Celox `HEAD`。invocation ごとの空の Cargo
-  target directory に `--locked` の release/LTO build を行い、その成果物を実行
-- `test_soc_linux_boot`、runner 順序 `veryl-cc`、`celox`、各 300 秒 timeout
+- clean な Celox `Cargo.lock` と locked build で固定した Veryl simulator
+  `0.20.2`。`PATH` や `VERYL_BIN` の CLI は使わない
+- clean で途中に変化しない Celox `HEAD`。invocation ごとの空の Cargo target
+  directory に時間分離版 Veryl と Celox の locked release/LTO build を行い、
+  その成果物を実行
+- `test_soc_linux_boot`、runner 順序 `veryl-cc-sync`、`celox`、各 300 秒 timeout
 - invocation ごとに新しい空の Veryl AOT cache を作り、実行後に削除
 - Celox native backend、`O2`、2-state、full execution、SIR pass override なし
 - runner ごとに別の detached Heliodor worktree。project-local な生成物を
@@ -84,31 +91,32 @@ gate の構成は変更できません。以下をすべて固定します。
 
 gate は `target/heliodor/results` の下に、新しい独立した
 `gate_<timestamp>.<suffix>` directory を作ります。その invocation が生成した
-2 行だけを受理します。Veryl は正常終了し、対象 test の成功をちょうど 1 件、
-集計を `1 passed, 0 failed` と報告する必要があります。Celox は正常終了し、
-native/O2/`four_state=false`/`compile_only=false` の config 行と full-pass
-result 行をそれぞれちょうど 1 件報告する必要があります。実行前後で source
-manifest、checkout identity、runner executable hash も検査します。
+2 行だけを受理します。両 runner は正常終了し、正確な config 行、分離 timing 行、
+full-pass result 行をそれぞれちょうど 1 件報告する必要があります。Celox は
+native/O2/`four_state=false`/`compile_only=false`、Veryl は同期 AOT-C の
+`aot_c_async=false` でなければなりません。実行前後で source manifest、
+checkout identity、runner executable hash も検査します。
 さらに両ログに architectural completion marker がちょうど 1 件あり、
 16 進数の先頭 0 を除いて `cy=9ae070 x3=aa pass=1` と一致することを要求します。
 
-subprocess 時間は monotonic nanosecond clock で測定します。両方の semantic
-check が成功し、Celox の process 時間が Veryl 以下の場合にだけ gate は 0 で
-終了します。compile-only、partial window、runner 内部の報告時間、または正確な
-marker を伴わない process exit 0 は失敗です。`--kill-after` を持つ GNU
-`timeout` と Python 3 が必要です。
-この固定 gate は引き続き end-to-end acceptance check です。コード生成と実行を
-分けて比較するときは、上記の同期 runner を使います。
+両 runner は Simulator と initial testbench の構築完了までを
+`compile_elapsed_ns`、構築済みtestbenchの実行だけを `execute_elapsed_ns` として
+測ります。両方の semantic check が成功し、Celox の実行区間が Veryl 以下の場合に
+だけ gate は 0 で終了します。コード生成 latency は別に記録・表示し、実行
+throughput の判定には混ぜません。subprocess 時間は end-to-end の診断値です。
+compile-only、partial window、または正確な marker を伴わない process exit 0 は
+失敗です。`--kill-after` を持つ GNU `timeout` と Python 3 が必要です。
 
-直近の反復用非 LTO 比較では、同じ `cy=9ae070` の workload が
+時間分離前の直近の反復用非 LTO 比較では、同じ `cy=9ae070` の workload が
 Veryl-CC で `76.446 s`、Celox で `184.652 s` でした。その後、clean な Celox
 commit `e917489e` から fresh な locked release/LTO runner を build して固定 gate
 を実行しました。Veryl-CC は `68.409 s`、Celox は process 時間 `178.223 s`
 （runner 内部報告 `178.019 s`）でした。両者の semantic check は成功し、両ログに
 `cy=9ae070 x3=aa pass=1` がちょうど 1 件ありましたが、Celox は `2.605x`
-遅いため、gate は Veryl 以下という性能条件だけに失敗しました。成果物は
+遅いため、当時の合計process時間による性能条件に失敗しました。成果物は
 `target/heliodor/results/gate_20260716T010312Z.tcVUZd` にあります。通常の開発反復
-では引き続き非 LTO の `heliodor-dev` profile を使います。
+では引き続き非 LTO の `heliodor-dev` profile を使います。分離後の固定 gate は、
+実装をcommitし、意図した最終release/LTO qualificationを行う段階でだけ実行します。
 
 ## テスト
 
@@ -167,9 +175,11 @@ Celox runner は Celox の default backend を使います。x86-64 host では 
 | `execute_elapsed_ns` | コード生成完了後の testbench 実行時間。取得できない場合は `NA` |
 
 従来の `runner`、`test`、`status`、`elapsed_ns`、`log` は同じ順序で
-残ります。速度結果として扱えるのは `semantic_status=pass`、
-`exit_status=0` かつ `elapsed_ns` が数値の行だけです。
-`process_elapsed_ns` と `reported_elapsed_ns` は診断値であり、
+残ります。end-to-end process 結果として扱えるのは `semantic_status=pass`、
+`exit_status=0` かつ `elapsed_ns` が数値の行だけです。この旧列は生成コードの
+実行性能ではありません。throughput には `execute_elapsed_ns`、compiler latency
+には `compile_elapsed_ns` を使います。`process_elapsed_ns` と
+`reported_elapsed_ns` は診断値であり、
 `compile-only`、`fail`、`unreported`、`invalid` の full-test 性能として
 扱ってはいけません。
 

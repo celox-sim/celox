@@ -145,7 +145,9 @@ Requires `verilator` and a C++ toolchain.
 bash scripts/run-heliodor-bench.sh run
 ```
 
-Requires network access for the first Heliodor checkout. Veryl runners also require `veryl`; the Celox runner is built from this workspace.
+Requires network access for the first Heliodor checkout. The default synchronous
+Veryl timing runner and the Celox runner are built from this workspace; the
+optional Veryl CLI runners additionally require `veryl`.
 
 ## CI Environment
 

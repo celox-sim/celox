@@ -11,7 +11,7 @@ HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
 HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/results}"
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
 HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
-HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cranelift veryl-cc celox}"
+HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cc-sync celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
@@ -27,7 +27,6 @@ HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.2}"
 VERYL_BIN="${VERYL_BIN:-}"
 
 readonly GATE_HELIODOR_REF=7ad830fc0f8506c934b61a853ce2eadfa5926b82
-readonly GATE_VERYL_VERSION=0.20.2
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=300
 readonly GATE_EXPECTED_CYCLE=9ae070
@@ -66,7 +65,7 @@ Environment:
   HELIODOR_TOOLS_DIR   benchmark-owned tool install directory
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
-  HELIODOR_RUNNERS     space-separated runners (default: veryl-cranelift veryl-cc celox)
+  HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
                        Celox runners: celox, celox-cranelift
                        Split-timing runner: veryl-cc-sync
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
@@ -102,7 +101,9 @@ Examples:
 
 `gate` is the fixed acceptance comparison. Unlike diagnostic `run`, it ignores
 runner/test/configuration overrides, uses isolated generated trees, and exits
-successfully only when full native O2 Celox passes no slower than veryl-cc.
+successfully only when both full tests pass and native O2 Celox executes the
+testbench no slower than the synchronous Veryl AOT-C reference. Code generation
+time is measured and reported separately from execution time.
 USAGE
 }
 
@@ -452,6 +453,33 @@ validate_gate_celox_config() {
     done <"$log"
     if ((config_count != 1 || valid_count != 1)); then
         echo "error: Celox gate log must contain exactly one exact config record" >&2
+        echo "expected: $expected" >&2
+        echo "records=$config_count exact=$valid_count" >&2
+        return 1
+    fi
+}
+
+validate_gate_timed_veryl_config() {
+    local log="$1"
+    local expected_test="$2"
+    local expected="VERYL_TEST_CONFIG test=$expected_test backend=cc aot_c_async=false"
+    local line config_count=0 valid_count=0
+
+    if [[ ! -f "$log" ]]; then
+        echo "error: timed Veryl gate log does not exist: $log" >&2
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" != VERYL_TEST_CONFIG* ]]; then
+            continue
+        fi
+        config_count=$((config_count + 1))
+        if [[ "$line" == "$expected" ]]; then
+            valid_count=$((valid_count + 1))
+        fi
+    done <"$log"
+    if ((config_count != 1 || valid_count != 1)); then
+        echo "error: timed Veryl gate log must contain exactly one exact config record" >&2
         echo "expected: $expected" >&2
         echo "records=$config_count exact=$valid_count" >&2
         return 1
@@ -1263,8 +1291,10 @@ run_all() {
 }
 
 GATE_CELOX_HEAD=""
-GATE_VERYL_ELAPSED_NS=""
-GATE_CELOX_ELAPSED_NS=""
+GATE_VERYL_COMPILE_NS=""
+GATE_VERYL_EXECUTE_NS=""
+GATE_CELOX_COMPILE_NS=""
+GATE_CELOX_EXECUTE_NS=""
 
 gate_require_clean_checkout() {
     local directory="$1"
@@ -1313,27 +1343,6 @@ gate_verify_heliodor_checkout() {
         echo "error: Heliodor gate requires $GATE_HELIODOR_REF, found $head" >&2
         return 1
     fi
-}
-
-resolve_gate_veryl_bin() {
-    local bin version
-    bin="$(installed_veryl_bin)"
-    if [[ ! -x "$bin" ]]; then
-        install_veryl || return "$?"
-    fi
-    if [[ ! -x "$bin" || -L "$bin" ]]; then
-        echo "error: gate Veryl must be a benchmark-owned regular executable: $bin" >&2
-        return 1
-    fi
-    version="$("$bin" --version 2>&1)" || {
-        echo "error: could not execute gate Veryl: $bin" >&2
-        return 1
-    }
-    if [[ "$version" != "veryl $GATE_VERYL_VERSION" ]]; then
-        echo "error: gate requires 'veryl $GATE_VERYL_VERSION', found '$version' at $bin" >&2
-        return 1
-    fi
-    printf '%s\n' "$bin"
 }
 
 gate_file_hash() {
@@ -1385,7 +1394,7 @@ gate_source_manifest() {
 gate_create_worktrees() {
     local runner path
     mkdir -p "$GATE_WORKTREE_ROOT"
-    for runner in veryl-cc celox; do
+    for runner in veryl-cc-sync celox; do
         path="$GATE_WORKTREE_ROOT/$runner"
         if ! git -C "$GATE_WORKTREE_REPO" worktree add --quiet --detach \
             "$path" "$GATE_HELIODOR_REF"; then
@@ -1400,7 +1409,7 @@ gate_cleanup_worktrees() {
     if [[ -z "$GATE_WORKTREE_REPO" || -z "$GATE_WORKTREE_ROOT" ]]; then
         return
     fi
-    for runner in veryl-cc celox; do
+    for runner in veryl-cc-sync celox; do
         path="$GATE_WORKTREE_ROOT/$runner"
         if [[ -e "$path" ]]; then
             git -C "$GATE_WORKTREE_REPO" worktree remove --force "$path" \
@@ -1420,8 +1429,10 @@ validate_gate_results() {
     local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra
     local expected_runner
 
-    GATE_VERYL_ELAPSED_NS=""
-    GATE_CELOX_ELAPSED_NS=""
+    GATE_VERYL_COMPILE_NS=""
+    GATE_VERYL_EXECUTE_NS=""
+    GATE_CELOX_COMPILE_NS=""
+    GATE_CELOX_EXECUTE_NS=""
     if [[ ! -f "$results_file" ]]; then
         echo "error: gate result file does not exist: $results_file" >&2
         return 1
@@ -1447,7 +1458,7 @@ validate_gate_results() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         row_count=$((row_count + 1))
         case "$row_count" in
-            1) expected_runner=veryl-cc ;;
+            1) expected_runner=veryl-cc-sync ;;
             2) expected_runner=celox ;;
             *)
                 echo "error: gate result file contains more than two rows" >&2
@@ -1477,6 +1488,11 @@ validate_gate_results() {
             echo "error: gate row $row_count is not a full semantic pass with positive process time" >&2
             return 1
         fi
+        if ! is_uint "$compile_elapsed" || ! is_uint "$execute_elapsed" \
+            || ((compile_elapsed == 0 || execute_elapsed == 0)); then
+            echo "error: gate row $row_count must report positive compile and execute intervals" >&2
+            return 1
+        fi
         if [[ ! -f "$log" || -L "$log" ]]; then
             echo "error: gate row $row_count log is not a regular invocation-owned file: $log" >&2
             return 1
@@ -1490,15 +1506,25 @@ validate_gate_results() {
             return 1
         fi
         case "$runner" in
-            veryl-cc)
-                [[ "$reported_elapsed" == NA && "$compile_elapsed" == NA \
-                    && "$execute_elapsed" == NA ]] || {
-                    echo "error: Veryl gate row has unexpected runner-reported timing values" >&2
+            veryl-cc-sync)
+                validate_gate_timed_veryl_config "$log" "$GATE_TEST" || return "$?"
+                validate_gate_arch_completion "$log" veryl-cc-sync || return "$?"
+                classify_timed_veryl_result "$log" "$GATE_TEST" "$exit_status" || {
+                    echo "error: $VERYL_TIMED_RESULT_DIAGNOSTIC" >&2
                     return 1
                 }
-                validate_veryl_completion "$log" "$GATE_TEST" || return "$?"
-                validate_gate_arch_completion "$log" veryl-cc || return "$?"
-                GATE_VERYL_ELAPSED_NS="$process_elapsed"
+                [[ "$VERYL_TIMED_SEMANTIC_STATUS" == pass ]] || {
+                    echo "error: timed Veryl gate did not report a full pass" >&2
+                    return 1
+                }
+                [[ "$reported_elapsed" == "$VERYL_TIMED_REPORTED_ELAPSED_NS" \
+                    && "$compile_elapsed" == "$VERYL_TIMED_COMPILE_ELAPSED_NS" \
+                    && "$execute_elapsed" == "$VERYL_TIMED_EXECUTE_ELAPSED_NS" ]] || {
+                    echo "error: timed Veryl gate row/report timing values disagree" >&2
+                    return 1
+                }
+                GATE_VERYL_COMPILE_NS="$compile_elapsed"
+                GATE_VERYL_EXECUTE_NS="$execute_elapsed"
                 ;;
             celox)
                 validate_gate_celox_config "$log" "$GATE_TEST" || return "$?"
@@ -1520,17 +1546,21 @@ validate_gate_results() {
                     echo "error: Celox gate row/report split timing values disagree" >&2
                     return 1
                 }
-                GATE_CELOX_ELAPSED_NS="$process_elapsed"
+                GATE_CELOX_COMPILE_NS="$compile_elapsed"
+                GATE_CELOX_EXECUTE_NS="$execute_elapsed"
                 ;;
         esac
     done < <(tail -n +2 "$results_file")
 
-    if ((row_count != 2)) || [[ -z "$GATE_VERYL_ELAPSED_NS" || -z "$GATE_CELOX_ELAPSED_NS" ]]; then
-        echo "error: gate must produce exactly the paired veryl-cc and Celox rows" >&2
+    if ((row_count != 2)) \
+        || [[ -z "$GATE_VERYL_COMPILE_NS" || -z "$GATE_VERYL_EXECUTE_NS" \
+            || -z "$GATE_CELOX_COMPILE_NS" || -z "$GATE_CELOX_EXECUTE_NS" ]]; then
+        echo "error: gate must produce exactly the paired timed Veryl and Celox rows" >&2
         return 1
     fi
-    if ((GATE_CELOX_ELAPSED_NS > GATE_VERYL_ELAPSED_NS)); then
-        echo "error: Heliodor gate failed: Celox ${GATE_CELOX_ELAPSED_NS}ns > Veryl ${GATE_VERYL_ELAPSED_NS}ns" >&2
+    if ((GATE_CELOX_EXECUTE_NS > GATE_VERYL_EXECUTE_NS)); then
+        echo "error: Heliodor execution gate failed: Celox ${GATE_CELOX_EXECUTE_NS}ns > Veryl ${GATE_VERYL_EXECUTE_NS}ns" >&2
+        echo "code generation (reported separately): Celox ${GATE_CELOX_COMPILE_NS}ns, Veryl ${GATE_VERYL_COMPILE_NS}ns" >&2
         return 1
     fi
 }
@@ -1550,20 +1580,20 @@ run_gate() {
     HELIODOR_RESULTS_DIR="$base_results_dir"
     HELIODOR_TOOLS_DIR="$CELOX_ROOT/target/heliodor/tools"
     HELIODOR_TESTS="$GATE_TEST"
-    HELIODOR_RUNNERS="veryl-cc celox"
+    HELIODOR_RUNNERS="veryl-cc-sync celox"
     HELIODOR_TIMEOUT_SEC="$GATE_TIMEOUT_SEC"
     HELIODOR_CELOX_TIMEOUT_MULTIPLIER=1
     HELIODOR_CELOX_COMPILE_ONLY=0
     HELIODOR_CELOX_COMPILE_TIMEOUT_SEC=""
     HELIODOR_BUILD_CELOX_RUNNER=1
-    HELIODOR_INSTALL_TOOLS=1
-    HELIODOR_VERYL_VERSION="$GATE_VERYL_VERSION"
+    HELIODOR_INSTALL_TOOLS=0
     VERYL_BIN=""
     CELOX_OPT_LEVEL=O2
     CELOX_SIR_PASS_OVERRIDES=""
     HELIODOR_CELOX_CARGO_PROFILE=release
     HELIODOR_CELOX_TARGET_DIR=""
     CELOX_RUNNER_BIN=""
+    VERYL_TIMED_RUNNER_BIN=""
 
     gate_record_celox_checkout || return "$?"
     if ! command -v timeout >/dev/null; then
@@ -1589,12 +1619,13 @@ run_gate() {
     HELIODOR_RESULTS_DIR="$invocation_dir"
     HELIODOR_CELOX_TARGET_DIR="$invocation_dir/celox-target"
     CELOX_RUNNER_BIN="$HELIODOR_CELOX_TARGET_DIR/release/examples/run_veryl_project_test"
+    VERYL_TIMED_RUNNER_BIN="$HELIODOR_CELOX_TARGET_DIR/release/examples/run_veryl_project_test_timed"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
 
     build_celox_runner || return "$?"
+    build_timed_veryl_runner || return "$?"
     gate_verify_celox_checkout || return "$?"
-    RESOLVED_VERYL_BIN="$(resolve_gate_veryl_bin)" || return "$?"
-    echo "Using gate Veryl: $RESOLVED_VERYL_BIN"
+    echo "Using gate timed Veryl runner: $VERYL_TIMED_RUNNER_BIN"
 
     GATE_WORKTREE_REPO="$source_checkout"
     GATE_WORKTREE_ROOT="$invocation_dir/worktrees"
@@ -1603,7 +1634,7 @@ run_gate() {
         return 1
     fi
 
-    for runner in veryl-cc celox; do
+    for runner in veryl-cc-sync celox; do
         HELIODOR_DIR="$GATE_WORKTREE_ROOT/$runner"
         gate_verify_heliodor_checkout "$HELIODOR_DIR" || overall=1
         before_manifest="$invocation_dir/${runner}.source.before"
@@ -1612,7 +1643,7 @@ run_gate() {
             overall=1
         fi
         case "$runner" in
-            veryl-cc) executable="$RESOLVED_VERYL_BIN" ;;
+            veryl-cc-sync) executable="$VERYL_TIMED_RUNNER_BIN" ;;
             celox) executable="$CELOX_RUNNER_BIN" ;;
         esac
         if ! expected_hash="$(gate_file_hash "$executable")"; then
@@ -1645,7 +1676,8 @@ run_gate() {
         echo "Heliodor gate: FAIL (artifacts: $invocation_dir)" >&2
         return 1
     fi
-    echo "Heliodor gate: PASS (Celox ${GATE_CELOX_ELAPSED_NS}ns <= Veryl ${GATE_VERYL_ELAPSED_NS}ns)"
+    echo "Heliodor gate: PASS (execute: Celox ${GATE_CELOX_EXECUTE_NS}ns <= Veryl ${GATE_VERYL_EXECUTE_NS}ns)"
+    echo "Code generation: Celox ${GATE_CELOX_COMPILE_NS}ns; Veryl ${GATE_VERYL_COMPILE_NS}ns"
     echo "Artifacts: $invocation_dir"
 }
 
