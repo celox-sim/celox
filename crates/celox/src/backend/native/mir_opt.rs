@@ -6299,7 +6299,9 @@ mod tests {
                     offset: 100,
                     size: OpSize::S64,
                 },
+                MInst::Scratch { dst: VReg(4) },
                 MInst::SparseMarkActive {
+                    scratch: VReg(4),
                     active_index: 3,
                     active_count_offset: 100,
                     active_flags_offset: 200,
@@ -6344,19 +6346,19 @@ mod tests {
                 },
                 MInst::Return,
             ],
-            4,
+            5,
         );
 
         global_gvn(&mut func);
 
         assert_eq!(
-            func.blocks[0].insts[3],
+            func.blocks[0].insts[4],
             MInst::Mov {
                 dst: VReg(2),
                 src: VReg(0),
             }
         );
-        assert!(matches!(func.blocks[0].insts[4], MInst::Load { .. }));
+        assert!(matches!(func.blocks[0].insts[5], MInst::Load { .. }));
     }
 
     #[test]

@@ -644,6 +644,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         MInst::Mov { .. }
         | MInst::Mov32 { .. }
         | MInst::LoadImm { .. }
+        | MInst::Scratch { .. }
         | MInst::LoadConstantTableAddr { .. }
         | MInst::Load { .. }
         | MInst::LoadIndexed { .. }

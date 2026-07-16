@@ -476,6 +476,10 @@ pub enum MInst {
     Mov32 { dst: VReg, src: VReg },
     /// dst = immediate
     LoadImm { dst: VReg, value: u64 },
+    /// Define an arbitrary machine-register value without emitting code.
+    /// The sole purpose is to reserve one explicit temporary for a following
+    /// pseudo instruction instead of hiding a post-RA scratch clobber.
+    Scratch { dst: VReg },
     /// dst = address of an immutable function-local constant table
     LoadConstantTableAddr { dst: VReg, table: ConstantTableId },
 
@@ -585,6 +589,7 @@ pub enum MInst {
     /// Add one sparse region to the fixed-capacity active-region worklist.
     /// The active byte makes repeated stores to the same region idempotent.
     SparseMarkActive {
+        scratch: VReg,
         active_index: u32,
         active_count_offset: i32,
         active_flags_offset: i32,
@@ -768,6 +773,7 @@ impl fmt::Display for MInst {
             MInst::Mov { dst, src } => write!(f, "{dst} = mov.w64 {src}"),
             MInst::Mov32 { dst, src } => write!(f, "{dst} = mov.w32 {src}"),
             MInst::LoadImm { dst, value } => write!(f, "{dst} = imm {value:#x}"),
+            MInst::Scratch { dst } => write!(f, "{dst} = scratch"),
             MInst::LoadConstantTableAddr { dst, table } => {
                 write!(f, "{dst} = constant_table_addr {table}")
             }
@@ -866,8 +872,15 @@ impl fmt::Display for MInst {
                 f,
                 "sparse_commit [sim + {dst_offset}], [sim + {src_offset}], bytes={byte_size}, dirty_words={dirty_word_count}, summary_words={summary_word_count}, four_state={four_state}"
             ),
-            MInst::SparseMarkActive { active_index, .. } => {
-                write!(f, "sparse_mark_active region={active_index}")
+            MInst::SparseMarkActive {
+                scratch,
+                active_index,
+                ..
+            } => {
+                write!(
+                    f,
+                    "sparse_mark_active region={active_index}, scratch={scratch}"
+                )
             }
             MInst::SparseCommitWorklist {
                 descriptor_table,
@@ -1043,6 +1056,7 @@ impl MInst {
             MInst::Mov { dst, .. }
             | MInst::Mov32 { dst, .. }
             | MInst::LoadImm { dst, .. }
+            | MInst::Scratch { dst }
             | MInst::LoadConstantTableAddr { dst, .. }
             | MInst::Load { dst, .. }
             | MInst::LoadPtr { dst, .. }
@@ -1113,12 +1127,13 @@ impl MInst {
         match self {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
             MInst::LoadImm { .. }
+            | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
             | MInst::SparseCommit { .. }
-            | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. } => Uses::none(),
+            MInst::SparseMarkActive { scratch, .. } => Uses::one(*scratch),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1421,15 +1436,20 @@ impl MInst {
                 }
             }
             MInst::LoadImm { .. }
+            | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
             | MInst::SparseCommit { .. }
-            | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
+            MInst::SparseMarkActive { scratch, .. } => {
+                if *scratch == old {
+                    *scratch = new;
+                }
+            }
         }
     }
 
@@ -1627,6 +1647,11 @@ mod tests {
                 expected: vec![],
             },
             UseCase {
+                name: "Scratch",
+                inst: MInst::Scratch { dst },
+                expected: vec![],
+            },
+            UseCase {
                 name: "LoadConstantTableAddr",
                 inst: MInst::LoadConstantTableAddr {
                     dst,
@@ -1748,6 +1773,18 @@ mod tests {
                     byte_len: 16,
                 },
                 expected: vec![],
+            },
+            UseCase {
+                name: "SparseMarkActive",
+                inst: MInst::SparseMarkActive {
+                    scratch: a,
+                    active_index: 0,
+                    active_count_offset: 0,
+                    active_flags_offset: 8,
+                    active_list_offset: 16,
+                    active_capacity: 1,
+                },
+                expected: vec![a],
             },
             UseCase {
                 name: "Add",
@@ -2084,7 +2121,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            52,
+            54,
             "the MInst variant table must stay exhaustive"
         );
 

@@ -2925,12 +2925,15 @@ fn lower_four_state_mux_chunk(
 }
 
 fn emit_sparse_mark_active(
-    ctx: &ISelContext,
+    ctx: &mut ISelContext,
     block: &mut MBlock,
     sparse: &crate::backend::memory_layout::SparseWorkingLayout,
 ) {
     if ctx.sparse_descriptor_table.is_some() {
+        let scratch = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Scratch { dst: scratch });
         block.push(MInst::SparseMarkActive {
+            scratch,
             active_index: sparse.active_index as u32,
             active_count_offset: ctx.layout.sparse_active_count_offset as i32,
             active_flags_offset: ctx.layout.sparse_active_flags_offset as i32,

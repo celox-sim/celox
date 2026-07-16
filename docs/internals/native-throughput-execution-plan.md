@@ -1059,6 +1059,77 @@ passed.
 Status: **complete structurally; runtime effect unconfirmed; throughput target
 remains open**.
 
+### Step 11: Make native pseudo scratch registers explicit before allocation
+
+The x86 emitter previously implemented every `SparseMarkActive` with an
+unconditional `push rax` / `pop rax` pair around the active-list update. That
+temporary did not exist in MIR, so liveness and register allocation could not
+choose a dead register or account for the clobber. The complete Step 10 trace
+contains 23,350 post-allocation sparse marks. They therefore contributed
+23,350 pushes and 23,350 pops to the emitted functions.
+
+Treating RAX as an ordinary instruction clobber was tested and rejected before
+runtime qualification. The fixed-register legalization boundary split one
+block at every sparse mark: post-allocation block count rose from 63,859 to
+87,209, and the two affected functions grew by a combined 37,787 bytes despite
+removing the saves. This is the wrong model for a temporary whose identity is
+unconstrained.
+
+ISel now emits a zero-code `Scratch` definition immediately before
+`SparseMarkActive`, and the sparse mark carries that VReg as an explicit use.
+Its incoming bits have no meaning; the def/use pair reserves one allocatable
+machine register across the pseudo. Normal liveness consequently prevents the
+register from overlapping any value live through the mark, while the emitter
+uses the assigned register directly. No arbitrary RTL width is attached to the
+VReg, and there is no hidden post-allocation register use.
+
+The pre-optimized, post-optimized, and native-optimized SIR hashes are
+byte-identical to Step 10. Post-allocation block count remains 63,859, all five
+spill frames are unchanged, and the disassembly changes are concrete:
+
+- `push rax` falls from 23,676 to 326 and `pop rax` from 23,632 to 282, exactly
+  removing the 46,700 sparse-mark save/restore instructions;
+- `eval_apply_ff[0]` ends at `0x0029a23d` instead of `0x0029d4dd`, a reduction
+  of 12,960 bytes; and
+- `eval_comb_apply_ff[0]` ends at `0x003495f3` instead of `0x0034c81e`, a
+  reduction of 12,843 bytes.
+
+For example, a Step 10 sequence preserves a live RAX value with
+`push rax`, updates the worklist through RAX, and then executes `pop rax`.
+After this step, allocation selects RDX for the worklist update while the live
+RAX value remains untouched; neither stack instruction is emitted.
+
+Code generation and generated-code execution were measured as separate
+intervals. Dedicated non-LTO compile-only samples were 41.077 s for Step 10
+and 42.647 s for this step; they contain zero execution time. Linux execution
+used a CPU-0 Step 10 / candidate / Step 10 A--B--A sequence. All three runs
+reached normal power-down at the identical `cy=9ae070 x3=aa pass=1` marker:
+
+- Step 10 before: 132.252 s execute
+  (`target/heliodor/analysis/step11_runtime_a_step10_cpu0.log`);
+- explicit-scratch candidate: 132.954 s execute
+  (`target/heliodor/analysis/step11_runtime_b_scratch_cpu0.log`); and
+- Step 10 after: 135.434 s execute
+  (`target/heliodor/analysis/step11_runtime_c_step10_cpu0.log`).
+
+The candidate is 0.66% faster than the adjacent-baseline mean, but the two
+identical baseline executions differ by 3.182 s, over three times the inferred
+0.889 s effect. Runtime improvement is therefore **not established**. The step
+is retained because it removes a proved emitter/allocator boundary violation
+and its generated stack instructions without changing SIR, CFG shape, spill
+frames, cycle count, or workload result.
+
+Focused MIR operand, rewrite, memory-effect, reload, allocation, emission, and
+sparse-worklist tests passed, including all 134 register-allocation tests. The
+common non-LTO gates passed with 730/730 library tests, 6/6 exact native MIR
+tests, 60/60 non-ignored native-testbench tests, and 9/9 non-ignored
+native/Cranelift/Wasm counter tests; formatting and `cargo check -p celox` also
+passed. The CI-equivalent all-target clippy command passed after its unrelated
+pre-existing lint was repaired in a separate commit.
+
+Status: **complete structurally; runtime effect unconfirmed; broader
+live-range/reload work remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1080,6 +1151,7 @@ remains open**.
 | 8 | target-capacity-aware scheduling | scheduler 15/15; native MIR 6/6 | lib 718/718; native 60/60; counter 9/9 | pass twice: `cy=9ae070 x3=aa pass=1` | compile 41.181 s / 41.000 s; execute 136.602 s / 136.868 s | complete; bounded ILP retained, throughput target open |
 | 9 | structural native MemorySSA and same-version state-load GVN | effects 2/2; reload 23/23; MIR optimization 50/50; native MIR 6/6 | lib 725/725; native 60/60; counter 9/9 | A--B--A all pass: `cy=9ae070 x3=aa pass=1` | Step 8 execute 146.367 s / 146.216 s; candidate 137.843 s; candidate compile 39.483 s | complete; execute -5.78%, indexed alias range open |
 | 10 | bounded register-indexed state-write effects | dynamic scalar/wide ISel; effects 3/3; reload 24/24; MIR optimization 51/51; native MIR 6/6 | lib 729/729; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | baseline execute 144.622 s / 138.620 s; candidate 139.287 s; compile reported separately | structural result complete; runtime effect unconfirmed |
+| 11 | explicit allocation of pseudo scratch registers | MIR operand/rewrite; sparse effects/reload/emission; allocator 134/134; native MIR 6/6 | lib 730/730; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | compile-only: baseline 41.077 s, candidate 42.647 s; execute: baseline 132.252 s / 135.434 s, candidate 132.954 s | hidden stack operations removed; runtime effect unconfirmed |
 
 ## Related design records
 

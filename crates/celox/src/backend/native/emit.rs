@@ -1918,6 +1918,10 @@ fn emit_inst(
             }
         }
 
+        // The assigned register is reserved for the following pseudo use; its
+        // incoming bits are irrelevant and require no machine instruction.
+        MInst::Scratch { .. } => {}
+
         MInst::LoadConstantTableAddr { dst, table } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             // MIR verification guarantees that the table identity exists.
@@ -2158,13 +2162,14 @@ fn emit_inst(
         }
 
         MInst::SparseMarkActive {
+            scratch,
             active_index,
             active_count_offset,
             active_flags_offset,
             active_list_offset,
             active_capacity,
         } => {
-            asm.push(rax)?;
+            let scratch = preg_to_reg64(resolve(assignment, *scratch));
             let mut done = asm.create_label();
             let flag = mem_operand(
                 BaseReg::SimState,
@@ -2174,24 +2179,23 @@ fn emit_inst(
             asm.jne(done)?;
             asm.mov(byte_ptr(flag), 1i32)?;
             asm.mov(
-                rax,
+                scratch,
                 qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
             )?;
             // This is unreachable for valid state because active bytes dedupe
             // entries, but keep malformed checkpoint metadata memory-safe.
-            asm.cmp(rax, *active_capacity as i32)?;
+            asm.cmp(scratch, *active_capacity as i32)?;
             asm.jae(done)?;
             asm.mov(
-                dword_ptr(SIM_BASE + rax * 4 + *active_list_offset),
+                dword_ptr(SIM_BASE + scratch * 4 + *active_list_offset),
                 *active_index as i32,
             )?;
-            asm.inc(rax)?;
+            asm.inc(scratch)?;
             asm.mov(
                 qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
-                rax,
+                scratch,
             )?;
             asm.set_label(&mut done)?;
-            asm.pop(rax)?;
         }
 
         MInst::SparseCommitWorklist {
@@ -3816,6 +3820,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
             match inst {
                 MInst::Mov { .. } | MInst::Mov32 { .. } => mov += 1,
                 MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
+                MInst::Scratch { .. } => {}
                 MInst::Load { base, .. } => match base {
                     BaseReg::SimState => load_sim += 1,
                     BaseReg::StackFrame => load_stack += 1,
@@ -4434,6 +4439,108 @@ mod shift_encoding_tests {
     }
 
     #[test]
+    fn sparse_mark_active_uses_allocated_scratch_without_save_restore() {
+        const OUTPUT: usize = 0;
+        const ACTIVE_COUNT: usize = 8;
+        const ACTIVE_FLAGS: usize = 16;
+        const ACTIVE_LIST: usize = 20;
+
+        let mut vregs = VRegAllocator::new();
+        let old_count = vregs.alloc();
+        let scratch = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: old_count,
+            base: BaseReg::SimState,
+            offset: ACTIVE_COUNT as i32,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Scratch { dst: scratch });
+        block.push(MInst::SparseMarkActive {
+            scratch,
+            active_index: 0,
+            active_count_offset: ACTIVE_COUNT as i32,
+            active_flags_offset: ACTIVE_FLAGS as i32,
+            active_list_offset: ACTIVE_LIST as i32,
+            active_capacity: 10,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: OUTPUT as i32,
+            src: old_count,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let live_after_mark = func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|inst| match inst {
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    src,
+                    ..
+                } if *offset == OUTPUT as i32 => Some(*src),
+                _ => None,
+            })
+            .expect("fixture output store disappeared");
+        let allocated_scratch = func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|inst| match inst {
+                MInst::SparseMarkActive { scratch, .. } => Some(*scratch),
+                _ => None,
+            })
+            .expect("fixture sparse mark disappeared");
+        assert_ne!(
+            allocation.assignment.get(live_after_mark),
+            allocation.assignment.get(allocated_scratch),
+            "SparseMarkActive scratch overlapped a value live through the pseudo"
+        );
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            assert!(
+                !matches!(instruction.mnemonic(), Mnemonic::Push | Mnemonic::Pop)
+                    || instruction.op0_register() != Register::RAX,
+                "SparseMarkActive emitted a hidden RAX save/restore: {instruction}"
+            );
+        }
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 64];
+        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].copy_from_slice(&7u64.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[OUTPUT..OUTPUT + 8].try_into().unwrap()),
+            7
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
+            8
+        );
+        assert_eq!(state[ACTIVE_FLAGS], 1);
+        assert_eq!(
+            u32::from_le_bytes(
+                state[ACTIVE_LIST + 7 * 4..ACTIVE_LIST + 8 * 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
+    }
+
+    #[test]
     fn sparse_worklist_deduplicates_regions_and_commits_tail_bytes() {
         const BYTE_SIZE: usize = 13;
         const STABLE: usize = 0;
@@ -4444,7 +4551,9 @@ mod shift_encoding_tests {
         const ACTIVE_FLAGS: usize = 88;
         const ACTIVE_LIST: usize = 92;
 
-        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut vregs = VRegAllocator::new();
+        let scratches = [vregs.alloc(), vregs.alloc()];
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); scratches.len()]);
         let descriptor = SparseCommitDescriptor {
             src_offset: SPARSE as u64,
             dst_offset: STABLE as u64,
@@ -4457,8 +4566,10 @@ mod shift_encoding_tests {
         };
         let table = func.intern_constant_table(descriptor.words().to_vec());
         let mut block = MBlock::new(BlockId(0));
-        for _ in 0..2 {
+        for scratch in scratches {
+            block.push(MInst::Scratch { dst: scratch });
             block.push(MInst::SparseMarkActive {
+                scratch,
                 active_index: 0,
                 active_count_offset: ACTIVE_COUNT as i32,
                 active_flags_offset: ACTIVE_FLAGS as i32,
@@ -4476,7 +4587,11 @@ mod shift_encoding_tests {
         block.push(MInst::Return);
         func.push_block(block);
 
-        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let mut assignment = AssignmentMap::default();
+        for scratch in scratches {
+            assignment.set(scratch, PhysReg::RAX);
+        }
+        let emitted = emit(&func, &assignment, 0).unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0xa5u8; 128];
         state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);
@@ -4522,7 +4637,9 @@ mod shift_encoding_tests {
         const ACTIVE_FLAGS: usize = 56;
         const ACTIVE_LIST: usize = 60;
 
-        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut vregs = VRegAllocator::new();
+        let scratch = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
         let descriptor = SparseCommitDescriptor {
             src_offset: SPARSE as u64,
             dst_offset: STABLE as u64,
@@ -4535,7 +4652,9 @@ mod shift_encoding_tests {
         };
         let table = func.intern_constant_table(descriptor.words().to_vec());
         let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Scratch { dst: scratch });
         block.push(MInst::SparseMarkActive {
+            scratch,
             active_index: 0,
             active_count_offset: ACTIVE_COUNT as i32,
             active_flags_offset: ACTIVE_FLAGS as i32,
@@ -4552,7 +4671,9 @@ mod shift_encoding_tests {
         block.push(MInst::Return);
         func.push_block(block);
 
-        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let mut assignment = AssignmentMap::default();
+        assignment.set(scratch, PhysReg::RAX);
+        let emitted = emit(&func, &assignment, 0).unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0xa5u8; 80];
         state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);

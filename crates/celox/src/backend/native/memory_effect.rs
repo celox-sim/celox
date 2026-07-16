@@ -123,6 +123,7 @@ fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
         active_flags_offset,
         active_list_offset,
         active_capacity,
+        ..
     } = inst
     else {
         return None;
@@ -186,6 +187,7 @@ mod tests {
     #[test]
     fn sparse_mark_active_has_only_metadata_write_ranges() {
         let inst = MInst::SparseMarkActive {
+            scratch: VReg(0),
             active_index: 3,
             active_count_offset: 100,
             active_flags_offset: 200,

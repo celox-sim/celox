@@ -1919,7 +1919,7 @@ mod tests {
     #[test]
     fn sparse_mark_preserves_only_nonoverlapping_state_recipes() {
         fn fixture(load_offset: i32) -> (VReg, ReloadRecipeAnalysis) {
-            let (mut func, values) = function_with_values(2);
+            let (mut func, values) = function_with_values(3);
             let mut block = MBlock::new(BlockId(0));
             block.push(MInst::Load {
                 dst: values[0],
@@ -1927,7 +1927,9 @@ mod tests {
                 offset: load_offset,
                 size: OpSize::S64,
             });
+            block.push(MInst::Scratch { dst: values[2] });
             block.push(MInst::SparseMarkActive {
+                scratch: values[2],
                 active_index: 3,
                 active_count_offset: 100,
                 active_flags_offset: 200,
@@ -1947,14 +1949,14 @@ mod tests {
         let (unrelated, unrelated_analysis) = fixture(40);
         assert!(unrelated_analysis.state_valid_at_point(PointUse {
             block: BlockId(0),
-            instruction: 2,
+            instruction: 3,
             value: unrelated,
         }));
 
         let (metadata, metadata_analysis) = fixture(100);
         assert!(!metadata_analysis.state_valid_at_point(PointUse {
             block: BlockId(0),
-            instruction: 2,
+            instruction: 3,
             value: metadata,
         }));
     }
