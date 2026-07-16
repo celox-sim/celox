@@ -312,8 +312,16 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         }
     }
 
+    let Some(dependency_priorities) = dependency_priorities(&dependencies) else {
+        return RegionSchedule {
+            instructions: Vec::new(),
+            dependency_verified: false,
+            live_before: None,
+            work: RegionWork::default(),
+        };
+    };
     let mut work = RegionWork::default();
-    let mut ready = IndexedReadyQueue::new(region.len());
+    let mut ready = IndexedReadyQueue::new(dependency_priorities);
     for (index, &count) in users.iter().enumerate() {
         if count == 0 {
             enqueue_ready(&mut ready, index, region, &unique_uses, &live, &mut work);
@@ -321,7 +329,7 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
     }
     let mut reverse = Vec::with_capacity(region.len());
     while reverse.len() != region.len() {
-        let Some(candidate) = ready.pop_best(&mut work) else {
+        let Some(candidate) = ready.pop_best(live.len(), super::NUM_REGS, &mut work) else {
             return RegionSchedule {
                 instructions: Vec::new(),
                 dependency_verified: false,
@@ -430,6 +438,31 @@ fn dependency_order_valid(dependencies: &[Vec<usize>], order: &[usize]) -> bool 
     })
 }
 
+/// Compute longest dependency paths in both directions. The bottom-up list
+/// scheduler uses these ranks to expose independent work while register
+/// pressure is below the target's physical capacity.
+fn dependency_priorities(dependencies: &[Vec<usize>]) -> Option<Vec<(usize, usize)>> {
+    let mut entry_depths = vec![1usize; dependencies.len()];
+    for (instruction, inputs) in dependencies.iter().enumerate() {
+        let mut depth = 1usize;
+        for &input in inputs {
+            if input >= instruction {
+                return None;
+            }
+            depth = depth.max(entry_depths[input].checked_add(1)?);
+        }
+        entry_depths[instruction] = depth;
+    }
+    let mut exit_depths = vec![1usize; dependencies.len()];
+    for (instruction, inputs) in dependencies.iter().enumerate().rev() {
+        let successor_depth = exit_depths[instruction].checked_add(1)?;
+        for &input in inputs {
+            exit_depths[input] = exit_depths[input].max(successor_depth);
+        }
+    }
+    Some(exit_depths.into_iter().zip(entry_depths).collect())
+}
+
 fn enqueue_ready(
     ready: &mut IndexedReadyQueue,
     instruction: usize,
@@ -479,16 +512,19 @@ const MAX_PRIORITY: i8 = 5;
 const PRIORITY_BUCKETS: usize = (MAX_PRIORITY - MIN_PRIORITY + 1) as usize;
 
 struct IndexedReadyQueue {
-    buckets: [BTreeSet<usize>; PRIORITY_BUCKETS],
+    buckets: [BTreeSet<(usize, usize, usize)>; PRIORITY_BUCKETS],
     priorities: Vec<i8>,
+    dependency_priorities: Vec<(usize, usize)>,
     present: Vec<bool>,
 }
 
 impl IndexedReadyQueue {
-    fn new(instructions: usize) -> Self {
+    fn new(dependency_priorities: Vec<(usize, usize)>) -> Self {
+        let instructions = dependency_priorities.len();
         Self {
             buckets: std::array::from_fn(|_| BTreeSet::new()),
             priorities: vec![0; instructions],
+            dependency_priorities,
             present: vec![false; instructions],
         }
     }
@@ -500,7 +536,8 @@ impl IndexedReadyQueue {
     fn insert(&mut self, instruction: usize, priority: i8, work: &mut RegionWork) {
         debug_assert!(!self.present[instruction]);
         let bucket = priority_bucket(priority);
-        self.buckets[bucket].insert(instruction);
+        let (exit_depth, entry_depth) = self.dependency_priorities[instruction];
+        self.buckets[bucket].insert((exit_depth, entry_depth, instruction));
         self.priorities[instruction] = priority;
         self.present[instruction] = true;
         work.ready_insertions += 1;
@@ -509,24 +546,56 @@ impl IndexedReadyQueue {
     fn adjust(&mut self, instruction: usize, delta: i8, work: &mut RegionWork) {
         debug_assert!(self.present[instruction]);
         let old_priority = self.priorities[instruction];
-        self.buckets[priority_bucket(old_priority)].remove(&instruction);
+        let (exit_depth, entry_depth) = self.dependency_priorities[instruction];
+        let key = (exit_depth, entry_depth, instruction);
+        self.buckets[priority_bucket(old_priority)].remove(&key);
         let new_priority = old_priority + delta;
-        self.buckets[priority_bucket(new_priority)].insert(instruction);
+        self.buckets[priority_bucket(new_priority)].insert(key);
         self.priorities[instruction] = new_priority;
         work.priority_updates += 1;
     }
 
-    fn pop_best(&mut self, work: &mut RegionWork) -> Option<usize> {
-        for bucket in &mut self.buckets {
+    fn pop_best(
+        &mut self,
+        current_pressure: usize,
+        register_capacity: usize,
+        work: &mut RegionWork,
+    ) -> Option<usize> {
+        let mut pressure_best = None::<(usize, usize, usize, usize)>;
+        let mut dependency_best = None::<(usize, usize, usize, usize)>;
+        for (bucket_index, bucket) in self.buckets.iter().enumerate() {
             work.priority_bucket_probes += 1;
-            if let Some(instruction) = bucket.iter().next_back().copied() {
-                bucket.remove(&instruction);
-                self.present[instruction] = false;
-                work.ready_pops += 1;
-                return Some(instruction);
+            if let Some(&(exit_depth, entry_depth, instruction)) = bucket.iter().next_back() {
+                pressure_best.get_or_insert((exit_depth, entry_depth, bucket_index, instruction));
+                if dependency_best.is_none_or(|(best_exit, best_entry, _, _)| {
+                    (exit_depth, entry_depth) > (best_exit, best_entry)
+                }) {
+                    dependency_best = Some((exit_depth, entry_depth, bucket_index, instruction));
+                }
             }
         }
-        None
+        let dependency_best = dependency_best?;
+        let dependency_delta = self.priorities[dependency_best.3];
+        let dependency_pressure = projected_pressure(current_pressure, dependency_delta);
+        let selected =
+            if current_pressure <= register_capacity && dependency_pressure <= register_capacity {
+                dependency_best
+            } else {
+                pressure_best.expect("a dependency-ready instruction is also pressure-ready")
+            };
+        let (exit_depth, entry_depth, bucket, instruction) = selected;
+        self.buckets[bucket].remove(&(exit_depth, entry_depth, instruction));
+        self.present[instruction] = false;
+        work.ready_pops += 1;
+        Some(instruction)
+    }
+}
+
+fn projected_pressure(current: usize, delta: i8) -> usize {
+    if delta >= 0 {
+        current.saturating_add(delta as usize)
+    } else {
+        current.saturating_sub(delta.unsigned_abs() as usize)
     }
 }
 
@@ -565,44 +634,77 @@ fn is_schedulable_at(
     !is_fixed_copy
         && facts.fixed_uses.is_empty()
         && facts.clobbers.is_empty()
-        && matches!(
-            inst,
-            MInst::Mov { .. }
-                | MInst::LoadImm { .. }
-                | MInst::LoadConstantTableAddr { .. }
-                | MInst::Load { .. }
-                | MInst::LoadIndexed { .. }
-                | MInst::Store { .. }
-                | MInst::Add { .. }
-                | MInst::Sub { .. }
-                | MInst::Mul { .. }
-                | MInst::And { .. }
-                | MInst::Or { .. }
-                | MInst::Xor { .. }
-                | MInst::Shr { .. }
-                | MInst::Shl { .. }
-                | MInst::Sar { .. }
-                | MInst::AndImm { .. }
-                | MInst::OrImm { .. }
-                | MInst::ShrImm { .. }
-                | MInst::ShlImm { .. }
-                | MInst::SarImm { .. }
-                | MInst::AddImm { .. }
-                | MInst::SubImm { .. }
-                | MInst::Cmp { .. }
-                | MInst::CmpImm { .. }
-                | MInst::BitNot { .. }
-                | MInst::Neg { .. }
-                | MInst::Popcnt { .. }
-                | MInst::Bsr { .. }
-                | MInst::BsrOr { .. }
-                | MInst::Pext { .. }
-                | MInst::Pdep { .. }
-                | MInst::Select { .. }
-                | MInst::CmpSelect { .. }
-                | MInst::CmpImmSelect { .. }
-                | MInst::GuardedCmpSelect { .. }
-        )
+        && is_pressure_schedulable_kind(inst)
+}
+
+/// Classify every MIR opcode explicitly so adding a new width or side effect
+/// cannot silently turn it into a scheduling barrier (or make it movable).
+fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
+    match inst {
+        MInst::Mov { .. }
+        | MInst::Mov32 { .. }
+        | MInst::LoadImm { .. }
+        | MInst::LoadConstantTableAddr { .. }
+        | MInst::Load { .. }
+        | MInst::LoadIndexed { .. }
+        | MInst::Store { .. }
+        | MInst::Add { .. }
+        | MInst::Add32 { .. }
+        | MInst::Sub { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul { .. }
+        | MInst::Mul32 { .. }
+        | MInst::And { .. }
+        | MInst::And32 { .. }
+        | MInst::Or { .. }
+        | MInst::Or32 { .. }
+        | MInst::Xor { .. }
+        | MInst::Xor32 { .. }
+        | MInst::Shr { .. }
+        | MInst::Shl { .. }
+        | MInst::Sar { .. }
+        | MInst::AndImm { .. }
+        | MInst::AndImm32 { .. }
+        | MInst::OrImm { .. }
+        | MInst::ShrImm { .. }
+        | MInst::ShlImm { .. }
+        | MInst::SarImm { .. }
+        | MInst::AddImm { .. }
+        | MInst::SubImm { .. }
+        | MInst::Cmp { .. }
+        | MInst::CmpImm { .. }
+        | MInst::BitNot { .. }
+        | MInst::Neg { .. }
+        | MInst::Popcnt { .. }
+        | MInst::Bsr { .. }
+        | MInst::BsrOr { .. }
+        | MInst::Pext { .. }
+        | MInst::Pdep { .. }
+        | MInst::Select { .. }
+        | MInst::CmpSelect { .. }
+        | MInst::CmpImmSelect { .. }
+        | MInst::GuardedCmpSelect { .. } => true,
+        MInst::LoadPtr { .. }
+        | MInst::StorePtr { .. }
+        | MInst::ReleaseStorePtr { .. }
+        | MInst::StoreIndexed { .. }
+        | MInst::LoadPtrIndexed { .. }
+        | MInst::StorePtrIndexed { .. }
+        | MInst::ReleaseStorePtrIndexed { .. }
+        | MInst::MemCopy { .. }
+        | MInst::SparseCommit { .. }
+        | MInst::SparseMarkActive { .. }
+        | MInst::SparseCommitWorklist { .. }
+        | MInst::UMulHi { .. }
+        | MInst::UDiv { .. }
+        | MInst::URem { .. }
+        | MInst::SDiv { .. }
+        | MInst::SRem { .. }
+        | MInst::Branch { .. }
+        | MInst::Jump { .. }
+        | MInst::Return
+        | MInst::ReturnError { .. } => false,
+    }
 }
 
 #[cfg(test)]
@@ -740,6 +842,163 @@ mod tests {
             });
             assert!(positions[0] < positions[1] && positions[1] < positions[2]);
         }
+    }
+
+    #[test]
+    fn w32_operations_do_not_split_a_pressure_scheduling_region() {
+        let mut vregs = VRegAllocator::new();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let first_masked = vregs.alloc();
+        let second_masked = vregs.alloc();
+        let first_result = vregs.alloc();
+        let second_result = vregs.alloc();
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::Load {
+                dst: first,
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: second,
+                base: BaseReg::SimState,
+                offset: 4,
+                size: OpSize::S32,
+            },
+            MInst::AndImm32 {
+                dst: first_masked,
+                src: first,
+                imm: 0xff,
+            },
+            MInst::AndImm32 {
+                dst: second_masked,
+                src: second,
+                imm: 0xff,
+            },
+            MInst::Mov32 {
+                dst: first_result,
+                src: first_masked,
+            },
+            MInst::Mov32 {
+                dst: second_result,
+                src: second_masked,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: first_result,
+                size: OpSize::S32,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 12,
+                src: second_result,
+                size: OpSize::S32,
+            },
+            MInst::Return,
+        ];
+        let mut func = MFunction::new(vregs, (0..6).map(|_| SpillDesc::transient()).collect());
+        func.blocks.push(block);
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = ConstraintModel::build(&func, &cfg).unwrap();
+        let analysis = super::super::analysis::analyze(&func);
+
+        let stats = schedule_for_pressure(&mut func, &cfg, &constraints, &analysis).unwrap();
+
+        assert_eq!(stats.regions_considered, 1);
+        assert!(stats.maximum_after < stats.maximum_before);
+        func.verify();
+    }
+
+    #[test]
+    fn dependency_spine_stays_behind_its_independent_w32_input() {
+        let mut vregs = VRegAllocator::new();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let side_input = vregs.alloc();
+        let first_reduction = vregs.alloc();
+        let result = vregs.alloc();
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::Load {
+                dst: first,
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: second,
+                base: BaseReg::SimState,
+                offset: 4,
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: side_input,
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S32,
+            },
+            MInst::And32 {
+                dst: first_reduction,
+                lhs: first,
+                rhs: second,
+            },
+            MInst::And32 {
+                dst: result,
+                lhs: first_reduction,
+                rhs: side_input,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 12,
+                src: result,
+                size: OpSize::S32,
+            },
+            MInst::Return,
+        ];
+        let mut func = MFunction::new(vregs, (0..5).map(|_| SpillDesc::transient()).collect());
+        func.blocks.push(block);
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = ConstraintModel::build(&func, &cfg).unwrap();
+        let analysis = super::super::analysis::analyze(&func);
+
+        schedule_for_pressure(&mut func, &cfg, &constraints, &analysis).unwrap();
+
+        let instructions = &func.blocks[0].insts;
+        let side_input_position = instructions
+            .iter()
+            .position(|inst| inst.def() == Some(side_input))
+            .unwrap();
+        let first_reduction_position = instructions
+            .iter()
+            .position(|inst| inst.def() == Some(first_reduction))
+            .unwrap();
+        let result_position = instructions
+            .iter()
+            .position(|inst| inst.def() == Some(result))
+            .unwrap();
+        assert!(side_input_position < first_reduction_position);
+        assert!(first_reduction_position < result_position);
+        func.verify();
+    }
+
+    #[test]
+    fn ready_queue_switches_to_pressure_at_the_register_capacity() {
+        let priorities = vec![(8, 8), (1, 1)];
+        let mut below_capacity = IndexedReadyQueue::new(priorities.clone());
+        let mut work = RegionWork::default();
+        below_capacity.insert(0, 2, &mut work);
+        below_capacity.insert(1, -1, &mut work);
+        assert_eq!(below_capacity.pop_best(10, 14, &mut work), Some(0));
+
+        let mut at_capacity = IndexedReadyQueue::new(priorities);
+        at_capacity.insert(0, 2, &mut work);
+        at_capacity.insert(1, -1, &mut work);
+        assert_eq!(at_capacity.pop_best(14, 14, &mut work), Some(1));
     }
 
     #[test]

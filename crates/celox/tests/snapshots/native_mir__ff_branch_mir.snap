@@ -38,33 +38,33 @@ bb0:
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 40]
-  v1 = and.w32 v0, 0xff
   v2 = load.i8 [sim + 35]
   v4 = and.w64 v2, 0xffffffffffffff00
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
   v5 = mov.w32 v1
   v3 = or.w64 v4, v5
   store.i8 [sim + 35], v3
   ret
 Spill frame: 0 bytes
 Register assignment:
-  v0 -> rax
-  v1 -> rax
-  v2 -> rdx
-  v3 -> rdx
-  v4 -> rdx
-  v5 -> rax
+  v0 -> rdx
+  v1 -> rdx
+  v2 -> rax
+  v3 -> rax
+  v4 -> rax
+  v5 -> rdx
 x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
-  0x00000009  movzx eax,byte [r15+28h]
-  0x0000000e  and eax,0FFh
-  0x00000013  movzx edx,byte [r15+23h]
-  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
-  0x0000001f  mov eax,eax
-  0x00000021  or rdx,rax
-  0x00000024  mov [r15+23h],dl
+  0x00000009  movzx eax,byte [r15+23h]
+  0x0000000e  and rax,0FFFFFFFFFFFFFF00h
+  0x00000014  movzx edx,byte [r15+28h]
+  0x00000019  and edx,0FFh
+  0x0000001f  mov edx,edx
+  0x00000021  or rax,rdx
+  0x00000024  mov [r15+23h],al
   0x00000028  xor eax,eax
   0x0000002a  jmp short 000000000000002Ch
   0x0000002c  add rsp,8

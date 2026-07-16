@@ -139,6 +139,16 @@ set or block suffix. A schedule is accepted only when dependency verification
 passes and exact high-water pressure does not increase. It runs once before
 spilling, with no schedule/spill feedback loop.
 
+The bottom-up ready queue uses the target register capacity `K`, rather than an
+unbounded pressure-only or dependency-only priority. While the current live set
+and the longest-path candidate both project to at most `K`, longest paths to the
+region exit and from the region entry expose independent machine work. At the
+capacity boundary, the candidate with the smallest immediate live-pressure
+delta wins. Thus the scheduler keeps an instruction-level-parallelism window
+which the target can hold, but does not create an arbitrarily large live set
+for the spill planner to repair. All MIR opcodes, including the 32-bit ALU
+forms, are classified explicitly as movable or as barriers.
+
 ### 4. Conventional SSA before spill-home formation
 
 Braun--Hack Section 4.4 assigns one spill home to a whole phi-congruence class
@@ -435,8 +445,9 @@ contains:
 - dedicated insertion blocks for every branch edge, RPO layout, iterative
   dominator/loop/SCC construction, a fully checked normalized-CFG model, and no
   CFG-size or traversal-depth cap;
-- dependency-verified pressure scheduling with one backward liveness pass per
-  block and indexed ready buckets rather than suffix or ready-set rescans;
+- dependency-verified, target-capacity-aware list scheduling with one backward
+  liveness pass per block and indexed ready buckets rather than suffix or
+  ready-set rescans;
 - Method-I CSSA normalization and an independent semantic
   congruence-interference verifier;
 - lexicographic next-use distance over natural-loop and irreducible-SCC regions,

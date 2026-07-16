@@ -851,6 +851,60 @@ Celox baseline of 40.450 s and 137.675 s respectively. The accepted log is
 
 Status: **complete; scheduler redesign remains open**.
 
+### Step 8: Bound list scheduling by target register capacity
+
+The rejected Step 7 trials exposed two opposite failures. Pressure-only
+selection serialized independent bit extraction with the reduction spine and
+lost instruction-level parallelism. Unbounded dependency-depth selection
+preloaded far more values than x86-64 can hold and delegated the resulting
+live-range explosion to spilling. The retained scheduler now uses the actual
+allocatable register count `K = 14` as the switch between those policies.
+
+For each bottom-up ready instruction, the scheduler keeps its immediate
+pressure delta and longest dependency depths to the region exit and from the
+region entry. While both the current live set and the structurally best
+candidate project to at most `K`, it chooses dependency depth to expose
+independent work. Once that candidate would cross `K`, it chooses the smallest
+pressure delta. This creates a bounded ILP window instead of either serializing
+the whole DAG or preloading the whole DAG. The schedulable-opcode match is also
+exhaustive now; the 32-bit move, ALU, and immediate forms no longer become
+accidental region barriers.
+
+The exact Linux trace has byte-identical pre-optimized, post-optimized, and
+native-optimized SIR to Step 7, so the measured change begins in MIR
+scheduling. Direct post-RA inspection shows the old fused entry spilling and
+immediately reloading a common input before streaming extracted intermediates
+to stack. The retained order keeps common inputs and reduction chains in the
+bounded register window before moving to another independent chain. Exact
+spill frames changed as follows:
+
+| Native function | Step 7 | Capacity-aware schedule |
+|---|---:|---:|
+| `eval_comb` | 37,776 B | 33,960 B |
+| `apply_ff[0]` | 0 B | 0 B |
+| `eval_apply_ff[0]` | 8,520 B | 8,560 B |
+| `eval_only_ff[0]` | 14,768 B | 13,824 B |
+| `eval_comb_apply_ff[0]` | 46,192 B | 42,488 B |
+
+Focused scheduler tests passed 15/15 and exact native MIR tests passed 6/6.
+The common non-LTO gates passed with 718/718 library tests, 60 non-ignored
+native-testbench tests, and 9 native/Cranelift/Wasm counter tests. Two pinned
+Heliodor runs both reached normal power-down at the exact
+`cy=9ae070 x3=aa pass=1` marker:
+
+- `target/heliodor/results/20260716T035757Z_celox_test_soc_linux_boot.log`:
+  41.181 s compile, 136.602 s execute;
+- `target/heliodor/results/20260716T040306Z_celox_test_soc_linux_boot.log`:
+  41.000 s compile, 136.868 s execute.
+
+Compared with the Step 7 run, code generation is about 0.9--1.1 s slower while
+execution is 0.48--0.75 s faster. The execution change is deliberately treated
+as small rather than as closure of the throughput gap. This step retains the
+bounded scheduling foundation and reduced spill frames; subsequent work must
+still address MemorySSA/mem2reg and spill/reload cost directly.
+
+Status: **complete; generated-code throughput target remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -869,6 +923,7 @@ Status: **complete; scheduler redesign remains open**.
 | 5 | `138f46eb`--`e917489e` | repair regression; Heliodor result/gate fixtures | lib 715/715; native 60/60; counter 9/9 | non-LTO Celox twice and final release/LTO pair passed at `cy=9ae070 x3=aa pass=1` | non-LTO: Veryl 76.446 s, Celox 184.652 s; release/LTO gate: Veryl 68.409 s, Celox 178.223 s | qualification complete; performance failed (2.605x) |
 | 6 | split timing | result/gate fixtures passed | lib 715/715; native 60/60; counter 9/9; docs build passed | non-LTO Celox and cold synchronous Veryl AOT-C passed at `cy=9ae070 x3=aa pass=1` | compile: Celox 40.450 s, Veryl 58.354 s; execute: Celox 137.675 s, Veryl 54.282 s | generated-code gap isolated at 2.536x |
 | 7 | post-reconstruction DCE | reconstruction 11/11; native MIR 6/6 | lib 715/715; native 60/60; counter 9/9 | pass: `cy=9ae070 x3=aa pass=1` | compile 40.097 s; execute 137.349 s | complete; scheduling trials rejected |
+| 8 | target-capacity-aware scheduling | scheduler 15/15; native MIR 6/6 | lib 718/718; native 60/60; counter 9/9 | pass twice: `cy=9ae070 x3=aa pass=1` | compile 41.181 s / 41.000 s; execute 136.602 s / 136.868 s | complete; bounded ILP retained, throughput target open |
 
 ## Related design records
 
