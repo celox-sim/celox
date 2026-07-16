@@ -1939,15 +1939,14 @@ mod tests {
     ) -> (MFunction, ReconstructionResult) {
         func.verify();
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
-        let planning_recipes = super::super::reload::analyze_for_planning(&func).unwrap();
+        let planning_recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         next_use.verify(&func, &cfg).unwrap();
-        let recipe_costs = planning_recipes.global_materialization_costs().unwrap();
         let plan = super::super::spill_plan::plan_with_recipe_costs(
             &func,
             &cfg,
             &next_use,
-            &recipe_costs,
+            &planning_recipes,
             registers,
         )
         .unwrap();

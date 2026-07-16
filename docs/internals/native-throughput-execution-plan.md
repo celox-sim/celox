@@ -1406,6 +1406,100 @@ build also pass.
 Status: **complete; proved unchanged FF writebacks removed; generated-code
 execution improved 2.65% in the retained sample**.
 
+### Step 15: Give the allocator point-specific MemorySSA reload costs
+
+The next allocator inspection found that the existing reload analysis had two
+different levels of knowledge which were used at different times.  Before
+spill planning it classified each VReg once from its defining instruction.
+A transient value was therefore costed as a stack spill and reload even when a
+later RTL state write had committed that exact value.  After planning,
+reconstruction could discover the stronger post-store MemorySSA recipe and
+avoid the stack slot, but the W/S and eviction decisions had already been made
+with the wrong cost.  A pre-allocation transform which eagerly replaced
+distant uses with state loads was rejected: it made constants into memory
+loads in its unrestricted form, increased code-generation time in every
+restricted form, and did not establish an execution-time improvement.
+
+Reload planning now retains two distinct kinds of cost.  Constants, original
+SimState loads, and pure expressions rooted in either still have a global
+materialization cost.  Values which may acquire a state home after their
+definition are found by a linear dependency closure over exact store operands,
+pure MIR definitions, and complete register phis.  Only their actual MIR uses
+are queried.  Sparse native MemorySSA proves the byte version at each query and
+on relevant phi edges; no `(block, live value)` Cartesian table is built.
+The planner uses the exact cost for a known local next use and for a known phi
+edge, and falls back to the original stack cost for a cross-block or stale
+point whose concrete recipe is not proved.
+
+This planning snapshot cannot authorize code generation.  Once the complete
+spill plan is known, reconstruction requests only its selected reload points,
+rebuilds MemorySSA independently, materializes the selected machine-width
+recipe, then rebuilds it once more over the resulting MIR and compares the
+expected and actual versions.  A planning-cost mistake can therefore choose a
+poor split but cannot turn a stale state value into generated code.
+
+The supporting representation was tightened at the same boundary:
+
+- direct SimState/StackFrame memory and runtime-owned pointer memory are
+  separate effect domains, so an indirect runtime store no longer kills every
+  direct state recipe;
+- canonical result widths are solved to a def-use fixed point over physical
+  MIR operations rather than inferred by instruction order;
+- a partial read-modify-write carries per-definition `StateInsertDesc`
+  provenance naming the inserted source, bit offset, and width; this is a
+  MemorySSA relation, not an arbitrary bit width attached to a VReg;
+- 33--63-bit inserted fields are reconstructed with the exact x86-64
+  shift/mask sequence; and
+- native GVN reuses a same-version state-load leader only when doing so does
+  not lengthen that leader's live range.
+
+Focused tests prove a post-store home, rejection after an overlapping write,
+matching and non-matching register-phi homes, partial-RMW reconstruction,
+separation of indirect memory, and the planner's use of different costs for
+two uses of the same SSA value.  A planner fixture also forces the exact
+one-load recipe to change the allocator-owned split while the stack-only model
+retains the prior deterministic MIN choice.
+
+The complete traced Heliodor pre-optimized, post-optimized, and
+native-optimized SIR files are byte-identical to the forwarding-disabled
+baseline.  The complete post-allocation MIR shows both the intended gain and
+the remaining limitation.  In one eval-comb region a retained value removes a
+three-operation `load.i16; shr; and` reconstruction while another operand is
+loaded directly from its exact byte state home.  Around `bb1008`, however, two
+predecessor state reloads and their reconstruction phi move to two separate
+uses in the join.  This removes a stack spill/reload and the phi but executes
+the same byte load twice when both uses are reached.  Point costs alone do not
+price a cluster of nearby uses or represent an already-valid state home in the
+W/S state, so that duplication is not treated as solved.
+
+Code generation and generated-code execution were measured separately on CPU
+0 with a prebuilt non-LTO `heliodor-dev` runner and tracing disabled.  Host
+Cargo build time was outside both intervals:
+
+- compile-only: 64.747553772 s and `execute_ns=0`;
+- full-run compile: 65.313464831 s;
+- full-run execute: 128.601612984 s; and
+- result: normal power-down at `cy=9ae070 x3=aa pass=1`.
+
+The execution sample lies inside the Step 14 variation, so no runtime speedup
+is claimed.  The next allocator substeps are deliberately not another eager
+MIR rewrite:
+
+1. represent a MemorySSA-proved state version as an allocator home alternative
+   instead of only lowering its numerical reload cost;
+2. price all uses in the prospective split interval (including repeated uses
+   and loop/edge placement), so retaining one reload across a short use cluster
+   competes against rematerializing it repeatedly;
+3. let SSA spill placement choose register, stack, or state homes and then
+   coalesce compatible split ranges; and
+4. preserve the existing independent post-reconstruction MemorySSA verifier,
+   with focused tests and the split compile/execute Heliodor gate after every
+   substep.
+
+Status: **point-specific costs are structurally working and semantically
+qualified; execution effect is unconfirmed; allocator-owned state homes and
+use-cluster costing remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1432,6 +1526,7 @@ execution improved 2.65% in the retained sample**.
 | 13a | shared reconstruction edge-reload tails | allocator 137/137; native MIR 6/6 | lib 746/746; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final qualification pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 69.770 / 63.295 / 66.919 s, execute 139.706 / 137.092 / 141.808 s; final candidate 70.140 s compile / 148.424 s execute | static duplication removed; timing effect unconfirmed; executed-edge reload reduction open |
 | 13b | cost-aware join residency with CFG anticipatability | allocator 141/141; native MIR 6/6 | lib 750/750; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and earlier candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 61.226 / 61.512 / 60.899 s, execute 137.664 / 135.005 / 131.713 s; earlier candidate 63.831 s compile / 131.116 s execute | seven unconditional join reloads removed or delayed; timing effect unconfirmed |
 | 14 | unchanged StateSSA writeback-edge elision | global StateSSA/mem2reg 19/19; native MIR 6/6 | lib 751/751; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 64.276 / 62.684 / 64.201 s, execute 132.360 / 127.036 / 131.116 s; final candidate 68.105 s compile / 129.461 s execute | exact identity writebacks removed; candidate mean execute -2.65%; compile effect unconfirmed |
+| 15 | point-specific MemorySSA reload costs | allocator 147/147; reload 30/30; spill plan 11/11; native MIR 6/6 | lib 759/759; native 60/60; counter 9/9; check, strict clippy, docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 64.748 s (`execute_ns=0`); full-run compile 65.313 s; full-run execute 128.602 s | exact-use placement works; runtime effect unconfirmed; state homes and use-cluster costing remain open |
 
 ## Related design records
 

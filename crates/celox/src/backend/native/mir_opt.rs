@@ -1340,13 +1340,14 @@ fn gvn_affected_memory_variables(
     tracked: &GvnTrackedMemory,
 ) -> Option<Vec<GvnMemoryVariable>> {
     let effect = memory_effect::writes(inst);
-    if let Some(base) = effect.unknown_base() {
-        return Some(match base {
-            Some(base) if tracked.tracks_base(base) => {
+    if let Some(memory) = effect.unknown_memory() {
+        return Some(match memory {
+            memory_effect::UnknownMemory::Direct(base) if tracked.tracks_base(base) => {
                 vec![GvnMemoryVariable::UnknownBase(base)]
             }
-            Some(_) => Vec::new(),
-            None => vec![GvnMemoryVariable::UnknownAll],
+            memory_effect::UnknownMemory::Direct(_) | memory_effect::UnknownMemory::Indirect => {
+                Vec::new()
+            }
         });
     }
     let mut affected = HashSet::<GvnMemoryVariable>::new();
@@ -1693,15 +1694,11 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let state_load_can_be_rematerialized =
-                        matches!(&key, GvnKey::Load(BaseReg::SimState, ..));
                     let reuse_does_not_extend_live_range = live_out.contains(&leader)
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
-                    if dst != leader
-                        && (state_load_can_be_rematerialized || reuse_does_not_extend_live_range)
-                    {
+                    if dst != leader && reuse_does_not_extend_live_range {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
                     } else if dst != leader {
                         // The expression is available, but reusing its original
@@ -5718,7 +5715,7 @@ mod tests {
     }
 
     #[test]
-    fn global_gvn_reuses_same_version_state_load_across_blocks() {
+    fn global_gvn_does_not_extend_state_load_leader_across_blocks() {
         let mut vregs = VRegAllocator::new();
         for _ in 0..2 {
             vregs.alloc();
@@ -5749,6 +5746,59 @@ mod tests {
             MInst::Store {
                 base: BaseReg::SimState,
                 offset: 80,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(successor);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(
+            func.blocks[1].insts[0],
+            MInst::Load { dst: VReg(1), .. }
+        ));
+    }
+
+    #[test]
+    fn global_gvn_reuses_state_load_leader_that_is_already_live() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..2 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..2).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.insts = vec![
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 88,
                 src: VReg(1),
                 size: OpSize::S64,
             },
@@ -6403,6 +6453,15 @@ mod tests {
                     dst: VReg(5),
                     base: BaseReg::SimState,
                     offset: 128,
+                    size: OpSize::S64,
+                },
+                // Keep the original nonoverlapping leader live independently
+                // of the candidate CSE. The test is about the bounded alias
+                // envelope, not permission to lengthen a state-load range.
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 400,
+                    src: VReg(1),
                     size: OpSize::S64,
                 },
                 MInst::Return,

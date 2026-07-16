@@ -5009,7 +5009,13 @@ fn lower_instruction(
                                         size: load_size,
                                     });
 
-                                    let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                    let descriptor = if consumed == 0 && part_width == *width_bits {
+                                        SpillDesc::transient()
+                                            .with_state_insert(src_vreg, intra, part_width)
+                                    } else {
+                                        SpillDesc::transient()
+                                    };
+                                    let new_word = ctx.alloc_vreg(descriptor);
                                     ctx.emit_bfi(
                                         block,
                                         new_word,
@@ -5288,7 +5294,14 @@ fn lower_instruction(
                                             offset: containing_off,
                                             size: load_size,
                                         });
-                                        let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                        let descriptor =
+                                            if consumed == 0 && part_width == *width_bits {
+                                                SpillDesc::transient()
+                                                    .with_state_insert(mask_vreg, intra, part_width)
+                                            } else {
+                                                SpillDesc::transient()
+                                            };
+                                        let new_word = ctx.alloc_vreg(descriptor);
                                         ctx.emit_bfi(
                                             block,
                                             new_word,

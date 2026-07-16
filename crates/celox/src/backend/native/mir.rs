@@ -220,6 +220,16 @@ pub enum SpillKind {
     Remat { value: u64 },
 }
 
+/// Semantic subvalue inserted into the machine word produced by a static
+/// state-store read-modify-write. This is per-definition provenance for
+/// MemorySSA, not a width or type attached to the referenced VReg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StateInsertDesc {
+    pub value: VReg,
+    pub bit_offset: usize,
+    pub width_bits: usize,
+}
+
 /// Cost information for spilling / reloading a virtual register.
 #[derive(Debug, Clone)]
 pub struct SpillDesc {
@@ -229,6 +239,8 @@ pub struct SpillDesc {
     /// Estimated cost to spill. 0 if the value is already in memory
     /// (store-back-only or rematerializable).
     pub spill_cost: u8,
+    /// Optional relation established only when this definition is stored.
+    pub(crate) state_insert: Option<StateInsertDesc>,
 }
 
 impl SpillDesc {
@@ -238,6 +250,7 @@ impl SpillDesc {
             kind: SpillKind::Remat { value },
             reload_cost: 1,
             spill_cost: 0,
+            state_insert: None,
         }
     }
 
@@ -262,6 +275,7 @@ impl SpillDesc {
             },
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
+            state_insert: None,
         }
     }
 
@@ -286,6 +300,7 @@ impl SpillDesc {
             },
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
+            state_insert: None,
         }
     }
 
@@ -303,7 +318,22 @@ impl SpillDesc {
             kind: SpillKind::Stack,
             reload_cost: 2,
             spill_cost: 2,
+            state_insert: None,
         }
+    }
+
+    pub(crate) fn with_state_insert(
+        mut self,
+        value: VReg,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Self {
+        self.state_insert = Some(StateInsertDesc {
+            value,
+            bit_offset,
+            width_bits,
+        });
+        self
     }
 }
 
@@ -498,14 +528,16 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// dst = load [ptr + offset]
+    /// dst = load [ptr + offset] in the runtime-owned indirect-memory domain.
+    /// This domain is disjoint from SimState and StackFrame.
     LoadPtr {
         dst: VReg,
         ptr: VReg,
         offset: i32,
         size: OpSize,
     },
-    /// store [ptr + offset] = src
+    /// store [ptr + offset] = src in the runtime-owned indirect-memory domain.
+    /// This domain is disjoint from SimState and StackFrame.
     StorePtr {
         ptr: VReg,
         offset: i32,
@@ -540,7 +572,8 @@ pub enum MInst {
         size: OpSize,
         alias_range: Option<MemoryAliasRange>,
     },
-    /// dst = load [ptr + offset + index]
+    /// dst = load [ptr + offset + index] in the runtime-owned indirect-memory
+    /// domain, which is disjoint from SimState and StackFrame.
     LoadPtrIndexed {
         dst: VReg,
         ptr: VReg,
@@ -548,7 +581,8 @@ pub enum MInst {
         index: VReg,
         size: OpSize,
     },
-    /// store [ptr + offset + index] = src
+    /// store [ptr + offset + index] = src in the runtime-owned indirect-memory
+    /// domain, which is disjoint from SimState and StackFrame.
     StorePtrIndexed {
         ptr: VReg,
         offset: i32,

@@ -8,6 +8,7 @@ use crate::backend::native::mir::{BlockId, MFunction, VReg};
 use super::assignment::clobbers;
 use super::cfg::NormalizedCfg;
 use super::next_use::{NextUseAnalysis, NextUseDistance};
+use super::reload::{EdgeUse, PlanningRecipes, PointUse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct LogicalValue(pub u32);
@@ -383,14 +384,15 @@ pub(super) fn plan(
     next_use: &NextUseAnalysis,
     registers: usize,
 ) -> Result<SpillPlan, SpillPlanError> {
-    plan_with_recipe_costs(func, cfg, next_use, &[], registers)
+    let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
+    plan_with_recipe_costs(func, cfg, next_use, &planning_recipes, registers)
 }
 
 pub(super) fn plan_with_recipe_costs(
     func: &MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
-    recipe_costs: &[Option<u16>],
+    planning_recipes: &PlanningRecipes,
     registers: usize,
 ) -> Result<SpillPlan, SpillPlanError> {
     let logical = LogicalValues::build(func);
@@ -414,7 +416,7 @@ pub(super) fn plan_with_recipe_costs(
                 func,
                 cfg,
                 next_use,
-                recipe_costs,
+                planning_recipes,
                 &result,
                 &edge_translations,
                 block,
@@ -499,7 +501,7 @@ pub(super) fn plan_with_recipe_costs(
             limit(
                 func,
                 next_use,
-                recipe_costs,
+                planning_recipes,
                 &mut result,
                 block,
                 instruction,
@@ -525,7 +527,7 @@ pub(super) fn plan_with_recipe_costs(
                 limit_live_through_clobber(
                     func,
                     next_use,
-                    recipe_costs,
+                    planning_recipes,
                     &mut result,
                     block,
                     instruction,
@@ -553,7 +555,7 @@ pub(super) fn plan_with_recipe_costs(
                     limit(
                         func,
                         next_use,
-                        recipe_costs,
+                        planning_recipes,
                         &mut result,
                         block,
                         instruction,
@@ -621,7 +623,7 @@ pub(super) fn plan_with_recipe_costs(
 fn limit_live_through_clobber(
     func: &MFunction,
     next_use: &NextUseAnalysis,
-    recipe_costs: &[Option<u16>],
+    planning_recipes: &PlanningRecipes,
     plan: &mut SpillPlan,
     block: usize,
     instruction: usize,
@@ -648,8 +650,11 @@ fn limit_live_through_clobber(
         let Some(victim) = live_through.iter().copied().max_by(|left, right| {
             compare_eviction_candidates(
                 func,
-                recipe_costs,
+                next_use,
+                planning_recipes,
                 spilled,
+                block,
+                instruction + 1,
                 (
                     *left,
                     logical_distance_at(
@@ -706,7 +711,7 @@ fn init_usual(
     func: &MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
-    recipe_costs: &[Option<u16>],
+    planning_recipes: &PlanningRecipes,
     plan: &SpillPlan,
     edge_translations: &EdgeTranslations,
     block: usize,
@@ -749,21 +754,26 @@ fn init_usual(
                             .saturating_add(u128::from(spill_cost(func, predecessor_value)));
                     }
                 } else {
-                    keep_cost = keep_cost.saturating_add(u128::from(reload_cost(
+                    keep_cost = keep_cost.saturating_add(u128::from(reload_cost_on_edge(
                         func,
-                        recipe_costs,
+                        planning_recipes,
+                        predecessor,
+                        block,
                         predecessor_value,
                     )));
                 }
             }
             if next_use.anticipated_at_entry(block, VReg(value.0)) {
-                drop_cost = drop_cost.saturating_add(
-                    (processed.len() as u128).saturating_mul(u128::from(reload_cost(
+                drop_cost = drop_cost.saturating_add((processed.len() as u128).saturating_mul(
+                    u128::from(reload_cost_at_next_local_use(
                         func,
-                        recipe_costs,
+                        next_use,
+                        planning_recipes,
+                        block,
+                        0,
                         value,
-                    ))),
-                );
+                    )),
+                ));
             }
             let savings = drop_cost
                 .checked_sub(keep_cost)
@@ -868,7 +878,7 @@ fn init_loop_region(
 fn limit(
     func: &MFunction,
     next_use: &NextUseAnalysis,
-    recipe_costs: &[Option<u16>],
+    planning_recipes: &PlanningRecipes,
     plan: &mut SpillPlan,
     block: usize,
     point_instruction: usize,
@@ -886,8 +896,11 @@ fn limit(
             .max_by(|left, right| {
                 compare_eviction_candidates(
                     func,
-                    recipe_costs,
+                    next_use,
+                    planning_recipes,
                     spilled,
+                    block,
+                    distance_instruction,
                     (
                         *left,
                         logical_distance_at(
@@ -950,8 +963,11 @@ fn limit(
 /// and the denominator is the register occupancy until that use.
 fn compare_eviction_candidates(
     func: &MFunction,
-    recipe_costs: &[Option<u16>],
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
     spilled: &BTreeSet<LogicalValue>,
+    block: usize,
+    instruction: usize,
     left: (LogicalValue, NextUseDistance),
     right: (LogicalValue, NextUseDistance),
 ) -> Ordering {
@@ -969,8 +985,24 @@ fn compare_eviction_candidates(
                 instructions: right_instructions,
             },
         ) => left_exits.cmp(&right_exits).then_with(|| {
-            let left_cost = eviction_cost(func, recipe_costs, spilled, left.0) as u128;
-            let right_cost = eviction_cost(func, recipe_costs, spilled, right.0) as u128;
+            let left_cost = eviction_cost(
+                func,
+                next_use,
+                planning_recipes,
+                spilled,
+                block,
+                instruction,
+                left.0,
+            ) as u128;
+            let right_cost = eviction_cost(
+                func,
+                next_use,
+                planning_recipes,
+                spilled,
+                block,
+                instruction,
+                right.0,
+            ) as u128;
             let left_span = left_instructions as u128 + 1;
             let right_span = right_instructions as u128 + 1;
             // Lower avoided-cost density is the better eviction candidate.
@@ -986,19 +1018,62 @@ fn compare_eviction_candidates(
 
 fn eviction_cost(
     func: &MFunction,
-    recipe_costs: &[Option<u16>],
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
     spilled: &BTreeSet<LogicalValue>,
+    block: usize,
+    instruction: usize,
     value: LogicalValue,
 ) -> u16 {
-    reload_cost(func, recipe_costs, value).saturating_add(if spilled.contains(&value) {
-        0
-    } else {
-        spill_cost(func, value)
-    })
+    reload_cost_at_next_local_use(func, next_use, planning_recipes, block, instruction, value)
+        .saturating_add(if spilled.contains(&value) {
+            0
+        } else {
+            spill_cost(func, value)
+        })
 }
 
-fn reload_cost(func: &MFunction, recipe_costs: &[Option<u16>], value: LogicalValue) -> u16 {
-    if let Some(cost) = recipe_costs.get(value.0 as usize).copied().flatten() {
+fn reload_cost_at_next_local_use(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    block: usize,
+    instruction: usize,
+    value: LogicalValue,
+) -> u16 {
+    let value = VReg(value.0);
+    if let Some(instruction) = next_use.next_local_use(block, instruction, value)
+        && let Some(cost) = planning_recipes.materialization_cost_at_point(PointUse {
+            block: func.blocks[block].id,
+            instruction,
+            value,
+        })
+    {
+        return cost;
+    }
+    reload_cost(func, planning_recipes, LogicalValue(value.0))
+}
+
+fn reload_cost_on_edge(
+    func: &MFunction,
+    planning_recipes: &PlanningRecipes,
+    predecessor: usize,
+    successor: usize,
+    value: LogicalValue,
+) -> u16 {
+    let value = VReg(value.0);
+    if let Some(cost) = planning_recipes.materialization_cost_on_edge(EdgeUse {
+        predecessor: func.blocks[predecessor].id,
+        successor: func.blocks[successor].id,
+        value,
+    }) {
+        return cost;
+    }
+    reload_cost(func, planning_recipes, LogicalValue(value.0))
+}
+
+fn reload_cost(func: &MFunction, planning_recipes: &PlanningRecipes, value: LogicalValue) -> u16 {
+    if let Some(cost) = planning_recipes.global_materialization_cost(VReg(value.0)) {
         return cost;
     }
     let Some(desc) = func.spill_desc(VReg(value.0)) else {
@@ -1319,11 +1394,12 @@ mod tests {
         plan.s_exit[predecessor].insert(logical_value);
 
         assert!(!next_use.anticipated_at_entry(successor, value));
+        let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
         let inherited = init_usual(
             &func,
             &cfg,
             &next_use,
-            &[],
+            &planning_recipes,
             &plan,
             &translations,
             successor,
@@ -1414,7 +1490,17 @@ mod tests {
 
         assert!(!next_use.anticipated_at_entry(join, conditional));
         assert!(next_use.anticipated_at_entry(join, guaranteed));
-        let retained = init_usual(&func, &cfg, &next_use, &[], &plan, &translations, join, 1);
+        let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
+        let retained = init_usual(
+            &func,
+            &cfg,
+            &next_use,
+            &planning_recipes,
+            &plan,
+            &translations,
+            join,
+            1,
+        );
 
         assert_eq!(retained, BTreeSet::from([LogicalValue(guaranteed.0)]));
     }
@@ -1522,7 +1608,13 @@ mod tests {
         let mut vregs = VRegAllocator::new();
         let cheap = vregs.alloc();
         let costly = vregs.alloc();
-        let func = MFunction::new(vregs, vec![SpillDesc::remat(1), SpillDesc::transient()]);
+        let mut func = MFunction::new(vregs, vec![SpillDesc::remat(1), SpillDesc::transient()]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
         let spilled = BTreeSet::new();
         let local = |instructions| NextUseDistance::Finite {
             loop_exits: 0,
@@ -1532,8 +1624,11 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
-                &[],
+                &next_use,
+                &planning_recipes,
                 &spilled,
+                0,
+                0,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(1)),
             ),
@@ -1543,8 +1638,11 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
-                &[],
+                &next_use,
+                &planning_recipes,
                 &spilled,
+                0,
+                0,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(15)),
             ),
@@ -1552,31 +1650,131 @@ mod tests {
             "a sufficiently long occupancy interval must outweigh a larger split cost"
         );
 
-        let equal_cost = MFunction::new(
+        let mut equal_cost = MFunction::new(
             func.vregs.clone(),
             vec![SpillDesc::transient(), SpillDesc::transient()],
         );
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        equal_cost.push_block(block);
+        let equal_cfg = super::super::cfg::normalize(&mut equal_cost).unwrap();
+        let equal_next_use = super::super::next_use::analyze(&equal_cost, &equal_cfg).unwrap();
+        let equal_recipes = PlanningRecipes::stack_only(equal_cost.vregs.count());
         assert_eq!(
             compare_eviction_candidates(
                 &equal_cost,
-                &[],
+                &equal_next_use,
+                &equal_recipes,
                 &spilled,
+                0,
+                0,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(8)),
             ),
             Ordering::Less,
             "equal target costs must reduce to furthest-next-use MIN"
         );
+        let exact_recipes = PlanningRecipes::with_global_costs(vec![Some(1), None]);
         assert_eq!(
             compare_eviction_candidates(
                 &equal_cost,
-                &[Some(1), None],
+                &equal_next_use,
+                &exact_recipes,
                 &spilled,
+                0,
+                0,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(2)),
             ),
             Ordering::Greater,
             "an exact reload recipe must override the stale transient descriptor cost"
+        );
+    }
+
+    #[test]
+    fn point_specific_memoryssa_cost_changes_the_allocator_owned_split() {
+        let mut vregs = VRegAllocator::new();
+        let state_backed = vregs.alloc();
+        let stack_backed = vregs.alloc();
+        let near_use = vregs.alloc();
+        let pressure = vregs.alloc();
+        let sum = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: state_backed,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: state_backed,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: stack_backed,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: near_use,
+            base: BaseReg::StackFrame,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        block.push(MInst::LoadImm {
+            dst: pressure,
+            value: 0,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 24,
+            src: near_use,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Add {
+            dst: sum,
+            lhs: state_backed,
+            rhs: stack_backed,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 48,
+            src: sum,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let exact = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
+        let stack_only = PlanningRecipes::stack_only(func.vregs.count());
+
+        let exact_plan = plan_with_recipe_costs(&func, &cfg, &next_use, &exact, 3).unwrap();
+        let stack_plan = plan_with_recipe_costs(&func, &cfg, &next_use, &stack_only, 3).unwrap();
+        let split_at_pressure = |plan: &SpillPlan| {
+            plan.point_ops.iter().find_map(|(point, operation)| {
+                (point.block == BlockId(0) && point.instruction == 4)
+                    .then_some(operation)
+                    .and_then(|operation| match operation {
+                        PlannedOp::Spill { value, .. } => Some(*value),
+                        _ => None,
+                    })
+            })
+        };
+
+        assert_eq!(
+            split_at_pressure(&exact_plan),
+            Some(LogicalValue(state_backed.0)),
+            "the exact one-load SimState home should make this the cheapest split"
+        );
+        assert_eq!(
+            split_at_pressure(&stack_plan),
+            Some(LogicalValue(stack_backed.0)),
+            "without a point recipe equal-cost MIN uses the deterministic VReg tie-break"
         );
     }
 

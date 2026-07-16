@@ -26,14 +26,11 @@ pub(super) fn allocate(
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let phase = timing.then(crate::timing::now);
-    let recipe_costs = planning_recipes
-        .global_materialization_costs()
-        .map_err(|error| super::reload_recipe_error("spill-planner recipe costs", error))?;
     let plan = super::spill_plan::plan_with_recipe_costs(
         func,
         cfg,
         next_use,
-        &recipe_costs,
+        planning_recipes,
         super::NUM_REGS,
     )
     .map_err(|error| {

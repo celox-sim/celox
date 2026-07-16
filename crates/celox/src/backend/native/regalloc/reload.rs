@@ -85,81 +85,134 @@ enum PlanningRecipe {
     Stack,
 }
 
-/// Recipe shape used by spill planning before concrete reload points exist.
-/// It deliberately contains no MemorySSA versions: exact validity is proved
-/// only for reloads that the planner actually selects.
+/// Reload costs used by spill planning.
+///
+/// Globally valid constants and state loads have one value-wide cost.  Values
+/// committed after their SSA definition instead use sparse, MemorySSA-proved
+/// costs at actual MIR uses and phi edges.  Reconstruction independently
+/// rebuilds and verifies every recipe which the planner ultimately selects;
+/// these cost facts can influence placement but cannot authorize emission.
 #[derive(Debug)]
 pub(super) struct PlanningRecipes {
-    recipes: Vec<PlanningRecipe>,
-    pure_recipes: Vec<PureRecipe>,
+    global_costs: Vec<Option<u16>>,
+    point_costs: BTreeMap<PointUse, u16>,
+    edge_costs: BTreeMap<EdgeUse, u16>,
 }
 
 impl PlanningRecipes {
+    #[cfg(test)]
     pub fn global_materialization_costs(&self) -> Result<Vec<Option<u16>>, ReloadRecipeError> {
-        let mut costs = vec![None::<Option<u16>>; self.recipes.len()];
-        for start in 0..self.recipes.len() {
-            if costs[start].is_some() {
-                continue;
-            }
-            let mut path = Vec::<usize>::new();
-            let mut seen = BTreeSet::<usize>::new();
-            let mut current = start;
-            let mut cost = loop {
-                if let Some(cost) = costs[current] {
-                    break cost;
-                }
-                if !seen.insert(current) {
-                    return Err(ReloadRecipeError::new(
-                        "RELOAD_RECIPE.PURE_CYCLE",
-                        None,
-                        None,
-                        Some(VReg(current as u32)),
-                        "planning recipe graph contains a cycle",
-                    ));
-                }
-                match self.recipes[current] {
-                    PlanningRecipe::Constant | PlanningRecipe::State => {
-                        costs[current] = Some(Some(1));
-                        break Some(1);
-                    }
-                    PlanningRecipe::Stack => {
-                        costs[current] = Some(None);
-                        break None;
-                    }
-                    PlanningRecipe::Pure { expression } => {
-                        let Some(recipe) = self.pure_recipes.get(expression.0 as usize) else {
-                            return Err(ReloadRecipeError::new(
-                                "RELOAD_RECIPE.PURE_EXPRESSION",
-                                None,
-                                None,
-                                Some(VReg(current as u32)),
-                                "planning pure-expression identifier is outside its table",
-                            ));
-                        };
-                        path.push(current);
-                        current = recipe.source().0 as usize;
-                        if current >= self.recipes.len() {
-                            return Err(ReloadRecipeError::new(
-                                "RELOAD_RECIPE.VALUE_COVERAGE",
-                                None,
-                                None,
-                                Some(VReg(current as u32)),
-                                "planning pure recipe source is outside the VReg table",
-                            ));
-                        }
-                    }
-                }
-            };
-            for value in path.into_iter().rev() {
-                cost = cost.map(|value| value.saturating_add(1));
-                costs[value] = Some(cost);
-            }
-        }
-        Ok(costs
-            .into_iter()
-            .map(|cost| cost.expect("every planning recipe cost is visited"))
-            .collect())
+        Ok(self.global_costs.clone())
     }
+
+    pub(super) fn global_materialization_cost(&self, value: VReg) -> Option<u16> {
+        self.global_costs.get(value.0 as usize).copied().flatten()
+    }
+
+    pub(super) fn materialization_cost_at_point(&self, point: PointUse) -> Option<u16> {
+        minimum_cost(
+            self.global_materialization_cost(point.value),
+            self.point_costs.get(&point).copied(),
+        )
+    }
+
+    pub(super) fn materialization_cost_on_edge(&self, edge: EdgeUse) -> Option<u16> {
+        minimum_cost(
+            self.global_materialization_cost(edge.value),
+            self.edge_costs.get(&edge).copied(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn stack_only(value_count: u32) -> Self {
+        Self::with_global_costs(vec![None; value_count as usize])
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_global_costs(global_costs: Vec<Option<u16>>) -> Self {
+        Self {
+            global_costs,
+            point_costs: BTreeMap::new(),
+            edge_costs: BTreeMap::new(),
+        }
+    }
+}
+
+fn minimum_cost(left: Option<u16>, right: Option<u16>) -> Option<u16> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(cost), None) | (None, Some(cost)) => Some(cost),
+        (None, None) => None,
+    }
+}
+
+fn global_materialization_costs(
+    recipes: &[PlanningRecipe],
+    pure_recipes: &[PureRecipe],
+) -> Result<Vec<Option<u16>>, ReloadRecipeError> {
+    let mut costs = vec![None::<Option<u16>>; recipes.len()];
+    for start in 0..recipes.len() {
+        if costs[start].is_some() {
+            continue;
+        }
+        let mut path = Vec::<usize>::new();
+        let mut seen = BTreeSet::<usize>::new();
+        let mut current = start;
+        let mut cost = loop {
+            if let Some(cost) = costs[current] {
+                break cost;
+            }
+            if !seen.insert(current) {
+                return Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.PURE_CYCLE",
+                    None,
+                    None,
+                    Some(VReg(current as u32)),
+                    "planning recipe graph contains a cycle",
+                ));
+            }
+            match recipes[current] {
+                PlanningRecipe::Constant | PlanningRecipe::State => {
+                    costs[current] = Some(Some(1));
+                    break Some(1);
+                }
+                PlanningRecipe::Stack => {
+                    costs[current] = Some(None);
+                    break None;
+                }
+                PlanningRecipe::Pure { expression } => {
+                    let Some(recipe) = pure_recipes.get(expression.0 as usize) else {
+                        return Err(ReloadRecipeError::new(
+                            "RELOAD_RECIPE.PURE_EXPRESSION",
+                            None,
+                            None,
+                            Some(VReg(current as u32)),
+                            "planning pure-expression identifier is outside its table",
+                        ));
+                    };
+                    path.push(current);
+                    current = recipe.source().0 as usize;
+                    if current >= recipes.len() {
+                        return Err(ReloadRecipeError::new(
+                            "RELOAD_RECIPE.VALUE_COVERAGE",
+                            None,
+                            None,
+                            Some(VReg(current as u32)),
+                            "planning pure recipe source is outside the VReg table",
+                        ));
+                    }
+                }
+            }
+        };
+        for value in path.into_iter().rev() {
+            cost = cost.map(|value| value.saturating_add(1));
+            costs[value] = Some(cost);
+        }
+    }
+    Ok(costs
+        .into_iter()
+        .map(|cost| cost.expect("every planning recipe cost is visited"))
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -246,6 +299,19 @@ pub(super) enum ResolvedBase {
 pub(super) struct ResolvedRecipe {
     pub base: ResolvedBase,
     pub steps: Vec<PureStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreHomeSpec {
+    value: VReg,
+    load: StateLoad,
+    steps: Vec<PureStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreHome {
+    state: StateRecipe,
+    steps: Vec<PureStep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -547,7 +613,10 @@ impl fmt::Display for ReloadRecipeError {
 
 impl std::error::Error for ReloadRecipeError {}
 
-pub(super) fn analyze_for_planning(func: &MFunction) -> Result<PlanningRecipes, ReloadRecipeError> {
+pub(super) fn analyze_for_planning(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+) -> Result<PlanningRecipes, ReloadRecipeError> {
     let mut recipes = vec![PlanningRecipe::Stack; func.vregs.count() as usize];
     let mut pure_recipes = Vec::<PureRecipe>::new();
     for block in &func.blocks {
@@ -591,10 +660,191 @@ pub(super) fn analyze_for_planning(func: &MFunction) -> Result<PlanningRecipes, 
             };
         }
     }
+    let global_costs = global_materialization_costs(&recipes, &pure_recipes)?;
+    let candidates = point_specific_recipe_candidates(func, &recipes, &pure_recipes)?;
+    let requested_points = func
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .insts
+                .iter()
+                .enumerate()
+                .flat_map(move |(instruction, inst)| {
+                    inst.uses().into_iter().map(move |value| PointUse {
+                        block: block.id,
+                        instruction,
+                        value,
+                    })
+                })
+        })
+        .filter(|point| {
+            candidates.contains(&point.value)
+                && global_costs
+                    .get(point.value.0 as usize)
+                    .is_some_and(Option::is_none)
+        })
+        .collect::<BTreeSet<_>>();
+    let (point_costs, edge_costs) = if requested_points.is_empty() {
+        (BTreeMap::new(), BTreeMap::new())
+    } else {
+        let exact = analyze_unverified_with_queries(func, cfg, &requested_points, false)?;
+        (
+            exact
+                .point_recipes
+                .iter()
+                .map(|(point, recipe)| (*point, resolved_recipe_cost(recipe)))
+                .collect(),
+            exact
+                .edge_recipes
+                .iter()
+                .map(|(edge, recipe)| (*edge, resolved_recipe_cost(recipe)))
+                .collect(),
+        )
+    };
     Ok(PlanningRecipes {
-        recipes,
-        pure_recipes,
+        global_costs,
+        point_costs,
+        edge_costs,
     })
+}
+
+fn resolved_recipe_cost(recipe: &ResolvedRecipe) -> u16 {
+    u16::try_from(recipe.steps.len().saturating_add(1)).unwrap_or(u16::MAX)
+}
+
+/// Conservatively identify SSA names which may acquire a path-specific
+/// SimState home.  This is only a sparse query filter: MemorySSA still proves
+/// the exact byte version at every retained use.
+fn point_specific_recipe_candidates(
+    func: &MFunction,
+    recipes: &[PlanningRecipe],
+    pure_recipes: &[PureRecipe],
+) -> Result<BTreeSet<VReg>, ReloadRecipeError> {
+    fn seed_candidate(
+        value: VReg,
+        value_count: usize,
+        candidates: &mut BTreeSet<VReg>,
+        queue: &mut VecDeque<VReg>,
+    ) -> Result<(), ReloadRecipeError> {
+        if value.0 as usize >= value_count {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.VALUE_COVERAGE",
+                None,
+                None,
+                Some(value),
+                "point-specific recipe candidate is outside the VReg table",
+            ));
+        }
+        if candidates.insert(value) {
+            queue.push_back(value);
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum Dependent {
+        Pure(VReg),
+        Phi(usize),
+    }
+
+    struct PhiCandidate {
+        destination: VReg,
+        remaining_sources: usize,
+    }
+
+    let value_count = func.vregs.count() as usize;
+    let mut dependents = vec![Vec::<Dependent>::new(); value_count];
+    for (destination, recipe) in recipes.iter().copied().enumerate() {
+        let PlanningRecipe::Pure { expression } = recipe else {
+            continue;
+        };
+        let Some(expression) = pure_recipes.get(expression.0 as usize) else {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.PURE_EXPRESSION",
+                None,
+                None,
+                Some(VReg(destination as u32)),
+                "planning pure-expression identifier is outside its table",
+            ));
+        };
+        let source = expression.source();
+        let Some(users) = dependents.get_mut(source.0 as usize) else {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.PURE_SOURCE_RANGE",
+                None,
+                None,
+                Some(source),
+                "planning pure recipe source is outside the VReg table",
+            ));
+        };
+        users.push(Dependent::Pure(VReg(destination as u32)));
+    }
+
+    let mut phis = Vec::<PhiCandidate>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            let sources = phi
+                .sources
+                .iter()
+                .map(|(_, source)| *source)
+                .collect::<BTreeSet<_>>();
+            if sources.is_empty() {
+                continue;
+            }
+            let index = phis.len();
+            phis.push(PhiCandidate {
+                destination: phi.dst,
+                remaining_sources: sources.len(),
+            });
+            for source in sources {
+                let Some(users) = dependents.get_mut(source.0 as usize) else {
+                    return Err(ReloadRecipeError::new(
+                        "RELOAD_RECIPE.VALUE_COVERAGE",
+                        Some(block.id),
+                        None,
+                        Some(source),
+                        "phi source is outside the VReg table",
+                    ));
+                };
+                users.push(Dependent::Phi(index));
+            }
+        }
+    }
+
+    let canonical_bits = canonical_value_bits(func)?;
+    let mut candidates = BTreeSet::<VReg>::new();
+    let mut queue = VecDeque::<VReg>::new();
+    for (value, recipe) in recipes.iter().enumerate() {
+        if matches!(recipe, PlanningRecipe::State) {
+            seed_candidate(VReg(value as u32), value_count, &mut candidates, &mut queue)?;
+        }
+    }
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for home in store_home_specs(func, inst, &canonical_bits) {
+                seed_candidate(home.value, value_count, &mut candidates, &mut queue)?;
+            }
+        }
+    }
+
+    while let Some(value) = queue.pop_front() {
+        for dependent in dependents[value.0 as usize].iter().copied() {
+            match dependent {
+                Dependent::Pure(destination) => {
+                    seed_candidate(destination, value_count, &mut candidates, &mut queue)?
+                }
+                Dependent::Phi(index) => {
+                    let phi = &mut phis[index];
+                    phi.remaining_sources = phi.remaining_sources.saturating_sub(1);
+                    if phi.remaining_sources == 0 {
+                        seed_candidate(phi.destination, value_count, &mut candidates, &mut queue)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(candidates)
 }
 
 #[cfg(test)]
@@ -660,14 +910,6 @@ fn analyze_unverified_with_queries(
     }
 
     let canonical_bits = canonical_value_bits(func)?;
-    let mut exact_store_homes = HashMap::new();
-    for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            if let Some(home) = exact_store_home(inst, &canonical_bits) {
-                exact_store_homes.insert((block, instruction), home);
-            }
-        }
-    }
     let mut state_loads = vec![None; func.vregs.count() as usize];
     let mut recipes = vec![ReloadRecipe::Stack; func.vregs.count() as usize];
     let mut pure_recipes = Vec::<PureRecipe>::new();
@@ -739,24 +981,37 @@ fn analyze_unverified_with_queries(
         requested_points,
         collect_all_uses,
     )?;
-    exact_store_homes.retain(|_, (value, _)| relevant_values.contains(value));
+    let mut store_homes = HashMap::<(usize, usize), Vec<StoreHomeSpec>>::new();
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+            let homes = store_home_specs(func, inst, &canonical_bits)
+                .into_iter()
+                .filter(|home| relevant_values.contains(&home.value))
+                .collect::<Vec<_>>();
+            if !homes.is_empty() {
+                store_homes.insert((block, instruction), homes);
+            }
+        }
+    }
     let mut tracked_bytes = BTreeSet::<i64>::new();
     for &value in &relevant_values {
         if let Some(load) = state_loads.get(value.0 as usize).copied().flatten() {
             tracked_bytes.extend(load.bytes().expect("state-load range was validated"));
         }
     }
-    for &(value, load) in exact_store_homes.values() {
-        let Some(bytes) = load.bytes() else {
-            return Err(ReloadRecipeError::new(
-                "RELOAD_RECIPE.STATE_RANGE",
-                None,
-                None,
-                Some(value),
-                "exact store-home byte range overflows i64",
-            ));
-        };
-        tracked_bytes.extend(bytes);
+    for homes in store_homes.values() {
+        for home in homes {
+            let Some(bytes) = home.load.bytes() else {
+                return Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.STATE_RANGE",
+                    None,
+                    None,
+                    Some(home.value),
+                    "store-home byte range overflows i64",
+                ));
+            };
+            tracked_bytes.extend(bytes);
+        }
     }
 
     let mut memory_ssa = build_memory_ssa(func, cfg, &tracked_bytes)?;
@@ -771,7 +1026,7 @@ fn analyze_unverified_with_queries(
         &pure_recipes,
         &mut recipes,
         &mut memory_ssa,
-        &exact_store_homes,
+        &store_homes,
         &relevant_values,
         requested_points,
         collect_all_uses,
@@ -801,7 +1056,7 @@ fn analyze_unverified_with_queries(
     })
 }
 
-fn exact_store_home(inst: &MInst, canonical_bits: &[u8]) -> Option<(VReg, StateLoad)> {
+fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Vec<StoreHomeSpec> {
     let MInst::Store {
         base: BaseReg::SimState,
         offset,
@@ -809,19 +1064,71 @@ fn exact_store_home(inst: &MInst, canonical_bits: &[u8]) -> Option<(VReg, StateL
         size,
     } = inst
     else {
-        return None;
+        return Vec::new();
     };
     let stored_bits = (size.bytes() * 8) as u8;
-    if canonical_bits.get(src.0 as usize).copied()? > stored_bits {
-        return None;
+    let load = StateLoad {
+        offset: *offset,
+        size: *size,
+    };
+    let mut homes = Vec::with_capacity(2);
+    if canonical_bits
+        .get(src.0 as usize)
+        .is_some_and(|bits| *bits <= stored_bits)
+    {
+        homes.push(StoreHomeSpec {
+            value: *src,
+            load,
+            steps: Vec::new(),
+        });
     }
-    Some((
-        *src,
-        StateLoad {
-            offset: *offset,
-            size: *size,
-        },
-    ))
+
+    let Some(insert) = func.spill_desc(*src).and_then(|desc| desc.state_insert) else {
+        return homes;
+    };
+    let Some(end_bit) = insert.bit_offset.checked_add(insert.width_bits) else {
+        return homes;
+    };
+    if insert.width_bits == 0
+        || insert.width_bits > 64
+        || end_bit > usize::from(stored_bits)
+        || canonical_bits
+            .get(insert.value.0 as usize)
+            .is_none_or(|bits| usize::from(*bits) > insert.width_bits)
+    {
+        return homes;
+    }
+    let mut steps = Vec::with_capacity(2);
+    if insert.bit_offset != 0 {
+        let Ok(immediate) = u8::try_from(insert.bit_offset) else {
+            return homes;
+        };
+        steps.push(PureStep::ShrImm64 { immediate });
+    }
+    if insert.width_bits < 64 {
+        if insert.width_bits <= 32 {
+            steps.push(PureStep::AndImm32 {
+                immediate: u32::MAX >> (32 - insert.width_bits),
+            });
+        } else {
+            let clear_bits = (64 - insert.width_bits) as u8;
+            steps.push(PureStep::ShlImm64 {
+                immediate: clear_bits,
+            });
+            steps.push(PureStep::ShrImm64 {
+                immediate: clear_bits,
+            });
+        }
+    }
+    let inserted = StoreHomeSpec {
+        value: insert.value,
+        load,
+        steps,
+    };
+    if !homes.contains(&inserted) {
+        homes.push(inserted);
+    }
+    homes
 }
 
 /// Prove how many low bits may be nonzero from MIR semantics alone.
@@ -831,92 +1138,241 @@ fn exact_store_home(inst: &MInst, canonical_bits: &[u8]) -> Option<(VReg, StateL
 /// is a reload home only when its source is already exactly the zero-extended
 /// value produced by a load of the same machine width.
 fn canonical_value_bits(func: &MFunction) -> Result<Vec<u8>, ReloadRecipeError> {
-    let mut bits = vec![64u8; func.vregs.count() as usize];
-    let get = |value: VReg, bits: &[u8], block: BlockId, instruction: Option<usize>| {
-        bits.get(value.0 as usize).copied().ok_or_else(|| {
+    #[derive(Clone, Copy)]
+    enum Definition {
+        Phi { block: usize, phi: usize },
+        Instruction { block: usize, instruction: usize },
+    }
+
+    let value_count = func.vregs.count() as usize;
+    let mut definitions = vec![None::<Definition>; value_count];
+    let mut dependent_counts = vec![0usize; value_count];
+    let value_index = |value: VReg,
+                       block: BlockId,
+                       instruction: Option<usize>,
+                       role: &'static str|
+     -> Result<usize, ReloadRecipeError> {
+        let index = value.0 as usize;
+        (index < value_count).then_some(index).ok_or_else(|| {
             ReloadRecipeError::new(
                 "RELOAD_RECIPE.VALUE_RANGE",
                 Some(block),
                 instruction,
                 Some(value),
+                format!("MIR {role} is outside the canonical-value side table"),
+            )
+        })
+    };
+
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (phi_index, phi) in block.phis.iter().enumerate() {
+            let destination = value_index(phi.dst, block.id, None, "phi destination")?;
+            definitions[destination] = Some(Definition::Phi {
+                block: block_index,
+                phi: phi_index,
+            });
+            for &(_, source) in &phi.sources {
+                let source = value_index(source, block.id, None, "phi source")?;
+                dependent_counts[source] = dependent_counts[source].saturating_add(1);
+            }
+        }
+        for (instruction_index, inst) in block.insts.iter().enumerate() {
+            let Some(destination) = inst.def() else {
+                continue;
+            };
+            let destination =
+                value_index(destination, block.id, Some(instruction_index), "definition")?;
+            definitions[destination] = Some(Definition::Instruction {
+                block: block_index,
+                instruction: instruction_index,
+            });
+            for source in inst.uses() {
+                let source = value_index(source, block.id, Some(instruction_index), "operand")?;
+                dependent_counts[source] = dependent_counts[source].saturating_add(1);
+            }
+        }
+    }
+
+    // Store the def-use graph in CSR form. A Vec per VReg is prohibitively
+    // expensive on the fused Linux function even though the number of actual
+    // operand edges is linear in MIR size.
+    let mut dependent_offsets = Vec::with_capacity(value_count + 1);
+    dependent_offsets.push(0usize);
+    for count in dependent_counts {
+        let next = dependent_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(count);
+        dependent_offsets.push(next);
+    }
+    let mut dependent_cursor = dependent_offsets[..value_count].to_vec();
+    let mut dependents = vec![VReg(0); dependent_offsets[value_count]];
+    let mut record_dependency = |source: VReg, destination: VReg| {
+        let source = source.0 as usize;
+        let cursor = &mut dependent_cursor[source];
+        dependents[*cursor] = destination;
+        *cursor += 1;
+    };
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                record_dependency(source, phi.dst);
+            }
+        }
+        for inst in &block.insts {
+            if let Some(destination) = inst.def() {
+                for source in inst.uses() {
+                    record_dependency(source, destination);
+                }
+            }
+        }
+    }
+
+    // None is the unreachable/not-yet-proved bottom element. Phi nodes merge
+    // the values already reachable from processed predecessors; a backedge can
+    // raise that bound later. The worklist therefore reaches the least fixed
+    // point without rescanning every instruction for every loop iteration.
+    let mut bits = vec![None::<u8>; value_count];
+    let mut queued = vec![false; value_count];
+    let mut worklist = VecDeque::with_capacity(value_count);
+    for (value, definition) in definitions.iter().enumerate() {
+        if definition.is_some() {
+            queued[value] = true;
+            worklist.push_back(VReg(value as u32));
+        }
+    }
+    while let Some(value) = worklist.pop_front() {
+        let value_index = value.0 as usize;
+        queued[value_index] = false;
+        let Some(definition) = definitions[value_index] else {
+            continue;
+        };
+        let proved = match definition {
+            Definition::Phi { block, phi } => func.blocks[block].phis[phi]
+                .sources
+                .iter()
+                .filter_map(|(_, source)| bits[source.0 as usize])
+                .max(),
+            Definition::Instruction { block, instruction } => canonical_instruction_bits(
+                func,
+                &func.blocks[block].insts[instruction],
+                &bits,
+                func.blocks[block].id,
+                instruction,
+            )?,
+        };
+        let Some(proved) = proved else {
+            continue;
+        };
+        if bits[value_index].is_some_and(|previous| previous >= proved) {
+            continue;
+        }
+        bits[value_index] = Some(proved);
+        for &dependent in
+            &dependents[dependent_offsets[value_index]..dependent_offsets[value_index + 1]]
+        {
+            let dependent = dependent.0 as usize;
+            if !queued[dependent] {
+                queued[dependent] = true;
+                worklist.push_back(VReg(dependent as u32));
+            }
+        }
+    }
+
+    Ok(bits.into_iter().map(|width| width.unwrap_or(64)).collect())
+}
+
+fn canonical_instruction_bits(
+    func: &MFunction,
+    inst: &MInst,
+    bits: &[Option<u8>],
+    block: BlockId,
+    instruction: usize,
+) -> Result<Option<u8>, ReloadRecipeError> {
+    let operand = |value: VReg| {
+        bits.get(value.0 as usize).copied().ok_or_else(|| {
+            ReloadRecipeError::new(
+                "RELOAD_RECIPE.VALUE_RANGE",
+                Some(block),
+                Some(instruction),
+                Some(value),
                 "MIR operand is outside the canonical-value side table",
             )
         })
     };
-    for block in &func.blocks {
-        for phi in &block.phis {
-            let mut width = 0u8;
-            for &(_, source) in &phi.sources {
-                width = width.max(get(source, &bits, block.id, None)?);
-            }
-            let Some(destination) = bits.get_mut(phi.dst.0 as usize) else {
-                return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.VALUE_RANGE",
-                    Some(block.id),
-                    None,
-                    Some(phi.dst),
-                    "MIR phi destination is outside the canonical-value side table",
-                ));
-            };
-            *destination = width;
-        }
-        for (instruction, inst) in block.insts.iter().enumerate() {
-            let Some(destination) = inst.def() else {
-                continue;
-            };
-            let operand = |value| get(value, &bits, block.id, Some(instruction));
-            let width = match inst {
-                MInst::Mov { src, .. } => operand(*src)?,
-                MInst::Mov32 { src, .. } => operand(*src)?.min(32),
-                MInst::LoadImm { value, .. } => significant_bits(*value),
-                MInst::Load { size, .. }
-                | MInst::LoadPtr { size, .. }
-                | MInst::LoadIndexed { size, .. }
-                | MInst::LoadPtrIndexed { size, .. } => (size.bytes() * 8) as u8,
-                MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => 32,
-                MInst::And { lhs, rhs, .. } => operand(*lhs)?.min(operand(*rhs)?),
-                MInst::And32 { lhs, rhs, .. } => operand(*lhs)?.min(operand(*rhs)?).min(32),
-                MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
-                    operand(*lhs)?.max(operand(*rhs)?)
-                }
-                MInst::Or32 { lhs, rhs, .. } | MInst::Xor32 { lhs, rhs, .. } => {
-                    operand(*lhs)?.max(operand(*rhs)?).min(32)
-                }
-                MInst::AndImm { src, imm, .. } => operand(*src)?.min(significant_bits(*imm)),
-                MInst::AndImm32 { src, imm, .. } => operand(*src)?
-                    .min(significant_bits(u64::from(*imm)))
-                    .min(32),
-                MInst::OrImm { src, imm, .. } => operand(*src)?.max(significant_bits(*imm)),
-                MInst::ShrImm { src, imm, .. } => operand(*src)?.saturating_sub(*imm),
-                MInst::ShlImm { src, imm, .. } => operand(*src)?.saturating_add(*imm).min(64),
-                MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
-                MInst::Popcnt { .. } => 7,
-                MInst::Bsr { .. } | MInst::BsrOr { .. } => 6,
-                MInst::Select {
-                    true_val,
-                    false_val,
-                    ..
-                }
-                | MInst::CmpSelect {
-                    true_val,
-                    false_val,
-                    ..
-                } => operand(*true_val)?.max(operand(*false_val)?),
-                _ => 64,
-            };
-            let Some(slot) = bits.get_mut(destination.0 as usize) else {
-                return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.VALUE_RANGE",
-                    Some(block.id),
-                    Some(instruction),
-                    Some(destination),
-                    "MIR definition is outside the canonical-value side table",
-                ));
-            };
-            *slot = width;
+    for source in inst.uses() {
+        if operand(source)?.is_none() {
+            return Ok(None);
         }
     }
-    Ok(bits)
+    let known = |value: VReg| -> Result<u8, ReloadRecipeError> {
+        Ok(operand(value)?.expect("all instruction operands were proved above"))
+    };
+    let width = match inst {
+        MInst::Mov { src, .. } => known(*src)?,
+        MInst::Mov32 { src, .. } => known(*src)?.min(32),
+        MInst::LoadImm { value, .. } => significant_bits(*value),
+        MInst::Load {
+            dst, base, size, ..
+        } => {
+            let physical = (size.bytes() * 8) as u8;
+            let logical = (*base == BaseReg::SimState)
+                .then(|| func.spill_desc(*dst))
+                .flatten()
+                .and_then(|descriptor| match descriptor.kind {
+                    crate::backend::native::mir::SpillKind::SimState { width_bits, .. }
+                    | crate::backend::native::mir::SpillKind::SimStateAlias {
+                        width_bits, ..
+                    } => u8::try_from(width_bits).ok(),
+                    crate::backend::native::mir::SpillKind::Stack
+                    | crate::backend::native::mir::SpillKind::Remat { .. } => None,
+                });
+            logical.map_or(physical, |logical| logical.min(physical))
+        }
+        MInst::LoadPtr { size, .. }
+        | MInst::LoadIndexed { size, .. }
+        | MInst::LoadPtrIndexed { size, .. } => (size.bytes() * 8) as u8,
+        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => 32,
+        MInst::And { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?),
+        MInst::And32 { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?).min(32),
+        MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => known(*lhs)?.max(known(*rhs)?),
+        MInst::Or32 { lhs, rhs, .. } | MInst::Xor32 { lhs, rhs, .. } => {
+            known(*lhs)?.max(known(*rhs)?).min(32)
+        }
+        MInst::AndImm { src, imm, .. } => known(*src)?.min(significant_bits(*imm)),
+        MInst::AndImm32 { src, imm, .. } => {
+            known(*src)?.min(significant_bits(u64::from(*imm))).min(32)
+        }
+        MInst::OrImm { src, imm, .. } => known(*src)?.max(significant_bits(*imm)),
+        MInst::ShrImm { src, imm, .. } => known(*src)?.saturating_sub(*imm),
+        MInst::ShlImm { src, imm, .. } => known(*src)?.saturating_add(*imm).min(64),
+        MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
+        MInst::Popcnt { .. } => 7,
+        MInst::Bsr { .. } | MInst::BsrOr { .. } => 6,
+        MInst::Select {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::CmpImmSelect {
+            true_val,
+            false_val,
+            ..
+        }
+        | MInst::GuardedCmpSelect {
+            true_val,
+            false_val,
+            ..
+        } => known(*true_val)?.max(known(*false_val)?),
+        _ => 64,
+    };
+    Ok(Some(width))
 }
 
 fn significant_bits(value: u64) -> u8 {
@@ -1117,10 +1573,11 @@ fn build_memory_ssa(
         let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
             let effect = memory_effect::writes(inst);
-            let affects_sim_state = effect
-                .unknown_base()
-                .is_some_and(|base| base.is_none_or(|base| base == BaseReg::SimState))
-                || effect.ranges().any(|range| range.base == BaseReg::SimState);
+            let affects_sim_state =
+                matches!(
+                    effect.unknown_memory(),
+                    Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
+                ) || effect.ranges().any(|range| range.base == BaseReg::SimState);
             let ordinal = if affects_sim_state {
                 let ordinal = write_ordinal;
                 write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
@@ -1209,10 +1666,10 @@ fn affected_variables(
     tracked_bytes: &BTreeSet<i64>,
 ) -> Result<Vec<MemoryVariable>, ReloadRecipeError> {
     let effect = memory_effect::writes(inst);
-    if effect
-        .unknown_base()
-        .is_some_and(|base| base.is_none_or(|base| base == BaseReg::SimState))
-    {
+    if matches!(
+        effect.unknown_memory(),
+        Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
+    ) {
         return Ok(vec![MemoryVariable::UnknownAlias]);
     }
     let mut affected = BTreeSet::new();
@@ -1241,7 +1698,7 @@ fn rename_memory_ssa(
     pure_recipes: &[PureRecipe],
     recipes: &mut [ReloadRecipe],
     memory_ssa: &mut MemorySsa,
-    exact_store_homes: &HashMap<(usize, usize), (VReg, StateLoad)>,
+    store_homes: &HashMap<(usize, usize), Vec<StoreHomeSpec>>,
     relevant_values: &BTreeSet<VReg>,
     requested_points: &BTreeSet<PointUse>,
     collect_all_uses: bool,
@@ -1273,7 +1730,7 @@ fn rename_memory_ssa(
     }
 
     let mut current = BTreeMap::<MemoryVariable, MemoryVersion>::new();
-    let mut current_homes = BTreeMap::<VReg, Vec<StateRecipe>>::new();
+    let mut current_homes = BTreeMap::<VReg, Vec<StoreHome>>::new();
     let requested_by_location = requested_points.iter().fold(
         BTreeMap::<(BlockId, usize), Vec<VReg>>::new(),
         |mut locations, point| {
@@ -1330,7 +1787,8 @@ fn rename_memory_ssa(
 
         let block_id = func.blocks[block].id;
         // A register phi that merges values already committed to the same
-        // exact SimState slot has the MemorySSA phi for that slot as a home.
+        // exact SimState expression has the MemorySSA phi for that slot as a
+        // home. Identity copies introduced by CSSA do not change the shape.
         // Derive this only after every forward predecessor edge has supplied
         // an independently validated recipe.  Missing backedge facts keep a
         // loop phi on its stack fallback; they are never guessed.
@@ -1339,6 +1797,7 @@ fn rename_memory_ssa(
                 continue;
             }
             let mut common_load = None::<StateLoad>;
+            let mut common_steps = None::<Vec<PureStep>>;
             let mut complete = !phi.sources.is_empty();
             for &(predecessor, source) in &phi.sources {
                 let edge = EdgeUse {
@@ -1358,15 +1817,11 @@ fn rename_memory_ssa(
                     complete = false;
                     break;
                 };
-                // Method-I CSSA gives each phi operand an edge-local Mov.
-                // A 64-bit copy is the identity in MIR, so any chain made
-                // solely from Copy64 still denotes the exact stored value.
-                // Width-changing Copy32 and all arithmetic steps must remain
-                // explicit and therefore cannot define a direct phi home.
-                if !steps.iter().all(|step| matches!(step, PureStep::Copy64)) {
-                    complete = false;
-                    break;
-                }
+                let steps = steps
+                    .iter()
+                    .copied()
+                    .filter(|step| !matches!(step, PureStep::Copy64))
+                    .collect::<Vec<_>>();
                 match common_load {
                     Some(load) if load != state.load => {
                         complete = false;
@@ -1375,24 +1830,27 @@ fn rename_memory_ssa(
                     Some(_) => {}
                     None => common_load = Some(state.load),
                 }
+                match &common_steps {
+                    Some(common) if *common != steps => {
+                        complete = false;
+                        break;
+                    }
+                    Some(_) => {}
+                    None => common_steps = Some(steps),
+                }
             }
             if complete {
                 let Some(load) = common_load else {
                     continue;
                 };
-                let Some(recipe) = recipes.get_mut(phi.dst.0 as usize) else {
-                    return Err(ReloadRecipeError::new(
-                        "RELOAD_RECIPE.VALUE_RANGE",
-                        Some(block_id),
-                        None,
-                        Some(phi.dst),
-                        "MIR phi destination is outside the VReg recipe side table",
-                    ));
-                };
-                *recipe = ReloadRecipe::StateVersion(StateRecipe {
-                    load,
-                    version: current_state_version(load, &current, memory_ssa)?,
+                current_homes.entry(phi.dst).or_default().push(StoreHome {
+                    state: StateRecipe {
+                        load,
+                        version: current_state_version(load, &current, memory_ssa)?,
+                    },
+                    steps: common_steps.unwrap_or_default(),
                 });
+                home_pushes.push(phi.dst);
             }
         }
 
@@ -1463,13 +1921,18 @@ fn rename_memory_ssa(
                 set_current(&mut current, &mut memory_changes, variable, version);
             }
 
-            if let Some(&(value, load)) = exact_store_homes.get(&(block, instruction)) {
-                let recipe = StateRecipe {
-                    load,
-                    version: current_state_version(load, &current, memory_ssa)?,
-                };
-                current_homes.entry(value).or_default().push(recipe);
-                home_pushes.push(value);
+            if let Some(homes) = store_homes.get(&(block, instruction)) {
+                for home in homes {
+                    let stored = StoreHome {
+                        state: StateRecipe {
+                            load: home.load,
+                            version: current_state_version(home.load, &current, memory_ssa)?,
+                        },
+                        steps: home.steps.clone(),
+                    };
+                    current_homes.entry(home.value).or_default().push(stored);
+                    home_pushes.push(home.value);
+                }
             }
         }
 
@@ -1718,7 +2181,7 @@ fn available_recipe(
     value: VReg,
     recipes: &[ReloadRecipe],
     pure_recipes: &[PureRecipe],
-    current_homes: &BTreeMap<VReg, Vec<StateRecipe>>,
+    current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
     current: &BTreeMap<MemoryVariable, MemoryVersion>,
     memory_ssa: &MemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
@@ -1813,7 +2276,7 @@ fn available_recipe(
 fn available_store_home(
     value: VReg,
     reverse_steps: &[PureStep],
-    current_homes: &BTreeMap<VReg, Vec<StateRecipe>>,
+    current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
     current: &BTreeMap<MemoryVariable, MemoryVersion>,
     memory_ssa: &MemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
@@ -1821,11 +2284,13 @@ fn available_store_home(
         return Ok(None);
     };
     for home in homes.iter().rev() {
-        if current_state_version(home.load, current, memory_ssa)? == home.version {
-            let mut steps = reverse_steps.to_vec();
-            steps.reverse();
+        if current_state_version(home.state.load, current, memory_ssa)? == home.state.version {
+            let mut steps = home.steps.clone();
+            let mut suffix = reverse_steps.to_vec();
+            suffix.reverse();
+            steps.extend(suffix);
             return Ok(Some(ResolvedRecipe {
-                base: ResolvedBase::State(home.clone()),
+                base: ResolvedBase::State(home.state.clone()),
                 steps,
             }));
         }
@@ -2065,6 +2530,8 @@ mod tests {
     use crate::backend::native::mir::{
         MBlock, MemoryAliasRange, PhiNode, SpillDesc, VRegAllocator,
     };
+    use crate::ir::{InstanceId, RegionedAbsoluteAddr, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
 
     fn function_with_values(count: usize) -> (MFunction, Vec<VReg>) {
         let mut vregs = VRegAllocator::new();
@@ -2163,7 +2630,7 @@ mod tests {
         });
         block.push(MInst::Return);
         func.push_block(block);
-        let (func, _, analysis) = analyze_function(func);
+        let (func, cfg, analysis) = analyze_function(func);
 
         assert_eq!(
             analysis.state_recipe(values[0]).map(|recipe| recipe.load),
@@ -2193,7 +2660,7 @@ mod tests {
             })
         );
         assert_eq!(
-            analyze_for_planning(&func)
+            analyze_for_planning(&func, &cfg)
                 .unwrap()
                 .global_materialization_costs()
                 .unwrap(),
@@ -2308,6 +2775,142 @@ mod tests {
             })
         ));
         assert!(recipe.steps.is_empty());
+    }
+
+    #[test]
+    fn planning_cost_is_exact_at_each_use_and_falls_back_after_overwrite() {
+        let (mut func, values) = function_with_values(4);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: values[0],
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Mov {
+            dst: values[1],
+            src: values[0],
+        });
+        block.push(MInst::LoadImm {
+            dst: values[2],
+            value: 9,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[2],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Mov {
+            dst: values[3],
+            src: values[0],
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+
+        let costs = analyze_for_planning(&func, &cfg).unwrap();
+
+        assert_eq!(costs.global_materialization_cost(values[0]), None);
+        assert_eq!(
+            costs.materialization_cost_at_point(PointUse {
+                block: BlockId(0),
+                instruction: 2,
+                value: values[0],
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            costs.materialization_cost_at_point(PointUse {
+                block: BlockId(0),
+                instruction: 5,
+                value: values[0],
+            }),
+            None,
+            "an overwritten MemorySSA version must use the stack fallback"
+        );
+    }
+
+    #[test]
+    fn planning_cost_preserves_exact_phi_edge_homes() {
+        let (mut func, values) = function_with_values(5);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: values[0],
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: values[1],
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[1],
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[2],
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: values[3],
+            sources: vec![(BlockId(1), values[1]), (BlockId(2), values[2])],
+        });
+        join.push(MInst::Mov {
+            dst: values[4],
+            src: values[3],
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+
+        let costs = analyze_for_planning(&func, &cfg).unwrap();
+
+        assert_eq!(
+            costs.materialization_cost_at_point(PointUse {
+                block: BlockId(3),
+                instruction: 0,
+                value: values[3],
+            }),
+            Some(1)
+        );
+        for (predecessor, value) in [(BlockId(1), values[1]), (BlockId(2), values[2])] {
+            assert_eq!(
+                costs.materialization_cost_on_edge(EdgeUse {
+                    predecessor,
+                    successor: BlockId(3),
+                    value,
+                }),
+                Some(1)
+            );
+        }
     }
 
     #[test]
@@ -2544,6 +3147,214 @@ mod tests {
             })
         ));
         assert!(recipe.steps.is_empty());
+    }
+
+    #[test]
+    fn logical_state_load_width_proves_a_narrow_store_phi_home() {
+        let (mut func, values) = function_with_values(5);
+        let address = RegionedAbsoluteAddr {
+            region: STABLE_REGION,
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        func.spill_descs[values[1].0 as usize] = SpillDesc::sim_state(address, 0, 5, false);
+        func.spill_descs[values[2].0 as usize] = SpillDesc::sim_state(address, 0, 5, false);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: values[0],
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: values[1],
+            base: BaseReg::SimState,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[1],
+            size: OpSize::S8,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::SimState,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[2],
+            size: OpSize::S8,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: values[3],
+            sources: vec![(BlockId(1), values[1]), (BlockId(2), values[2])],
+        });
+        join.push(MInst::Mov {
+            dst: values[4],
+            src: values[3],
+        });
+        join.push(MInst::Return);
+
+        // Keep the CFG valid but place the phi before its source definitions
+        // in the block vector. A single linear width scan cannot prove it.
+        func.blocks = vec![entry, join, left, right];
+        let bits = canonical_value_bits(&func).unwrap();
+        assert_eq!(bits[values[3].0 as usize], 5);
+
+        let (_, _, analysis) = analyze_function(func);
+        let recipe = analysis
+            .resolved_recipe_at_point(PointUse {
+                block: BlockId(3),
+                instruction: 0,
+                value: values[3],
+            })
+            .unwrap();
+        assert!(matches!(
+            &recipe.base,
+            ResolvedBase::State(StateRecipe {
+                load: StateLoad {
+                    offset: 40,
+                    size: OpSize::S8,
+                },
+                ..
+            })
+        ));
+        assert!(recipe.steps.is_empty());
+    }
+
+    #[test]
+    fn partial_rmw_store_phi_reconstructs_inserted_value_from_state() {
+        let (mut func, values) = function_with_values(11);
+        let low_mask = (1u64 << 52) - 1;
+        let high_mask = !low_mask;
+        func.spill_descs[values[4].0 as usize] =
+            SpillDesc::transient().with_state_insert(values[1], 0, 52);
+        func.spill_descs[values[8].0 as usize] =
+            SpillDesc::transient().with_state_insert(values[5], 0, 52);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: values[0],
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: values[1],
+            value: 0x123,
+        });
+        left.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        left.push(MInst::AndImm {
+            dst: values[3],
+            src: values[2],
+            imm: high_mask,
+        });
+        left.push(MInst::Or {
+            dst: values[4],
+            lhs: values[3],
+            rhs: values[1],
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[4],
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: values[5],
+            value: 0x456,
+        });
+        right.push(MInst::Load {
+            dst: values[6],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        right.push(MInst::AndImm {
+            dst: values[7],
+            src: values[6],
+            imm: high_mask,
+        });
+        right.push(MInst::Or {
+            dst: values[8],
+            lhs: values[7],
+            rhs: values[5],
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[8],
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: values[9],
+            sources: vec![(BlockId(1), values[1]), (BlockId(2), values[5])],
+        });
+        join.push(MInst::Mov {
+            dst: values[10],
+            src: values[9],
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+
+        let (_, _, analysis) = analyze_function(func);
+        let recipe = analysis
+            .resolved_recipe_at_point(PointUse {
+                block: BlockId(3),
+                instruction: 0,
+                value: values[9],
+            })
+            .unwrap();
+        assert!(matches!(
+            &recipe.base,
+            ResolvedBase::State(StateRecipe {
+                load: StateLoad {
+                    offset: 40,
+                    size: OpSize::S64,
+                },
+                ..
+            })
+        ));
+        assert_eq!(
+            recipe.steps,
+            vec![
+                PureStep::ShlImm64 { immediate: 12 },
+                PureStep::ShrImm64 { immediate: 12 },
+            ]
+        );
     }
 
     #[test]
@@ -2821,6 +3632,45 @@ mod tests {
         });
         block.push(MInst::Mov {
             dst: values[2],
+            src: values[0],
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let (_, _, analysis) = analyze_function(func);
+
+        assert!(analysis.state_valid_at_point(PointUse {
+            block: BlockId(0),
+            instruction: 4,
+            value: values[0],
+        }));
+    }
+
+    #[test]
+    fn indirect_runtime_store_preserves_direct_state_recipe() {
+        let (mut func, values) = function_with_values(4);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: values[0],
+            base: BaseReg::SimState,
+            offset: 16,
+            size: OpSize::S32,
+        });
+        block.push(MInst::LoadImm {
+            dst: values[1],
+            value: 0,
+        });
+        block.push(MInst::LoadImm {
+            dst: values[2],
+            value: 7,
+        });
+        block.push(MInst::StorePtr {
+            ptr: values[1],
+            offset: 0,
+            src: values[2],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Mov {
+            dst: values[3],
             src: values[0],
         });
         block.push(MInst::Return);

@@ -26,14 +26,22 @@ impl MemoryRange {
     }
 }
 
-/// `unknown == Some(None)` aliases every base; `Some(Some(base))` aliases only
-/// that base. Static effects contain at most the three ranges required by a
-/// sparse pseudo and allocate no temporary vector while scanning MIR.
+/// Memory domain for a write whose concrete byte range is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnknownMemory {
+    /// May alias the whole direct-addressed base.
+    Direct(BaseReg),
+    /// Runtime-owned pointer memory, disjoint from SimState and StackFrame.
+    Indirect,
+}
+
+/// Static effects contain at most the three ranges required by a sparse
+/// pseudo and allocate no temporary vector while scanning MIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemoryWrites {
     ranges: [MemoryRange; MAX_STATIC_RANGES],
     range_count: u8,
-    unknown: Option<Option<BaseReg>>,
+    unknown: Option<UnknownMemory>,
 }
 
 impl MemoryWrites {
@@ -43,9 +51,9 @@ impl MemoryWrites {
         unknown: None,
     };
 
-    fn unknown(base: Option<BaseReg>) -> Self {
+    fn unknown(memory: UnknownMemory) -> Self {
         Self {
-            unknown: Some(base),
+            unknown: Some(memory),
             ..Self::NONE
         }
     }
@@ -64,7 +72,7 @@ impl MemoryWrites {
         self.ranges[..usize::from(self.range_count)].iter().copied()
     }
 
-    pub(crate) fn unknown_base(self) -> Option<Option<BaseReg>> {
+    pub(crate) fn unknown_memory(self) -> Option<UnknownMemory> {
         self.unknown
     }
 
@@ -147,34 +155,36 @@ pub(crate) fn writes(inst: &MInst) -> MemoryWrites {
             base, offset, size, ..
         } => checked_range(*base, *offset, size.bytes() as usize)
             .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(Some(*base))),
+            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(*base))),
         MInst::MemCopy {
             dst_offset,
             byte_len,
             ..
         } => checked_range(BaseReg::SimState, *dst_offset, *byte_len)
             .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(Some(BaseReg::SimState))),
+            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         MInst::SparseCommit { .. } => sparse_commit_ranges(inst)
             .map(|ranges| MemoryWrites::static_ranges(&ranges))
-            .unwrap_or_else(|| MemoryWrites::unknown(Some(BaseReg::SimState))),
+            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         MInst::SparseMarkActive { .. } => sparse_mark_ranges(inst)
             .map(|ranges| MemoryWrites::static_ranges(&ranges))
-            .unwrap_or_else(|| MemoryWrites::unknown(Some(BaseReg::SimState))),
+            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         // Descriptor rows name several sparse regions which are not carried by
         // this MIR instruction. Keep this one conservative until the table is
         // part of the shared effect model.
-        MInst::SparseCommitWorklist { .. } => MemoryWrites::unknown(Some(BaseReg::SimState)),
+        MInst::SparseCommitWorklist { .. } => {
+            MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))
+        }
         MInst::StoreIndexed {
             base, alias_range, ..
         } => alias_range
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
             .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(Some(*base))),
+            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(*base))),
         MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StorePtrIndexed { .. }
-        | MInst::ReleaseStorePtrIndexed { .. } => MemoryWrites::unknown(None),
+        | MInst::ReleaseStorePtrIndexed { .. } => MemoryWrites::unknown(UnknownMemory::Indirect),
         _ => MemoryWrites::NONE,
     }
 }
@@ -196,7 +206,7 @@ mod tests {
         };
         let effect = writes(&inst);
 
-        assert_eq!(effect.unknown_base(), None);
+        assert_eq!(effect.unknown_memory(), None);
         assert_eq!(
             effect.ranges().collect::<Vec<_>>(),
             vec![
@@ -273,6 +283,21 @@ mod tests {
                 byte_len: 64,
             }]
         );
-        assert_eq!(writes(&inst).unknown_base(), None);
+        assert_eq!(writes(&inst).unknown_memory(), None);
+    }
+
+    #[test]
+    fn pointer_store_is_an_indirect_memory_effect() {
+        let inst = MInst::StorePtr {
+            ptr: VReg(0),
+            offset: 0,
+            src: VReg(1),
+            size: OpSize::S64,
+        };
+
+        let effect = writes(&inst);
+        assert!(effect.has_effect());
+        assert_eq!(effect.unknown_memory(), Some(UnknownMemory::Indirect));
+        assert!(effect.ranges().next().is_none());
     }
 }

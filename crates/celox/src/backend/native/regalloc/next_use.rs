@@ -514,6 +514,22 @@ impl NextUseAnalysis {
             .unwrap_or(NextUseDistance::Dead)
     }
 
+    /// Return the first ordinary MIR use in this block at or after
+    /// `instruction`.  Cross-block next uses deliberately return `None`: a
+    /// path-specific reload cost is valid only when its concrete use point is
+    /// known.
+    pub(super) fn next_local_use(
+        &self,
+        block: usize,
+        instruction: usize,
+        value: VReg,
+    ) -> Option<usize> {
+        let positions = self.use_positions.get(block)?.get(&value)?;
+        positions
+            .get(positions.partition_point(|position| *position < instruction))
+            .copied()
+    }
+
     pub(super) fn region_at_entry(&self, block: usize) -> Option<usize> {
         self.entry_region[block]
     }

@@ -341,7 +341,7 @@ fn run_regalloc_in_place(
         );
     }
     let reload_recipe_start = timing.then(crate::timing::now);
-    let planning_recipes = reload::analyze_for_planning(func)
+    let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
         .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
     if let Some(start) = reload_recipe_start {
         eprintln!(
