@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, MInst, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, MInst, PhiNode, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -258,12 +258,22 @@ pub(super) fn color_ssa(
             }
         }
 
-        // Phi/Perm results are simultaneous definitions at block entry.  The
-        // local matching is installed first, then ordinary phi definitions use
-        // the remaining live colors.
+        // Phi/Perm results are simultaneous definitions at block entry. Dead
+        // ordinary phis need a complete assignment for verification but do not
+        // interfere with any live value, so color them before installing the
+        // live bundle. Perm rows are already matched as one constrained bundle.
         for phi in &block.phis {
             let is_perm = perm_rows.iter().any(|row| row.destination == phi.dst);
-            if !is_perm {
+            let is_live = is_live_after_entry(phi.dst, &last_use, live_out);
+            if is_perm && !is_live {
+                return Err(ColorError::at_value(
+                    "color.dead-perm-row",
+                    block.id,
+                    None,
+                    phi.dst,
+                ));
+            }
+            if !is_perm && !is_live {
                 let register = choose_color(
                     block.id,
                     None,
@@ -285,19 +295,48 @@ pub(super) fn color_ssa(
                     "color.phi-out-of-range",
                 )?;
             }
-            if is_live_after_entry(phi.dst, &last_use, live_out) {
-                let register = color_of(&colors, phi.dst).ok_or_else(|| {
-                    ColorError::at_value("color.phi-without-color", block.id, None, phi.dst)
-                })?;
-                active.add(block.id, None, phi.dst, register)?;
-            } else if is_perm {
-                return Err(ColorError::at_value(
-                    "color.dead-perm-row",
-                    block.id,
-                    None,
-                    phi.dst,
-                ));
+        }
+
+        for phi in &block.phis {
+            if !is_live_after_entry(phi.dst, &last_use, live_out)
+                || !perm_rows.iter().any(|row| row.destination == phi.dst)
+            {
+                continue;
             }
+            let register = color_of(&colors, phi.dst).ok_or_else(|| {
+                ColorError::at_value("color.phi-without-color", block.id, None, phi.dst)
+            })?;
+            active.add(block.id, None, phi.dst, register)?;
+        }
+
+        let ordinary_live_phis = block
+            .phis
+            .iter()
+            .filter(|phi| {
+                is_live_after_entry(phi.dst, &last_use, live_out)
+                    && !perm_rows.iter().any(|row| row.destination == phi.dst)
+            })
+            .collect::<Vec<_>>();
+        let ordinary_live_colors = choose_phi_bundle_colors(
+            block.id,
+            &ordinary_live_phis,
+            registers,
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &active,
+        )?;
+        for (phi, register) in ordinary_live_phis.into_iter().zip(ordinary_live_colors) {
+            set_color(
+                &mut colors,
+                block.id,
+                None,
+                phi.dst,
+                register,
+                "color.phi-out-of-range",
+            )?;
+            active.add(block.id, None, phi.dst, register)?;
         }
 
         for (instruction, inst) in block.insts.iter().enumerate() {
@@ -643,6 +682,151 @@ fn choose_color(
     ))
 }
 
+/// Color the simultaneously-live ordinary phi definitions as one bundle.
+///
+/// Greedy row-by-row coloring can consume the only incoming source color of a
+/// later phi even when the earlier row has an equally good alternative.  The
+/// resulting avoidable edge copies are especially expensive when the join
+/// dominates a large switch.  With at most the target's physical register
+/// count of live rows, an exact subset dynamic program is small and makes the
+/// same standard coalescing decision for the complete bundle: maximize the
+/// number of already-colored incoming sources which become identity copies.
+/// Register order is the deterministic lexicographic tie-breaker.
+#[allow(clippy::too_many_arguments)]
+fn choose_phi_bundle_colors(
+    block: BlockId,
+    phis: &[&PhiNode],
+    registers: &[PhysReg],
+    required: &[Option<PhysReg>],
+    forbidden: &[ColorMask],
+    preferences: &HashMap<VReg, Vec<VReg>>,
+    colors: &[Option<PhysReg>],
+    active: &ActiveColors,
+) -> Result<Vec<PhysReg>, ColorError> {
+    if phis.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = Vec::<Vec<(usize, i64)>>::with_capacity(phis.len());
+    for phi in phis {
+        let Some(&required) = required.get(phi.dst.0 as usize) else {
+            return Err(ColorError::at_value(
+                "color.value-out-of-range",
+                block,
+                None,
+                phi.dst,
+            ));
+        };
+        let Some(&forbidden) = forbidden.get(phi.dst.0 as usize) else {
+            return Err(ColorError::at_value(
+                "color.value-out-of-range",
+                block,
+                None,
+                phi.dst,
+            ));
+        };
+        let mut row = Vec::new();
+        for (register_index, &register) in registers.iter().enumerate() {
+            if active.contains(register)
+                || forbidden.contains(register)
+                || required.is_some_and(|required| required != register)
+            {
+                continue;
+            }
+            let affinity = preferences.get(&phi.dst).map_or(0, |neighbors| {
+                neighbors
+                    .iter()
+                    .filter(|&&neighbor| color_of(colors, neighbor) == Some(register))
+                    .count() as i64
+            });
+            row.push((register_index, affinity));
+        }
+        if row.is_empty() {
+            return Err(ColorError::at_value(
+                "color.no-available-register",
+                block,
+                None,
+                phi.dst,
+            ));
+        }
+        candidates.push(row);
+    }
+
+    let state_count = 1usize << registers.len();
+    let mut memo = vec![i64::MIN; phis.len() * state_count];
+    let optimum = best_phi_bundle_score(0, 0, &candidates, state_count, &mut memo);
+    if optimum < 0 {
+        return Err(ColorError::at_value(
+            "color.no-available-register",
+            block,
+            None,
+            phis[0].dst,
+        ));
+    }
+
+    let mut result = Vec::with_capacity(phis.len());
+    let mut row = 0usize;
+    let mut used = 0usize;
+    let mut remaining = optimum;
+    while row < phis.len() {
+        let mut selected = None;
+        for &(register_index, affinity) in &candidates[row] {
+            let bit = 1usize << register_index;
+            if used & bit != 0 {
+                continue;
+            }
+            let suffix =
+                best_phi_bundle_score(row + 1, used | bit, &candidates, state_count, &mut memo);
+            if suffix >= 0 && affinity + suffix == remaining {
+                selected = Some((register_index, affinity));
+                break;
+            }
+        }
+        let Some((register_index, affinity)) = selected else {
+            return Err(ColorError::at_value(
+                "color.phi-bundle-reconstruction",
+                block,
+                None,
+                phis[row].dst,
+            ));
+        };
+        result.push(registers[register_index]);
+        used |= 1usize << register_index;
+        remaining -= affinity;
+        row += 1;
+    }
+    Ok(result)
+}
+
+fn best_phi_bundle_score(
+    row: usize,
+    used: usize,
+    candidates: &[Vec<(usize, i64)>],
+    state_count: usize,
+    memo: &mut [i64],
+) -> i64 {
+    if row == candidates.len() {
+        return 0;
+    }
+    let slot = row * state_count + used;
+    if memo[slot] != i64::MIN {
+        return memo[slot];
+    }
+    let mut best = -1i64;
+    for &(register, affinity) in &candidates[row] {
+        let bit = 1usize << register;
+        if used & bit != 0 {
+            continue;
+        }
+        let suffix = best_phi_bundle_score(row + 1, used | bit, candidates, state_count, memo);
+        if suffix >= 0 {
+            best = best.max(affinity + suffix);
+        }
+    }
+    memo[slot] = best;
+    best
+}
+
 fn is_live_after_entry(
     value: VReg,
     last_use: &HashMap<VReg, usize>,
@@ -879,6 +1063,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(color, PhysReg::R14);
+    }
+
+    #[test]
+    fn phi_bundle_matching_avoids_a_greedy_copy() {
+        let first_rax = VReg(0);
+        let first_rdx = VReg(1);
+        let second_rax = VReg(2);
+        let first_destination = VReg(3);
+        let second_destination = VReg(4);
+        let first = PhiNode {
+            dst: first_destination,
+            sources: vec![(BlockId(0), first_rax), (BlockId(1), first_rdx)],
+        };
+        let second = PhiNode {
+            dst: second_destination,
+            sources: vec![(BlockId(0), second_rax)],
+        };
+        let required = vec![None; 5];
+        let forbidden = vec![ColorMask::empty(); 5];
+        let preferences = HashMap::from([
+            (first_destination, vec![first_rax, first_rdx]),
+            (second_destination, vec![second_rax]),
+        ]);
+        let colors = vec![
+            Some(PhysReg::RAX),
+            Some(PhysReg::RDX),
+            Some(PhysReg::RAX),
+            None,
+            None,
+        ];
+
+        let result = choose_phi_bundle_colors(
+            BlockId(2),
+            &[&first, &second],
+            &[PhysReg::RAX, PhysReg::RDX],
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &ActiveColors::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![PhysReg::RDX, PhysReg::RAX]);
     }
 
     #[test]
