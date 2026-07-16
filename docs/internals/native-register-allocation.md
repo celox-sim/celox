@@ -479,8 +479,12 @@ The current non-LTO qualification passes all 715 library tests, 60 non-ignored
 native-testbench tests, and 9 native/Cranelift/Wasm counter tests. Two clean
 full Heliodor runs reached normal power-down at the exact Veryl reference
 `cy=9ae070 x3=aa pass=1`, taking `198.235 s` and `184.652 s`. The paired
-Veryl-CC run took `76.446 s`, so the fixed gate's no-slower performance target
-remains open even though full native execution is now correct and complete.
+Veryl-CC run took `76.446 s`. The subsequent fixed gate built Celox commit
+`e917489e` with release/LTO and measured `178.223 s`, versus `68.409 s` for
+Veryl-CC. Both exact markers and semantic checks passed, but the remaining
+`2.605x` gap failed the gate's no-slower performance condition. Full native
+execution is therefore correct and complete while the throughput target
+remains open.
 The earlier Celox `cy=9ab960` completions were invalidated by an ISel
 wide-to-narrow canonicalization bug, not by the allocator.
 

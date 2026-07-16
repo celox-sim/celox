@@ -122,6 +122,12 @@ time must not exceed the corresponding Veryl wall time. The Celox runner is
 built once with the locked release/LTO profile for this final gate; iterative
 development runs use `heliodor-dev` without LTO.
 
+The fixed gate on clean Celox commit `e917489e` passed both semantic checks and
+the exact `cy=9ae070 x3=aa pass=1` markers. Veryl-CC took `68.409 s` and Celox
+took `178.223 s`; the resulting `2.605x` gap failed only the performance
+condition. Branch-aware placement is therefore retained as tested compiler
+infrastructure, but it has not closed the end-to-end throughput target.
+
 ## Current boundary
 
 Binary reverse if-conversion remains only the leaf mechanism. The production

@@ -63,10 +63,14 @@ marker を伴わない process exit 0 は失敗です。`--kill-after` を持つ
 `timeout` と Python 3 が必要です。
 
 直近の反復用非 LTO 比較では、同じ `cy=9ae070` の workload が
-Veryl-CC で `76.446 s`、Celox で `184.652 s` でした。Celox は full Linux boot
-には成功していますが、Veryl 以下という gate の性能条件はまだ満たしていません。
-固定 gate は最終的な release/LTO 比較を行い、通常の開発反復では非 LTO の
-`heliodor-dev` profile を使います。
+Veryl-CC で `76.446 s`、Celox で `184.652 s` でした。その後、clean な Celox
+commit `e917489e` から fresh な locked release/LTO runner を build して固定 gate
+を実行しました。Veryl-CC は `68.409 s`、Celox は process 時間 `178.223 s`
+（runner 内部報告 `178.019 s`）でした。両者の semantic check は成功し、両ログに
+`cy=9ae070 x3=aa pass=1` がちょうど 1 件ありましたが、Celox は `2.605x`
+遅いため、gate は Veryl 以下という性能条件だけに失敗しました。成果物は
+`target/heliodor/results/gate_20260716T010312Z.tcVUZd` にあります。通常の開発反復
+では引き続き非 LTO の `heliodor-dev` profile を使います。
 
 ## テスト
 

@@ -762,12 +762,21 @@ the goal remains open.
 Progress:
 
 - correctness repair and direct regression: complete in `138f46eb`;
-- common non-LTO test set: complete;
-- first clean pinned Linux run: complete at `198.235 s` and `cy=9ae070`;
-- shell fixtures, second clean Linux run, final same-input comparison, and
-  status-document updates: pending.
+- common non-LTO test set: complete with 715/715 library tests, 60/60
+  native-testbench tests, and 9/9 native/Cranelift/Wasm counter tests;
+- Heliodor result and acceptance-gate shell fixtures: complete;
+- two clean non-LTO Celox Linux runs: complete at `198.235 s` and `184.652 s`,
+  both with `cy=9ae070 x3=aa pass=1`;
+- paired non-LTO Veryl-CC run: complete at `76.446 s` with the same marker;
+- final fixed release/LTO gate on clean Celox commit `e917489e`: complete.
+  Veryl-CC took `68.409 s` and Celox took `178.223 s` process time
+  (`178.019 s` runner-reported), and both reached normal power-down with the
+  exact `cy=9ae070 x3=aa pass=1` marker. Semantic qualification passed, but
+  Celox remained `2.605x` slower, so the gate failed only its no-slower-than-
+  Veryl performance condition; and
+- status-document updates: complete.
 
-Status: **in progress**.
+Status: **qualification complete; throughput target remains open**.
 
 ## Execution record
 
@@ -784,7 +793,7 @@ Status: **in progress**.
 | 4c2b1--4d | `8e1ec0b9` | branchify 41/41 | lib 714/714; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.378 s | complete |
 | 4c2b2 trial | rejected (no commit) | branchify 46/46 | lib 719/719; native 60/60; counter 9/9 | pass twice: `cy=9ab960 x3=aa pass=1` | 184.120 s; 190.775 s | reverted |
 | semantic repair | `138f46eb` | wide shift to one-bit Mux regression; prior SAR regression | lib 715/715; native 60/60; counter 9/9 | pass once: `cy=9ae070 x3=aa pass=1` | 198.235 s | complete |
-| 5 | pending | repair regression passed | common non-LTO set passed | first of two runs passed at `cy=9ae070` | 198.235 s | in progress |
+| 5 | `138f46eb`--`e917489e` | repair regression; Heliodor result/gate fixtures | lib 715/715; native 60/60; counter 9/9 | non-LTO Celox twice and final release/LTO pair passed at `cy=9ae070 x3=aa pass=1` | non-LTO: Veryl 76.446 s, Celox 184.652 s; release/LTO gate: Veryl 68.409 s, Celox 178.223 s | qualification complete; performance failed (2.605x) |
 
 ## Related design records
 

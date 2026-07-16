@@ -60,12 +60,15 @@ when the compiled binary becomes available:
 <https://veryl-lang.org/blog/veryl-simulator-performance/>.
 
 The corrected end-to-end qualification on the pinned `test_soc_linux_boot`
-source now gives a concrete baseline:
+source now gives concrete iterative and final-gate baselines:
 
-- Veryl-CC completed the `cy=0x009ae070` workload in `76.446 s`.
-- Non-LTO Celox completed the same cycle marker in `184.652 s`; a separate
-  clean run completed in `198.235 s`. The paired result leaves Celox about
-  2.42x slower, rather than the earlier unbounded/partial-run estimate.
+- In the paired iterative non-LTO run, Veryl-CC completed the
+  `cy=0x009ae070` workload in `76.446 s` and Celox completed it in `184.652 s`;
+  a separate clean Celox run completed in `198.235 s`.
+- The fixed final gate built Celox commit `e917489e` once with the locked
+  release/LTO profile. Veryl-CC took `68.409 s` and Celox took `178.223 s`.
+  Both semantic checks and exact architectural markers passed, but Celox was
+  `2.605x` slower, so only the gate's performance condition failed.
 - Earlier Celox runs powered down at `cy=0x009ab960`. Those were not equivalent
   work: a wide-to-narrow ISel error allowed upper garbage bits to affect a
   one-bit Mux condition. Commit `138f46eb` physically canonicalizes scalar
@@ -191,7 +194,7 @@ Mux count is not sufficient when the rewrite lengthens live-ins or worsens
 native layout. The detailed slice-by-slice evidence is recorded in
 [Native throughput execution plan](./native-throughput-execution-plan.md).
 
-The remaining 2.42x end-to-end gap is therefore measured after control-region
+The remaining 2.605x release/LTO end-to-end gap is therefore measured after control-region
 and allocator work, not evidence that the old leaf-only `BranchifyMux` pass
 should simply be enabled more aggressively.
 

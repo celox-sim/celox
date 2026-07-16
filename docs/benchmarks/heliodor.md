@@ -68,10 +68,15 @@ markers is a failure. GNU `timeout` with `--kill-after` and Python 3 are require
 
 The latest iterative non-LTO comparison completed the same
 `cy=9ae070` workload in `76.446 s` with Veryl-CC and `184.652 s` with Celox.
-Celox therefore has a successful full Linux-boot result, but still does not
-meet the gate's no-slower-than-Veryl performance condition. The fixed gate
-performs the final release/LTO comparison; routine development runs use the
-non-LTO `heliodor-dev` profile.
+The final fixed gate was then run from clean Celox commit `e917489e` with its
+fresh locked release/LTO runner. Veryl-CC took `68.409 s`; Celox took
+`178.223 s` process time and reported `178.019 s` internally. Both semantic
+checks passed and both logs contained exactly one
+`cy=9ae070 x3=aa pass=1` marker, but Celox was `2.605x` slower. The gate
+therefore failed only its no-slower-than-Veryl performance condition. Its
+artifacts are in
+`target/heliodor/results/gate_20260716T010312Z.tcVUZd`. Routine development
+runs continue to use the non-LTO `heliodor-dev` profile.
 
 ## Tests
 
