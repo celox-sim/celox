@@ -29,6 +29,8 @@ readonly GATE_HELIODOR_REF=7ad830fc0f8506c934b61a853ce2eadfa5926b82
 readonly GATE_VERYL_VERSION=0.20.2
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=300
+readonly GATE_EXPECTED_CYCLE=9ae070
+readonly GATE_EXPECTED_X3=aa
 
 # Populated only while `gate` owns detached Heliodor worktrees. Keeping these
 # paths global lets the direct-execution EXIT trap clean up an interrupted gate.
@@ -342,6 +344,40 @@ validate_veryl_completion() {
         || completion_count != 1 || exact_completion_count != 1)); then
         echo "error: Veryl gate log must report exactly $expected_test and 1 passed, 0 failed" >&2
         echo "success records=$success_count exact=$exact_success_count; completion records=$completion_count exact=$exact_completion_count" >&2
+        return 1
+    fi
+}
+
+validate_gate_arch_completion() {
+    local log="$1"
+    local runner="$2"
+    local line cycle x3 pass marker_count=0 exact_count=0
+    local pattern='^v4 SoC linux boot smoke: cy=([0-9A-Fa-f]+) x3=([0-9A-Fa-f]+) pass=([01])$'
+
+    if [[ ! -f "$log" ]]; then
+        echo "error: $runner gate log does not exist: $log" >&2
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        line="${line#>}"
+        if [[ "$line" != *"v4 SoC linux boot smoke:"* ]]; then
+            continue
+        fi
+        marker_count=$((marker_count + 1))
+        if [[ "$line" =~ $pattern ]]; then
+            cycle="${BASH_REMATCH[1],,}"
+            x3="${BASH_REMATCH[2],,}"
+            pass="${BASH_REMATCH[3]}"
+            if [[ "$cycle" =~ ^0*${GATE_EXPECTED_CYCLE}$ \
+                && "$x3" =~ ^0*${GATE_EXPECTED_X3}$ && "$pass" == 1 ]]; then
+                exact_count=$((exact_count + 1))
+            fi
+        fi
+    done <"$log"
+    if ((marker_count != 1 || exact_count != 1)); then
+        echo "error: $runner gate log must contain exactly cy=$GATE_EXPECTED_CYCLE x3=$GATE_EXPECTED_X3 pass=1" >&2
+        echo "records=$marker_count exact=$exact_count" >&2
         return 1
     fi
 }
@@ -1161,10 +1197,12 @@ validate_gate_results() {
                     return 1
                 }
                 validate_veryl_completion "$log" "$GATE_TEST" || return "$?"
+                validate_gate_arch_completion "$log" veryl-cc || return "$?"
                 GATE_VERYL_ELAPSED_NS="$process_elapsed"
                 ;;
             celox)
                 validate_gate_celox_config "$log" "$GATE_TEST" || return "$?"
+                validate_gate_arch_completion "$log" celox || return "$?"
                 classify_celox_result "$log" "$GATE_TEST" "$exit_status" 0 || {
                     echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
                     return 1
