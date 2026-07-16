@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::backend::native::mir::{
-    BaseReg, BlockId, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
+    BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
 };
 
 use super::cfg::NormalizedCfg;
@@ -17,6 +17,7 @@ use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillP
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
     pub recipe_reloads: Vec<ExpectedMaterializedReload>,
+    pub shared_reload_blocks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +67,47 @@ struct PreparedRecipe {
     instructions: Vec<MInst>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ReloadMaterialization {
+    Recipe(ResolvedRecipe),
+    Immediate(u64),
+    Stack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeReloadShape {
+    value: LogicalValue,
+    home: SpillHome,
+    materialization: ReloadMaterialization,
+}
+
+struct MaterializedReload {
+    shape: EdgeReloadShape,
+    final_definition: VReg,
+    definitions: Vec<VReg>,
+    instruction_count: usize,
+}
+
+struct EdgeReloadBundle {
+    predecessor: usize,
+    successor: usize,
+    shape: Vec<EdgeReloadShape>,
+    final_definitions: Vec<VReg>,
+    definitions: Vec<VReg>,
+    instruction_count: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct EdgeReloadGroupKey {
+    successor: usize,
+    shape: Vec<EdgeReloadShape>,
+}
+
+struct SharedReloadPlan {
+    bundles: Vec<usize>,
+    phi_replacements: Vec<VReg>,
+}
+
 pub(super) fn reconstruct(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
@@ -82,6 +124,7 @@ pub(super) fn reconstruct(
         .collect::<Vec<_>>();
     let mut insertions = HashMap::<(usize, usize), Vec<MaterializedOp>>::new();
     let mut reload_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
+    let mut edge_reload_bundles = Vec::<EdgeReloadBundle>::new();
     let spilled_phis = plan
         .point_ops
         .iter()
@@ -144,7 +187,7 @@ pub(super) fn reconstruct(
             ));
         };
         let recipe = reload_recipe_at_point(reload_recipes, point, operation, &recipe_homes)?;
-        materialize_operation(
+        let _ = materialize_operation(
             func,
             plan,
             block,
@@ -166,6 +209,7 @@ pub(super) fn reconstruct(
                 format!("edge operation predecessor index {predecessor} is outside function"),
             ));
         };
+        let predecessor_id = predecessor_block.id;
         let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
             return Err(ReconstructError::new(
                 "RECONSTRUCT.EDGE_PREDECESSOR_TERMINATED",
@@ -175,6 +219,15 @@ pub(super) fn reconstruct(
                 "edge operation predecessor block is empty",
             ));
         };
+        let mut bundle = EdgeReloadBundle {
+            predecessor,
+            successor,
+            shape: Vec::new(),
+            final_definitions: Vec::new(),
+            definitions: Vec::new(),
+            instruction_count: 0,
+        };
+        let mut reloads_only = true;
         for &operation in operations {
             let recipe = reload_recipe_on_edge(
                 func,
@@ -185,7 +238,7 @@ pub(super) fn reconstruct(
                 operation,
                 &recipe_homes,
             )?;
-            materialize_operation(
+            let materialized = materialize_operation(
                 func,
                 plan,
                 predecessor,
@@ -196,6 +249,28 @@ pub(super) fn reconstruct(
                 &mut reload_blocks,
                 recipe,
             )?;
+            let Some(materialized) = materialized else {
+                reloads_only = false;
+                continue;
+            };
+            bundle.shape.push(materialized.shape);
+            bundle.final_definitions.push(materialized.final_definition);
+            bundle.definitions.extend(materialized.definitions);
+            bundle.instruction_count = bundle
+                .instruction_count
+                .checked_add(materialized.instruction_count)
+                .ok_or_else(|| {
+                    ReconstructError::new(
+                        "RECONSTRUCT.EDGE_RELOAD_SIZE_RANGE",
+                        Some(predecessor_id),
+                        None,
+                        Vec::new(),
+                        "materialized edge-reload bundle exceeds addressable MIR size",
+                    )
+                })?;
+        }
+        if reloads_only && !bundle.shape.is_empty() {
+            edge_reload_bundles.push(bundle);
         }
     }
 
@@ -283,6 +358,8 @@ pub(super) fn reconstruct(
         &recipe_homes,
         &mut recipe_reloads,
     )?;
+    let shared_reload_blocks =
+        share_identical_edge_reload_bundles(func, &edge_reload_bundles, &mut recipe_reloads)?;
     eliminate_dead_definitions(func, &mut recipe_reloads);
 
     let frame_size = u32::try_from(stack_offsets.len())
@@ -300,6 +377,7 @@ pub(super) fn reconstruct(
     Ok(ReconstructionResult {
         frame_size,
         recipe_reloads,
+        shared_reload_blocks,
     })
 }
 
@@ -683,26 +761,53 @@ fn materialize_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     recipe: Option<ResolvedRecipe>,
-) -> Result<(), ReconstructError> {
-    let operation = match operation {
+) -> Result<Option<MaterializedReload>, ReconstructError> {
+    let (operation, reload) = match operation {
         PlannedOp::Spill { value, home } | PlannedOp::SpillPhi { value, home } => {
-            MaterializedOp::Spill { value, home }
+            (MaterializedOp::Spill { value, home }, None)
         }
         PlannedOp::Reload { value, home } => {
-            let (fresh, recipe) = if let Some(recipe) = recipe {
+            let materialization = recipe.as_ref().map_or_else(
+                || {
+                    rematerialized_logical_value(func, value).map_or(
+                        ReloadMaterialization::Stack,
+                        ReloadMaterialization::Immediate,
+                    )
+                },
+                |recipe| ReloadMaterialization::Recipe(recipe.clone()),
+            );
+            let (fresh, recipe, definitions, instruction_count) = if let Some(recipe) = recipe {
                 let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, value, recipe)?;
-                (fresh, Some(prepared))
+                let definitions = prepared
+                    .instructions
+                    .iter()
+                    .filter_map(MInst::def)
+                    .collect::<Vec<_>>();
+                let instruction_count = prepared.instructions.len();
+                (fresh, Some(prepared), definitions, instruction_count)
             } else {
                 let fresh = alloc_fresh(func, logical_for_vreg, value)?;
-                (fresh, None)
+                (fresh, None, vec![fresh], 1)
             };
             reload_blocks.entry(value).or_default().insert(block);
-            MaterializedOp::Reload {
-                value,
-                home,
-                fresh,
-                recipe,
-            }
+            (
+                MaterializedOp::Reload {
+                    value,
+                    home,
+                    fresh,
+                    recipe,
+                },
+                Some(MaterializedReload {
+                    shape: EdgeReloadShape {
+                        value,
+                        home,
+                        materialization,
+                    },
+                    final_definition: fresh,
+                    definitions,
+                    instruction_count,
+                }),
+            )
         }
     };
     let _ = plan;
@@ -710,7 +815,7 @@ fn materialize_operation(
         .entry((block, instruction))
         .or_default()
         .push(operation);
-    Ok(())
+    Ok(reload)
 }
 
 fn prepare_recipe(
@@ -927,6 +1032,261 @@ fn rename_block(
         }
     }
     Ok(())
+}
+
+/// Tail-merge identical edge reload bundles before coloring.
+///
+/// Braun--Hack coupling is edge-sensitive: when several high-pressure arms
+/// evict the same live-ins, reconstruction would otherwise copy the same
+/// reload sequence into every arm and then merge the fresh representatives
+/// with one phi per logical value.  A shared block preserves exactly which
+/// paths execute the reloads while materializing the identical sequence only
+/// once.  Stack and SimState recipes are grouped only when their complete
+/// logical/home/MemorySSA shapes match.
+fn share_identical_edge_reload_bundles(
+    func: &mut MFunction,
+    bundles: &[EdgeReloadBundle],
+    recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+) -> Result<usize, ReconstructError> {
+    let mut grouped = HashMap::<EdgeReloadGroupKey, Vec<usize>>::new();
+    for (bundle, edge) in bundles.iter().enumerate() {
+        grouped
+            .entry(EdgeReloadGroupKey {
+                successor: edge.successor,
+                shape: edge.shape.clone(),
+            })
+            .or_default()
+            .push(bundle);
+    }
+
+    let mut groups = grouped
+        .into_values()
+        .filter(|group| group.len() >= 2)
+        .collect::<Vec<_>>();
+    for group in &mut groups {
+        group.sort_unstable_by_key(|bundle| bundles[*bundle].predecessor);
+    }
+    groups.sort_unstable_by_key(|group| {
+        let first = &bundles[group[0]];
+        (first.successor, first.predecessor)
+    });
+
+    let mut plans = Vec::<SharedReloadPlan>::new();
+    for group in groups {
+        let Some(phi_replacements) = shared_reload_phi_replacements(func, bundles, &group) else {
+            continue;
+        };
+        plans.push(SharedReloadPlan {
+            bundles: group,
+            phi_replacements,
+        });
+    }
+    if plans.is_empty() {
+        return Ok(0);
+    }
+    let shared_count = plans.len();
+
+    let maximum_id = func
+        .blocks
+        .iter()
+        .map(|block| block.id.0)
+        .max()
+        .unwrap_or(0);
+    let additional = u32::try_from(plans.len()).map_err(|_| {
+        ReconstructError::new(
+            "RECONSTRUCT.SHARED_RELOAD_BLOCK_ID",
+            None,
+            None,
+            Vec::new(),
+            "shared reload block count exceeds the BlockId range",
+        )
+    })?;
+    maximum_id.checked_add(additional).ok_or_else(|| {
+        ReconstructError::new(
+            "RECONSTRUCT.SHARED_RELOAD_BLOCK_ID",
+            None,
+            None,
+            Vec::new(),
+            "BlockId overflow while sharing edge reload bundles",
+        )
+    })?;
+
+    let mut removed_recipe_reloads = BTreeSet::<VReg>::new();
+    for (shared_offset, plan) in plans.into_iter().enumerate() {
+        let canonical_index = plan.bundles[0];
+        let canonical = &bundles[canonical_index];
+        let successor_id = func.blocks[canonical.successor].id;
+        let shared_offset = u32::try_from(shared_offset + 1).map_err(|_| {
+            ReconstructError::new(
+                "RECONSTRUCT.SHARED_RELOAD_BLOCK_ID",
+                None,
+                None,
+                Vec::new(),
+                "shared reload block offset exceeds the BlockId range",
+            )
+        })?;
+        let shared_id = BlockId(maximum_id + shared_offset);
+        let predecessor_ids = plan
+            .bundles
+            .iter()
+            .map(|bundle| func.blocks[bundles[*bundle].predecessor].id)
+            .collect::<BTreeSet<_>>();
+
+        let mut shared_instructions = Vec::<MInst>::new();
+        for &bundle_index in &plan.bundles {
+            let bundle = &bundles[bundle_index];
+            let predecessor = &mut func.blocks[bundle.predecessor];
+            let terminator = predecessor.insts.pop().ok_or_else(|| {
+                ReconstructError::new(
+                    "RECONSTRUCT.SHARED_RELOAD_SUFFIX",
+                    Some(predecessor.id),
+                    None,
+                    bundle.definitions.clone(),
+                    "shared edge-reload predecessor lost its terminator",
+                )
+            })?;
+            let suffix_start = predecessor
+                .insts
+                .len()
+                .checked_sub(bundle.instruction_count)
+                .ok_or_else(|| {
+                    ReconstructError::new(
+                        "RECONSTRUCT.SHARED_RELOAD_SUFFIX",
+                        Some(predecessor.id),
+                        None,
+                        bundle.definitions.clone(),
+                        "shared edge-reload suffix no longer fits its predecessor",
+                    )
+                })?;
+            let suffix = predecessor.insts.split_off(suffix_start);
+            if bundle_index == canonical_index {
+                shared_instructions = suffix;
+            } else {
+                removed_recipe_reloads.extend(bundle.final_definitions.iter().copied());
+            }
+            if terminator
+                != (MInst::Jump {
+                    target: successor_id,
+                })
+            {
+                return Err(ReconstructError::new(
+                    "RECONSTRUCT.SHARED_RELOAD_SUFFIX",
+                    Some(predecessor.id),
+                    None,
+                    bundle.definitions.clone(),
+                    "shared edge-reload predecessor changed after eligibility checking",
+                ));
+            }
+            predecessor.push(MInst::Jump { target: shared_id });
+        }
+
+        let successor = &mut func.blocks[canonical.successor];
+        for (phi, replacement) in successor.phis.iter_mut().zip(plan.phi_replacements) {
+            let original = std::mem::take(&mut phi.sources);
+            let mut rewritten = Vec::with_capacity(
+                original
+                    .len()
+                    .saturating_sub(predecessor_ids.len())
+                    .saturating_add(1),
+            );
+            let mut inserted = false;
+            for (predecessor, source) in original {
+                if predecessor_ids.contains(&predecessor) {
+                    if !inserted {
+                        rewritten.push((shared_id, replacement));
+                        inserted = true;
+                    }
+                } else {
+                    rewritten.push((predecessor, source));
+                }
+            }
+            if !inserted {
+                return Err(ReconstructError::new(
+                    "RECONSTRUCT.SHARED_RELOAD_PHI",
+                    Some(successor.id),
+                    None,
+                    vec![phi.dst],
+                    "shared edge-reload phi lost every grouped predecessor",
+                ));
+            }
+            phi.sources = rewritten;
+        }
+
+        let mut shared = MBlock::new(shared_id);
+        shared.insts = shared_instructions;
+        shared.push(MInst::Jump {
+            target: successor_id,
+        });
+        func.blocks.push(shared);
+    }
+
+    recipe_reloads.retain(|reload| !removed_recipe_reloads.contains(&reload.reload));
+    Ok(shared_count)
+}
+
+fn shared_reload_phi_replacements(
+    func: &MFunction,
+    bundles: &[EdgeReloadBundle],
+    group: &[usize],
+) -> Option<Vec<VReg>> {
+    let canonical = bundles.get(*group.first()?)?;
+    let successor = func.blocks.get(canonical.successor)?;
+    if group.iter().any(|bundle_index| {
+        let bundle = &bundles[*bundle_index];
+        if bundle.successor != canonical.successor
+            || bundle.instruction_count == 0
+            || bundle.shape != canonical.shape
+            || bundle.final_definitions.len() != canonical.final_definitions.len()
+        {
+            return true;
+        }
+        let Some(predecessor) = func.blocks.get(bundle.predecessor) else {
+            return true;
+        };
+        if !matches!(
+            predecessor.insts.last(),
+            Some(MInst::Jump { target }) if *target == successor.id
+        ) {
+            return true;
+        }
+        let Some(required) = bundle.instruction_count.checked_add(1) else {
+            return true;
+        };
+        let Some(suffix_start) = predecessor.insts.len().checked_sub(required) else {
+            return true;
+        };
+        predecessor.insts[suffix_start..predecessor.insts.len() - 1]
+            .iter()
+            .filter_map(MInst::def)
+            .ne(bundle.definitions.iter().copied())
+    }) {
+        return None;
+    }
+
+    let mut replacements = Vec::with_capacity(successor.phis.len());
+    for phi in &successor.phis {
+        let mut sources = Vec::with_capacity(group.len());
+        for &bundle_index in group {
+            let predecessor_id = func.blocks[bundles[bundle_index].predecessor].id;
+            let source = phi.sources.iter().find_map(|&(predecessor, source)| {
+                (predecessor == predecessor_id).then_some(source)
+            })?;
+            sources.push(source);
+        }
+        if sources.iter().all(|source| *source == sources[0]) {
+            replacements.push(sources[0]);
+            continue;
+        }
+        let replacement = (0..canonical.final_definitions.len()).find_map(|position| {
+            group
+                .iter()
+                .enumerate()
+                .all(|(edge, bundle)| sources[edge] == bundles[*bundle].final_definitions[position])
+                .then_some(canonical.final_definitions[position])
+        })?;
+        replacements.push(replacement);
+    }
+    Some(replacements)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1276,6 +1636,148 @@ mod tests {
     }
 
     #[test]
+    fn shares_identical_edge_reload_tails_without_reloading_the_resident_edge() {
+        let mut vregs = VRegAllocator::new();
+        let original = vregs.alloc();
+        let first_condition = vregs.alloc();
+        let second_condition = vregs.alloc();
+        let left_reload = vregs.alloc();
+        let right_reload = vregs.alloc();
+        let merged = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: original,
+            base: BaseReg::SimState,
+            offset: 80,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::LoadImm {
+            dst: first_condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: first_condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: left_reload,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(4) });
+
+        let mut decision = MBlock::new(BlockId(2));
+        decision.push(MInst::LoadImm {
+            dst: second_condition,
+            value: 1,
+        });
+        decision.push(MInst::Branch {
+            cond: second_condition,
+            true_bb: BlockId(3),
+            false_bb: BlockId(5),
+        });
+
+        let mut right = MBlock::new(BlockId(3));
+        right.push(MInst::Load {
+            dst: right_reload,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(4) });
+
+        let mut join = MBlock::new(BlockId(4));
+        join.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![
+                (BlockId(1), left_reload),
+                (BlockId(3), right_reload),
+                (BlockId(5), original),
+            ],
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 88,
+            src: merged,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+
+        let mut resident = MBlock::new(BlockId(5));
+        resident.push(MInst::Jump { target: BlockId(4) });
+        func.blocks = vec![entry, left, decision, right, join, resident];
+        func.verify();
+
+        let shape = EdgeReloadShape {
+            value: LogicalValue(original.0),
+            home: SpillHome(original.0),
+            materialization: ReloadMaterialization::Stack,
+        };
+        let bundles = vec![
+            EdgeReloadBundle {
+                predecessor: 1,
+                successor: 4,
+                shape: vec![shape.clone()],
+                final_definitions: vec![left_reload],
+                definitions: vec![left_reload],
+                instruction_count: 1,
+            },
+            EdgeReloadBundle {
+                predecessor: 3,
+                successor: 4,
+                shape: vec![shape],
+                final_definitions: vec![right_reload],
+                definitions: vec![right_reload],
+                instruction_count: 1,
+            },
+        ];
+
+        let shared =
+            share_identical_edge_reload_bundles(&mut func, &bundles, &mut Vec::new()).unwrap();
+
+        assert_eq!(shared, 1);
+        assert_eq!(func.blocks.len(), 7);
+        assert_eq!(
+            func.blocks[4].phis[0].sources,
+            vec![(BlockId(6), left_reload), (BlockId(5), original)]
+        );
+        assert_eq!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        offset: 0,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            func.blocks[1].insts,
+            vec![MInst::Jump { target: BlockId(6) }]
+        );
+        assert_eq!(
+            func.blocks[3].insts,
+            vec![MInst::Jump { target: BlockId(6) }]
+        );
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        cfg.verify(&func).unwrap();
+        func.verify();
+    }
+
+    #[test]
     fn missing_phi_representative_is_a_structured_error() {
         let mut vregs = VRegAllocator::new();
         let original = vregs.alloc();
@@ -1455,9 +1957,12 @@ mod tests {
         let recipes =
             super::super::reload::analyze_with_queries(&func, &cfg, &requested_points).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        let rebuilt_cfg = (result.shared_reload_blocks != 0)
+            .then(|| super::super::cfg::normalize(&mut func).unwrap());
+        let cfg = rebuilt_cfg.as_ref().unwrap_or(&cfg);
         super::super::reload::verify_expected_materialized_reloads(
             &func,
-            &cfg,
+            cfg,
             &result.recipe_reloads,
         )
         .unwrap();
@@ -1776,5 +2281,138 @@ mod tests {
                     )
                 })
         );
+    }
+
+    #[test]
+    fn planner_shares_matching_high_pressure_arm_reloads() {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let first_condition = vregs.alloc();
+        let second_condition = vregs.alloc();
+        let left_first = vregs.alloc();
+        let left_second = vregs.alloc();
+        let right_first = vregs.alloc();
+        let right_second = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 7]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::SimState,
+            offset: 80,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::LoadImm {
+            dst: first_condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: first_condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: left_first,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Load {
+            dst: left_second,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 96,
+            src: left_first,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 104,
+            src: left_second,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(4) });
+
+        let mut decision = MBlock::new(BlockId(2));
+        decision.push(MInst::LoadImm {
+            dst: second_condition,
+            value: 1,
+        });
+        decision.push(MInst::Branch {
+            cond: second_condition,
+            true_bb: BlockId(3),
+            false_bb: BlockId(5),
+        });
+
+        let mut right = MBlock::new(BlockId(3));
+        right.push(MInst::Load {
+            dst: right_first,
+            base: BaseReg::StackFrame,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Load {
+            dst: right_second,
+            base: BaseReg::StackFrame,
+            offset: 24,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 112,
+            src: right_first,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 120,
+            src: right_second,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(4) });
+
+        let mut join = MBlock::new(BlockId(4));
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 128,
+            src: stored,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+
+        let mut resident = MBlock::new(BlockId(5));
+        resident.push(MInst::Jump { target: BlockId(4) });
+        func.blocks = vec![entry, left, decision, right, join, resident];
+
+        let (func, result) = reconstruct_with_registers(func, 2);
+
+        assert_eq!(result.shared_reload_blocks, 1);
+        assert_eq!(result.frame_size, 0);
+        assert_eq!(
+            func.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        base: BaseReg::SimState,
+                        offset: 80,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "one original resident-path load and one shared arm reload must remain"
+        );
+        assert!(func.blocks.iter().flat_map(|block| &block.phis).any(|phi| {
+            phi.sources.len() == 2 && phi.sources.iter().any(|(_, source)| *source == stored)
+        }));
     }
 }

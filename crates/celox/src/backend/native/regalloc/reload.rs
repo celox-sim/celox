@@ -40,22 +40,23 @@ enum MemoryVariable {
 enum MemoryVersion {
     Entry(MemoryVariable),
     Write {
+        block: BlockId,
         ordinal: usize,
         variable: MemoryVariable,
     },
     Phi {
-        block: usize,
+        block: BlockId,
         variable: MemoryVariable,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct StateVersion {
     unknown_alias: MemoryVersion,
     bytes: Box<[MemoryVersion]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct StateRecipe {
     pub load: StateLoad,
     version: StateVersion,
@@ -219,7 +220,7 @@ impl PureRecipe {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PureStep {
     Copy64,
     Copy32,
@@ -235,13 +236,13 @@ pub(super) enum PureStep {
     Neg64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum ResolvedBase {
     Constant(u64),
     State(StateRecipe),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ResolvedRecipe {
     pub base: ResolvedBase,
     pub steps: Vec<PureStep>,
@@ -780,6 +781,13 @@ fn analyze_unverified_with_queries(
         &mut valid_edge_uses,
     )?;
     verify_memory_phis(func, cfg, &memory_ssa)?;
+    let phi_aliases = trivial_memory_phi_aliases(&memory_ssa);
+    canonicalize_reload_recipes(
+        &mut recipes,
+        &mut point_recipes,
+        &mut edge_recipes,
+        &phi_aliases,
+    );
 
     Ok(ReloadRecipeAnalysis {
         recipes,
@@ -1105,8 +1113,8 @@ fn build_memory_ssa(
 
     let mut definition_blocks = BTreeMap::<MemoryVariable, BTreeSet<usize>>::new();
     let mut write_versions = HashMap::new();
-    let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
+        let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
             let effect = memory_effect::writes(inst);
             let affects_sim_state = effect
@@ -1121,7 +1129,7 @@ fn build_memory_ssa(
                         Some(mir_block.id),
                         Some(instruction),
                         None,
-                        "MemorySSA write ordinal exceeds addressable MIR size",
+                        "per-block MemorySSA write ordinal exceeds addressable MIR size",
                     )
                 })?;
                 Some(ordinal)
@@ -1129,12 +1137,25 @@ fn build_memory_ssa(
                 None
             };
             let affected = affected_variables(inst, tracked_bytes)?;
+            if affected.is_empty() {
+                continue;
+            }
+            let ordinal = ordinal.ok_or_else(|| {
+                ReloadRecipeError::new(
+                    "RELOAD_RECIPE.WRITE_ORDINAL_MISSING",
+                    Some(mir_block.id),
+                    Some(instruction),
+                    None,
+                    "MemorySSA found affected SimState variables for an instruction without a SimState write ordinal",
+                )
+            })?;
             for variable in affected {
                 definition_blocks.entry(variable).or_default().insert(block);
                 write_versions.insert(
                     (block, instruction, variable),
                     MemoryVersion::Write {
-                        ordinal: ordinal.expect("affected variables belong to a memory write"),
+                        block: mir_block.id,
+                        ordinal,
                         variable,
                     },
                 );
@@ -1158,7 +1179,7 @@ fn build_memory_ssa(
                     block: frontier,
                     variable,
                     version: MemoryVersion::Phi {
-                        block: frontier,
+                        block: func.blocks[frontier].id,
                         variable,
                     },
                     inputs: Vec::with_capacity(cfg.predecessors[frontier].len()),
@@ -1604,7 +1625,10 @@ fn verify_resolved_recipe_match(
                     None,
                     None,
                     Some(reload),
-                    "an overlapping or unknown state write makes a pure recipe's state base stale",
+                    format!(
+                        "an overlapping or unknown state write changed the selected version {:?} to {:?}",
+                        left.version, right.version
+                    ),
                 ));
             }
         }
@@ -1809,6 +1833,201 @@ fn available_store_home(
     Ok(None)
 }
 
+/// Collapse MemorySSA phis whose complete SCC has one external version.
+///
+/// Iterated dominance-frontier placement is intentionally structural and can
+/// create a wrapper phi after CFG tail merging even when every incoming edge
+/// carries the same version.  Treating that wrapper as a new state value would
+/// reject a valid reload moved from those edges into their shared block.  SCC
+/// condensation handles loop phis without recursion: a component is trivial
+/// only when all of its external operands canonicalize to one version.
+fn trivial_memory_phi_aliases(memory_ssa: &MemorySsa) -> HashMap<MemoryVersion, MemoryVersion> {
+    let count = memory_ssa.phis.len();
+    if count == 0 {
+        return HashMap::new();
+    }
+    let phi_index = memory_ssa
+        .phis
+        .iter()
+        .enumerate()
+        .map(|(index, phi)| (phi.version, index))
+        .collect::<HashMap<_, _>>();
+    let mut dependencies = vec![Vec::<usize>::new(); count];
+    let mut users = vec![Vec::<usize>::new(); count];
+    for (phi, node) in memory_ssa.phis.iter().enumerate() {
+        let inputs = node
+            .inputs
+            .iter()
+            .filter_map(|(_, version)| phi_index.get(version).copied())
+            .collect::<BTreeSet<_>>();
+        dependencies[phi].extend(inputs.iter().copied());
+        for input in inputs {
+            users[input].push(phi);
+        }
+    }
+
+    let mut visited = vec![false; count];
+    let mut postorder = Vec::with_capacity(count);
+    for root in 0..count {
+        if visited[root] {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((phi, expanded)) = stack.pop() {
+            if expanded {
+                postorder.push(phi);
+                continue;
+            }
+            if std::mem::replace(&mut visited[phi], true) {
+                continue;
+            }
+            stack.push((phi, true));
+            stack.extend(
+                dependencies[phi]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .map(|dependency| (dependency, false)),
+            );
+        }
+    }
+
+    let mut component_of = vec![usize::MAX; count];
+    let mut components = Vec::<Vec<usize>>::new();
+    for root in postorder.into_iter().rev() {
+        if component_of[root] != usize::MAX {
+            continue;
+        }
+        let component = components.len();
+        let mut members = Vec::new();
+        let mut stack = vec![root];
+        component_of[root] = component;
+        while let Some(phi) = stack.pop() {
+            members.push(phi);
+            for &user in &users[phi] {
+                if component_of[user] == usize::MAX {
+                    component_of[user] = component;
+                    stack.push(user);
+                }
+            }
+        }
+        members.sort_unstable();
+        components.push(members);
+    }
+
+    let mut component_dependencies = vec![BTreeSet::<usize>::new(); components.len()];
+    let mut component_users = vec![BTreeSet::<usize>::new(); components.len()];
+    for phi in 0..count {
+        let component = component_of[phi];
+        for &dependency in &dependencies[phi] {
+            let dependency = component_of[dependency];
+            if dependency != component && component_dependencies[component].insert(dependency) {
+                component_users[dependency].insert(component);
+            }
+        }
+    }
+    let mut pending = component_dependencies
+        .iter()
+        .map(BTreeSet::len)
+        .collect::<Vec<_>>();
+    let mut ready = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(component, pending)| (*pending == 0).then_some(component))
+        .collect::<BTreeSet<_>>();
+    let mut aliases = HashMap::<MemoryVersion, MemoryVersion>::new();
+    while let Some(component) = ready.pop_first() {
+        let mut external = BTreeSet::<MemoryVersion>::new();
+        for &phi in &components[component] {
+            for &(_, version) in &memory_ssa.phis[phi].inputs {
+                if phi_index
+                    .get(&version)
+                    .is_some_and(|input| component_of[*input] == component)
+                {
+                    continue;
+                }
+                external.insert(canonical_memory_version(version, &aliases));
+            }
+        }
+        let representative = if external.len() == 1 {
+            external.first().copied()
+        } else if external.is_empty() {
+            components[component]
+                .iter()
+                .map(|phi| memory_ssa.phis[*phi].version)
+                .min()
+        } else {
+            None
+        };
+        if let Some(representative) = representative {
+            for &phi in &components[component] {
+                let version = memory_ssa.phis[phi].version;
+                if version != representative {
+                    aliases.insert(version, representative);
+                }
+            }
+        }
+        for &user in &component_users[component] {
+            pending[user] -= 1;
+            if pending[user] == 0 {
+                ready.insert(user);
+            }
+        }
+    }
+    aliases
+}
+
+fn canonical_memory_version(
+    mut version: MemoryVersion,
+    aliases: &HashMap<MemoryVersion, MemoryVersion>,
+) -> MemoryVersion {
+    while let Some(&canonical) = aliases.get(&version) {
+        version = canonical;
+    }
+    version
+}
+
+fn canonicalize_state_recipe(
+    recipe: &mut StateRecipe,
+    aliases: &HashMap<MemoryVersion, MemoryVersion>,
+) {
+    recipe.version.unknown_alias = canonical_memory_version(recipe.version.unknown_alias, aliases);
+    for version in &mut recipe.version.bytes {
+        *version = canonical_memory_version(*version, aliases);
+    }
+}
+
+fn canonicalize_resolved_recipe(
+    recipe: &mut ResolvedRecipe,
+    aliases: &HashMap<MemoryVersion, MemoryVersion>,
+) {
+    if let ResolvedBase::State(state) = &mut recipe.base {
+        canonicalize_state_recipe(state, aliases);
+    }
+}
+
+fn canonicalize_reload_recipes(
+    recipes: &mut [ReloadRecipe],
+    point_recipes: &mut BTreeMap<PointUse, ResolvedRecipe>,
+    edge_recipes: &mut BTreeMap<EdgeUse, ResolvedRecipe>,
+    aliases: &HashMap<MemoryVersion, MemoryVersion>,
+) {
+    if aliases.is_empty() {
+        return;
+    }
+    for recipe in recipes {
+        if let ReloadRecipe::StateVersion(state) = recipe {
+            canonicalize_state_recipe(state, aliases);
+        }
+    }
+    for recipe in point_recipes.values_mut() {
+        canonicalize_resolved_recipe(recipe, aliases);
+    }
+    for recipe in edge_recipes.values_mut() {
+        canonicalize_resolved_recipe(recipe, aliases);
+    }
+}
+
 fn verify_memory_phis(
     func: &MFunction,
     cfg: &NormalizedCfg,
@@ -1854,6 +2073,72 @@ mod tests {
             MFunction::new(vregs, vec![SpillDesc::transient(); count]),
             values,
         )
+    }
+
+    #[test]
+    fn trivial_memory_phi_aliases_cover_wrappers_and_cycles() {
+        let variable = MemoryVariable::Byte(80);
+        let entry = MemoryVersion::Entry(variable);
+        let write = MemoryVersion::Write {
+            block: BlockId(0),
+            ordinal: 0,
+            variable,
+        };
+        let nontrivial = MemoryVersion::Phi {
+            block: BlockId(1),
+            variable,
+        };
+        let wrapper = MemoryVersion::Phi {
+            block: BlockId(2),
+            variable,
+        };
+        let cycle_left = MemoryVersion::Phi {
+            block: BlockId(3),
+            variable,
+        };
+        let cycle_right = MemoryVersion::Phi {
+            block: BlockId(4),
+            variable,
+        };
+        let memory_ssa = MemorySsa {
+            tracked_bytes: BTreeSet::new(),
+            entry_versions: BTreeMap::new(),
+            write_versions: HashMap::new(),
+            phis: vec![
+                MemoryPhi {
+                    block: 1,
+                    variable,
+                    version: nontrivial,
+                    inputs: vec![(0, entry), (1, write)],
+                },
+                MemoryPhi {
+                    block: 2,
+                    variable,
+                    version: wrapper,
+                    inputs: vec![(0, nontrivial), (1, nontrivial)],
+                },
+                MemoryPhi {
+                    block: 3,
+                    variable,
+                    version: cycle_left,
+                    inputs: vec![(0, entry), (1, cycle_right)],
+                },
+                MemoryPhi {
+                    block: 4,
+                    variable,
+                    version: cycle_right,
+                    inputs: vec![(0, cycle_left)],
+                },
+            ],
+            phis_by_block: Vec::new(),
+        };
+
+        let aliases = trivial_memory_phi_aliases(&memory_ssa);
+
+        assert!(!aliases.contains_key(&nontrivial));
+        assert_eq!(aliases.get(&wrapper), Some(&nontrivial));
+        assert_eq!(aliases.get(&cycle_left), Some(&entry));
+        assert_eq!(aliases.get(&cycle_right), Some(&entry));
     }
 
     fn analyze_function(mut func: MFunction) -> (MFunction, NormalizedCfg, ReloadRecipeAnalysis) {

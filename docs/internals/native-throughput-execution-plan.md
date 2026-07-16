@@ -1218,6 +1218,66 @@ strict library/test clippy, and both Heliodor shell fixture suites also passed.
 Status: **complete structurally; code-generation regression removed; runtime
 effect unconfirmed; arm-exit live ranges/reloads remain open**.
 
+### Step 13a: Share identical allocator edge-reload tails
+
+The exact Step 12 post-reconstruction MIR exposed an allocator artifact after
+correlated case threading.  Each of `bb8172`, `bb8175`, `bb8178`, and `bb8181`
+ended with the same seven-value reload bundle before entering `bb8183`:
+four exact `SimState` loads and three stack loads from offsets 192, 200, and
+448.  The merge then contained seven reconstruction phis with one resident
+input plus four freshly reloaded inputs.  This duplication was introduced by
+Braun--Hack edge coupling and SSA reconstruction; it was absent from SIR and
+pre-allocation MIR.
+
+Reconstruction now records the complete shape of a reload-only edge bundle:
+its logical value, spill home, and exact immediate, stack, or resolved recipe.
+Bundles are tail-merged only when they have the same successor and byte-for-byte
+equivalent shapes, occupy the complete suffix before an unconditional jump,
+and every successor phi can replace all grouped inputs with the corresponding
+shared definition.  Resident predecessors are not redirected.  One new block
+contains the canonical reload suffix; grouped predecessors jump to it and the
+successor phis collapse those predecessor rows to one shared row.  The
+post-reconstruction CFG is normalized and verified once before reload proof,
+pressure proof, Perm construction, and coloring; spill planning is not retried.
+
+Reload validity remains structural across that CFG rewrite.  Native MemorySSA
+write identities now use `(BlockId, per-block SimState-write ordinal,
+variable)`, and phi identities use `(BlockId, variable)`, so block reordering
+or insertion of a non-writing reload cannot renumber a version.  Iterative SCC
+condensation aliases a MemorySSA phi only when every external input to its
+complete SCC canonicalizes to one version.  This removes the trivial wrapper
+phi created at a shared reload block without treating a genuinely different
+state version as equal.
+
+The complete optimized SIR before and after Step 13a is byte-identical.  In the
+complete post-reconstruction MIR, all four arm blocks now end in
+`jmp bb14491`; `bb14491` contains the single seven-load bundle and jumps to
+`bb8183`; and each of the seven merge phis has exactly the resident `bb14416`
+and shared `bb14491` inputs.  The four arm-local spill stores remain.  A taken
+arm still executes seven reloads, while the resident edge executes none, so
+this step removes static code/phi duplication and does **not** claim a dynamic
+reload-count reduction.  The full textual MIR is 202,533 bytes smaller than
+Step 12 (191,496,890 to 191,294,357 bytes).
+
+Compilation and generated-code execution were measured independently on CPU 0;
+host Cargo builds and full-IR formatting were outside both intervals.  The
+interleaved Step 12 / Step 13a / Step 12 runs were:
+
+- compile: 69.770 s / 63.295 s / 66.919 s;
+- execute: 139.706 s / 137.092 s / 141.808 s; and
+- result in every run: normal power-down at `cy=9ae070 x3=aa pass=1`.
+
+Against the mean of the adjacent Step 12 runs, the candidate compile interval
+is 5.049 s (7.4%) shorter and its execute interval is 3.665 s (2.6%) shorter.
+The final post-test qualification run also passed, but took 70.140 s compile
+and 148.424 s execute.  This wider candidate variation prevents a runtime or
+compile-time speedup claim.  The next allocator step must reduce reloads on
+the actually executed edge by improving cost-aware resident selection and
+live-range placement.
+
+Status: **structurally complete; static edge duplication removed; dynamic
+reload reduction remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1241,6 +1301,7 @@ effect unconfirmed; arm-exit live ranges/reloads remain open**.
 | 10 | bounded register-indexed state-write effects | dynamic scalar/wide ISel; effects 3/3; reload 24/24; MIR optimization 51/51; native MIR 6/6 | lib 729/729; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | baseline execute 144.622 s / 138.620 s; candidate 139.287 s; compile reported separately | structural result complete; runtime effect unconfirmed |
 | 11 | explicit allocation of pseudo scratch registers | MIR operand/rewrite; sparse effects/reload/emission; allocator 134/134; native MIR 6/6 | lib 730/730; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | compile-only: baseline 41.077 s, candidate 42.647 s; execute: baseline 132.252 s / 135.434 s, candidate 132.954 s | hidden stack operations removed; runtime effect unconfirmed |
 | 12 | sparse SIR StateSSA GVN and correlated case-edge threading | StateSSA 8/8; GVN 17/17; CFS 16/16; native MIR 6/6 | lib 743/743; native 60/60; counter 9/9; strict clippy and Heliodor fixtures | all full runs pass: `cy=9ae070 x3=aa pass=1` | final compile-only 62.949 s; final execute 139.358 s; Step 11 adjacent compile-only 62.419 s / execute 142.445 s | structural result complete; compile regression removed; runtime effect unconfirmed |
+| 13a | shared reconstruction edge-reload tails | allocator 137/137; native MIR 6/6 | lib 746/746; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final qualification pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 69.770 / 63.295 / 66.919 s, execute 139.706 / 137.092 / 141.808 s; final candidate 70.140 s compile / 148.424 s execute | static duplication removed; timing effect unconfirmed; executed-edge reload reduction open |
 
 ## Related design records
 

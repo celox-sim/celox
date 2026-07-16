@@ -116,19 +116,40 @@ pub(super) fn allocate(
         )?;
     if let Some(start) = phase {
         eprintln!(
-            "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} elapsed={:?}",
+            "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} shared_reload_blocks={} elapsed={:?}",
             func.vregs.count(),
             func.blocks
                 .iter()
                 .map(|block| block.insts.len())
                 .sum::<usize>(),
             reconstruction.frame_size,
+            reconstruction.shared_reload_blocks,
             start.elapsed()
         );
     }
     func.verify_result().map_err(|error| {
         super::RegallocError::mir("SSA reconstruction structural verification", error)
     })?;
+
+    // Shared edge-reload tails add real CFG blocks after the original
+    // allocation graph was frozen. Rebuild the normalized graph once, then
+    // use it for every independent post-reconstruction proof and coloring
+    // phase. No spill planning or allocation retry is performed.
+    let reconstructed_cfg = if reconstruction.shared_reload_blocks != 0 {
+        let rebuilt = super::cfg::normalize(func)
+            .map_err(|error| super::cfg_error("shared reload CFG normalization", error))?;
+        rebuilt.verify(func).map_err(|error| {
+            super::cfg_error("shared reload CFG normalization verification", error)
+        })?;
+        func.verify_result().map_err(|error| {
+            super::RegallocError::mir("shared reload CFG structural verification", error)
+        })?;
+        Some(rebuilt)
+    } else {
+        None
+    };
+    let cfg = reconstructed_cfg.as_ref().unwrap_or(cfg);
+
     super::reload::verify_expected_materialized_reloads(func, cfg, &reconstruction.recipe_reloads)
         .map_err(|error| {
             super::reload_recipe_error("spill-planner reload-recipe verification", error)

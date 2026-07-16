@@ -210,6 +210,18 @@ needed phis.  This is a separate Sastry--Ju-style reconstruction phase, not an
 opportunistic part of MIN.  A backwards use mark removes dead reloads, dead
 Perm rows, and cyclic dead phi webs before the next phase.
 
+After renaming, reconstruction tail-merges identical reload-only coupling
+bundles which enter the same successor.  Equality includes the logical value,
+spill home, and complete immediate, stack, or versioned-state recipe; the
+bundle must be the exact suffix before an unconditional edge jump, and all
+affected phi rows must collapse consistently.  Paths which already keep the
+values resident continue to enter the merge directly.  This shares static
+reload code and reconstruction-phi inputs without moving a reload onto a path
+which did not previously execute it.  Because the transformation creates real
+blocks after the allocation graph was frozen, the normalized CFG is rebuilt
+once for the independent reload/pressure proofs, Perm construction, and
+coloring.  It does not rerun spill planning.
+
 ### 8. Pressure and home verification
 
 An independent forward/backward proof recomputes edge-sensitive liveness and
@@ -457,7 +469,8 @@ contains:
 - a Braun--Hack-style W/S spill plan and an independent sparse-SSA all-path,
   same-home store/reload proof without a block-by-home state matrix;
 - separate pruned-IDF SSA reconstruction, stack-slot precomputation,
-  rematerialization, and dead reload/cyclic-phi removal;
+  rematerialization, dead reload/cyclic-phi removal, and exact edge-reload tail
+  sharing;
 - post-reconstruction full-live Perm materialization, including pruned-IDF
   merge phis when a Perm splits only one CFG path, exact allowed-color masks,
   and local bipartite matching;
@@ -540,6 +553,21 @@ bytes without changing optimized SIR. The CPU-0 A--B--A executions were
 1.65% advantage over their mean, so this establishes the structural result but
 does not yet establish a runtime speedup. Their compile intervals were 59.225 s,
 60.763 s, and 59.821 s and are kept separate from generated-code execution.
+
+The next reconstruction step shares identical reload-only edge tails after
+Braun--Hack coupling.  In the exact Linux MIR, four correlated case arms had
+four static copies of the same seven reloads and seven five-input
+reconstruction phis.  They now enter one shared seven-reload block and seven
+two-input phis; the resident edge remains direct.  Taken paths still execute
+seven reloads, so this is deliberately a static-code result rather than a
+claim that spill placement is solved.  MemorySSA identities use stable block
+IDs and per-block SimState-write ordinals, while trivial phi SCCs are
+canonicalized only when they have one external reaching version.  The CPU-0
+Step 12 / candidate / Step 12 execution intervals were 139.706 s, 137.092 s,
+and 141.808 s, all at `cy=9ae070 x3=aa pass=1`; their compile intervals were
+69.770 s, 63.295 s, and 66.919 s and remain a separate result.  A final
+post-test candidate qualification also passed but took 70.140 s compile and
+148.424 s execute, so neither timing improvement is considered established.
 
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and
