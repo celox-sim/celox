@@ -40,7 +40,7 @@ The gate is deliberately not configurable. It forces all of the following:
   from the official repository, with a clean checkout;
 - benchmark-owned Veryl `0.20.2`, selected by its exact path and checked with
   `--version` rather than taken from `PATH` or `VERYL_BIN`;
-- a clean, unchanged Celox `HEAD`, a locked release build in a fresh
+- a clean, unchanged Celox `HEAD`, a locked release/LTO build in a fresh
   invocation-owned Cargo target directory, and execution of that exact built
   binary;
 - `test_soc_linux_boot`, runners `veryl-cc` then `celox`, and a fixed 300-second
@@ -56,7 +56,9 @@ invocation. Veryl must exit successfully and log exactly one success for the
 requested test plus `1 passed, 0 failed`. Celox must exit successfully and log
 exactly one native/O2/`four_state=false`/`compile_only=false` config record and
 one full-pass result record. Source manifests, checkout identities, and runner
-executable hashes are checked before and after execution.
+executable hashes are checked before and after execution. Both logs must also
+contain exactly one architectural completion marker equal to
+`cy=9ae070 x3=aa pass=1`; leading hexadecimal zeroes are ignored.
 
 Subprocess elapsed time is measured with a monotonic nanosecond clock. The gate
 exits successfully only if both semantic checks pass and the Celox process time
@@ -64,9 +66,12 @@ is no greater than the Veryl process time. Compile-only completion, a partial
 window, runner-reported internal time, or process exit zero without the exact
 markers is a failure. GNU `timeout` with `--kill-after` and Python 3 are required.
 
-Celox has not yet produced a competitive successful full Linux-boot result on
-this gate. The existence of the command makes the acceptance decision
-executable; it is not itself evidence that the performance requirement passes.
+The latest iterative non-LTO comparison completed the same
+`cy=9ae070` workload in `76.446 s` with Veryl-CC and `184.652 s` with Celox.
+Celox therefore has a successful full Linux-boot result, but still does not
+meet the gate's no-slower-than-Veryl performance condition. The fixed gate
+performs the final release/LTO comparison; routine development runs use the
+non-LTO `heliodor-dev` profile.
 
 ## Tests
 
@@ -93,7 +98,7 @@ Useful long tests include:
 
 | Runner | Command |
 |---|---|
-| `celox` | `target/release/examples/run_veryl_project_test --project ... --test ...` |
+| `celox` | `target/<profile>/examples/run_veryl_project_test --project ... --test ...` |
 | `veryl-cc` | `veryl test --ignored --test ... --backend cc` |
 | `veryl-cranelift` | `veryl test --ignored --test ... --backend cranelift` |
 | `veryl-interpret` | `veryl test --ignored --test ... --backend interpret` |
@@ -153,6 +158,10 @@ bash scripts/tests/run-heliodor-bench-results.sh
 bash scripts/tests/run-heliodor-bench-gate.sh
 ```
 
-## Current Caveat
+## Architectural completion marker
 
-Celox currently records the semantic result, process result, and wall-clock time for this macro benchmark. Heliodor prints simulated cycle counts with `$display`; the current Celox detailed test runner suppresses display events, so cycle extraction is only available from Veryl runner logs until display forwarding is exposed in the Celox runner.
+The Celox testbench runner forwards Heliodor's `$display` output, so both Celox
+and Veryl logs contain the simulated cycle, architectural result register, and
+pass bit. The fixed gate validates `cy=9ae070 x3=aa pass=1` independently of
+the process exit and test-result records. This check is required: an earlier
+native ISel width bug still powered down with `pass=1`, but at `cy=9ab960`.

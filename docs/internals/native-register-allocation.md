@@ -427,7 +427,7 @@ fallback.  Its source remains compiled only by unit tests while the remaining
 differential fixture is migrated; a failure in the new allocator is a bug to
 diagnose and fix.
 
-## Interim implementation status
+## Implementation status
 
 The frozen allocation pipeline is now the default `auto` implementation.  It
 contains:
@@ -465,22 +465,24 @@ created about 2.3 million VReg identities from roughly 400,000 input VRegs.
 Both measurements motivate the frozen late-Perm architecture; neither is a
 reason to add an iteration, branchification, or CFG-size cap.
 
-With SIR/MIR boundary verification and the new allocator's phase verifiers
-enabled, the current `test_soc_linux_boot` compile-only run completes in about
-30.6 seconds. The cost-directed CFG currently presented to `eval_comb` has
+In the pre-whole-region diagnostic snapshot, the `test_soc_linux_boot`
+compile-only run completed in about 30.6 seconds. The cost-directed CFG then
+presented to `eval_comb` had
 7,738 SIR/MIR blocks and 152,086 post-MIR-optimization instructions. Scheduling
-reduces its measured maximum straight-region pressure from 2,229 to 2,024;
-allocation then produces a 79,216-byte spill frame. SSA destruction sees
+reduced its measured maximum straight-region pressure from 2,229 to 2,024;
+allocation produced a 79,216-byte spill frame. SSA destruction saw
 33,697 rows, of which 23,587 are identities and 10,110 require code (including
-1,442 cycle breaks). These figures are diagnostics, not a performance pass.
+1,442 cycle breaks). These historical figures motivated the later StateSSA,
+reload-recipe, and placement work; they are not the current performance result.
 
-The 252-test library suite, all 145 non-ignored `comb_observer` cases, the
-16-test native suite with per-pass SIR/MIR auditing, and the native
-control-preserving mux integration test pass. A successful end-to-end Heliodor
-execution under the fixed `veryl-cc` comparison remains open. Celox has not had a
-fast successful full Linux-boot run on this gate: prior status-0 Celox entries
-were compile-only, and current 60-second executions are intentionally partial
-diagnostic windows.
+The current non-LTO qualification passes all 715 library tests, 60 non-ignored
+native-testbench tests, and 9 native/Cranelift/Wasm counter tests. Two clean
+full Heliodor runs reached normal power-down at the exact Veryl reference
+`cy=9ae070 x3=aa pass=1`, taking `198.235 s` and `184.652 s`. The paired
+Veryl-CC run took `76.446 s`, so the fixed gate's no-slower performance target
+remains open even though full native execution is now correct and complete.
+The earlier Celox `cy=9ab960` completions were invalidated by an ISel
+wide-to-narrow canonicalization bug, not by the allocator.
 
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and

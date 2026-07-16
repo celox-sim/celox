@@ -40,7 +40,7 @@ gate の構成は変更できません。以下をすべて固定します。
 - benchmark 所有ディレクトリにある Veryl `0.20.2`。`PATH` や
   `VERYL_BIN` は使わず、固定 path と `--version` の完全一致で選択
 - clean で途中に変化しない Celox `HEAD`。invocation ごとの空の Cargo
-  target directory に `--locked` release build し、その成果物を実行
+  target directory に `--locked` の release/LTO build を行い、その成果物を実行
 - `test_soc_linux_boot`、runner 順序 `veryl-cc`、`celox`、各 300 秒 timeout
 - Celox native backend、`O2`、2-state、full execution、SIR pass override なし
 - runner ごとに別の detached Heliodor worktree。project-local な生成物を
@@ -53,6 +53,8 @@ gate は `target/heliodor/results` の下に、新しい独立した
 native/O2/`four_state=false`/`compile_only=false` の config 行と full-pass
 result 行をそれぞれちょうど 1 件報告する必要があります。実行前後で source
 manifest、checkout identity、runner executable hash も検査します。
+さらに両ログに architectural completion marker がちょうど 1 件あり、
+16 進数の先頭 0 を除いて `cy=9ae070 x3=aa pass=1` と一致することを要求します。
 
 subprocess 時間は monotonic nanosecond clock で測定します。両方の semantic
 check が成功し、Celox の process 時間が Veryl 以下の場合にだけ gate は 0 で
@@ -60,9 +62,11 @@ check が成功し、Celox の process 時間が Veryl 以下の場合にだけ 
 marker を伴わない process exit 0 は失敗です。`--kill-after` を持つ GNU
 `timeout` と Python 3 が必要です。
 
-Celox は現時点で、この gate における競争力のある full Linux-boot 成功結果を
-一度も出していません。コマンドの実装によって acceptance 判定を実行可能にした
-のであって、それ自体が性能要件の合格実績になるわけではありません。
+直近の反復用非 LTO 比較では、同じ `cy=9ae070` の workload が
+Veryl-CC で `76.446 s`、Celox で `184.652 s` でした。Celox は full Linux boot
+には成功していますが、Veryl 以下という gate の性能条件はまだ満たしていません。
+固定 gate は最終的な release/LTO 比較を行い、通常の開発反復では非 LTO の
+`heliodor-dev` profile を使います。
 
 ## テスト
 
@@ -89,7 +93,7 @@ scripts/run-heliodor-bench.sh list
 
 | Runner | Command |
 |---|---|
-| `celox` | `target/release/examples/run_veryl_project_test --project ... --test ...` |
+| `celox` | `target/<profile>/examples/run_veryl_project_test --project ... --test ...` |
 | `veryl-cc` | `veryl test --ignored --test ... --backend cc` |
 | `veryl-cranelift` | `veryl test --ignored --test ... --backend cranelift` |
 | `veryl-interpret` | `veryl test --ignored --test ... --backend interpret` |
@@ -149,6 +153,10 @@ bash scripts/tests/run-heliodor-bench-results.sh
 bash scripts/tests/run-heliodor-bench-gate.sh
 ```
 
-## 現状の注意
+## Architectural completion marker
 
-このマクロベンチで Celox 側が記録するのは、現時点では意味上の結果、process の結果、wall-clock time です。Heliodor は `$display` で simulated cycle count を出しますが、Celox の detailed test runner は display event を捨てているため、cycle 抽出は Celox runner が display forwarding を持つまで Veryl runner のログ側だけで利用できます。
+Celox の testbench runner は Heliodor の `$display` を転送するため、Celox と
+Veryl の両ログに simulated cycle、architectural result register、pass bit が
+残ります。固定 gate は process exit や test-result record とは独立に
+`cy=9ae070 x3=aa pass=1` を検査します。この検査は必須です。以前の native
+ISel 幅バグは `pass=1` のまま power-down しましたが、cycle は `9ab960` でした。

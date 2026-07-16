@@ -21,10 +21,9 @@ same-workload performance comparison.
 
 ## Non-negotiable rules
 
-1. Do not use LTO for iterative builds or the final measurements in this plan.
-   Use the `heliodor-dev` Cargo profile. The fixed `gate` command currently
-   forces the release/LTO profile, so it is not used unless that policy is
-   changed separately.
+1. Do not use LTO for iterative builds or per-step measurements. Use the
+   `heliodor-dev` Cargo profile while developing. The final fixed acceptance
+   comparison is the one deliberate release/LTO build and run.
 2. Do not call a compile-only result, a cycle window, an instruction count, or
    a process exit code a successful runtime result. A Heliodor run succeeds
    only when its normal full-test semantic markers are present and its cycle
@@ -747,6 +746,8 @@ After all retained steps:
 - run Heliodor shell fixtures;
 - run the full pinned Heliodor Linux test at least twice with `heliodor-dev`;
 - run a same-input `veryl-cc` comparison without using Celox LTO;
+- after the iterative correctness runs, run the fixed release/LTO comparison
+  once from a clean committed checkout;
 - confirm the same semantic completion and simulated-cycle marker;
 - record each full-process wall time directly without turning repeated runs
   into a statistical correctness argument; and
