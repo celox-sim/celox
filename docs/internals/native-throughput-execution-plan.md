@@ -1130,6 +1130,94 @@ pre-existing lint was repaired in a separate commit.
 Status: **complete structurally; runtime effect unconfirmed; broader
 live-range/reload work remains open**.
 
+### Step 12: Version SIR state loads and thread correlated case edges
+
+The remaining Heliodor selector ladders were not an instruction-selection
+problem.  SIR repeatedly loaded the same selector around disjoint state
+writes, so ordinary GVN did not give the comparisons one SSA input.  The CFG
+then contained several independent equality branches rather than one
+correlated case, and every taken arm still entered the suffix of tests which
+could no longer match.
+
+SIR GVN now keys an exact state load by its `StateFragment`, structural
+MemorySSA version, result type, and observable-effect epoch.  Loads at the
+same version can therefore cross joins, read-only loops, and disjoint
+stores/commits.  An overlapping write creates a new version; trigger/capture
+stores, trigger commits, and runtime/capture callbacks advance the observable
+epoch.  Dynamic or structurally invalid loads retain the old path-local
+memory epoch.
+
+The StateSSA construction is sparse.  Before building the shared CFG, GVN
+groups exact loads by fragment and result type and retains only shapes with at
+least two occurrences.  An EU with no possible reuse builds no StateSSA at
+all.  Selected analysis still scans every store, commit, and dynamic alias and
+still validates exact writer types, but it does not allocate unrelated load
+slots, narrowing both work and failure scope to loads which GVN can consume.
+In the complete Heliodor SIR the resulting verified version safely removes one
+additional 32-bit reload of `inst51.var184`, replacing `r71553` with the
+same-version dominating `r71340`.
+
+Control-flow simplification now performs edge-sensitive correlated value
+analysis over the full `SirCfg`.  Exact selector equalities and generic
+boolean facts are intersected at joins; cyclic SCCs, effectful decision
+blocks, and unsupported block arguments are rejected.  Each linear
+same-selector case spine is indexed once, so a taken edge reaches its final
+merge without enumerating paths or walking every suffix.  Pure predicate DAGs
+which remain live outside a skipped suffix are rematerialized at their actual
+use blocks, preserving SSA while shortening the original live range.
+Suffixes with no chain-external definitions are summarized once from tail to
+head, avoiding a hidden per-arm suffix scan in rematerialization validation;
+the complete 16-test CFS group, including its 4096-case fixture, fell from
+about 7.2 s to 0.98 s in the same debug test profile.
+
+The exact optimized Heliodor SIR shows the intended dynamic path.  `b8169`
+loads the selector once.  The value-zero arm `b8172`, value-one arm `b8175`,
+value-two arm `b8178`, and value-three arm `b8181` now jump directly to
+`b8183`; only a not-taken edge reaches the next equality block.  The complete
+post-allocation MIR has the corresponding direct arm-to-merge jumps.  It
+still reloads the selector at heavy arm exits to feed a later dispatch, which
+is a remaining live-range/reload problem rather than unexecuted-arm work.
+
+GVN can expose those facts after the main CFS run.  Re-running full SCCP after
+every GVN produced the same final code but needlessly rebuilt its lattice.
+FF, eval-only, and the post-vectorization comb position now run a smaller
+post-GVN fixed point containing only dominated-Mux cleanup and correlated
+threading.  The early comb position retains full CFS, and the final SIR
+boundary retains full `GVN -> CFS`.  Before sparse load selection, this
+arrangement produced byte-identical pre-SIR, optimized SIR, native-optimized
+SIR, and full MIR to the all-full-CFS candidate.
+
+Code generation and generated-code execution were measured separately.  Host
+Cargo build time and IR formatting time are excluded from these comparisons,
+and compile-only runs report `execute_ns=0`:
+
+- the CPU-0 Step 11 compile-only sample was 62.419 s;
+- the final sparse Step 12 compile-only sample was 62.949 s;
+- an adjacent Step 11 full run was 62.883 s compile and 142.445 s execute;
+- the two pre-sparsification Step 12 full runs were 64.651/66.607 s compile
+  and 141.629/137.984 s execute; and
+- the final sparse candidate completed in 67.765 s compile and 139.358 s
+  execute.
+
+Every full run reached normal power-down at the identical
+`cy=9ae070 x3=aa pass=1` marker.  The final compile-only interval is only
+0.530 s above the sampled Step 11 interval, so the earlier roughly 4.25%
+code-generation regression has been removed.  Execution is consistently in
+the faster direction in this sample, but the two identical pre-sparsification
+candidate executions differ by 3.646 s, larger than the inferred improvement;
+runtime improvement is therefore not established.
+
+Focused tests cover structural versions across diamonds and loops, aliasing
+writes, observable barriers, live-out predicate rematerialization, cyclic and
+effectful rejection, selected-load writer type validation, and a 4096-case
+spine.  The common non-LTO gates passed with 743/743 library tests, 6/6 exact
+native MIR tests, 60/60 non-ignored native-testbench tests, and 9/9
+non-ignored native/Cranelift/Wasm counter tests.  `cargo check`, formatting,
+strict library/test clippy, and both Heliodor shell fixture suites also passed.
+
+Status: **complete structurally; code-generation regression removed; runtime
+effect unconfirmed; arm-exit live ranges/reloads remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1152,6 +1240,7 @@ live-range/reload work remains open**.
 | 9 | structural native MemorySSA and same-version state-load GVN | effects 2/2; reload 23/23; MIR optimization 50/50; native MIR 6/6 | lib 725/725; native 60/60; counter 9/9 | A--B--A all pass: `cy=9ae070 x3=aa pass=1` | Step 8 execute 146.367 s / 146.216 s; candidate 137.843 s; candidate compile 39.483 s | complete; execute -5.78%, indexed alias range open |
 | 10 | bounded register-indexed state-write effects | dynamic scalar/wide ISel; effects 3/3; reload 24/24; MIR optimization 51/51; native MIR 6/6 | lib 729/729; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | baseline execute 144.622 s / 138.620 s; candidate 139.287 s; compile reported separately | structural result complete; runtime effect unconfirmed |
 | 11 | explicit allocation of pseudo scratch registers | MIR operand/rewrite; sparse effects/reload/emission; allocator 134/134; native MIR 6/6 | lib 730/730; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | compile-only: baseline 41.077 s, candidate 42.647 s; execute: baseline 132.252 s / 135.434 s, candidate 132.954 s | hidden stack operations removed; runtime effect unconfirmed |
+| 12 | sparse SIR StateSSA GVN and correlated case-edge threading | StateSSA 8/8; GVN 17/17; CFS 16/16; native MIR 6/6 | lib 743/743; native 60/60; counter 9/9; strict clippy and Heliodor fixtures | all full runs pass: `cy=9ae070 x3=aa pass=1` | final compile-only 62.949 s; final execute 139.358 s; Step 11 adjacent compile-only 62.419 s / execute 142.445 s | structural result complete; compile regression removed; runtime effect unconfirmed |
 
 ## Related design records
 

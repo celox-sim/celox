@@ -417,7 +417,7 @@ impl StateSsa {
         eligible_load_blocks: Option<&HashSet<BlockId>>,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, eligible_load_blocks, phases, false)
+        Self::analyze_selected(eu, cfg, region, eligible_load_blocks, None, phases, false)
     }
 
     /// Build state versions for every exact load shape, including state which
@@ -431,7 +431,21 @@ impl StateSsa {
         region: u32,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, phases, true)
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true)
+    }
+
+    /// Build versions only for exact loads which have a prospective consumer.
+    /// Other accesses are still scanned as aliasing effects, but they do not
+    /// allocate slots or MemorySSA uses.  This is the sparse entry point used
+    /// by GVN after it has proved that a load shape occurs more than once.
+    pub fn analyze_selected_loads(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        eligible_loads: &HashSet<RegisterId>,
+        phases: &StatePhaseMap,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(eu, cfg, region, None, Some(eligible_loads), phases, true)
     }
 
     fn analyze_selected(
@@ -439,6 +453,7 @@ impl StateSsa {
         cfg: &SirCfg,
         region: u32,
         eligible_load_blocks: Option<&HashSet<BlockId>>,
+        eligible_loads: Option<&HashSet<RegisterId>>,
         phases: &StatePhaseMap,
         include_read_only: bool,
     ) -> Result<Self, StateSsaError> {
@@ -455,7 +470,9 @@ impl StateSsa {
                         addr,
                         SIROffset::Static(bit_offset),
                         width,
-                    ) if addr.region == region => {
+                    ) if addr.region == region
+                        && eligible_loads.is_none_or(|loads| loads.contains(destination)) =>
+                    {
                         let ty = eu
                             .register_map
                             .get(destination)
@@ -475,7 +492,7 @@ impl StateSsa {
                         source,
                         _,
                         _,
-                    ) if addr.region == region => {
+                    ) if addr.region == region && eligible_loads.is_none() => {
                         let ty = eu
                             .register_map
                             .get(source)
@@ -489,6 +506,45 @@ impl StateSsa {
                         .record_type(ty, *width);
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Sparse load selection must still validate an exact writer's type.
+        // Store-only locations do not need slots, but omitting a writer which
+        // aliases a selected load would incorrectly make a mixed-type slot
+        // appear valid.  This second discovery sweep is order-independent:
+        // every selected load location is already present in `raw`.
+        if eligible_loads.is_some() {
+            for &block_id in &cfg.block_ids {
+                for instruction in &eu.blocks[&block_id].instructions {
+                    let SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(bit_offset),
+                        width,
+                        source,
+                        _,
+                        _,
+                    ) = instruction
+                    else {
+                        continue;
+                    };
+                    if addr.region != region {
+                        continue;
+                    }
+                    let location = StateLocation {
+                        addr: *addr,
+                        bit_offset: *bit_offset,
+                        width: *width,
+                    };
+                    let Some(slot) = raw.get_mut(&location) else {
+                        continue;
+                    };
+                    let ty = eu
+                        .register_map
+                        .get(source)
+                        .ok_or(StateSsaError::MissingRegister(*source))?;
+                    slot.record_type(ty, *width);
                 }
             }
         }
@@ -535,6 +591,7 @@ impl StateSsa {
                             SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
                         };
                         if eligible_load_blocks.is_none_or(|blocks| blocks.contains(&block_id))
+                            && eligible_loads.is_none_or(|loads| loads.contains(destination))
                             && let Some(slot) = exact
                         {
                             facts[slot].has_load = true;
@@ -1154,6 +1211,51 @@ mod tests {
                 )
             })
             .expect("destination has a StateSSA use")
+    }
+
+    #[test]
+    fn selected_loads_still_validate_an_earlier_exact_store_type() {
+        let stable = address(STABLE_REGION, 0);
+        let eu = unit(
+            vec![block(
+                0,
+                vec![
+                    SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        32,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 32),
+                    SIRInstruction::Load(RegisterId(2), stable, SIROffset::Static(0), 32),
+                ],
+                SIRTerminator::Return,
+            )],
+            [
+                (RegisterId(0), RegisterType::Logic { width: 32 }),
+                (RegisterId(1), bit(32)),
+                (RegisterId(2), bit(32)),
+            ],
+        );
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        let eligible = [RegisterId(1), RegisterId(2)]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        let state = StateSsa::analyze_selected_loads(
+            &eu,
+            &cfg,
+            STABLE_REGION,
+            &eligible,
+            &StatePhaseMap::default(),
+        )
+        .unwrap();
+
+        assert!(state.slots.is_empty());
+        assert!(state.read_version(BlockId(0), 1, RegisterId(1)).is_none());
+        assert!(state.read_version(BlockId(0), 2, RegisterId(2)).is_none());
     }
 
     #[test]

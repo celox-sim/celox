@@ -119,7 +119,7 @@ use pass_branchify_mux::BranchifyMuxPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
-use pass_control_flow_simplify::ControlFlowSimplifyPass;
+use pass_control_flow_simplify::{ControlFlowSimplifyPass, PostGvnCfgCleanupPass};
 use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
@@ -443,6 +443,9 @@ fn optimize_with_options(
     }
     if on(SirPass::Gvn) {
         ff_passes.add_pass(GvnPass);
+        if on(SirPass::ControlFlowSimplify) {
+            ff_passes.add_pass(PostGvnCfgCleanupPass);
+        }
     }
     if on(SirPass::ConcatFolding) {
         ff_passes.add_pass(ConcatFoldingPass);
@@ -503,6 +506,9 @@ fn optimize_with_options(
     }
     if on(SirPass::Gvn) {
         eval_only_passes.add_pass(GvnPass);
+        if on(SirPass::ControlFlowSimplify) {
+            eval_only_passes.add_pass(PostGvnCfgCleanupPass);
+        }
     }
     if on(SirPass::ConcatFolding) {
         eval_only_passes.add_pass(ConcatFoldingPass);
@@ -591,6 +597,9 @@ fn optimize_with_options(
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass);
+        if on(SirPass::ControlFlowSimplify) {
+            comb_passes.add_pass(ControlFlowSimplifyPass);
+        }
     }
     if on(SirPass::ConcatFolding) {
         comb_passes.add_pass(ConcatFoldingPass);
@@ -628,6 +637,9 @@ fn optimize_with_options(
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization
+        if on(SirPass::ControlFlowSimplify) {
+            comb_passes.add_pass(PostGvnCfgCleanupPass);
+        }
     }
 
     let eu_count = program.eval_comb.len();
@@ -691,6 +703,19 @@ fn optimize_with_options(
     if on(SirPass::BranchifyMux) {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, &options);
+        }
+    }
+    // Late CFG-producing passes can expose a new equality spine.  Rebuild
+    // structural load identities and thread it at the final SIR boundary,
+    // before native lowering fixes register live ranges and spill slots.
+    if on(SirPass::Gvn) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&GvnPass, eu, &options);
+        }
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
         }
     }
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
