@@ -905,6 +905,87 @@ still address MemorySSA/mem2reg and spill/reload cost directly.
 
 Status: **complete; generated-code throughput target remains open**.
 
+### Step 9: Give native load GVN structural MemorySSA versions
+
+The exact Step 8 MIR contained physical `SimState` loads which reached the
+same memory definition but were emitted again in dominated blocks. The old
+global GVN could not safely remove all of them: it invalidated load keys while
+walking one dominator-tree path and restored those keys when leaving that
+subtree. At a CFG join, the join block is a dominator-tree sibling of the
+writing arm, so restoration could make a pre-branch load visible again even
+when one incoming path had written the same bytes. A regression constructed
+with an entry load, one writing diamond arm, and a join load reproduced that
+incorrect reuse before this step.
+
+Native GVN now builds sparse structural MemorySSA before rewriting MIR. Each
+exact load is keyed by the reaching versions of its bytes plus an unknown-base
+and unknown-all version. Writes receive deterministic definitions, iterated
+dominance frontiers place memory phis, and a dominator-tree rename gives joins
+and loops distinct structural versions. If CFG analysis fails, load CSE is
+disabled rather than falling back to path-local invalidation; non-memory GVN
+continues independently.
+
+The optimizer and reload analysis now share one physical MIR write-effect
+model. Plain stores and `MemCopy` have exact destination ranges.
+`SparseCommit` names its destination and dirty/summary bitmap ranges, while
+`SparseMarkActive` names its count, flag, and active-list ranges. Pointer
+writes, `SparseCommitWorklist`, and `StoreIndexed` remain conservative. Thus a
+sparse metadata update no longer destroys unrelated RTL-state reload recipes,
+but an indexed state store still invalidates its entire base until MIR carries
+or proves an index range.
+
+For a `SimState` load with the same structural version, GVN may reuse a
+dominating value even when doing so extends its MIR live range. The allocator's
+version-checked state reload recipe can reconstruct that value at uses, so the
+choice removes repeated physical state loads without requiring the register to
+remain resident. Arithmetic expressions and stack-frame loads retain the old
+live-range profitability rule.
+
+The exact optimized SIR is byte-identical to Step 8. In the full exact MIR,
+later loads at concrete addresses including `sim+136384..136456`,
+`sim+193648..193656`, and `sim+33908889..33908891` were replaced with uses of
+their dominating same-version values. MIR trace size fell to 190,410,346 bytes
+and post-allocation frames remained bounded:
+
+| Native function | Step 8 | Structural MemorySSA |
+|---|---:|---:|
+| `eval_comb` | 33,960 B | 34,016 B |
+| `apply_ff[0]` | 0 B | 0 B |
+| `eval_apply_ff[0]` | 8,560 B | 8,536 B |
+| `eval_only_ff[0]` | 13,824 B | 13,792 B |
+| `eval_comb_apply_ff[0]` | 42,488 B | 42,448 B |
+
+The selector at `sim+34006414` is still loaded in four successive case blocks
+because taken arms contain `StoreIndexed`, whose current effect is the whole
+`SimState` base. This step does not claim that indexed alias problem is solved.
+
+Host execution time drifted enough that candidate-only runs ranged from
+136.483 s to 149.993 s. Acceptance therefore used an interleaved Step 8 /
+candidate / Step 8 A--B--A measurement with separately reported compile and
+execute intervals. All three runs powered down with the identical
+`cy=9ae070 x3=aa pass=1` result:
+
+- Step 8 before: 40.186 s compile, 146.367 s execute
+  (`target/heliodor/results/20260716T044847Z_step8_baseline_ab.log`);
+- structural MemorySSA: 39.483 s compile, 137.843 s execute
+  (`target/heliodor/results/20260716T045202Z_memoryssa_candidate_ab.log`);
+- Step 8 after: 39.326 s compile, 146.216 s execute
+  (`target/heliodor/results/20260716T045515Z_step8_baseline_ab2.log`).
+
+The candidate reduced generated-code execution time by 8.448 s, or 5.78%,
+against the mean of the two adjacent Step 8 runs. Compile time did not regress,
+but it remains a separate code-generation metric and is not included in that
+5.78% result.
+
+Focused write-effect, reload-MemorySSA, and MIR-optimization tests passed
+2/2, 23/23, and 50/50. The common non-LTO gates passed with 725/725 library
+tests, 6/6 exact native MIR tests, 60 non-ignored native-testbench tests, and 9
+native/Cranelift/Wasm counter tests; `cargo fmt --check` and `cargo check -p
+celox` also passed.
+
+Status: **complete; indexed-memory alias ranges and broader mem2reg remain
+open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -924,6 +1005,7 @@ Status: **complete; generated-code throughput target remains open**.
 | 6 | split timing | result/gate fixtures passed | lib 715/715; native 60/60; counter 9/9; docs build passed | non-LTO Celox and cold synchronous Veryl AOT-C passed at `cy=9ae070 x3=aa pass=1` | compile: Celox 40.450 s, Veryl 58.354 s; execute: Celox 137.675 s, Veryl 54.282 s | generated-code gap isolated at 2.536x |
 | 7 | post-reconstruction DCE | reconstruction 11/11; native MIR 6/6 | lib 715/715; native 60/60; counter 9/9 | pass: `cy=9ae070 x3=aa pass=1` | compile 40.097 s; execute 137.349 s | complete; scheduling trials rejected |
 | 8 | target-capacity-aware scheduling | scheduler 15/15; native MIR 6/6 | lib 718/718; native 60/60; counter 9/9 | pass twice: `cy=9ae070 x3=aa pass=1` | compile 41.181 s / 41.000 s; execute 136.602 s / 136.868 s | complete; bounded ILP retained, throughput target open |
+| 9 | structural native MemorySSA and same-version state-load GVN | effects 2/2; reload 23/23; MIR optimization 50/50; native MIR 6/6 | lib 725/725; native 60/60; counter 9/9 | A--B--A all pass: `cy=9ae070 x3=aa pass=1` | Step 8 execute 146.367 s / 146.216 s; candidate 137.843 s; candidate compile 39.483 s | complete; execute -5.78%, indexed alias range open |
 
 ## Related design records
 

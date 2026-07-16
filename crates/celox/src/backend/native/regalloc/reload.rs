@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
+use crate::backend::native::memory_effect;
 use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, OpSize, VReg};
 
 use super::cfg::NormalizedCfg;
@@ -621,13 +622,6 @@ enum RecipeBase {
     State(VReg),
 }
 
-#[derive(Debug, Clone, Copy)]
-enum MemoryWrite {
-    None,
-    Static { offset: i32, byte_len: usize },
-    Unknown,
-}
-
 #[derive(Debug)]
 struct MemoryPhi {
     block: usize,
@@ -1114,21 +1108,25 @@ fn build_memory_ssa(
     let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let ordinal = match memory_write(inst) {
-                MemoryWrite::None => None,
-                MemoryWrite::Static { .. } | MemoryWrite::Unknown => {
-                    let ordinal = write_ordinal;
-                    write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
-                        ReloadRecipeError::new(
-                            "RELOAD_RECIPE.WRITE_ORDINAL_RANGE",
-                            Some(mir_block.id),
-                            Some(instruction),
-                            None,
-                            "MemorySSA write ordinal exceeds addressable MIR size",
-                        )
-                    })?;
-                    Some(ordinal)
-                }
+            let effect = memory_effect::writes(inst);
+            let affects_sim_state = effect
+                .unknown_base()
+                .is_some_and(|base| base.is_none_or(|base| base == BaseReg::SimState))
+                || effect.ranges().any(|range| range.base == BaseReg::SimState);
+            let ordinal = if affects_sim_state {
+                let ordinal = write_ordinal;
+                write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
+                    ReloadRecipeError::new(
+                        "RELOAD_RECIPE.WRITE_ORDINAL_RANGE",
+                        Some(mir_block.id),
+                        Some(instruction),
+                        None,
+                        "MemorySSA write ordinal exceeds addressable MIR size",
+                    )
+                })?;
+                Some(ordinal)
+            } else {
+                None
             };
             let affected = affected_variables(inst, tracked_bytes)?;
             for variable in affected {
@@ -1189,66 +1187,29 @@ fn affected_variables(
     inst: &MInst,
     tracked_bytes: &BTreeSet<i64>,
 ) -> Result<Vec<MemoryVariable>, ReloadRecipeError> {
-    match memory_write(inst) {
-        MemoryWrite::None => Ok(Vec::new()),
-        MemoryWrite::Unknown => Ok(vec![MemoryVariable::UnknownAlias]),
-        MemoryWrite::Static { offset, byte_len } => {
-            let start = i64::from(offset);
-            let Some(length) = i64::try_from(byte_len).ok() else {
-                return Ok(vec![MemoryVariable::UnknownAlias]);
-            };
-            let Some(end) = start.checked_add(length) else {
-                return Ok(vec![MemoryVariable::UnknownAlias]);
-            };
-            Ok(tracked_bytes
-                .range(start..end)
+    let effect = memory_effect::writes(inst);
+    if effect
+        .unknown_base()
+        .is_some_and(|base| base.is_none_or(|base| base == BaseReg::SimState))
+    {
+        return Ok(vec![MemoryVariable::UnknownAlias]);
+    }
+    let mut affected = BTreeSet::new();
+    for range in effect
+        .ranges()
+        .filter(|range| range.base == BaseReg::SimState)
+    {
+        let Some(end) = range.end() else {
+            return Ok(vec![MemoryVariable::UnknownAlias]);
+        };
+        affected.extend(
+            tracked_bytes
+                .range(range.offset..end)
                 .copied()
-                .map(MemoryVariable::Byte)
-                .collect())
-        }
+                .map(MemoryVariable::Byte),
+        );
     }
-}
-
-fn memory_write(inst: &MInst) -> MemoryWrite {
-    match inst {
-        MInst::Store {
-            base: BaseReg::SimState,
-            offset,
-            size,
-            ..
-        } => MemoryWrite::Static {
-            offset: *offset,
-            byte_len: size.bytes() as usize,
-        },
-        MInst::Store {
-            base: BaseReg::StackFrame,
-            ..
-        } => MemoryWrite::None,
-        MInst::StoreIndexed {
-            base: BaseReg::SimState,
-            ..
-        }
-        | MInst::StorePtr { .. }
-        | MInst::ReleaseStorePtr { .. }
-        | MInst::StorePtrIndexed { .. }
-        | MInst::ReleaseStorePtrIndexed { .. }
-        | MInst::SparseCommit { .. }
-        | MInst::SparseMarkActive { .. }
-        | MInst::SparseCommitWorklist { .. } => MemoryWrite::Unknown,
-        MInst::StoreIndexed {
-            base: BaseReg::StackFrame,
-            ..
-        } => MemoryWrite::None,
-        MInst::MemCopy {
-            dst_offset,
-            byte_len,
-            ..
-        } => MemoryWrite::Static {
-            offset: *dst_offset,
-            byte_len: *byte_len,
-        },
-        _ => MemoryWrite::None,
-    }
+    Ok(affected.into_iter().collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1951,6 +1912,49 @@ mod tests {
                 .unwrap(),
             vec![Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn sparse_mark_preserves_only_nonoverlapping_state_recipes() {
+        fn fixture(load_offset: i32) -> (VReg, ReloadRecipeAnalysis) {
+            let (mut func, values) = function_with_values(2);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: values[0],
+                base: BaseReg::SimState,
+                offset: load_offset,
+                size: OpSize::S64,
+            });
+            block.push(MInst::SparseMarkActive {
+                active_index: 3,
+                active_count_offset: 100,
+                active_flags_offset: 200,
+                active_list_offset: 300,
+                active_capacity: 16,
+            });
+            block.push(MInst::Mov {
+                dst: values[1],
+                src: values[0],
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+            let (_, _, analysis) = analyze_function(func);
+            (values[0], analysis)
+        }
+
+        let (unrelated, unrelated_analysis) = fixture(40);
+        assert!(unrelated_analysis.state_valid_at_point(PointUse {
+            block: BlockId(0),
+            instruction: 2,
+            value: unrelated,
+        }));
+
+        let (metadata, metadata_analysis) = fixture(100);
+        assert!(!metadata_analysis.state_valid_at_point(PointUse {
+            block: BlockId(0),
+            instruction: 2,
+            value: metadata,
+        }));
     }
 
     #[test]

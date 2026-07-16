@@ -505,6 +505,24 @@ interval.
 The earlier Celox `cy=9ab960` completions were invalidated by an ISel
 wide-to-narrow canonicalization bug, not by the allocator.
 
+The next retained throughput step added structural byte-granular MemorySSA to
+native load GVN and made its physical write effects shared with allocator
+reload analysis. This fixed an unsound path-scoped load invalidation at CFG
+joins and lets same-version `SimState` loads reuse a dominating value even when
+the MIR live range grows: the allocator can reconstruct that value from its
+independently checked state home instead of forcing it to remain in a register.
+Exact sparse-commit and sparse-active metadata ranges no longer invalidate
+unrelated homes. Indexed and pointer writes remain conservative; in particular,
+`StoreIndexed` still invalidates every tracked byte on its base until a proved
+index range is represented in MIR alias analysis.
+
+An interleaved Step 8 / candidate / Step 8 non-LTO Linux measurement separated
+compilation from generated-code execution. The adjacent Step 8 executions took
+146.367 s and 146.216 s; the structural-MemorySSA candidate took 137.843 s, a
+5.78% reduction from their mean. All three completed at
+`cy=9ae070 x3=aa pass=1`. Their compile intervals were 40.186 s, 39.483 s, and
+39.326 s respectively and are not part of that execution-time result.
+
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and
 completed-assignment verification is unconditional.  Internal default-SSA

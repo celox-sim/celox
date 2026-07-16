@@ -7,6 +7,7 @@ pub mod emit;
 pub(crate) mod features;
 pub mod isel;
 pub mod jit_mem;
+pub(crate) mod memory_effect;
 pub mod mir;
 pub(crate) mod mir_legalize;
 pub(crate) mod mir_opt;

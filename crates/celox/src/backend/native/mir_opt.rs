@@ -3,8 +3,9 @@
 //! - Copy propagation: `v2 = mov v1` → replace all uses of v2 with v1
 //! - Dead code elimination: remove instructions whose defs are unused
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+use super::memory_effect;
 use super::mir::*;
 
 /// Run all MIR optimization passes.
@@ -1062,6 +1063,36 @@ enum GvnOpcode {
     Pdep,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum GvnMemoryVariable {
+    UnknownAll,
+    UnknownBase(BaseReg),
+    Byte(BaseReg, i64),
+}
+
+/// Structural identity of one reaching physical-memory definition. Phi
+/// versions distinguish loop iterations and joining paths without depending
+/// on hash-table iteration order or on unrelated tracked byte ranges.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum GvnMemoryVersion {
+    Entry(GvnMemoryVariable),
+    Write {
+        ordinal: usize,
+        variable: GvnMemoryVariable,
+    },
+    Phi {
+        block: usize,
+        variable: GvnMemoryVariable,
+    },
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct GvnLoadVersion {
+    unknown_all: GvnMemoryVersion,
+    unknown_base: GvnMemoryVersion,
+    bytes: Box<[GvnMemoryVersion]>,
+}
+
 /// An expression over value numbers, not source VRegs.  Two different VRegs
 /// that GVN has already proven equal therefore form the same later expression.
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -1086,7 +1117,7 @@ enum GvnKey {
         ValueNumber,
         ValueNumber,
     ),
-    Load(BaseReg, i32, OpSize),
+    Load(BaseReg, i32, OpSize, GvnLoadVersion),
 }
 
 fn gvn_is_commutative(op: GvnOpcode) -> bool {
@@ -1105,7 +1136,11 @@ fn gvn_value(value_numbers: &[ValueNumber], vreg: VReg) -> ValueNumber {
     value_numbers[vreg.0 as usize]
 }
 
-fn gvn_key(inst: &MInst, value_numbers: &[ValueNumber]) -> Option<GvnKey> {
+fn gvn_key(
+    inst: &MInst,
+    value_numbers: &[ValueNumber],
+    load_version: Option<&GvnLoadVersion>,
+) -> Option<GvnKey> {
     let value = |vreg| gvn_value(value_numbers, vreg);
     let binary = |op, lhs, rhs| gvn_binary(op, value(lhs), value(rhs));
     match inst {
@@ -1224,7 +1259,7 @@ fn gvn_key(inst: &MInst, value_numbers: &[ValueNumber]) -> Option<GvnKey> {
         )),
         MInst::Load {
             base, offset, size, ..
-        } => Some(GvnKey::Load(*base, *offset, *size)),
+        } => Some(GvnKey::Load(*base, *offset, *size, load_version?.clone())),
         _ => None,
     }
 }
@@ -1236,52 +1271,254 @@ fn gvn_binary(op: GvnOpcode, mut lhs: ValueNumber, mut rhs: ValueNumber) -> GvnK
     GvnKey::Binary(op, lhs, rhs)
 }
 
-#[derive(Clone, Copy)]
-enum MemoryWrite {
-    None,
-    Static {
-        base: BaseReg,
-        offset: i32,
-        byte_len: usize,
-    },
-    Unknown {
-        base: Option<BaseReg>,
-    },
+#[derive(Default)]
+struct GvnTrackedMemory {
+    sim_state: BTreeSet<i64>,
+    stack_frame: BTreeSet<i64>,
 }
 
-/// Describe the memory written by an instruction. `MemCopy` reads its source
-/// range and writes its destination range; only the latter invalidates an
-/// already-loaded value.
-fn memory_write(inst: &MInst) -> MemoryWrite {
-    match inst {
-        MInst::Store {
-            base, offset, size, ..
-        } => MemoryWrite::Static {
-            base: *base,
-            offset: *offset,
-            byte_len: size.bytes() as usize,
-        },
-        MInst::MemCopy {
-            dst_offset,
-            byte_len,
-            ..
-        } => MemoryWrite::Static {
-            base: BaseReg::SimState,
-            offset: *dst_offset,
-            byte_len: *byte_len,
-        },
-        MInst::SparseCommit { .. }
-        | MInst::SparseMarkActive { .. }
-        | MInst::SparseCommitWorklist { .. } => MemoryWrite::Unknown {
-            base: Some(BaseReg::SimState),
-        },
-        MInst::StoreIndexed { base, .. } => MemoryWrite::Unknown { base: Some(*base) },
-        MInst::StorePtr { .. }
-        | MInst::ReleaseStorePtr { .. }
-        | MInst::StorePtrIndexed { .. }
-        | MInst::ReleaseStorePtrIndexed { .. } => MemoryWrite::Unknown { base: None },
-        _ => MemoryWrite::None,
+impl GvnTrackedMemory {
+    fn bytes(&self, base: BaseReg) -> &BTreeSet<i64> {
+        match base {
+            BaseReg::SimState => &self.sim_state,
+            BaseReg::StackFrame => &self.stack_frame,
+        }
     }
+
+    fn bytes_mut(&mut self, base: BaseReg) -> &mut BTreeSet<i64> {
+        match base {
+            BaseReg::SimState => &mut self.sim_state,
+            BaseReg::StackFrame => &mut self.stack_frame,
+        }
+    }
+
+    fn tracks_base(&self, base: BaseReg) -> bool {
+        !self.bytes(base).is_empty()
+    }
+}
+
+fn gvn_memory_variable_key(variable: GvnMemoryVariable) -> (u8, i64) {
+    match variable {
+        GvnMemoryVariable::UnknownAll => (0, 0),
+        GvnMemoryVariable::UnknownBase(BaseReg::SimState) => (1, 0),
+        GvnMemoryVariable::UnknownBase(BaseReg::StackFrame) => (2, 0),
+        GvnMemoryVariable::Byte(BaseReg::SimState, byte) => (3, byte),
+        GvnMemoryVariable::Byte(BaseReg::StackFrame, byte) => (4, byte),
+    }
+}
+
+fn gvn_memory_version(
+    variable: GvnMemoryVariable,
+    current: &HashMap<GvnMemoryVariable, GvnMemoryVersion>,
+) -> GvnMemoryVersion {
+    current
+        .get(&variable)
+        .copied()
+        .unwrap_or(GvnMemoryVersion::Entry(variable))
+}
+
+fn gvn_load_version(
+    base: BaseReg,
+    offset: i32,
+    size: OpSize,
+    current: &HashMap<GvnMemoryVariable, GvnMemoryVersion>,
+) -> Option<GvnLoadVersion> {
+    let start = i64::from(offset);
+    let end = start.checked_add(i64::from(size.bytes()))?;
+    Some(GvnLoadVersion {
+        unknown_all: gvn_memory_version(GvnMemoryVariable::UnknownAll, current),
+        unknown_base: gvn_memory_version(GvnMemoryVariable::UnknownBase(base), current),
+        bytes: (start..end)
+            .map(|byte| gvn_memory_version(GvnMemoryVariable::Byte(base, byte), current))
+            .collect(),
+    })
+}
+
+fn gvn_affected_memory_variables(
+    inst: &MInst,
+    tracked: &GvnTrackedMemory,
+) -> Option<Vec<GvnMemoryVariable>> {
+    let effect = memory_effect::writes(inst);
+    if let Some(base) = effect.unknown_base() {
+        return Some(match base {
+            Some(base) if tracked.tracks_base(base) => {
+                vec![GvnMemoryVariable::UnknownBase(base)]
+            }
+            Some(_) => Vec::new(),
+            None => vec![GvnMemoryVariable::UnknownAll],
+        });
+    }
+    let mut affected = HashSet::<GvnMemoryVariable>::new();
+    for range in effect.ranges() {
+        let end = range.end()?;
+        affected.extend(
+            tracked
+                .bytes(range.base)
+                .range(range.offset..end)
+                .copied()
+                .map(|byte| GvnMemoryVariable::Byte(range.base, byte)),
+        );
+    }
+    let mut affected = affected.into_iter().collect::<Vec<_>>();
+    affected.sort_unstable_by_key(|variable| gvn_memory_variable_key(*variable));
+    Some(affected)
+}
+
+fn gvn_dominance_frontiers(
+    predecessors: &[Vec<usize>],
+    idom: &[Option<usize>],
+) -> Option<Vec<BTreeSet<usize>>> {
+    if predecessors.len() != idom.len() {
+        return None;
+    }
+    let mut frontiers = vec![BTreeSet::new(); predecessors.len()];
+    for (block, incoming) in predecessors.iter().enumerate() {
+        if incoming.len() < 2 {
+            continue;
+        }
+        let immediate = idom[block]?;
+        for &predecessor in incoming {
+            let mut runner = predecessor;
+            let mut steps = 0usize;
+            while runner != immediate {
+                frontiers.get_mut(runner)?.insert(block);
+                runner = idom.get(runner).copied().flatten()?;
+                steps = steps.checked_add(1)?;
+                if steps > idom.len() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(frontiers)
+}
+
+/// Build sparse byte-granular MemorySSA versions for every exact MIR load.
+/// The result is keyed by the original block/instruction location and is
+/// computed before GVN mutates any instruction into a copy.
+fn compute_gvn_load_versions(
+    func: &MFunction,
+    predecessors: &[Vec<usize>],
+    idom: &[Option<usize>],
+) -> Option<HashMap<(usize, usize), GvnLoadVersion>> {
+    let mut tracked = GvnTrackedMemory::default();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MInst::Load {
+                base, offset, size, ..
+            } = inst
+            else {
+                continue;
+            };
+            let start = i64::from(*offset);
+            let end = start.checked_add(i64::from(size.bytes()))?;
+            tracked.bytes_mut(*base).extend(start..end);
+        }
+    }
+    if tracked.sim_state.is_empty() && tracked.stack_frame.is_empty() {
+        return Some(HashMap::new());
+    }
+
+    let frontiers = gvn_dominance_frontiers(predecessors, idom)?;
+    let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::new();
+    let mut write_versions = HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::new();
+    let mut write_ordinal = 0usize;
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+            let effect = memory_effect::writes(inst);
+            let ordinal = if effect.has_effect() {
+                let ordinal = write_ordinal;
+                write_ordinal = write_ordinal.checked_add(1)?;
+                Some(ordinal)
+            } else {
+                None
+            };
+            for variable in gvn_affected_memory_variables(inst, &tracked)? {
+                definition_blocks.entry(variable).or_default().insert(block);
+                write_versions.insert(
+                    (block, instruction, variable),
+                    GvnMemoryVersion::Write {
+                        ordinal: ordinal.expect("an affected variable belongs to a memory write"),
+                        variable,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut phis_by_block = vec![Vec::<GvnMemoryVariable>::new(); func.blocks.len()];
+    for (variable, original_definitions) in definition_blocks {
+        let mut definitions = original_definitions;
+        let mut queue = definitions.iter().copied().collect::<VecDeque<_>>();
+        let mut placed = BTreeSet::<usize>::new();
+        while let Some(definition) = queue.pop_front() {
+            for &frontier in &frontiers[definition] {
+                if frontier == 0 || !placed.insert(frontier) {
+                    continue;
+                }
+                phis_by_block[frontier].push(variable);
+                if definitions.insert(frontier) {
+                    queue.push_back(frontier);
+                }
+            }
+        }
+    }
+    for phis in &mut phis_by_block {
+        phis.sort_unstable_by_key(|variable| gvn_memory_variable_key(*variable));
+    }
+
+    let mut children = vec![Vec::<usize>::new(); func.blocks.len()];
+    for (block, parent) in idom.iter().copied().enumerate().skip(1) {
+        if let Some(parent) = parent {
+            children[parent].push(block);
+        }
+    }
+
+    enum Action {
+        Enter(usize),
+        Exit(Vec<(GvnMemoryVariable, Option<GvnMemoryVersion>)>),
+    }
+    let mut current = HashMap::<GvnMemoryVariable, GvnMemoryVersion>::new();
+    let mut versions = HashMap::<(usize, usize), GvnLoadVersion>::new();
+    let mut actions = vec![Action::Enter(0)];
+    while let Some(action) = actions.pop() {
+        let block = match action {
+            Action::Exit(changes) => {
+                for (variable, previous) in changes.into_iter().rev() {
+                    if let Some(previous) = previous {
+                        current.insert(variable, previous);
+                    } else {
+                        current.remove(&variable);
+                    }
+                }
+                continue;
+            }
+            Action::Enter(block) => block,
+        };
+        let mut changes = Vec::new();
+        for &variable in &phis_by_block[block] {
+            let version = GvnMemoryVersion::Phi { block, variable };
+            changes.push((variable, current.insert(variable, version)));
+        }
+        for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            if let MInst::Load {
+                base, offset, size, ..
+            } = inst
+            {
+                versions.insert(
+                    (block, instruction),
+                    gvn_load_version(*base, *offset, *size, &current)?,
+                );
+            }
+            for variable in gvn_affected_memory_variables(inst, &tracked)? {
+                let version = *write_versions.get(&(block, instruction, variable))?;
+                changes.push((variable, current.insert(variable, version)));
+            }
+        }
+        actions.push(Action::Exit(changes));
+        actions.extend(children[block].iter().rev().copied().map(Action::Enter));
+    }
+    Some(versions)
 }
 
 /// Global GVN: dominator-tree-scoped value numbering.
@@ -1313,6 +1550,7 @@ fn global_gvn(func: &mut MFunction) {
 
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
+    let load_versions = compute_gvn_load_versions(func, &preds, &idom).unwrap_or_default();
     let (_, live_out) = compute_gvn_liveness(func, &block_id_to_idx, &succs);
     let last_uses = func
         .blocks
@@ -1347,14 +1585,14 @@ fn global_gvn(func: &mut MFunction) {
     debug_assert_eq!(value_numbers.len(), vreg_count);
 
     let mut value_table: HashMap<GvnKey, ValueNumber> = HashMap::new();
-    let mut active_load_keys: HashSet<GvnKey> = HashSet::new();
     let mut table_changes: Vec<(GvnKey, Option<ValueNumber>)> = Vec::new();
     let mut leader_changes: Vec<(ValueNumber, VReg, Option<usize>)> = Vec::new();
     let mut replacements: Vec<(usize, usize, MInst)> = Vec::new(); // (block_idx, inst_idx, new_inst)
 
-    // Dominator-scoped GVN. Every table mutation, including load invalidation
-    // by a store, is undo-logged so sibling subtrees see exactly the state at
-    // their common dominator.
+    // Dominator-scoped GVN. Every table mutation is undo-logged so sibling
+    // subtrees see exactly the expression scope at their common dominator.
+    // Load validity is carried by the structural MemorySSA version in its key,
+    // rather than by a path-local store invalidation side table.
     fn gvn_dfs(
         node: usize,
         dom_children: &[Vec<usize>],
@@ -1364,8 +1602,8 @@ fn global_gvn(func: &mut MFunction) {
         leader_blocks: &mut [Option<usize>],
         live_out: &[HashSet<VReg>],
         last_uses: &[HashMap<VReg, usize>],
+        load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
-        active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
         leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
@@ -1382,8 +1620,8 @@ fn global_gvn(func: &mut MFunction) {
             leader_blocks,
             &live_out[node],
             &last_uses[node],
+            load_versions,
             value_table,
-            active_load_keys,
             table_changes,
             leader_changes,
             replacements,
@@ -1399,8 +1637,8 @@ fn global_gvn(func: &mut MFunction) {
                 leader_blocks,
                 live_out,
                 last_uses,
+                load_versions,
                 value_table,
-                active_load_keys,
                 table_changes,
                 leader_changes,
                 replacements,
@@ -1416,15 +1654,9 @@ fn global_gvn(func: &mut MFunction) {
         while table_changes.len() > checkpoint {
             let (key, previous) = table_changes.pop().unwrap();
             if let Some(previous) = previous {
-                value_table.insert(key.clone(), previous);
-                if matches!(key, GvnKey::Load(..)) {
-                    active_load_keys.insert(key);
-                }
+                value_table.insert(key, previous);
             } else {
                 value_table.remove(&key);
-                if matches!(key, GvnKey::Load(..)) {
-                    active_load_keys.remove(&key);
-                }
             }
         }
     }
@@ -1437,8 +1669,8 @@ fn global_gvn(func: &mut MFunction) {
         leader_blocks: &mut [Option<usize>],
         live_out: &HashSet<VReg>,
         last_uses: &HashMap<VReg, usize>,
+        load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
-        active_load_keys: &mut HashSet<GvnKey>,
         table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
         leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
         replacements: &mut Vec<(usize, usize, MInst)>,
@@ -1446,56 +1678,13 @@ fn global_gvn(func: &mut MFunction) {
         for inst_idx in 0..block.insts.len() {
             let inst = &block.insts[inst_idx];
 
-            let write = memory_write(inst);
-            if !matches!(write, MemoryWrite::None) {
-                // Only invalidate Load CSE entries that overlap a known write.
-                // Dynamic/pointer writes remain conservative full clobbers.
-                let load_keys = active_load_keys
-                    .iter()
-                    .filter(|k| {
-                        let GvnKey::Load(load_base, load_offset, load_size) = k else {
-                            return false;
-                        };
-                        match write {
-                            MemoryWrite::None => false,
-                            MemoryWrite::Unknown { base } => {
-                                base.is_none_or(|base| *load_base == base)
-                            }
-                            MemoryWrite::Static {
-                                base,
-                                offset,
-                                byte_len,
-                            } => {
-                                if *load_base != base {
-                                    return false;
-                                }
-                                byte_ranges_may_overlap(
-                                    *load_offset,
-                                    load_size.bytes() as usize,
-                                    offset,
-                                    byte_len,
-                                )
-                            }
-                        }
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for key in load_keys {
-                    let previous = value_table
-                        .remove(&key)
-                        .expect("active load key must exist in the GVN table");
-                    active_load_keys.remove(&key);
-                    table_changes.push((key, Some(previous)));
-                }
-            }
-
             if let MInst::Mov { dst, src } = inst {
                 let number = gvn_value(value_numbers, *src);
                 value_numbers[dst.0 as usize] = number;
                 continue;
             }
 
-            if let Some(key) = gvn_key(inst, value_numbers) {
+            if let Some(key) = gvn_key(inst, value_numbers, load_versions.get(&(node, inst_idx))) {
                 let dst = inst
                     .def()
                     .expect("every value-numbered MIR instruction must define a VReg");
@@ -1503,11 +1692,15 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
+                    let state_load_can_be_rematerialized =
+                        matches!(&key, GvnKey::Load(BaseReg::SimState, ..));
                     let reuse_does_not_extend_live_range = live_out.contains(&leader)
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
-                    if dst != leader && reuse_does_not_extend_live_range {
+                    if dst != leader
+                        && (state_load_can_be_rematerialized || reuse_does_not_extend_live_range)
+                    {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
                     } else if dst != leader {
                         // The expression is available, but reusing its original
@@ -1529,9 +1722,6 @@ fn global_gvn(func: &mut MFunction) {
                     leader_blocks[number as usize] = Some(node);
                     let previous = value_table.insert(key.clone(), number);
                     debug_assert!(previous.is_none());
-                    if matches!(key, GvnKey::Load(..)) {
-                        active_load_keys.insert(key.clone());
-                    }
                     table_changes.push((key, previous));
                 }
             }
@@ -1547,14 +1737,13 @@ fn global_gvn(func: &mut MFunction) {
         &mut leader_blocks,
         &live_out,
         &last_uses,
+        &load_versions,
         &mut value_table,
-        &mut active_load_keys,
         &mut table_changes,
         &mut leader_changes,
         &mut replacements,
     );
     debug_assert!(value_table.is_empty());
-    debug_assert!(active_load_keys.is_empty());
     debug_assert!(table_changes.is_empty());
     debug_assert!(leader_changes.is_empty());
 
@@ -2039,23 +2228,6 @@ fn byte_range(offset: i32, byte_len: usize) -> Option<(i64, i64)> {
     let start = i64::from(offset);
     let byte_len = i64::try_from(byte_len).ok()?;
     Some((start, start.checked_add(byte_len)?))
-}
-
-fn byte_ranges_may_overlap(
-    lhs_offset: i32,
-    lhs_byte_len: usize,
-    rhs_offset: i32,
-    rhs_byte_len: usize,
-) -> bool {
-    match (
-        byte_range(lhs_offset, lhs_byte_len),
-        byte_range(rhs_offset, rhs_byte_len),
-    ) {
-        (Some((lhs_start, lhs_end)), Some((rhs_start, rhs_end))) => {
-            lhs_start < rhs_end && rhs_start < lhs_end
-        }
-        _ => true,
-    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -5544,6 +5716,56 @@ mod tests {
     }
 
     #[test]
+    fn global_gvn_reuses_same_version_state_load_across_blocks() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..2 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..2).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.insts = vec![
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(successor);
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[1].insts[0],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        );
+    }
+
+    #[test]
     fn global_gvn_reuses_a_cross_block_leader_that_is_already_live() {
         let mut vregs = VRegAllocator::new();
         for _ in 0..4 {
@@ -5903,6 +6125,236 @@ mod tests {
                 src: VReg(0),
             }
         ));
+    }
+
+    #[test]
+    fn global_gvn_does_not_reuse_load_across_a_joining_write() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..4).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 9,
+            },
+            MInst::Branch {
+                cond: VReg(1),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        func.push_block(entry);
+
+        let mut writing_arm = MBlock::new(BlockId(1));
+        writing_arm.insts = vec![
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(3) },
+        ];
+        func.push_block(writing_arm);
+
+        let mut unchanged_arm = MBlock::new(BlockId(2));
+        unchanged_arm.insts = vec![MInst::Jump { target: BlockId(3) }];
+        func.push_block(unchanged_arm);
+
+        let mut join = MBlock::new(BlockId(3));
+        join.insts = vec![
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            // Keep the entry value live at the repeated load. The memory
+            // version, not register liveness, must reject this replacement.
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 88,
+                src: VReg(3),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(join);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[3].insts[0], MInst::Load { .. }));
+    }
+
+    #[test]
+    fn global_gvn_does_not_reuse_load_across_a_loop_carried_write() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..3 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..3).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 1,
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+
+        let mut header = MBlock::new(BlockId(1));
+        header.insts = vec![MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        }];
+        func.push_block(header);
+
+        let mut body = MBlock::new(BlockId(2));
+        body.insts = vec![
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(body);
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.insts = vec![
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 88,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(exit);
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[3].insts[0], MInst::Load { .. }));
+    }
+
+    #[test]
+    fn global_gvn_sparse_mark_invalidates_only_its_metadata_ranges() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    size: OpSize::S64,
+                },
+                MInst::SparseMarkActive {
+                    active_index: 3,
+                    active_count_offset: 100,
+                    active_flags_offset: 200,
+                    active_list_offset: 300,
+                    active_capacity: 16,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(3),
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 400,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 408,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 416,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 424,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(0),
+            }
+        );
+        assert!(matches!(func.blocks[0].insts[4], MInst::Load { .. }));
     }
 
     #[test]
