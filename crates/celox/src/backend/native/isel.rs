@@ -3347,7 +3347,17 @@ fn prepare_sparse_store(
     emit_sparse_mark_active(ctx, block, sparse);
     let stable_base = ctx.layout.offsets[&abs] as i32;
     let sparse_base = (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32;
-    let byte_size = ctx.layout.plane_size(&abs) as i32;
+    let plane_size = ctx.layout.plane_size(&abs);
+    let byte_size = plane_size as i32;
+    let sparse_plane_access_len = plane_size.checked_add(7).map(|size| size & !7);
+    let dirty_alias_range = sparse
+        .dirty_word_count
+        .checked_mul(8)
+        .and_then(|byte_len| MemoryAliasRange::new(sparse.dirty_words_offset as i32, byte_len));
+    let summary_alias_range = sparse
+        .summary_word_count
+        .checked_mul(8)
+        .and_then(|byte_len| MemoryAliasRange::new(sparse.summary_words_offset as i32, byte_len));
 
     // A value that fits in one 64-bit chunk has no dynamic sparse-metadata
     // indexing at all: every valid store touches chunk zero, dirty word zero,
@@ -3580,6 +3590,9 @@ fn prepare_sparse_store(
                 index: data_index,
                 src: initialized,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(sparse_base + plane_delta, byte_len)
+                }),
             });
         }
 
@@ -3595,6 +3608,7 @@ fn prepare_sparse_store(
             index: dirty_index,
             src: new_dirty,
             size: OpSize::S64,
+            alias_range: dirty_alias_range,
         });
 
         let summary_word = ctx.alloc_vreg(SpillDesc::transient());
@@ -3637,6 +3651,7 @@ fn prepare_sparse_store(
             index: summary_index,
             src: new_summary,
             size: OpSize::S64,
+            alias_range: summary_alias_range,
         });
     }
 }
@@ -3647,6 +3662,7 @@ fn emit_aligned_dynamic_wide_store(
     base_offset: i32,
     byte_offset: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     chunks: &[(VReg, usize)],
 ) {
     let mut bit_pos = 0usize;
@@ -3687,6 +3703,7 @@ fn emit_aligned_dynamic_wide_store(
                         1 => OpSize::S8,
                         _ => unreachable!(),
                     },
+                    alias_range,
                 });
                 copied += bytes;
             }
@@ -3723,6 +3740,7 @@ fn emit_aligned_dynamic_wide_store(
                 index: byte_offset,
                 src: new,
                 size: OpSize::S8,
+                alias_range,
             });
         }
 
@@ -3741,6 +3759,7 @@ fn emit_dynamic_scalar_bitfield_store(
     bit_shift: VReg,
     src: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     track_change: bool,
 ) -> Option<VReg> {
     let width_mask = mask_for_width(width);
@@ -3799,6 +3818,7 @@ fn emit_dynamic_scalar_bitfield_store(
         index: byte_offset,
         src: new_low,
         size: ISelContext::op_size_for_width(width + 7),
+        alias_range,
     });
 
     let mut changed = track_change.then(|| {
@@ -3897,6 +3917,7 @@ fn emit_dynamic_scalar_bitfield_store(
         index: byte_offset,
         src: new_high,
         size: OpSize::S8,
+        alias_range,
     });
     if track_change {
         let high_changed = ctx.alloc_vreg(SpillDesc::transient());
@@ -3924,6 +3945,7 @@ fn emit_dynamic_wide_bitfield_store(
     byte_offset: VReg,
     bit_shift: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     chunks: &[(VReg, usize)],
     track_change: bool,
 ) -> Option<VReg> {
@@ -3943,6 +3965,7 @@ fn emit_dynamic_wide_bitfield_store(
             bit_shift,
             chunk,
             logical_width,
+            alias_range,
             track_change,
         );
         changed = match (changed, chunk_changed) {
@@ -5011,6 +5034,10 @@ fn lower_instruction(
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
                         let base_off = ctx.byte_offset(addr, 0);
+                        let value_alias_range = MemoryAliasRange::new(
+                            base_off,
+                            ctx.layout.plane_size(&addr.absolute_addr()),
+                        );
 
                         let byte_off = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::ShrImm {
@@ -5026,6 +5053,7 @@ fn lower_instruction(
                                 base_off,
                                 byte_off,
                                 *width_bits,
+                                value_alias_range,
                                 &chunks,
                             );
                         } else if *width_bits > 64 {
@@ -5039,6 +5067,7 @@ fn lower_instruction(
                                 byte_off,
                                 bit_shift,
                                 *width_bits,
+                                value_alias_range,
                                 &chunks,
                                 !comb_capture_sites.is_empty(),
                             ) {
@@ -5083,6 +5112,7 @@ fn lower_instruction(
                                 index: byte_off,
                                 src: store_src,
                                 size: store_size,
+                                alias_range: value_alias_range,
                             });
                             if let Some(old_word) = old_word {
                                 let changed = ctx.alloc_vreg(SpillDesc::transient());
@@ -5110,6 +5140,7 @@ fn lower_instruction(
                                 bit_shift,
                                 src_vreg,
                                 *width_bits,
+                                value_alias_range,
                                 !comb_capture_sites.is_empty(),
                             ) {
                                 emit_enable_comb_capture_sites(
@@ -5281,6 +5312,10 @@ fn lower_instruction(
                             let offset_low_zero_bits =
                                 memory_offset_low_zero_bits(ctx, addr, offset);
                             let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                            let mask_alias_range = MemoryAliasRange::new(
+                                mask_base_off,
+                                ctx.layout.plane_size(&addr.absolute_addr()),
+                            );
 
                             let m_byte_off = ctx.alloc_vreg(SpillDesc::transient());
                             block.push(MInst::ShrImm {
@@ -5305,6 +5340,7 @@ fn lower_instruction(
                                     mask_base_off,
                                     m_byte_off,
                                     *width_bits,
+                                    mask_alias_range,
                                     &mask_chunks,
                                 );
                             } else if *width_bits > 64 {
@@ -5326,6 +5362,7 @@ fn lower_instruction(
                                     m_byte_off,
                                     m_bit_shift,
                                     *width_bits,
+                                    mask_alias_range,
                                     &mask_chunks,
                                     !comb_capture_sites.is_empty(),
                                 ) {
@@ -5357,6 +5394,7 @@ fn lower_instruction(
                                     index: m_byte_off,
                                     src: store_src,
                                     size: store_size,
+                                    alias_range: mask_alias_range,
                                 });
                             } else {
                                 let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
@@ -5369,6 +5407,7 @@ fn lower_instruction(
                                     m_bit_shift,
                                     mask_vreg,
                                     *width_bits,
+                                    mask_alias_range,
                                     !comb_capture_sites.is_empty(),
                                 ) {
                                     emit_enable_comb_capture_sites(
@@ -5650,6 +5689,10 @@ fn lower_instruction(
                                 index: byte_off,
                                 src: tmp,
                                 size: chunk_size,
+                                alias_range: MemoryAliasRange::new(
+                                    dst_base_off,
+                                    ctx.layout.plane_size(&dst_addr.absolute_addr()),
+                                ),
                             });
                             copied += chunk_size.bytes() as usize;
                         }
@@ -5789,6 +5832,10 @@ fn lower_instruction(
                                     index: byte_off,
                                     src: tmp,
                                     size: cs,
+                                    alias_range: MemoryAliasRange::new(
+                                        dst_mask_base,
+                                        ctx.layout.plane_size(&dst_addr.absolute_addr()),
+                                    ),
                                 });
                                 copied += cs.bytes() as usize;
                             }
@@ -11885,6 +11932,23 @@ mod tests {
         }
     }
 
+    fn assert_indexed_stores_have_alias_ranges(function: &MFunction) {
+        let stores = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                MInst::StoreIndexed { alias_range, .. } => Some(alias_range),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!stores.is_empty(), "fixture did not lower an indexed store");
+        assert!(
+            stores.iter().all(|range| range.is_some()),
+            "ISel emitted an indexed store without a bounded memory effect"
+        );
+    }
+
     fn verify_scalar_alignment_matrix(dynamic: bool, four_state: bool) {
         const SLOT: usize = 768;
         const CASE_STRIDE: usize = SLOT * 3;
@@ -12029,6 +12093,9 @@ mod tests {
             runtime_event_site_layouts: vec![],
         };
         let mut function = lower_execution_unit(&eu, &layout, four_state);
+        if dynamic {
+            assert_indexed_stores_have_alias_ranges(&function);
+        }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
@@ -12263,6 +12330,9 @@ mod tests {
             runtime_event_site_layouts: vec![],
         };
         let mut function = lower_execution_unit(&eu, &layout, false);
+        if dynamic {
+            assert_indexed_stores_have_alias_ranges(&function);
+        }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();

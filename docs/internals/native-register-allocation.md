@@ -523,6 +523,24 @@ compilation from generated-code execution. The adjacent Step 8 executions took
 `cy=9ae070 x3=aa pass=1`. Their compile intervals were 40.186 s, 39.483 s, and
 39.326 s respectively and are not part of that execution-time result.
 
+The next alias-analysis step gives `StoreIndexed` an optional physical-state
+write envelope. ISel derives it from the destination allocation for dynamic
+value/mask stores and commits, and from the padded data/dirty/summary regions
+for sparse writes. This is operation-level MemorySSA metadata, not a narrow
+integer type on the index VReg; MIR register operations continue to distinguish
+only target-relevant 32- and 64-bit semantics. A missing proof still clobbers
+the whole base, while pointer writes and `SparseCommitWorklist` remain unknown.
+
+Both global load GVN and reload reconstruction consume the same write-effect
+range. On the exact Linux MIR this reduced loads of one repeatedly tested
+selector from 56 to 32 and reduced the fused spill frame from 42,448 to 39,208
+bytes without changing optimized SIR. The CPU-0 A--B--A executions were
+144.622 s, 139.287 s, and 138.620 s, all at
+`cy=9ae070 x3=aa pass=1`; the identical baselines vary more than the candidate's
+1.65% advantage over their mean, so this establishes the structural result but
+does not yet establish a runtime speedup. Their compile intervals were 59.225 s,
+60.763 s, and 59.821 s and are kept separate from generated-code execution.
+
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and
 completed-assignment verification is unconditional.  Internal default-SSA

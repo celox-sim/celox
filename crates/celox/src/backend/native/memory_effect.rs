@@ -164,7 +164,12 @@ pub(crate) fn writes(inst: &MInst) -> MemoryWrites {
         // this MIR instruction. Keep this one conservative until the table is
         // part of the shared effect model.
         MInst::SparseCommitWorklist { .. } => MemoryWrites::unknown(Some(BaseReg::SimState)),
-        MInst::StoreIndexed { base, .. } => MemoryWrites::unknown(Some(*base)),
+        MInst::StoreIndexed {
+            base, alias_range, ..
+        } => alias_range
+            .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
+            .map(|range| MemoryWrites::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryWrites::unknown(Some(*base))),
         MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StorePtrIndexed { .. }
@@ -176,6 +181,7 @@ pub(crate) fn writes(inst: &MInst) -> MemoryWrites {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::native::mir::{MemoryAliasRange, OpSize, VReg};
 
     #[test]
     fn sparse_mark_active_has_only_metadata_write_ranges() {
@@ -244,5 +250,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn bounded_indexed_store_uses_its_semantic_alias_envelope() {
+        let inst = MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: 120,
+            index: VReg(0),
+            src: VReg(1),
+            size: OpSize::S64,
+            alias_range: MemoryAliasRange::new(100, 64),
+        };
+
+        assert_eq!(
+            writes(&inst).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 100,
+                byte_len: 64,
+            }]
+        );
+        assert_eq!(writes(&inst).unknown_base(), None);
     }
 }

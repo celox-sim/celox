@@ -372,6 +372,44 @@ pub enum BaseReg {
     StackFrame,
 }
 
+/// Closed-open physical-state byte envelope whose values may be changed by a
+/// register-indexed store.
+///
+/// A read-modify-write may use a wider machine access while preserving bytes
+/// outside this envelope. This range describes its semantic memory effect,
+/// not every byte touched by that machine access. It is alias-analysis
+/// metadata on the memory operation, not a bit width or range type attached to
+/// the index VReg. `None` means that the whole base remains the conservative
+/// alias set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemoryAliasRange {
+    offset: i32,
+    byte_len: usize,
+}
+
+impl MemoryAliasRange {
+    pub fn new(offset: i32, byte_len: usize) -> Option<Self> {
+        if byte_len == 0 {
+            return None;
+        }
+        i64::from(offset)
+            .checked_add(i64::try_from(byte_len).ok()?)
+            .map(|_| Self { offset, byte_len })
+    }
+
+    pub fn end(self) -> i64 {
+        i64::from(self.offset) + self.byte_len as i64
+    }
+
+    pub fn offset(self) -> i32 {
+        self.offset
+    }
+
+    pub fn byte_len(self) -> usize {
+        self.byte_len
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Comparison kinds
 // ────────────────────────────────────────────────────────────────
@@ -496,6 +534,7 @@ pub enum MInst {
         index: VReg,
         src: VReg,
         size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
     },
     /// dst = load [ptr + offset + index]
     LoadPtrIndexed {
@@ -775,7 +814,14 @@ impl fmt::Display for MInst {
                 index,
                 src,
                 size,
-            } => write!(f, "store.{size} [{base} + {offset} + {index}], {src}"),
+                alias_range,
+            } => {
+                write!(f, "store.{size} [{base} + {offset} + {index}], {src}")?;
+                if let Some(range) = alias_range {
+                    write!(f, " ; aliases [{base} + {}..{})", range.offset, range.end())?;
+                }
+                Ok(())
+            }
             MInst::LoadPtrIndexed {
                 dst,
                 ptr,
@@ -1535,6 +1581,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_alias_range_must_be_nonempty() {
+        assert_eq!(MemoryAliasRange::new(8, 0), None);
+        assert_eq!(MemoryAliasRange::new(8, 1).unwrap().end(), 9);
+    }
+
+    #[test]
     fn try_alloc_reports_exhaustion_without_changing_state() {
         let mut allocator = VRegAllocator::new();
         allocator.set_next_for_test(u32::MAX);
@@ -1651,6 +1703,7 @@ mod tests {
                     index: a,
                     src: b,
                     size: OpSize::S64,
+                    alias_range: None,
                 },
                 expected: vec![a, b],
             },

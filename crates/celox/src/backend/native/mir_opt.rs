@@ -501,6 +501,7 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
             index,
             src,
             size,
+            ..
         } if *index == imm_vreg => sign_extended_i32(value)
             .and_then(|index| offset.checked_add(index))
             .map(|offset| MInst::Store {
@@ -4369,6 +4370,7 @@ mod tests {
                     index: VReg(0),
                     src: VReg(2),
                     size: OpSize::S64,
+                    alias_range: None,
                 },
                 MInst::Return,
             ],
@@ -6355,6 +6357,67 @@ mod tests {
             }
         );
         assert!(matches!(func.blocks[0].insts[4], MInst::Load { .. }));
+    }
+
+    #[test]
+    fn global_gvn_bounded_indexed_store_invalidates_only_its_alias_range() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 128,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 1,
+                },
+                MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    index: VReg(2),
+                    src: VReg(3),
+                    size: OpSize::S8,
+                    alias_range: MemoryAliasRange::new(16, 64),
+                },
+                MInst::Load {
+                    dst: VReg(4),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(5),
+                    base: BaseReg::SimState,
+                    offset: 128,
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            6,
+        );
+
+        global_gvn(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[5], MInst::Load { .. }));
+        assert_eq!(
+            func.blocks[0].insts[6],
+            MInst::Mov {
+                dst: VReg(5),
+                src: VReg(1),
+            }
+        );
     }
 
     #[test]

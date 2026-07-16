@@ -2362,6 +2362,7 @@ fn emit_inst(
             index,
             src,
             size,
+            ..
         } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));

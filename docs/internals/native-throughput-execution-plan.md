@@ -986,6 +986,79 @@ celox` also passed.
 Status: **complete; indexed-memory alias ranges and broader mem2reg remain
 open**.
 
+### Step 10: Bound register-indexed state-write effects
+
+Step 9 still treated every `StoreIndexed [sim + constant + vreg]` as a write to
+the whole `SimState` base. That was not a property of the RTL or of the index
+VReg. ISel already knows the physical destination object and its allocation;
+only that fact was lost when the dynamic address became MIR. In one concrete
+Linux chain, SIR block `b8172` stores a 32-bit element of a 1,024-element
+variable, while `b8174` reloads the two-bit case selector at
+`sim+34006414`. The generated indexed writes can reach only the value plane
+`[67812912..67817008)`, dirty bitmap `[68375160..68375224)`, and summary bitmap
+`[68375224..68375232)`. None can change the selector byte.
+
+`StoreIndexed` now carries an optional closed-open `MemoryAliasRange`. This is
+memory-operation metadata describing the physical state bytes whose values may
+change; it is deliberately not a width or value range attached to a VReg.
+Machine VRegs retain only the target-relevant 32/64-bit opcode semantics. A
+bitfield read-modify-write may use a wider machine access while preserving
+bytes outside the range, so the metadata describes the semantic memory effect,
+not every byte fetched by that access.
+
+ISel supplies the complete destination-plane range for aligned and unaligned
+dynamic value/mask stores and dynamic commits. Sparse first-write data stores
+use the actual u64-rounded allocation extent; dirty and summary indexed writes
+use their exact bitmap extents. The shared MIR write-effect model exposes these
+ranges to both structural load GVN and allocator reload MemorySSA. A missing
+range remains a safe whole-base clobber for manually constructed or genuinely
+unknown MIR. Constant-index folding produces a plain exact-address `Store`, and
+native emission is otherwise unchanged. Pointer stores and
+`SparseCommitWorklist` remain unknown effects.
+
+The optimized SIR before and after this step is byte-identical. In the complete
+native trace, exact loads of the selector at `sim+34006414` fell from 56 to 32;
+every register-indexed store emitted by ISel had a bounded range. The resulting
+post-allocation frames changed as follows:
+
+| Native function | Structural MemorySSA | Indexed write ranges |
+|---|---:|---:|
+| `eval_comb` | 34,016 B | 32,176 B |
+| `apply_ff[0]` | 0 B | 0 B |
+| `eval_apply_ff[0]` | 8,536 B | 7,072 B |
+| `eval_only_ff[0]` | 13,792 B | 12,848 B |
+| `eval_comb_apply_ff[0]` | 42,448 B | 39,208 B |
+
+Code generation and generated-code execution were measured independently on
+CPU 0. All three A--B--A runs reached normal power-down at the identical
+`cy=9ae070 x3=aa pass=1` marker:
+
+- Step 9 before: 59.225 s compile, 144.622 s execute
+  (`target/heliodor/results/20260716T055002Z_step9_baseline_cpu0.log`);
+- indexed-range candidate: 60.763 s compile, 139.287 s execute
+  (`target/heliodor/results/20260716T055336Z_indexed_alias_complete_cpu0.log`);
+- Step 9 after: 59.821 s compile, 138.620 s execute
+  (`target/heliodor/results/20260716T055927Z_celox_test_soc_linux_boot.log`).
+
+The candidate is 1.65% faster than the mean of the adjacent executions, but
+the two identical Step 9 binaries differ by 6.002 s, which is larger than that
+estimated effect. Runtime improvement is therefore **not established** by this
+sample. Compile intervals are reported separately and are not used to infer
+generated-code throughput. The step is retained for its proved alias scope,
+unchanged SIR semantics, exact MIR load reduction, smaller spill frames, and
+successful full-workload result; broader mem2reg and allocator work remains
+open.
+
+Focused dynamic scalar/wide ISel, write-effect, reload-MemorySSA, and GVN tests
+cover the metadata and its overlapping/non-overlapping behavior. The common
+non-LTO gates passed with 729/729 library tests, 6/6 exact native MIR tests, 60
+non-ignored native-testbench tests, and 9 native/Cranelift/Wasm counter tests;
+`cargo fmt --check`, `cargo check -p celox`, and strict library clippy also
+passed.
+
+Status: **complete structurally; runtime effect unconfirmed; throughput target
+remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1006,6 +1079,7 @@ open**.
 | 7 | post-reconstruction DCE | reconstruction 11/11; native MIR 6/6 | lib 715/715; native 60/60; counter 9/9 | pass: `cy=9ae070 x3=aa pass=1` | compile 40.097 s; execute 137.349 s | complete; scheduling trials rejected |
 | 8 | target-capacity-aware scheduling | scheduler 15/15; native MIR 6/6 | lib 718/718; native 60/60; counter 9/9 | pass twice: `cy=9ae070 x3=aa pass=1` | compile 41.181 s / 41.000 s; execute 136.602 s / 136.868 s | complete; bounded ILP retained, throughput target open |
 | 9 | structural native MemorySSA and same-version state-load GVN | effects 2/2; reload 23/23; MIR optimization 50/50; native MIR 6/6 | lib 725/725; native 60/60; counter 9/9 | A--B--A all pass: `cy=9ae070 x3=aa pass=1` | Step 8 execute 146.367 s / 146.216 s; candidate 137.843 s; candidate compile 39.483 s | complete; execute -5.78%, indexed alias range open |
+| 10 | bounded register-indexed state-write effects | dynamic scalar/wide ISel; effects 3/3; reload 24/24; MIR optimization 51/51; native MIR 6/6 | lib 729/729; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | baseline execute 144.622 s / 138.620 s; candidate 139.287 s; compile reported separately | structural result complete; runtime effect unconfirmed |
 
 ## Related design records
 

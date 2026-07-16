@@ -1843,7 +1843,9 @@ fn verify_memory_phis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, PhiNode, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{
+        MBlock, MemoryAliasRange, PhiNode, SpillDesc, VRegAllocator,
+    };
 
     fn function_with_values(count: usize) -> (MFunction, Vec<VReg>) {
         let mut vregs = VRegAllocator::new();
@@ -2569,6 +2571,7 @@ mod tests {
             index: values[1],
             src: values[2],
             size: OpSize::S8,
+            alias_range: None,
         });
         block.push(MInst::Mov {
             dst: values[3],
@@ -2582,6 +2585,58 @@ mod tests {
             block: BlockId(0),
             instruction: 4,
             value: values[0],
+        }));
+    }
+
+    #[test]
+    fn bounded_indexed_store_preserves_only_nonoverlapping_state_recipes() {
+        fn fixture(load_offset: i32) -> (VReg, ReloadRecipeAnalysis) {
+            let (mut func, values) = function_with_values(4);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: values[0],
+                base: BaseReg::SimState,
+                offset: load_offset,
+                size: OpSize::S64,
+            });
+            block.push(MInst::LoadImm {
+                dst: values[1],
+                value: 0,
+            });
+            block.push(MInst::LoadImm {
+                dst: values[2],
+                value: 1,
+            });
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 16,
+                index: values[1],
+                src: values[2],
+                size: OpSize::S8,
+                alias_range: MemoryAliasRange::new(16, 64),
+            });
+            block.push(MInst::Mov {
+                dst: values[3],
+                src: values[0],
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+            let (_, _, analysis) = analyze_function(func);
+            (values[0], analysis)
+        }
+
+        let (overlapping, overlapping_analysis) = fixture(32);
+        assert!(!overlapping_analysis.state_valid_at_point(PointUse {
+            block: BlockId(0),
+            instruction: 4,
+            value: overlapping,
+        }));
+
+        let (disjoint, disjoint_analysis) = fixture(128);
+        assert!(disjoint_analysis.state_valid_at_point(PointUse {
+            block: BlockId(0),
+            instruction: 4,
+            value: disjoint,
         }));
     }
 
