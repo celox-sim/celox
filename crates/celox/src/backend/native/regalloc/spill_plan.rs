@@ -410,7 +410,16 @@ pub(super) fn plan_with_recipe_costs(
         let entry = if let Some(region) = next_use.region_at_entry(block) {
             init_loop_region(func, next_use, &result, block, region, registers)?
         } else {
-            init_usual(cfg, next_use, &result, &edge_translations, block, registers)
+            init_usual(
+                func,
+                cfg,
+                next_use,
+                recipe_costs,
+                &result,
+                &edge_translations,
+                block,
+                registers,
+            )
         };
         result.w_entry[block] = entry;
         let live_entry = next_use.entry[block]
@@ -692,9 +701,12 @@ fn limit_live_through_clobber(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn init_usual(
+    func: &MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
+    recipe_costs: &[Option<u16>],
     plan: &SpillPlan,
     edge_translations: &EdgeTranslations,
     block: usize,
@@ -708,6 +720,14 @@ fn init_usual(
     if processed.is_empty() {
         return BTreeSet::new();
     }
+    if processed.len() == 1 && cfg.predecessors[block].len() == 1 {
+        let predecessor = processed[0];
+        return plan.w_exit[predecessor]
+            .iter()
+            .copied()
+            .map(|value| edge_translations.to_successor(predecessor, block, value))
+            .collect();
+    }
     let mut frequency = HashMap::<LogicalValue, usize>::new();
     for predecessor in &processed {
         for &value in &plan.w_exit[*predecessor] {
@@ -715,24 +735,85 @@ fn init_usual(
             *frequency.entry(value).or_default() += 1;
         }
     }
-    let mut take = frequency
-        .iter()
-        .filter_map(|(&value, &count)| (count == processed.len()).then_some(value))
-        .collect::<BTreeSet<_>>();
     let mut candidates = frequency
         .keys()
         .copied()
-        .filter(|value| !take.contains(value))
+        .filter_map(|value| {
+            let mut keep_cost = 0u128;
+            let mut drop_cost = 0u128;
+            for &predecessor in &processed {
+                let predecessor_value = edge_translations.to_predecessor(predecessor, block, value);
+                if plan.w_exit[predecessor].contains(&predecessor_value) {
+                    if !plan.s_exit[predecessor].contains(&predecessor_value) {
+                        drop_cost = drop_cost
+                            .saturating_add(u128::from(spill_cost(func, predecessor_value)));
+                    }
+                } else {
+                    keep_cost = keep_cost.saturating_add(u128::from(reload_cost(
+                        func,
+                        recipe_costs,
+                        predecessor_value,
+                    )));
+                }
+            }
+            if next_use.anticipated_at_entry(block, VReg(value.0)) {
+                drop_cost = drop_cost.saturating_add(
+                    (processed.len() as u128).saturating_mul(u128::from(reload_cost(
+                        func,
+                        recipe_costs,
+                        value,
+                    ))),
+                );
+            }
+            let savings = drop_cost
+                .checked_sub(keep_cost)
+                .filter(|saving| *saving != 0)?;
+            Some((
+                value,
+                savings,
+                logical_entry_distance(func, next_use, block, value),
+            ))
+        })
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|value| {
+    candidates.sort_by(|left, right| compare_join_retention_candidates(*left, *right));
+    candidates
+        .into_iter()
+        .take(registers)
+        .map(|(value, _, _)| value)
+        .collect()
+}
+
+/// Prefer the values for which entry residency avoids the most coupling and
+/// guaranteed-use work per instruction of live-range occupancy.  Loop exits
+/// dominate straight-line distance, matching global next-use ordering.
+fn compare_join_retention_candidates(
+    left: (LogicalValue, u128, NextUseDistance),
+    right: (LogicalValue, u128, NextUseDistance),
+) -> Ordering {
+    match (left.2, right.2) {
+        (NextUseDistance::Dead, NextUseDistance::Dead) => left.0.cmp(&right.0),
+        (NextUseDistance::Dead, _) => Ordering::Greater,
+        (_, NextUseDistance::Dead) => Ordering::Less,
         (
-            logical_entry_distance(next_use, &plan.logical, block, *value),
-            *value,
-        )
-    });
-    let room = registers.saturating_sub(take.len());
-    take.extend(candidates.into_iter().take(room));
-    take
+            NextUseDistance::Finite {
+                loop_exits: left_exits,
+                instructions: left_instructions,
+            },
+            NextUseDistance::Finite {
+                loop_exits: right_exits,
+                instructions: right_instructions,
+            },
+        ) => left_exits.cmp(&right_exits).then_with(|| {
+            let left_span = left_instructions as u128 + 1;
+            let right_span = right_instructions as u128 + 1;
+            right
+                .1
+                .saturating_mul(left_span)
+                .cmp(&left.1.saturating_mul(right_span))
+                .then_with(|| left_instructions.cmp(&right_instructions))
+                .then_with(|| left.0.cmp(&right.0))
+        }),
+    }
 }
 
 fn init_loop_region(
@@ -769,14 +850,13 @@ fn init_loop_region(
     let (mut candidates, mut live_through): (Vec<_>, Vec<_>) = alive
         .into_iter()
         .partition(|value| next_use.used_in_region(region, VReg(value.0)));
-    candidates.sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    candidates.sort_by_key(|value| logical_entry_distance(func, next_use, block, *value));
     if candidates.len() >= registers {
         return Ok(candidates.into_iter().take(registers).collect());
     }
     let internal_pressure = facts.max_pressure.saturating_sub(live_through.len());
     let free_loop = registers.saturating_sub(internal_pressure);
-    live_through
-        .sort_by_key(|value| logical_entry_distance(next_use, &plan.logical, block, *value));
+    live_through.sort_by_key(|value| logical_entry_distance(func, next_use, block, *value));
     Ok(candidates
         .into_iter()
         .chain(live_through.into_iter().take(free_loop))
@@ -910,6 +990,14 @@ fn eviction_cost(
     spilled: &BTreeSet<LogicalValue>,
     value: LogicalValue,
 ) -> u16 {
+    reload_cost(func, recipe_costs, value).saturating_add(if spilled.contains(&value) {
+        0
+    } else {
+        spill_cost(func, value)
+    })
+}
+
+fn reload_cost(func: &MFunction, recipe_costs: &[Option<u16>], value: LogicalValue) -> u16 {
     if let Some(cost) = recipe_costs.get(value.0 as usize).copied().flatten() {
         return cost;
     }
@@ -920,24 +1008,20 @@ fn eviction_cost(
         return u16::MAX;
     };
     u16::from(desc.reload_cost)
-        + if spilled.contains(&value) {
-            0
-        } else {
-            u16::from(desc.spill_cost)
-        }
+}
+
+fn spill_cost(func: &MFunction, value: LogicalValue) -> u16 {
+    func.spill_desc(VReg(value.0))
+        .map_or(u16::MAX, |desc| u16::from(desc.spill_cost))
 }
 
 fn logical_entry_distance(
+    func: &MFunction,
     next_use: &NextUseAnalysis,
-    logical: &LogicalValues,
     block: usize,
     value: LogicalValue,
 ) -> NextUseDistance {
-    let _ = logical;
-    next_use.entry[block]
-        .get(&VReg(value.0))
-        .copied()
-        .unwrap_or(NextUseDistance::Dead)
+    next_use.distance_at(func, block, 0, VReg(value.0))
 }
 
 fn logical_distance_at(
@@ -1193,7 +1277,147 @@ impl SpillPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{
+        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
+    };
+
+    #[test]
+    fn single_predecessor_inherits_residency_without_edge_reconciliation() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: value,
+            value: 1,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.push(MInst::Return);
+        func.blocks = vec![predecessor, successor];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let mut plan = SpillPlan {
+            logical,
+            homes,
+            point_ops: Vec::new(),
+            edge_ops: BTreeMap::new(),
+            w_entry: vec![BTreeSet::new(); func.blocks.len()],
+            w_exit: vec![BTreeSet::new(); func.blocks.len()],
+            s_entry: vec![BTreeSet::new(); func.blocks.len()],
+            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+        };
+        let predecessor = cfg.block_index[&BlockId(0)];
+        let successor = cfg.block_index[&BlockId(1)];
+        let logical_value = LogicalValue(value.0);
+        plan.w_exit[predecessor].insert(logical_value);
+        plan.s_exit[predecessor].insert(logical_value);
+
+        assert!(!next_use.anticipated_at_entry(successor, value));
+        let inherited = init_usual(
+            &func,
+            &cfg,
+            &next_use,
+            &[],
+            &plan,
+            &translations,
+            successor,
+            1,
+        );
+
+        assert_eq!(inherited, BTreeSet::from([logical_value]));
+    }
+
+    #[test]
+    fn join_retention_pays_for_guaranteed_use_but_delays_one_arm_use() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let conditional = vregs.alloc();
+        let guaranteed = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: conditional,
+            value: 2,
+        });
+        entry.push(MInst::LoadImm {
+            dst: guaranteed,
+            value: 3,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut first = MBlock::new(BlockId(1));
+        first.push(MInst::Jump { target: BlockId(3) });
+        let mut second = MBlock::new(BlockId(2));
+        second.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(4),
+            false_bb: BlockId(5),
+        });
+        let mut use_arm = MBlock::new(BlockId(4));
+        use_arm.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: conditional,
+            size: OpSize::S64,
+        });
+        use_arm.push(MInst::Jump { target: BlockId(6) });
+        let mut skip_arm = MBlock::new(BlockId(5));
+        skip_arm.push(MInst::Jump { target: BlockId(6) });
+        let mut tail = MBlock::new(BlockId(6));
+        tail.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: guaranteed,
+            size: OpSize::S64,
+        });
+        tail.push(MInst::Return);
+        func.blocks = vec![entry, first, second, join, use_arm, skip_arm, tail];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        next_use.verify(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let mut plan = SpillPlan {
+            logical,
+            homes,
+            point_ops: Vec::new(),
+            edge_ops: BTreeMap::new(),
+            w_entry: vec![BTreeSet::new(); func.blocks.len()],
+            w_exit: vec![BTreeSet::new(); func.blocks.len()],
+            s_entry: vec![BTreeSet::new(); func.blocks.len()],
+            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+        };
+        let join = cfg.block_index[&BlockId(3)];
+        let predecessors = &cfg.predecessors[join];
+        assert_eq!(predecessors.len(), 2);
+        assert!(predecessors.iter().all(|predecessor| *predecessor < join));
+        plan.w_exit[predecessors[0]]
+            .extend([LogicalValue(conditional.0), LogicalValue(guaranteed.0)]);
+
+        assert!(!next_use.anticipated_at_entry(join, conditional));
+        assert!(next_use.anticipated_at_entry(join, guaranteed));
+        let retained = init_usual(&func, &cfg, &next_use, &[], &plan, &translations, join, 1);
+
+        assert_eq!(retained, BTreeSet::from([LogicalValue(guaranteed.0)]));
+    }
 
     #[test]
     fn reused_cssa_edge_source_is_a_structured_error() {

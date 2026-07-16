@@ -176,6 +176,15 @@ by binary search or monotone cursor, never by suffix rescanning.  The same CFG
 analysis supplies a loop tree, loop uses, and maximum loop pressure without an
 edge-times-loop or nested-loop-times-instruction scan.
 
+The same backward worklist computes a separate after-phi anticipatability
+fact.  Unlike liveness or minimum next use, successor facts are intersected:
+a value is anticipated only when every continuation uses it before an ordinary
+definition replaces the SSA name.  Phi destinations are killed at the
+successor boundary and their exact sources are generated on the corresponding
+incoming edges.  An independently reconstructed equation verifier checks this
+must-use result for every block; a one-arm use therefore cannot justify
+extending a live range through the branch head.
+
 Loop use sets are not copied into every ancestor region.  Each syntactic use is
 attached once to its innermost natural-loop or irreducible-SCC region.  An
 iterative Euler numbering makes every region subtree an interval, and one flat
@@ -194,6 +203,15 @@ evicting the unpinned value with furthest global next use until `|W| <= K`.
 For an edge `P -> B`, coupling reloads `W_entry[B] - W_exit[P]` and spills
 `(S_entry[B] - S_exit[P]) intersect W_exit[P]`; backedges are coupled after
 their predecessor state becomes available.
+
+An ordinary join no longer fills spare `W_entry` capacity merely because a
+value is resident on some predecessor.  For each such candidate, keeping it is
+charged for reload/rematerialization on missing incoming edges, while dropping
+it is charged for required home-creation stores and for a later reload only
+when anticipatability proves that every continuation uses it.  Positive
+avoided-cost candidates compete by loop-exit distance and
+avoided-cost/live-range-span density.  Blocks with one predecessor inherit the
+translated `W_exit` unchanged; only a real join performs edge reconciliation.
 
 `S` means that one valid home exists on every root-to-point path.  A resident
 value inherits a home only from the intersection of predecessor `S_exit`
@@ -465,9 +483,11 @@ contains:
 - lexicographic next-use distance over natural-loop and irreducible-SCC regions,
   with no fixed loop-distance constant, one block/instruction summary pass,
   Euler-interval/flat-index nested-region queries, a complete Bellman-equation
+  verifier, CFG-intersection anticipatability with an independent equation
   verifier, and the same priority at every irreducible-region entry;
-- a Braun--Hack-style W/S spill plan and an independent sparse-SSA all-path,
-  same-home store/reload proof without a block-by-home state matrix;
+- a Braun--Hack-style W/S spill plan with cost-aware true-join residency and an
+  independent sparse-SSA all-path, same-home store/reload proof without a
+  block-by-home state matrix;
 - separate pruned-IDF SSA reconstruction, stack-slot precomputation,
   rematerialization, dead reload/cyclic-phi removal, and exact edge-reload tail
   sharing;
@@ -568,6 +588,19 @@ and 141.808 s, all at `cy=9ae070 x3=aa pass=1`; their compile intervals were
 69.770 s, 63.295 s, and 66.919 s and remain a separate result.  A final
 post-test candidate qualification also passed but took 70.140 s compile and
 148.424 s execute, so neither timing improvement is considered established.
+
+The following join-placement step uses CFG anticipatability and target
+spill/reload costs instead of filling spare join registers from partially
+resident values by next use alone.  The exact optimized SIR is unchanged.  In
+the exact Linux MIR, the four correlated case arms no longer enter the shared
+seven-reload block: those unconditional loads are delayed to the five later
+regions which actually use six values, and the seventh is rematerialized as
+zero.  A CPU-0 Step 13a / candidate / Step 13a measurement kept compilation
+separate at 61.226 s, 61.512 s, and 60.899 s; generated-code execution took
+137.664 s, 135.005 s, and 131.713 s.  Every run reached
+`cy=9ae070 x3=aa pass=1`.  The candidate lies inside baseline variation, so
+the placement result is retained structurally without claiming a measured
+speedup.
 
 The public allocator and chained native emitter now return structured errors,
 failed public allocations leave their input MIR unchanged, and

@@ -1278,6 +1278,76 @@ live-range placement.
 Status: **structurally complete; static edge duplication removed; dynamic
 reload reduction remains open**.
 
+### Step 13b: Cost join residency with CFG anticipatability
+
+The Step 13a reload bundle was not caused by SIR.  At an ordinary MIR join,
+the spill planner first retained values resident on every processed incoming
+edge, then filled every remaining register slot from the union of partially
+resident values using only nearest-next-use order.  Keeping such a value at
+the join forces a coupling reload on each predecessor which does not already
+hold it.  The planner did not ask whether that value was used on every
+continuation, nor compare those coupling reloads with the cost of ending the
+live range and reconstructing the value at its actual use.
+
+Global next-use analysis now also computes an after-phi anticipatability fact.
+The dataflow meet is intersection over all outgoing CFG edges: successor phi
+destinations are removed, the corresponding source is added on each incoming
+edge, ordinary definitions kill, and upward-exposed uses generate.  Thus a
+value used on only one branch is live but not anticipated at the branch head.
+The worklist has no iteration or CFG-size cap, and an independent verifier
+reconstructs phi-edge uses and ordinary MIR transfer functions before checking
+the fixed-point equation for every block.
+
+At a genuine multi-predecessor join, each resident candidate is now evaluated
+with the target reload/rematerialization and spill costs.  Keeping it pays the
+coupling reloads on incoming edges where it is absent.  Dropping it pays any
+needed home-creation stores and, when the CFG proves a use on every
+continuation, the later reload on each equally weighted incoming path.  Only
+candidates with positive avoided cost are retained; competition for a
+register is ordered by loop-exit distance and then avoided-cost/live-range-span
+density.  A single-predecessor block is not a reconciliation point and inherits
+the translated predecessor `W_exit` exactly.  This last rule keeps operations
+inside normalized edge blocks instead of moving them back onto a branch edge;
+the existing isolated-edge verifier remains unchanged.
+
+The complete pre-optimization, post-optimization, and native-optimized SIR
+files are byte-identical to Step 13a.  In the complete post-allocation MIR,
+`bb8172`, `bb8175`, `bb8178`, and `bb8181` again jump directly to `bb8183` and
+the shared seven-reload `bb14491` block is gone.  The seven unconditional
+loads formerly executed before the join have moved to the paths which use
+them: four exact `SimState` loads and two stack reloads appear in the later
+`bb8185`, `bb8187`, `bb8188`, `bb8190`, and `bb8201` regions, while the final
+value is rematerialized as zero.  Each heavy arm also has two stack-home stores
+instead of the previous three.  The formerly resident incoming edge now pays
+two stack-home stores, so this exact MIR change is not assumed to be a runtime
+win without measurement.
+
+Compilation and generated-code execution were measured independently with
+trace/full-IR formatting disabled.  Host Cargo builds were outside both
+intervals.  A CPU-0 Step 13a / Step 13b / Step 13a run gave:
+
+- compile: 61.226 s / 61.512 s / 60.899 s;
+- execute: 137.664 s / 135.005 s / 131.713 s; and
+- result in every run: normal power-down at `cy=9ae070 x3=aa pass=1`.
+
+The candidate compile interval is 0.449 s above the adjacent-baseline mean.
+Its execution interval is 0.317 s above that mean and lies between the two
+baseline samples, whose executions differ by 5.951 s.  An earlier candidate
+qualification took 63.831 s compile and 131.116 s execute.  The generated MIR
+change is therefore established, but neither code-generation nor execution
+speed changed measurably in these samples.
+
+Focused allocator tests, including independent anticipatability equations,
+phi-edge semantics, conditional-versus-guaranteed join retention, and
+single-predecessor inheritance, pass 141/141.  The common non-LTO gates pass
+750/750 library tests, 6/6 native-MIR tests, 60/60 non-ignored native-testbench
+tests, and 9/9 non-ignored native/Cranelift/Wasm counter tests.  Formatting,
+`cargo check`, strict workspace clippy, both Heliodor shell fixture suites, and
+the VitePress documentation build also pass.
+
+Status: **structurally complete; seven unconditional join reloads delayed or
+removed; timing effect unconfirmed**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1302,6 +1372,7 @@ reload reduction remains open**.
 | 11 | explicit allocation of pseudo scratch registers | MIR operand/rewrite; sparse effects/reload/emission; allocator 134/134; native MIR 6/6 | lib 730/730; native 60/60; counter 9/9 | CPU-0 A--B--A all pass: `cy=9ae070 x3=aa pass=1` | compile-only: baseline 41.077 s, candidate 42.647 s; execute: baseline 132.252 s / 135.434 s, candidate 132.954 s | hidden stack operations removed; runtime effect unconfirmed |
 | 12 | sparse SIR StateSSA GVN and correlated case-edge threading | StateSSA 8/8; GVN 17/17; CFS 16/16; native MIR 6/6 | lib 743/743; native 60/60; counter 9/9; strict clippy and Heliodor fixtures | all full runs pass: `cy=9ae070 x3=aa pass=1` | final compile-only 62.949 s; final execute 139.358 s; Step 11 adjacent compile-only 62.419 s / execute 142.445 s | structural result complete; compile regression removed; runtime effect unconfirmed |
 | 13a | shared reconstruction edge-reload tails | allocator 137/137; native MIR 6/6 | lib 746/746; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final qualification pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 69.770 / 63.295 / 66.919 s, execute 139.706 / 137.092 / 141.808 s; final candidate 70.140 s compile / 148.424 s execute | static duplication removed; timing effect unconfirmed; executed-edge reload reduction open |
+| 13b | cost-aware join residency with CFG anticipatability | allocator 141/141; native MIR 6/6 | lib 750/750; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and earlier candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 61.226 / 61.512 / 60.899 s, execute 137.664 / 135.005 / 131.713 s; earlier candidate 63.831 s compile / 131.116 s execute | seven unconditional join reloads removed or delayed; timing effect unconfirmed |
 
 ## Related design records
 
