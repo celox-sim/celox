@@ -10,11 +10,14 @@ HDL semantics into instruction selection or replacing the native backend with
 an external C/C++ compiler. It separates ordinary compiler infrastructure from
 the parts that must understand RTL state and simulation phases.
 
-The starting point is commit `6c3bca60`. With the non-LTO `heliodor-dev`
-profile, the pinned Heliodor single-hart Linux workload completed with
-`reboot: Power down`, `cy=9ab960`, `x3=aa`, and `pass=1`. The measured full
-Celox process took about 233 seconds. These values record the starting point;
-only a new full successful run may replace them.
+The starting point is commit `6c3bca60`. Its non-LTO Heliodor runs reported
+`reboot: Power down`, `cy=9ab960`, `x3=aa`, and `pass=1`, in about 233 seconds.
+Qualification later proved that `cy=9ab960` was not the expected RTL result:
+the same source under Veryl-CC and Veryl-Cranelift completed at `cy=9ae070`.
+Commit `138f46eb` fixed the native wide-to-narrow ISel error responsible for
+that discrepancy. Consequently, every earlier `cy=9ab960` timing in this
+document remains useful as implementation history but is invalid as a final
+same-workload performance comparison.
 
 ## Non-negotiable rules
 
@@ -24,7 +27,9 @@ only a new full successful run may replace them.
    changed separately.
 2. Do not call a compile-only result, a cycle window, an instruction count, or
    a process exit code a successful runtime result. A Heliodor run succeeds
-   only when its normal full-test semantic markers are present.
+   only when its normal full-test semantic markers are present and its cycle
+   marker matches the trusted same-RTL reference. For the pinned Linux image,
+   the accepted marker is `cy=9ae070 x3=aa pass=1`.
 3. Do not stack a new implementation step on a failed gate. Diagnose or revert
    the current step first.
 4. Keep instrumentation out of the generated comb/FF functions. If a diagnostic
@@ -107,8 +112,9 @@ scripts/run-heliodor-bench.sh run
 
 Before accepting the run, inspect its full log for exactly one native/O2/
 two-state/full-execution configuration, the expected test name, normal kernel
-power-down, and the final pass record. The generated Heliodor checkout must be
-clean before each run. Wall time is recorded, but correctness is the first gate.
+power-down, the exact `cy=9ae070 x3=aa pass=1` marker, and the final pass
+record. The generated Heliodor checkout must be clean before each run. Wall
+time is recorded, but correctness is the first gate.
 
 Documentation-only steps run `pnpm exec vitepress build docs` instead of the
 Linux workload. Shell fixture changes also run both Heliodor fixture suites.
@@ -689,6 +695,50 @@ at 4c2b1 instead of retaining a structurally cleaner but slower CFG.
 
 Status: **complete (4a--4c2b1 retained; 4c2b2 evaluated and rejected)**.
 
+### Correctness prerequisite discovered before Step 5
+
+The first same-source comparison against Veryl exposed a semantic mismatch
+which the testbench's pass bit alone did not detect. Veryl-CC and
+Veryl-Cranelift both reached the pinned Linux power-down at `cy=9ae070`, while
+Celox reached it at `cy=9ab960`. Disabling SIR optimization passes and changing
+the fused comb/FF execution modes did not remove the discrepancy.
+
+Cycle-local comparison found the first architectural divergence after cycle
+`0x243ea9`. Celox incorrectly marked and retired a load as poisoned. In the
+same FF state, `load_viol_w[19]` was true even though the stored
+`i_cdb_is_store` signal was false. A second `eval_comb` retained both values,
+which rejected comb non-convergence and scheduler ordering as the cause for
+this case.
+
+The complete optimized SIR preserved the correct one-bit types. The error was
+introduced while lowering a wide right shift to MIR:
+
+- the wide shift left its raw 64-bit low chunk in the scalar register map;
+- the destination SIR register was one bit wide, but no physical `& 1` had
+  canonicalized that chunk;
+- the generic post-instruction bookkeeping nevertheless recorded
+  `known_bits=1`; and
+- condition lowering trusted that false fact and eliminated its required
+  width mask, allowing bit 1 and higher to make a one-bit condition true.
+
+Commit `138f46eb` makes every scalar result produced by wide binary or unary
+lowering physically conform to its declared SIR width before `known_bits` can
+be consumed. Its direct SIR regression sets bit 66 while bit 65 is clear,
+right-shifts a 128-bit value by 65 into a one-bit register, and uses that value
+as a Mux condition. It produced `0xffffffff` before the fix and zero after it.
+
+The focused regression, the earlier SAR-width regression, all 715 non-LTO
+library tests, 60 native-testbench tests, and 9 native/Cranelift/Wasm counter
+tests passed. With all temporary probes removed and the Heliodor source clean
+at `7ad830fc`, the first corrected normal run completed with
+`reboot: Power down`, the exact `cy=9ae070 x3=aa pass=1` reference marker, and
+the final pass record. The non-LTO process time was `198.235 s`.
+
+This correction invalidates `cy=9ab960` runs as semantic acceptance evidence;
+it does not undo the separately tested implementation work in Steps 0--4.
+Step 5 therefore measures the retained pipeline again from the corrected
+semantic baseline.
+
 ## Step 5: End-to-end qualification
 
 After all retained steps:
@@ -708,7 +758,15 @@ speed difference is backed by full successful same-workload runs. If the target
 is not yet reached, this document records the measured remaining bottleneck and
 the goal remains open.
 
-Status: **not started**.
+Progress:
+
+- correctness repair and direct regression: complete in `138f46eb`;
+- common non-LTO test set: complete;
+- first clean pinned Linux run: complete at `198.235 s` and `cy=9ae070`;
+- shell fixtures, second clean Linux run, final same-input comparison, and
+  status-document updates: pending.
+
+Status: **in progress**.
 
 ## Execution record
 
@@ -724,7 +782,8 @@ Status: **not started**.
 | 4c2a | `f11ac186` | branchify 37/37 | lib 710/710; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.531 s | complete |
 | 4c2b1--4d | `8e1ec0b9` | branchify 41/41 | lib 714/714; native 60/60; counter 9/9 | pass: `cy=9ab960 x3=aa pass=1` | 183.378 s | complete |
 | 4c2b2 trial | rejected (no commit) | branchify 46/46 | lib 719/719; native 60/60; counter 9/9 | pass twice: `cy=9ab960 x3=aa pass=1` | 184.120 s; 190.775 s | reverted |
-| 5 | pending | pending | pending | pending | pending | not started |
+| semantic repair | `138f46eb` | wide shift to one-bit Mux regression; prior SAR regression | lib 715/715; native 60/60; counter 9/9 | pass once: `cy=9ae070 x3=aa pass=1` | 198.235 s | complete |
+| 5 | pending | repair regression passed | common non-LTO set passed | first of two runs passed at `cy=9ae070` | 198.235 s | in progress |
 
 ## Related design records
 
