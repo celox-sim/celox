@@ -1920,6 +1920,64 @@ better persistent home/split, while pricing the resulting physical-copy cost.
 Status: **rejected and fully reverted; post-allocation reload scheduling
 by fixed local distance is closed; interval/home selection remains open**.
 
+### Step 20 trial: Replace join-cluster cost with first-use cost
+
+The Step 17a join heuristic adds the materialization cost of every guaranteed
+ordinary use in the local block when it ranks a value for entry residency.
+Those uses are not unconditionally separate reloads: after the first reload a
+value remains resident until a real pressure point evicts it.  A focused trial
+therefore charged only the first guaranteed use and left all later decisions
+to the existing `limit` walk.  Its regression fixture had two values first
+used together, one of them reused later without intervening pressure; the
+first-use model correctly treated their entry reload costs as equal.
+
+That local premise does not hold for the Heliodor blocks which matter.  The
+candidate and an isolated Step 18 runner were rebuilt against the same
+Heliodor checkout and working directory.  All three complete SIR files and all
+pre-allocation MIR were byte-identical.  Only spill reconstruction, coloring,
+and emitted x86 changed.  Candidate x86 was 1,161 bytes shorter in `eval_comb`
+and 789 bytes shorter in `eval_comb_apply_ff`; the other three native
+functions had identical end addresses.
+
+Exact comparison must use original CFG block IDs, because reconstruction-added
+block IDs are not stable when the spill plan changes.  In original
+`eval_comb` block `bb1767`, pre-allocation `v35635` has six ordinary uses,
+while `v35733` and `v35656` have two each.  On the inspected
+`bb1810 -> bb1767` path, Step 18 keeps the representatives for `v35635` and
+`v35733` across the join and reloads `v35656` twice in the common block.  The
+first-use candidate instead carries `v35656`, reloads `v35733` in the common
+block, reloads `v35635` twice, and creates a new `v35635` spill.  It also adds
+the edge-side reload needed to carry `v35656`.  The concrete executed path is
+therefore two stack loads and one stack store larger.  The common block has 20
+incoming arms: deleting duplicated arm-local operations can reduce static
+code size while operations moved into or recreated in the common block still
+execute after the selected arm.
+
+This identifies the failed assumption rather than merely correlating a timing
+change.  A first-use reload does not imply residency through later uses;
+intervening pressure can split the value again.  Conversely, summing every use
+is not an exact reload count either.  The correct follow-up must replay the
+actual block pressure transitions for a candidate entry set, including values
+displaced by each reload, later evictions, home creation, and outgoing edge
+copies.  Neither first-use cost nor raw use count is a sufficient substitute.
+
+The CPU-0 non-LTO candidate--baseline--candidate sequence kept code generation
+and generated execution in separate same-process intervals.  Candidate code
+generation took 69.351968639 s and 66.217791125 s; isolated Step 18 took
+66.531577001 s.  Candidate generated-code execution took 133.902987154 s and
+132.918760734 s, versus 128.487157033 s for Step 18.  The candidate execution
+mean is 133.410873944 s, 4.923716911 s or 3.83% slower; its code-generation
+mean is separately 1.88% slower.  Every run reached normal power-down at
+exactly `cy=9ae070 x3=aa pass=1`.
+
+The complete source trial was reverted.  Its focused result is retained as a
+solver requirement, not as an optimization: a no-pressure repeated use may
+tie at first use, while a pressured repeated-use region must be evaluated by
+the operations the complete local plan would actually emit.
+
+Status: **rejected and fully reverted; regression cause identified in the
+original CFG; block-transition join solver remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1954,6 +2012,7 @@ by fixed local distance is closed; interval/home selection remains open**.
 | 18 | `40e29243` | color 5/5; allocator 155/155; native MIR 6/6 | lib 767/767; native 60/60; counter 9/9; check, strict clippy, format, docs | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; complete SIR and spill/reload MIR bodies are unchanged | compile candidate/baseline/candidate 64.924 / 64.495 / 65.235 s; execute 127.868 / 136.098 / 128.095 s | complete; candidate mean execute -5.96%; interval solver remains open |
 | 19 pre-RA reload-schedule trial | rejected (no commit) | focused reload scheduling 2/2; allocator 157/157; native MIR exposed the intended placement delta | trial reverted before retained common gate | CPU-0 non-LTO A--B--A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical | candidate compile 66.116 / 64.152 / 66.008 s vs baseline 63.882 / 65.501 s; candidate execute mean 137.665 s vs baseline 131.124 s | execute +4.99%; fully reverted; post-RA scheduling remains open |
 | 19 post-color reload-schedule trial | rejected (no commit) | focused physical-use/MemorySSA barriers 3/3; allocator 158/158; native MIR 6/6 | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; assignments and non-load instruction order byte-identical | candidate compile 69.308 / 67.862 s vs baseline 65.766 s; candidate execute mean 134.911 s vs baseline 129.176 s | execute +4.44%; fully reverted; fixed-distance scheduling closed |
+| 20 first-use join-cost trial | rejected (no commit) | focused first-use regression 1/1; allocator 155/155; non-LTO runner build | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical; original `bb1767` path has two extra loads and one extra store | candidate compile 69.352 / 66.218 s vs baseline 66.532 s; candidate execute mean 133.411 s vs baseline 128.487 s | execute +3.83%; fully reverted; complete block-transition pricing required |
 
 ## Related design records
 
