@@ -1849,6 +1849,54 @@ contemporaneous baseline.  Every run reached normal power-down at exactly
 Status: **complete; avoidable phi-edge copies removed; the interval solver
 remains open**.
 
+### Step 19 trial: Schedule reconstructed state reloads before coloring
+
+Step 17c showed that exact-use rematerialization can expose an x86 load-use
+dependency even when it reduces a virtual live range.  A bounded trial moved
+only the direct `SimState` load at the base of an independently verified
+materialized MemorySSA recipe.  It moved at most four MIR instructions, never
+crossed an overlapping or unknown state write, a fixed-register use, a
+clobber, another candidate reload, or a point which would raise exact virtual
+pressure above the 14 allocatable GPRs.  Every pre-existing non-reload
+instruction retained its relative order.  The existing independent recipe
+verifier then rebuilt MemorySSA and proved that each load still observed the
+selected version.
+
+The complete Heliodor pre-optimized, post-optimized, and native-optimized SIR
+files are byte-identical to Step 18.  Every function's pre-allocation MIR is
+also byte-identical.  After reconstruction, removing direct `SimState` loads
+from both traces leaves byte-identical anchor instruction sequences, and the
+multiset of those loads is unchanged.  Thus the trial changed placement and
+the downstream physical assignment, not dynamic work or SIR semantics.
+
+That downstream assignment is the problem.  Extending a reload's live range
+without exceeding capacity can still occupy a preferred color and lose
+coalescing.  In the focused large-pressure fixture, the trial caused an
+additional callee-saved GPR to be used and introduced register-to-register
+moves.  Four virtual MIR positions are also not a physical x86 latency model.
+Capacity safety therefore does not prove that pre-color latency scheduling is
+profitable.
+
+The CPU-0 non-LTO A--B--A--B--A sequence kept code generation
+(`build_native()` plus initial-testbench compilation) and generated execution
+(`run_compiled_testbench()` only) as independent intervals.  Cargo build,
+source loading, and IR formatting were outside both.  Candidate code
+generation took
+66.115843522 s, 64.152130441 s, and 66.008406225 s; isolated Step 18 took
+63.881776557 s and 65.501068723 s.  Candidate execution took 131.148613176 s,
+144.075147775 s, and 137.769898086 s; Step 18 took 132.484523833 s and
+129.762540774 s.  The candidate execution mean is 137.664553012 s versus
+131.123532304 s, a 6.541020709 s or 4.99% regression.  Every run reached
+normal power-down at exactly `cy=9ae070 x3=aa pass=1`.
+
+The trial was fully reverted.  Reload latency hiding must run after physical
+allocation, where a physical-liveness proof can move a load without changing
+coloring, or be integrated with a cost model which prices physical copies and
+coalescing rather than virtual pressure alone.
+
+Status: **rejected and fully reverted; post-allocation reload scheduling
+remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1881,6 +1929,7 @@ remains open**.
 | 17b | actual mixed-plan aggregate baseline | allocator 154/154; native MIR 6/6 | lib 766/766; native 60/60; counter 9/9; check and docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1`; complete SIR/MIR is byte-identical to Step 17a | compile 66.631 s; execute 128.829 s | cost-model correction complete; generated code unchanged; interval solver remains open |
 | 17c trial | rejected (no commit) | allocator 156/156; native MIR 6/6 | trial stopped before the retained common gate | cost-only and no-home variants both pass: `cy=9ae070 x3=aa pass=1` | cost-only compile 64.069 s / execute 131.028 s; no-home compile 68.297 s / execute 141.171 s | both variants regressed and were fully reverted |
 | 18 | `40e29243` | color 5/5; allocator 155/155; native MIR 6/6 | lib 767/767; native 60/60; counter 9/9; check, strict clippy, format, docs | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; complete SIR and spill/reload MIR bodies are unchanged | compile candidate/baseline/candidate 64.924 / 64.495 / 65.235 s; execute 127.868 / 136.098 / 128.095 s | complete; candidate mean execute -5.96%; interval solver remains open |
+| 19 pre-RA reload-schedule trial | rejected (no commit) | focused reload scheduling 2/2; allocator 157/157; native MIR exposed the intended placement delta | trial reverted before retained common gate | CPU-0 non-LTO A--B--A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical | candidate compile 66.116 / 64.152 / 66.008 s vs baseline 63.882 / 65.501 s; candidate execute mean 137.665 s vs baseline 131.124 s | execute +4.99%; fully reverted; post-RA scheduling remains open |
 
 ## Related design records
 
