@@ -69,6 +69,12 @@ source now gives concrete iterative and final-gate baselines:
   release/LTO profile. Veryl-CC took `68.409 s` and Celox took `178.223 s`.
   Both semantic checks and exact architectural markers passed, but Celox was
   `2.605x` slower, so only the gate's performance condition failed.
+- That `2.605x` value is an end-to-end process ratio, not a generated-code
+  ratio. A subsequent non-LTO synchronous AOT-C split measured Celox at
+  `40.450 s` compile plus `137.675 s` execute, and Veryl with an empty AOT
+  cache at `58.354 s` compile plus `54.282 s` execute. The runtime optimization
+  target is therefore the measured `2.536x` execution gap; compiler latency is
+  tracked separately (Celox was `0.693x` the Veryl cold interval in this run).
 - Earlier Celox runs powered down at `cy=0x009ab960`. Those were not equivalent
   work: a wide-to-narrow ISel error allowed upper garbage bits to affect a
   one-bit Mux condition. Commit `138f46eb` physically canonicalizes scalar
@@ -194,9 +200,10 @@ Mux count is not sufficient when the rewrite lengthens live-ins or worsens
 native layout. The detailed slice-by-slice evidence is recorded in
 [Native throughput execution plan](./native-throughput-execution-plan.md).
 
-The remaining 2.605x release/LTO end-to-end gap is therefore measured after control-region
-and allocator work, not evidence that the old leaf-only `BranchifyMux` pass
-should simply be enabled more aggressively.
+The remaining release/LTO end-to-end gap and the separately measured `2.536x`
+non-LTO execution gap are both after the retained control-region and allocator
+work. Neither is evidence that the old leaf-only `BranchifyMux` pass should
+simply be enabled more aggressively.
 
 ## Goals
 

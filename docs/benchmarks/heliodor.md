@@ -25,6 +25,43 @@ scripts/run-heliodor-bench.sh run
 
 The script pins Heliodor to commit `7ad830fc0f8506c934b61a853ce2eadfa5926b82` unless `HELIODOR_REF` is set.
 
+## Compile/execution split
+
+Use the synchronous Veryl-CC runner when diagnosing generated-code throughput:
+
+```bash
+HELIODOR_RUNNERS="veryl-cc-sync celox" \
+HELIODOR_TIMEOUT_SEC=300 \
+scripts/run-heliodor-bench.sh run
+```
+
+Both runners report build/prepare separately from testbench execution. The
+compile interval includes frontend analysis, optimization, native code
+generation, simulator initialization, and initial-testbench lowering; it ends
+immediately before the already-built testbench is executed. The Veryl runner
+uses the same synchronous AOT-C setup as
+Veryl 0.20.2's Heliodor benchmark (`aot_c_async=false`), so compilation is
+finished before execution starts. This avoids measuring an input-dependent
+Cranelift-to-C hot-swap point. Every Veryl-CC run receives a new empty temporary
+AOT cache, so a shared cached `.so` cannot turn a code-generation measurement
+into a cache-hit measurement. Source loading and process startup remain in
+`process_elapsed_ns`, outside both internal intervals.
+
+The first non-LTO split run reached the exact
+`cy=9ae070 x3=aa pass=1` completion with these internal times:
+
+| Runner | Compile | Execute |
+|---|---:|---:|
+| `veryl-cc-sync` | 58.354 s | 54.282 s |
+| `celox` | 40.450 s | 137.675 s |
+
+Thus the current generated-code execution gap is `2.536x`; Celox's cold compile
+interval is `0.693x` the Veryl interval in this run. The earlier `2.605x`
+fixed-gate result is an end-to-end process ratio, not an execution-only ratio.
+Use `execute_elapsed_ns` to retain or reject native runtime optimizations, and
+`compile_elapsed_ns` to evaluate compiler latency. This run is recorded under
+`target/heliodor/results/split_timing_aligned_20260716T021500Z`.
+
 ## Acceptance gate
 
 Run the reproducible end-to-end comparison from a clean, committed Celox
@@ -45,6 +82,7 @@ The gate is deliberately not configurable. It forces all of the following:
   binary;
 - `test_soc_linux_boot`, runners `veryl-cc` then `celox`, and a fixed 300-second
   timeout for each;
+- a new empty Veryl AOT cache for the invocation, removed after the run;
 - Celox native backend, `O2`, two-state mode, full execution, and no SIR pass
   overrides; and
 - separate detached Heliodor worktrees for the two runners so project-local
@@ -65,6 +103,8 @@ exits successfully only if both semantic checks pass and the Celox process time
 is no greater than the Veryl process time. Compile-only completion, a partial
 window, runner-reported internal time, or process exit zero without the exact
 markers is a failure. GNU `timeout` with `--kill-after` and Python 3 are required.
+This fixed gate remains an end-to-end acceptance check; use the synchronous
+runner above when the compile and execution components must be compared.
 
 The latest iterative non-LTO comparison completed the same
 `cy=9ae070` workload in `76.446 s` with Veryl-CC and `184.652 s` with Celox.
@@ -104,6 +144,7 @@ Useful long tests include:
 | Runner | Command |
 |---|---|
 | `celox` | `target/<profile>/examples/run_veryl_project_test --project ... --test ...` |
+| `veryl-cc-sync` | Direct Veryl 0.20.2 synchronous AOT-C runner with split timing |
 | `veryl-cc` | `veryl test --ignored --test ... --backend cc` |
 | `veryl-cranelift` | `veryl test --ignored --test ... --backend cranelift` |
 | `veryl-interpret` | `veryl test --ignored --test ... --backend interpret` |
@@ -129,7 +170,9 @@ from the simulated test result. Its columns are:
 | `semantic_status` | `pass`, `fail`, `compile-only`, `unreported`, or `invalid` |
 | `exit_status` | Subprocess exit status |
 | `process_elapsed_ns` | Monotonic elapsed time of the subprocess, including failed and compile-only runs |
-| `reported_elapsed_ns` | Celox runner's internal elapsed value, or `NA` when unavailable |
+| `reported_elapsed_ns` | Runner's internal total elapsed value, or `NA` when unavailable |
+| `compile_elapsed_ns` | Internal build/prepare time through simulator and testbench construction, or `NA` when unavailable |
+| `execute_elapsed_ns` | Internal testbench execution time after code generation, or `NA` when unavailable |
 
 The original `runner`, `test`, `status`, `elapsed_ns`, and `log` columns remain
 in their original positions. A speed result exists only when
@@ -138,22 +181,27 @@ in their original positions. A speed result exists only when
 used to claim full-test performance for `compile-only`, `fail`, `unreported`,
 or `invalid` rows.
 
-For Celox, the script requires exactly one complete log line in this form:
+For Celox, the script requires exactly one timing line and one result line:
 
 ```text
+CELOX_TEST_TIMING test=<requested-test> compile_ns=<integer> execute_ns=<integer>
 CELOX_TEST_RESULT test=<requested-test> status=pass|fail|compile-only elapsed_ns=<integer>
 ```
+
+`veryl-cc-sync` uses the corresponding `VERYL_TEST_TIMING` and
+`VERYL_TEST_RESULT` records. A compile-only Celox result must report
+`execute_ns=0`, and every split interval must fit within its internal total.
 
 Malformed, duplicate, missing, wrong-test, mode-inconsistent, or
 exit-status-inconsistent records cannot become a pass. An intentional
 `HELIODOR_CELOX_COMPILE_ONLY=1` run may finish successfully, but its
 `semantic_status` is `compile-only` and its `elapsed_ns` is `NA`.
 
-An existing five-column TSV is migrated atomically on the next run. The script
-keeps its first copy as `results.tsv.v1.bak`, recovers Celox semantics from the
-referenced logs where possible, and marks records without conclusive evidence
-as `unreported` or `invalid`. The migration never promotes process exit zero
-alone to a Celox full pass.
+Existing five- and nine-column TSV files are migrated atomically on the next
+run. The script keeps the first copy as `results.tsv.v1.bak` or
+`results.tsv.v2.bak`, recovers split timing from referenced logs where possible,
+and marks unavailable timing as `NA`. Migration never promotes process exit
+zero alone to a Celox full pass.
 
 The parser/migration and acceptance-gate fixtures run without checking out or
 executing Heliodor or either compiler:

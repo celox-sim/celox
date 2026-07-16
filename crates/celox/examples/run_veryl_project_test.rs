@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
 use celox::{OptLevel, Simulator, SirPass, TestResult};
 use veryl_metadata::Metadata;
 
@@ -59,7 +60,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         opts.compile_only
     );
 
-    let start = Instant::now();
+    let total_start = Instant::now();
     let mut builder = Simulator::from_sources(source_refs, &opts.test)
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
@@ -117,11 +118,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!(
             "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
             opts.test,
-            start.elapsed().as_nanos()
+            total_start.elapsed().as_nanos()
         );
         return Ok(());
     }
     if opts.compile_only {
+        let compile_start = Instant::now();
         match opts.backend {
             Backend::Native => {
                 let _sim = builder.build_native()?;
@@ -130,7 +132,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let _sim = builder.build_cranelift()?;
             }
         }
-        let elapsed = start.elapsed();
+        let compile_elapsed = compile_start.elapsed();
+        let elapsed = total_start.elapsed();
+        println!(
+            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns=0",
+            opts.test,
+            compile_elapsed.as_nanos()
+        );
         println!(
             "CELOX_TEST_RESULT test={} status=compile-only elapsed_ns={}",
             opts.test,
@@ -139,11 +147,34 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let result = match opts.backend {
-        Backend::Native => builder.run_test()?,
-        Backend::Cranelift => builder.run_test_cranelift()?,
+    let compile_start = Instant::now();
+    let (result, compile_elapsed, execute_elapsed) = match opts.backend {
+        Backend::Native => {
+            let mut sim = builder.build_native()?;
+            let testbench = compile_initial_testbench(&sim)
+                .ok_or("no initial block found — this module is not a native testbench")?;
+            let compile_elapsed = compile_start.elapsed();
+            let execute_start = Instant::now();
+            let result = run_compiled_testbench(&mut sim, &testbench);
+            (result, compile_elapsed, execute_start.elapsed())
+        }
+        Backend::Cranelift => {
+            let mut sim = builder.build_cranelift()?;
+            let testbench = compile_initial_testbench(&sim)
+                .ok_or("no initial block found — this module is not a native testbench")?;
+            let compile_elapsed = compile_start.elapsed();
+            let execute_start = Instant::now();
+            let result = run_compiled_testbench(&mut sim, &testbench);
+            (result, compile_elapsed, execute_start.elapsed())
+        }
     };
-    let elapsed = start.elapsed();
+    let elapsed = total_start.elapsed();
+    println!(
+        "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
+        opts.test,
+        compile_elapsed.as_nanos(),
+        execute_elapsed.as_nanos()
+    );
 
     match result {
         TestResult::Pass => {

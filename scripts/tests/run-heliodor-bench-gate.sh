@@ -32,9 +32,10 @@ write_valid_gate_logs() {
         "[INFO ]    Succeeded test ($GATE_TEST)" \
         '[INFO ]    Completed tests : 1 passed, 0 failed' \
         >"$directory/veryl.log"
-    printf '%s\n%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n' \
         "v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
+        "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=10 execute_ns=20" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=31" \
         >"$directory/celox.log"
 }
@@ -44,11 +45,11 @@ write_gate_results() {
     local veryl_elapsed="$2"
     local celox_elapsed="$3"
     write_valid_gate_logs "$directory"
-    printf '%s\n' "$RESULTS_HEADER_V2" >"$directory/results.tsv"
+    printf '%s\n' "$RESULTS_HEADER_V3" >"$directory/results.tsv"
     append_result_row "$directory/results.tsv" veryl-cc "$GATE_TEST" 0 \
-        "$veryl_elapsed" "$directory/veryl.log" pass "$veryl_elapsed" NA >/dev/null
+        "$veryl_elapsed" "$directory/veryl.log" pass "$veryl_elapsed" NA NA NA >/dev/null
     append_result_row "$directory/results.tsv" celox "$GATE_TEST" 0 \
-        "$celox_elapsed" "$directory/celox.log" pass "$celox_elapsed" 31 >/dev/null
+        "$celox_elapsed" "$directory/celox.log" pass "$celox_elapsed" 31 10 20 >/dev/null
 }
 
 unit="$TMP/unit"
@@ -62,7 +63,7 @@ trailing_empty="$TMP/trailing-empty"
 write_gate_results "$trailing_empty" 200 100
 sed -i $'2s/$/\t/' "$trailing_empty/results.tsv"
 if validate_gate_results "$trailing_empty/results.tsv" "$trailing_empty" 2>/dev/null; then
-    fail "gate accepted an empty tenth TSV field"
+    fail "gate accepted an empty trailing TSV field"
 fi
 
 leading_empty="$TMP/leading-empty"
@@ -80,11 +81,11 @@ traversal="$TMP/traversal"
 outside="$TMP/outside"
 mkdir -p "$traversal" "$outside"
 write_valid_gate_logs "$outside"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$traversal/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V3" >"$traversal/results.tsv"
 append_result_row "$traversal/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$traversal/../outside/veryl.log" pass 200 NA >/dev/null
+    "$traversal/../outside/veryl.log" pass 200 NA NA NA >/dev/null
 append_result_row "$traversal/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$traversal/../outside/celox.log" pass 100 31 >/dev/null
+    "$traversal/../outside/celox.log" pass 100 31 10 20 >/dev/null
 if validate_gate_results "$traversal/results.tsv" "$traversal" 2>/dev/null; then
     fail "gate accepted path traversal to logs outside the invocation"
 fi
@@ -97,11 +98,11 @@ fi
 
 reversed="$TMP/reversed"
 write_valid_gate_logs "$reversed"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$reversed/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V3" >"$reversed/results.tsv"
 append_result_row "$reversed/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$reversed/celox.log" pass 100 31 >/dev/null
+    "$reversed/celox.log" pass 100 31 10 20 >/dev/null
 append_result_row "$reversed/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$reversed/veryl.log" pass 200 NA >/dev/null
+    "$reversed/veryl.log" pass 200 NA NA NA >/dev/null
 if validate_gate_results "$reversed/results.tsv" "$reversed" 2>/dev/null; then
     fail "gate accepted reversed runner order"
 fi
@@ -109,7 +110,7 @@ fi
 extra="$TMP/extra"
 write_gate_results "$extra" 200 100
 append_result_row "$extra/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$extra/celox.log" pass 100 31 >/dev/null
+    "$extra/celox.log" pass 100 31 10 20 >/dev/null
 if validate_gate_results "$extra/results.tsv" "$extra" 2>/dev/null; then
     fail "gate accepted an extra result row"
 fi
@@ -130,15 +131,16 @@ fi
 
 compile_only="$TMP/compile-only"
 write_valid_gate_logs "$compile_only"
-printf '%s\n%s\n' \
+printf '%s\n%s\n%s\n' \
     "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=true" \
+    "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=30 execute_ns=0" \
     "CELOX_TEST_RESULT test=$GATE_TEST status=compile-only elapsed_ns=31" \
     >"$compile_only/celox.log"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$compile_only/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V3" >"$compile_only/results.tsv"
 append_result_row "$compile_only/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$compile_only/veryl.log" pass 200 NA >/dev/null
+    "$compile_only/veryl.log" pass 200 NA NA NA >/dev/null
 append_result_row "$compile_only/results.tsv" celox "$GATE_TEST" 0 NA \
-    "$compile_only/celox.log" compile-only 100 31 >/dev/null
+    "$compile_only/celox.log" compile-only 100 31 30 0 >/dev/null
 if validate_gate_results "$compile_only/results.tsv" "$compile_only" 2>/dev/null; then
     fail "gate accepted compile-only Celox"
 fi
@@ -180,7 +182,7 @@ fi
 
 reported_mismatch="$TMP/reported-mismatch"
 write_gate_results "$reported_mismatch" 200 100
-sed -i $'s/\t31$/\t32/' "$reported_mismatch/results.tsv"
+sed -i $'s/\t31\t10\t20$/\t32\t10\t20/' "$reported_mismatch/results.tsv"
 if validate_gate_results "$reported_mismatch/results.tsv" "$reported_mismatch" 2>/dev/null; then
     fail "gate accepted a Celox row/log reported-time mismatch"
 fi
@@ -418,6 +420,7 @@ run_one() {
     local test="$2"
     local log="$HELIODOR_RESULTS_DIR/$runner.log"
     local process_status=0 semantic_status=pass elapsed reported=NA
+    local compile_elapsed=NA execute_elapsed=NA
 
     assert_eq "$test" "$GATE_TEST" "fixed gate test"
     assert_eq "$HELIODOR_TESTS" "$GATE_TEST" "fixed test list"
@@ -448,14 +451,17 @@ run_one() {
         celox)
             elapsed="$MOCK_CELOX_ELAPSED"
             reported=31
+            compile_elapsed=10
+            execute_elapsed=20
             if [[ "$MOCK_CELOX_STATUS" == fail ]]; then
                 process_status=1
                 semantic_status=fail
                 elapsed=NA
             fi
-            printf '%s\n%s\n%s\n' \
+            printf '%s\n%s\n%s\n%s\n' \
                 'v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
+                "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=31" >"$log"
             if [[ "$MOCK_MUTATE_SOURCE" == 1 ]]; then
                 : >"$HELIODOR_DIR/.fixture-mutated"
@@ -469,7 +475,7 @@ run_one() {
     MOCK_RUNNERS="${MOCK_RUNNERS:+$MOCK_RUNNERS }$runner"
     append_result_row "$HELIODOR_RESULTS_DIR/results.tsv" "$runner" "$test" \
         "$process_status" "$elapsed" "$log" "$semantic_status" \
-        "${elapsed/NA/100}" "$reported" >/dev/null
+        "${elapsed/NA/100}" "$reported" "$compile_elapsed" "$execute_elapsed" >/dev/null
     [[ "$process_status" == 0 ]]
 }
 

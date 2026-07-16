@@ -778,6 +778,39 @@ Progress:
 
 Status: **qualification complete; throughput target remains open**.
 
+### Step 6: Separate compiler latency from generated-code throughput
+
+The end-to-end gate time combined source-to-native compilation with Linux
+execution. That made the `2.605x` process ratio unsuitable for deciding whether
+a native code-generation change improved the hot simulator. The benchmark now
+records `compile_elapsed_ns` and `execute_elapsed_ns` independently for Celox,
+and provides a `veryl-cc-sync` runner using Veryl 0.20.2's deterministic
+synchronous AOT-C configuration. Every Veryl-CC measurement uses a fresh empty
+AOT cache so a shared `.so` hit cannot contaminate compiler latency. The
+official asynchronous Veryl CLI remains available for the end-to-end acceptance
+gate.
+
+The split point is the call into the already-lowered testbench on both runners.
+Consequently the compile interval includes simulator initialization and
+testbench lowering as well as frontend, optimization, and native code
+generation. This keeps the execution interval directly comparable instead of
+charging Veryl-only setup work to its generated code.
+
+The first non-LTO full-workload split measurement completed at the identical
+`cy=9ae070 x3=aa pass=1` marker:
+
+- Celox: `40.450 s` compile, `137.675 s` execute;
+- Veryl synchronous AOT-C with an empty cache: `58.354 s` compile,
+  `54.282 s` execute;
+- generated-code execution gap: `2.536x`; Celox/Veryl cold-compile ratio:
+  `0.693x`.
+
+Subsequent native runtime steps are retained or rejected using full successful
+`execute_elapsed_ns`, while compile-time work uses `compile_elapsed_ns`.
+Process time remains a separately reported end-to-end metric. Result-schema,
+migration, parser, and fixed-gate fixtures cover the split records before the
+next code-generation experiment begins.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -794,6 +827,7 @@ Status: **qualification complete; throughput target remains open**.
 | 4c2b2 trial | rejected (no commit) | branchify 46/46 | lib 719/719; native 60/60; counter 9/9 | pass twice: `cy=9ab960 x3=aa pass=1` | 184.120 s; 190.775 s | reverted |
 | semantic repair | `138f46eb` | wide shift to one-bit Mux regression; prior SAR regression | lib 715/715; native 60/60; counter 9/9 | pass once: `cy=9ae070 x3=aa pass=1` | 198.235 s | complete |
 | 5 | `138f46eb`--`e917489e` | repair regression; Heliodor result/gate fixtures | lib 715/715; native 60/60; counter 9/9 | non-LTO Celox twice and final release/LTO pair passed at `cy=9ae070 x3=aa pass=1` | non-LTO: Veryl 76.446 s, Celox 184.652 s; release/LTO gate: Veryl 68.409 s, Celox 178.223 s | qualification complete; performance failed (2.605x) |
+| 6 | split timing | result/gate fixtures passed | lib 715/715; native 60/60; counter 9/9; docs build passed | non-LTO Celox and cold synchronous Veryl AOT-C passed at `cy=9ae070 x3=aa pass=1` | compile: Celox 40.450 s, Veryl 58.354 s; execute: Celox 137.675 s, Veryl 54.282 s | generated-code gap isolated at 2.536x |
 
 ## Related design records
 

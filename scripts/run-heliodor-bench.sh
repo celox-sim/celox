@@ -16,6 +16,7 @@ CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/examples/run_veryl_project_test}"
+VERYL_TIMED_RUNNER_BIN="${VERYL_TIMED_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/examples/run_veryl_project_test_timed}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_TARGET_DIR="${HELIODOR_CELOX_TARGET_DIR:-}"
 HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
@@ -41,12 +42,20 @@ declare -A BASELINE_ELAPSED_NS=()
 
 RESULTS_HEADER_V1=$'runner\ttest\tstatus\telapsed_ns\tlog'
 RESULTS_HEADER_V2=$'runner\ttest\tstatus\telapsed_ns\tlog\tsemantic_status\texit_status\tprocess_elapsed_ns\treported_elapsed_ns'
+RESULTS_HEADER_V3=$'runner\ttest\tstatus\telapsed_ns\tlog\tsemantic_status\texit_status\tprocess_elapsed_ns\treported_elapsed_ns\tcompile_elapsed_ns\texecute_elapsed_ns'
 
 # Outputs from classify_celox_result. Keep these as globals so callers retain
 # the function's structured result without parsing diagnostic text.
 CELOX_SEMANTIC_STATUS="unreported"
 CELOX_REPORTED_ELAPSED_NS="NA"
+CELOX_COMPILE_ELAPSED_NS="NA"
+CELOX_EXECUTE_ELAPSED_NS="NA"
 CELOX_RESULT_DIAGNOSTIC=""
+VERYL_TIMED_SEMANTIC_STATUS="unreported"
+VERYL_TIMED_REPORTED_ELAPSED_NS="NA"
+VERYL_TIMED_COMPILE_ELAPSED_NS="NA"
+VERYL_TIMED_EXECUTE_ELAPSED_NS="NA"
+VERYL_TIMED_RESULT_DIAGNOSTIC=""
 
 usage() {
     cat <<'USAGE'
@@ -59,6 +68,7 @@ Environment:
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cranelift veryl-cc celox)
                        Celox runners: celox, celox-cranelift
+                       Split-timing runner: veryl-cc-sync
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
@@ -66,6 +76,8 @@ Environment:
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
+  VERYL_TIMED_RUNNER_BIN
+                       prebuilt synchronous Veryl-CC timing runner path
   HELIODOR_CELOX_CARGO_PROFILE
                        Cargo profile for the Celox runner (default: heliodor-dev)
   HELIODOR_BUILD_CELOX_RUNNER
@@ -150,6 +162,8 @@ validate_result_fields() {
     local exit_status="$7"
     local process_elapsed_ns="$8"
     local reported_elapsed_ns="$9"
+    local compile_elapsed_ns="${10}"
+    local execute_elapsed_ns="${11}"
 
     if [[ -z "$runner" || -z "$test" || -z "$log" ]]; then
         echo "result row has an empty runner, test, or log field" >&2
@@ -168,6 +182,21 @@ validate_result_fields() {
         echo "result row has invalid reported_elapsed_ns: $reported_elapsed_ns" >&2
         return 1
     fi
+    if [[ "$compile_elapsed_ns" == NA && "$execute_elapsed_ns" != NA ]] \
+        || [[ "$compile_elapsed_ns" != NA && "$execute_elapsed_ns" == NA ]]; then
+        echo "result row must report both compile and execute elapsed values, or neither" >&2
+        return 1
+    fi
+    if [[ "$compile_elapsed_ns" != NA ]] \
+        && { ! is_uint "$compile_elapsed_ns" || ! is_uint "$execute_elapsed_ns"; }; then
+        echo "result row has invalid split elapsed values: compile=$compile_elapsed_ns execute=$execute_elapsed_ns" >&2
+        return 1
+    fi
+    if is_uint "$reported_elapsed_ns" && is_uint "$compile_elapsed_ns" \
+        && ((compile_elapsed_ns + execute_elapsed_ns > reported_elapsed_ns)); then
+        echo "result row split elapsed values exceed its runner-reported total" >&2
+        return 1
+    fi
 
     case "$semantic_status" in
         pass)
@@ -180,6 +209,10 @@ validate_result_fields() {
         compile-only)
             if [[ "$exit_status" != 0 || "$elapsed_ns" != NA ]]; then
                 echo "compile-only result must have exit status 0 and elapsed_ns=NA" >&2
+                return 1
+            fi
+            if is_uint "$execute_elapsed_ns" && ((execute_elapsed_ns != 0)); then
+                echo "compile-only result must have execute_elapsed_ns=0" >&2
                 return 1
             fi
             ;;
@@ -212,6 +245,8 @@ parse_celox_result_marker() {
 
     CELOX_SEMANTIC_STATUS="unreported"
     CELOX_REPORTED_ELAPSED_NS="NA"
+    CELOX_COMPILE_ELAPSED_NS="NA"
+    CELOX_EXECUTE_ELAPSED_NS="NA"
     CELOX_RESULT_DIAGNOSTIC=""
     if [[ ! -f "$log" ]]; then
         CELOX_RESULT_DIAGNOSTIC="Celox log does not exist: $log"
@@ -247,6 +282,42 @@ parse_celox_result_marker() {
     CELOX_SEMANTIC_STATUS="$marker_status"
 }
 
+parse_celox_timing_marker() {
+    local log="$1"
+    local expected_test="$2"
+    local required="$3"
+    local line marker_count=0 marker_valid=0 marker_test="" compile_elapsed="" execute_elapsed=""
+    local pattern='^CELOX_TEST_TIMING test=([^[:space:]]+) compile_ns=([0-9]+) execute_ns=([0-9]+)$'
+
+    CELOX_COMPILE_ELAPSED_NS="NA"
+    CELOX_EXECUTE_ELAPSED_NS="NA"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" != CELOX_TEST_TIMING* ]]; then
+            continue
+        fi
+        marker_count=$((marker_count + 1))
+        if [[ "$line" =~ $pattern ]]; then
+            marker_valid=$((marker_valid + 1))
+            marker_test="${BASH_REMATCH[1]}"
+            compile_elapsed="${BASH_REMATCH[2]}"
+            execute_elapsed="${BASH_REMATCH[3]}"
+        fi
+    done <"$log"
+    if ((marker_count == 0)) && [[ "$required" == 0 ]]; then
+        return 0
+    fi
+    if ((marker_count != 1 || marker_valid != 1)); then
+        CELOX_RESULT_DIAGNOSTIC="Celox log must contain exactly one well-formed CELOX_TEST_TIMING record (records=$marker_count valid=$marker_valid)"
+        return 1
+    fi
+    if [[ "$marker_test" != "$expected_test" ]]; then
+        CELOX_RESULT_DIAGNOSTIC="Celox timing names test $marker_test, expected $expected_test"
+        return 1
+    fi
+    CELOX_COMPILE_ELAPSED_NS="$compile_elapsed"
+    CELOX_EXECUTE_ELAPSED_NS="$execute_elapsed"
+}
+
 # Check the marker independently against the process exit status and requested
 # run mode. A contradiction is an invalid result, never a process-level pass.
 classify_celox_result() {
@@ -255,6 +326,10 @@ classify_celox_result() {
     local exit_status="$3"
     local expected_compile_only="$4"
     parse_celox_result_marker "$log" "$expected_test" || return 1
+    parse_celox_timing_marker "$log" "$expected_test" 1 || {
+        CELOX_SEMANTIC_STATUS="invalid"
+        return 1
+    }
     local marker_status="$CELOX_SEMANTIC_STATUS"
 
     if ! is_exit_status "$exit_status"; then
@@ -286,6 +361,74 @@ classify_celox_result() {
     esac
     CELOX_SEMANTIC_STATUS="invalid"
     return 1
+}
+
+classify_timed_veryl_result() {
+    local log="$1"
+    local expected_test="$2"
+    local exit_status="$3"
+    local line result_count=0 result_valid=0 timing_count=0 timing_valid=0
+    local marker_test="" marker_status="" marker_elapsed=""
+    local timing_test="" compile_elapsed="" execute_elapsed=""
+    local result_pattern='^VERYL_TEST_RESULT test=([^[:space:]]+) status=(pass|fail) elapsed_ns=([0-9]+)$'
+    local timing_pattern='^VERYL_TEST_TIMING test=([^[:space:]]+) compile_ns=([0-9]+) execute_ns=([0-9]+)$'
+
+    VERYL_TIMED_SEMANTIC_STATUS="unreported"
+    VERYL_TIMED_REPORTED_ELAPSED_NS="NA"
+    VERYL_TIMED_COMPILE_ELAPSED_NS="NA"
+    VERYL_TIMED_EXECUTE_ELAPSED_NS="NA"
+    VERYL_TIMED_RESULT_DIAGNOSTIC=""
+    if [[ ! -f "$log" ]]; then
+        VERYL_TIMED_RESULT_DIAGNOSTIC="timed Veryl log does not exist: $log"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == VERYL_TEST_RESULT* ]]; then
+            result_count=$((result_count + 1))
+            if [[ "$line" =~ $result_pattern ]]; then
+                result_valid=$((result_valid + 1))
+                marker_test="${BASH_REMATCH[1]}"
+                marker_status="${BASH_REMATCH[2]}"
+                marker_elapsed="${BASH_REMATCH[3]}"
+            fi
+        elif [[ "$line" == VERYL_TEST_TIMING* ]]; then
+            timing_count=$((timing_count + 1))
+            if [[ "$line" =~ $timing_pattern ]]; then
+                timing_valid=$((timing_valid + 1))
+                timing_test="${BASH_REMATCH[1]}"
+                compile_elapsed="${BASH_REMATCH[2]}"
+                execute_elapsed="${BASH_REMATCH[3]}"
+            fi
+        fi
+    done <"$log"
+    if ((result_count != 1 || result_valid != 1 || timing_count != 1 || timing_valid != 1)); then
+        VERYL_TIMED_SEMANTIC_STATUS="invalid"
+        VERYL_TIMED_RESULT_DIAGNOSTIC="timed Veryl log requires exactly one valid result and timing record"
+        return 1
+    fi
+    if [[ "$marker_test" != "$expected_test" || "$timing_test" != "$expected_test" ]]; then
+        VERYL_TIMED_SEMANTIC_STATUS="invalid"
+        VERYL_TIMED_RESULT_DIAGNOSTIC="timed Veryl result/timing test does not match $expected_test"
+        return 1
+    fi
+    VERYL_TIMED_REPORTED_ELAPSED_NS="$marker_elapsed"
+    VERYL_TIMED_COMPILE_ELAPSED_NS="$compile_elapsed"
+    VERYL_TIMED_EXECUTE_ELAPSED_NS="$execute_elapsed"
+    case "$marker_status:$exit_status" in
+        pass:0)
+            VERYL_TIMED_SEMANTIC_STATUS="pass"
+            return 0
+            ;;
+        fail:[1-9]*)
+            VERYL_TIMED_SEMANTIC_STATUS="fail"
+            return 0
+            ;;
+        *)
+            VERYL_TIMED_SEMANTIC_STATUS="invalid"
+            VERYL_TIMED_RESULT_DIAGNOSTIC="timed Veryl result contradicts process status $exit_status"
+            return 1
+            ;;
+    esac
 }
 
 validate_gate_celox_config() {
@@ -422,13 +565,17 @@ append_result_row() {
     local semantic_status="$7"
     local process_elapsed_ns="$8"
     local reported_elapsed_ns="$9"
+    local compile_elapsed_ns="${10}"
+    local execute_elapsed_ns="${11}"
     validate_result_fields \
         "$runner" "$test" "$exit_status" "$elapsed_ns" "$log" \
         "$semantic_status" "$exit_status" "$process_elapsed_ns" "$reported_elapsed_ns" \
+        "$compile_elapsed_ns" "$execute_elapsed_ns" \
         || return 1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$runner" "$test" "$exit_status" "$elapsed_ns" "$log" \
         "$semantic_status" "$exit_status" "$process_elapsed_ns" "$reported_elapsed_ns" \
+        "$compile_elapsed_ns" "$execute_elapsed_ns" \
         | tee -a "$results_file"
 }
 
@@ -437,10 +584,10 @@ migrate_results_v1() {
     local backup_file="${results_file}.v1.bak"
     local temporary_file
     temporary_file="$(mktemp "${results_file}.migrate.XXXXXX")"
-    printf '%s\n' "$RESULTS_HEADER_V2" >"$temporary_file"
+    printf '%s\n' "$RESULTS_HEADER_V3" >"$temporary_file"
 
     local runner test legacy_status legacy_elapsed log extra
-    local semantic_status process_elapsed reported_elapsed full_elapsed
+    local semantic_status process_elapsed reported_elapsed compile_elapsed execute_elapsed full_elapsed
     while IFS=$'\t' read -r runner test legacy_status legacy_elapsed log extra; do
         if [[ -z "$runner$test$legacy_status$legacy_elapsed$log$extra" ]]; then
             continue
@@ -454,11 +601,17 @@ migrate_results_v1() {
 
         process_elapsed="$legacy_elapsed"
         reported_elapsed="NA"
+        compile_elapsed="NA"
+        execute_elapsed="NA"
         case "$runner" in
             celox*)
                 classify_legacy_celox_result "$log" "$test" "$legacy_status" || true
                 semantic_status="$CELOX_SEMANTIC_STATUS"
                 reported_elapsed="$CELOX_REPORTED_ELAPSED_NS"
+                if parse_celox_timing_marker "$log" "$test" 0; then
+                    compile_elapsed="$CELOX_COMPILE_ELAPSED_NS"
+                    execute_elapsed="$CELOX_EXECUTE_ELAPSED_NS"
+                fi
                 ;;
             veryl-*)
                 if [[ "$legacy_status" == 0 ]]; then
@@ -472,14 +625,16 @@ migrate_results_v1() {
         full_elapsed="$(full_pass_elapsed_ns "$semantic_status" "$legacy_status" "$process_elapsed")"
         if ! validate_result_fields \
             "$runner" "$test" "$legacy_status" "$full_elapsed" "$log" \
-            "$semantic_status" "$legacy_status" "$process_elapsed" "$reported_elapsed"; then
+            "$semantic_status" "$legacy_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed"; then
             rm -f "$temporary_file"
             echo "error: cannot migrate inconsistent v1 results row for runner=$runner test=$test" >&2
             return 1
         fi
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$runner" "$test" "$legacy_status" "$full_elapsed" "$log" \
             "$semantic_status" "$legacy_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed" \
             >>"$temporary_file"
     done < <(tail -n +2 "$results_file")
 
@@ -496,11 +651,16 @@ migrate_results_v1() {
     fi
 }
 
-validate_results_v2() {
+migrate_results_v2() {
     local results_file="$1"
+    local backup_file="${results_file}.v2.bak"
+    local temporary_file
+    temporary_file="$(mktemp "${results_file}.migrate.XXXXXX")"
+    printf '%s\n' "$RESULTS_HEADER_V3" >"$temporary_file"
+
     local line_number=1
     local line normalized
-    local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed extra
+    local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! tsv_has_exact_field_count "$line" 9; then
@@ -510,10 +670,68 @@ validate_results_v2() {
         normalized="${line//$'\t'/$'\x1f'}"
         IFS=$'\x1f' read -r runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed extra \
             <<<"$normalized"
+        compile_elapsed=NA
+        execute_elapsed=NA
+        case "$runner" in
+            celox*)
+                if parse_celox_timing_marker "$log" "$test" 0; then
+                    compile_elapsed="$CELOX_COMPILE_ELAPSED_NS"
+                    execute_elapsed="$CELOX_EXECUTE_ELAPSED_NS"
+                fi
+                ;;
+            veryl-cc-sync)
+                if classify_timed_veryl_result "$log" "$test" "$exit_status"; then
+                    compile_elapsed="$VERYL_TIMED_COMPILE_ELAPSED_NS"
+                    execute_elapsed="$VERYL_TIMED_EXECUTE_ELAPSED_NS"
+                fi
+                ;;
+        esac
         if [[ -n "$extra" ]] || ! validate_result_fields \
             "$runner" "$test" "$legacy_status" "$elapsed" "$log" \
-            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed"; then
+            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed"; then
             echo "error: invalid v2 result row at $results_file:$line_number" >&2
+            rm -f "$temporary_file"
+            return 1
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$runner" "$test" "$legacy_status" "$elapsed" "$log" \
+            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed" >>"$temporary_file"
+    done < <(tail -n +2 "$results_file")
+
+    if [[ ! -e "$backup_file" ]]; then
+        if ! cp "$results_file" "$backup_file"; then
+            rm -f "$temporary_file"
+            return 1
+        fi
+    fi
+    chmod --reference="$results_file" "$temporary_file" 2>/dev/null || true
+    if ! mv "$temporary_file" "$results_file"; then
+        rm -f "$temporary_file"
+        return 1
+    fi
+}
+
+validate_results_v3() {
+    local results_file="$1"
+    local line_number=1
+    local line normalized
+    local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
+        if ! tsv_has_exact_field_count "$line" 11; then
+            echo "error: invalid v3 field count at $results_file:$line_number" >&2
+            return 1
+        fi
+        normalized="${line//$'\t'/$'\x1f'}"
+        IFS=$'\x1f' read -r runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra \
+            <<<"$normalized"
+        if [[ -n "$extra" ]] || ! validate_result_fields \
+            "$runner" "$test" "$legacy_status" "$elapsed" "$log" \
+            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed"; then
+            echo "error: invalid v3 result row at $results_file:$line_number" >&2
             return 1
         fi
     done < <(tail -n +2 "$results_file")
@@ -522,16 +740,17 @@ validate_results_v2() {
 ensure_results_schema() {
     local results_file="$1"
     if [[ ! -e "$results_file" || ! -s "$results_file" ]]; then
-        printf '%s\n' "$RESULTS_HEADER_V2" >"$results_file"
+        printf '%s\n' "$RESULTS_HEADER_V3" >"$results_file"
         return
     fi
 
     local header
     IFS= read -r header <"$results_file" || true
     case "$header" in
-        "$RESULTS_HEADER_V2")
-            validate_results_v2 "$results_file"
+        "$RESULTS_HEADER_V3")
+            validate_results_v3 "$results_file"
             ;;
+        "$RESULTS_HEADER_V2") migrate_results_v2 "$results_file" ;;
         "$RESULTS_HEADER_V1") migrate_results_v1 "$results_file" ;;
         *)
             echo "error: unsupported Heliodor results schema in $results_file" >&2
@@ -658,6 +877,7 @@ any_veryl_runner_enabled() {
     local runner
     for runner in $HELIODOR_RUNNERS; do
         case "$runner" in
+            veryl-cc-sync) ;;
             veryl-*) return 0 ;;
         esac
     done
@@ -688,6 +908,35 @@ build_celox_runner() {
     fi
     if [[ ! -f "$CELOX_RUNNER_BIN" || ! -x "$CELOX_RUNNER_BIN" ]]; then
         echo "error: Celox build did not produce the selected runner: $CELOX_RUNNER_BIN" >&2
+        return 1
+    fi
+}
+
+build_timed_veryl_runner() {
+    local log="$HELIODOR_RESULTS_DIR/veryl_timed_runner_build.log"
+    local -a target_dir_args=()
+    if [[ "$HELIODOR_BUILD_CELOX_RUNNER" != 1 ]]; then
+        if [[ ! -x "$VERYL_TIMED_RUNNER_BIN" ]]; then
+            echo "error: HELIODOR_BUILD_CELOX_RUNNER=0 but VERYL_TIMED_RUNNER_BIN is not executable: $VERYL_TIMED_RUNNER_BIN" >&2
+            return 127
+        fi
+        echo "Using prebuilt timed Veryl runner: $VERYL_TIMED_RUNNER_BIN"
+        return
+    fi
+    echo "Building timed Veryl runner: $VERYL_TIMED_RUNNER_BIN"
+    if [[ -n "$HELIODOR_CELOX_TARGET_DIR" ]]; then
+        target_dir_args=(--target-dir "$HELIODOR_CELOX_TARGET_DIR")
+    fi
+    if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
+        --example run_veryl_project_test_timed \
+        --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
+        "${target_dir_args[@]}" >"$log" 2>&1; then
+        tail -n 80 "$log" >&2 || true
+        return 1
+    fi
+    if [[ ! -f "$VERYL_TIMED_RUNNER_BIN" || ! -x "$VERYL_TIMED_RUNNER_BIN" ]]; then
+        echo "error: Celox build did not produce the timed Veryl runner: $VERYL_TIMED_RUNNER_BIN" >&2
         return 1
     fi
 }
@@ -823,12 +1072,15 @@ run_one() {
     local runner="$1"
     local test="$2"
     local stamp log process_status start end process_elapsed timeout_sec
-    local semantic_status reported_elapsed full_elapsed result_valid
-    local -a source_files celox_args
+    local semantic_status reported_elapsed compile_elapsed execute_elapsed full_elapsed result_valid
+    local veryl_aot_cache_dir=""
+    local -a source_files celox_args timed_veryl_args
     collect_test_source_files "$test" source_files || return "$?"
     celox_args=()
+    timed_veryl_args=()
     for source_file in "${source_files[@]}"; do
         celox_args+=(--source-file "$source_file")
+        timed_veryl_args+=(--source-file "$source_file")
     done
     for pass_override in $CELOX_SIR_PASS_OVERRIDES; do
         celox_args+=(--sir-pass "$pass_override")
@@ -854,6 +1106,16 @@ run_one() {
         echo "error: could not read a monotonic start timestamp" >&2
         return 1
     fi
+    case "$runner" in
+        veryl-cc|veryl-cc-sync)
+            local absolute_results_dir
+            if ! absolute_results_dir="$(realpath -e "$HELIODOR_RESULTS_DIR")" \
+                || ! veryl_aot_cache_dir="$(mktemp -d "$absolute_results_dir/.veryl-aot-cache.XXXXXX")"; then
+                echo "error: could not create an isolated Veryl AOT cache" >&2
+                return 1
+            fi
+            ;;
+    esac
     set +e
     case "$runner" in
         celox)
@@ -868,8 +1130,16 @@ run_one() {
                 "${celox_args[@]}" --backend cranelift --opt-level "$CELOX_OPT_LEVEL"
             process_status="$?"
             ;;
+        veryl-cc-sync)
+            run_in_heliodor "$timeout_sec" "$log" \
+                env VERYL_AOT_CACHE_DIR="$veryl_aot_cache_dir" \
+                "$VERYL_TIMED_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${timed_veryl_args[@]}"
+            process_status="$?"
+            ;;
         veryl-cc)
             run_in_heliodor "$timeout_sec" "$log" \
+                env VERYL_AOT_CACHE_DIR="$veryl_aot_cache_dir" \
                 "$RESOLVED_VERYL_BIN" test --include-ignored --test "$test" --backend cc \
                 "${source_files[@]}"
             process_status="$?"
@@ -892,6 +1162,9 @@ run_one() {
             ;;
     esac
     set -e
+    if [[ -n "$veryl_aot_cache_dir" ]]; then
+        rm -rf -- "$veryl_aot_cache_dir"
+    fi
     if ! end="$(monotonic_ns)" || ! is_uint "$end"; then
         echo "error: could not read a monotonic end timestamp" >&2
         return 1
@@ -903,6 +1176,8 @@ run_one() {
     process_elapsed="$((end - start))"
     semantic_status="unreported"
     reported_elapsed="NA"
+    compile_elapsed="NA"
+    execute_elapsed="NA"
     result_valid=1
     case "$runner" in
         celox*)
@@ -910,11 +1185,30 @@ run_one() {
                 "$log" "$test" "$process_status" "$HELIODOR_CELOX_COMPILE_ONLY"; then
                 semantic_status="$CELOX_SEMANTIC_STATUS"
                 reported_elapsed="$CELOX_REPORTED_ELAPSED_NS"
+                compile_elapsed="$CELOX_COMPILE_ELAPSED_NS"
+                execute_elapsed="$CELOX_EXECUTE_ELAPSED_NS"
             else
                 semantic_status="$CELOX_SEMANTIC_STATUS"
                 reported_elapsed="$CELOX_REPORTED_ELAPSED_NS"
+                compile_elapsed="$CELOX_COMPILE_ELAPSED_NS"
+                execute_elapsed="$CELOX_EXECUTE_ELAPSED_NS"
                 result_valid=0
                 echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
+            fi
+            ;;
+        veryl-cc-sync)
+            if classify_timed_veryl_result "$log" "$test" "$process_status"; then
+                semantic_status="$VERYL_TIMED_SEMANTIC_STATUS"
+                reported_elapsed="$VERYL_TIMED_REPORTED_ELAPSED_NS"
+                compile_elapsed="$VERYL_TIMED_COMPILE_ELAPSED_NS"
+                execute_elapsed="$VERYL_TIMED_EXECUTE_ELAPSED_NS"
+            else
+                semantic_status="$VERYL_TIMED_SEMANTIC_STATUS"
+                reported_elapsed="$VERYL_TIMED_REPORTED_ELAPSED_NS"
+                compile_elapsed="$VERYL_TIMED_COMPILE_ELAPSED_NS"
+                execute_elapsed="$VERYL_TIMED_EXECUTE_ELAPSED_NS"
+                result_valid=0
+                echo "error: $VERYL_TIMED_RESULT_DIAGNOSTIC" >&2
             fi
             ;;
         veryl-*)
@@ -931,7 +1225,8 @@ run_one() {
 
     if ! append_result_row "$HELIODOR_RESULTS_DIR/results.tsv" \
         "$runner" "$test" "$process_status" "$full_elapsed" "$log" \
-        "$semantic_status" "$process_elapsed" "$reported_elapsed"; then
+        "$semantic_status" "$process_elapsed" "$reported_elapsed" \
+        "$compile_elapsed" "$execute_elapsed"; then
         echo "error: refusing to append an invalid Heliodor result row" >&2
         return 1
     fi
@@ -950,6 +1245,9 @@ run_all() {
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
     if runner_enabled celox || runner_enabled celox-cranelift; then
         build_celox_runner
+    fi
+    if runner_enabled veryl-cc-sync; then
+        build_timed_veryl_runner
     fi
     if any_veryl_runner_enabled; then
         RESOLVED_VERYL_BIN="$(resolve_veryl_bin)" || return "$?"
@@ -1119,7 +1417,7 @@ validate_gate_results() {
     local results_file="$1"
     local invocation_dir="$2"
     local header row_count=0 canonical_invocation canonical_results canonical_log line normalized
-    local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed extra
+    local runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra
     local expected_runner
 
     GATE_VERYL_ELAPSED_NS=""
@@ -1141,7 +1439,7 @@ validate_gate_results() {
         return 1
     fi
     IFS= read -r header <"$results_file" || true
-    if [[ "$header" != "$RESULTS_HEADER_V2" ]]; then
+    if [[ "$header" != "$RESULTS_HEADER_V3" ]]; then
         echo "error: gate result file has the wrong schema" >&2
         return 1
     fi
@@ -1156,16 +1454,17 @@ validate_gate_results() {
                 return 1
                 ;;
         esac
-        if ! tsv_has_exact_field_count "$line" 9; then
-            echo "error: gate result row $row_count does not have exactly nine fields" >&2
+        if ! tsv_has_exact_field_count "$line" 11; then
+            echo "error: gate result row $row_count does not have exactly eleven fields" >&2
             return 1
         fi
         normalized="${line//$'\t'/$'\x1f'}"
-        IFS=$'\x1f' read -r runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed extra \
+        IFS=$'\x1f' read -r runner test legacy_status elapsed log semantic_status exit_status process_elapsed reported_elapsed compile_elapsed execute_elapsed extra \
             <<<"$normalized"
         if [[ -n "$extra" ]] || ! validate_result_fields \
             "$runner" "$test" "$legacy_status" "$elapsed" "$log" \
-            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed"; then
+            "$semantic_status" "$exit_status" "$process_elapsed" "$reported_elapsed" \
+            "$compile_elapsed" "$execute_elapsed"; then
             echo "error: invalid gate result row $row_count" >&2
             return 1
         fi
@@ -1192,8 +1491,9 @@ validate_gate_results() {
         fi
         case "$runner" in
             veryl-cc)
-                [[ "$reported_elapsed" == NA ]] || {
-                    echo "error: Veryl gate row has an unexpected reported elapsed value" >&2
+                [[ "$reported_elapsed" == NA && "$compile_elapsed" == NA \
+                    && "$execute_elapsed" == NA ]] || {
+                    echo "error: Veryl gate row has unexpected runner-reported timing values" >&2
                     return 1
                 }
                 validate_veryl_completion "$log" "$GATE_TEST" || return "$?"
@@ -1213,6 +1513,11 @@ validate_gate_results() {
                 }
                 [[ "$reported_elapsed" == "$CELOX_REPORTED_ELAPSED_NS" ]] || {
                     echo "error: Celox gate row/report elapsed values disagree" >&2
+                    return 1
+                }
+                [[ "$compile_elapsed" == "$CELOX_COMPILE_ELAPSED_NS" \
+                    && "$execute_elapsed" == "$CELOX_EXECUTE_ELAPSED_NS" ]] || {
+                    echo "error: Celox gate row/report split timing values disagree" >&2
                     return 1
                 }
                 GATE_CELOX_ELAPSED_NS="$process_elapsed"

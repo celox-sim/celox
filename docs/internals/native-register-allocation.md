@@ -485,6 +485,12 @@ Veryl-CC. Both exact markers and semantic checks passed, but the remaining
 `2.605x` gap failed the gate's no-slower performance condition. Full native
 execution is therefore correct and complete while the throughput target
 remains open.
+That fixed-gate number includes compilation. The explicit non-LTO split measured
+Celox at `40.450 s` compile and `137.675 s` execute, versus synchronous Veryl
+AOT-C with an empty cache at `58.354 s` compile and `54.282 s` execute.
+Allocator and emitted-runtime changes are now judged by the `2.536x` execution
+gap, while allocation and full compiler latency remain in the separate compile
+interval.
 The earlier Celox `cy=9ab960` completions were invalidated by an ISel
 wide-to-narrow canonicalization bug, not by the allocator.
 
