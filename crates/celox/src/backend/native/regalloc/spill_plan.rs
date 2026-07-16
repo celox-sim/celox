@@ -1284,14 +1284,12 @@ impl SpillPlan {
     ) -> Result<(), SpillPlanError> {
         let mut candidates = BTreeSet::<SpillHome>::new();
         let mut rejected = BTreeSet::<SpillHome>::new();
-        let mut stack_costs = BTreeMap::<SpillHome, u128>::new();
+        let mut baseline_costs = BTreeMap::<SpillHome, u128>::new();
         let mut recipe_costs = BTreeMap::<SpillHome, u128>::new();
         for &(point, operation) in &self.point_ops {
             match operation {
                 PlannedOp::Reload { value, home } => {
                     candidates.insert(home);
-                    let total = stack_costs.entry(home).or_default();
-                    *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
                     let query = PointUse {
                         block: point.block,
                         instruction: point.instruction,
@@ -1300,14 +1298,29 @@ impl SpillPlan {
                     if let Some(recipe) = analysis.resolved_recipe_at_point(query) {
                         let cost = u128::try_from(recipe.steps.len().saturating_add(1))
                             .unwrap_or(u128::MAX);
+                        let baseline = baseline_costs.entry(home).or_default();
+                        *baseline = baseline.saturating_add(
+                            if self.recipe_reloads.contains(&(
+                                point.block,
+                                point.instruction,
+                                value,
+                            )) {
+                                cost
+                            } else {
+                                u128::from(stack_reload_cost(func, value))
+                            },
+                        );
                         let total = recipe_costs.entry(home).or_default();
                         *total = total.saturating_add(cost);
                     } else {
+                        let baseline = baseline_costs.entry(home).or_default();
+                        *baseline =
+                            baseline.saturating_add(u128::from(stack_reload_cost(func, value)));
                         rejected.insert(home);
                     }
                 }
                 PlannedOp::Spill { value, home } => {
-                    let total = stack_costs.entry(home).or_default();
+                    let total = baseline_costs.entry(home).or_default();
                     *total = total.saturating_add(u128::from(spill_cost(func, value)));
                 }
                 PlannedOp::SpillPhi { value, home } => {
@@ -1345,7 +1358,7 @@ impl SpillPlan {
                         };
                         let source = LogicalValue(source.0);
                         if !self.s_exit[predecessor].contains(&source) {
-                            let total = stack_costs.entry(home).or_default();
+                            let total = baseline_costs.entry(home).or_default();
                             *total = total.saturating_add(u128::from(spill_cost(func, source)));
                         }
                     }
@@ -1384,7 +1397,7 @@ impl SpillPlan {
                 match operation {
                     PlannedOp::Reload { value, home } => {
                         candidates.insert(home);
-                        let total = stack_costs.entry(home).or_default();
+                        let total = baseline_costs.entry(home).or_default();
                         *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
                         let query = PointUse {
                             block: predecessor_block.id,
@@ -1401,7 +1414,7 @@ impl SpillPlan {
                         }
                     }
                     PlannedOp::Spill { value, home } => {
-                        let total = stack_costs.entry(home).or_default();
+                        let total = baseline_costs.entry(home).or_default();
                         *total = total.saturating_add(u128::from(spill_cost(func, value)));
                     }
                     PlannedOp::SpillPhi { .. } => {
@@ -1419,7 +1432,7 @@ impl SpillPlan {
         candidates.retain(|home| {
             !rejected.contains(home)
                 && recipe_costs.get(home).copied().unwrap_or(u128::MAX)
-                    < stack_costs.get(home).copied().unwrap_or_default()
+                    < baseline_costs.get(home).copied().unwrap_or_default()
         });
         self.recipe_homes = candidates;
         Ok(())
@@ -2507,6 +2520,123 @@ mod tests {
         assert_eq!(error.rule, "SPILL_PLAN.RECIPE_HOME_POINT");
         assert_eq!(error.block, Some(BlockId(0)));
         assert_eq!(error.instruction, Some(5));
+    }
+
+    #[test]
+    fn whole_recipe_home_uses_the_existing_mixed_plan_as_its_baseline() {
+        let mut vregs = VRegAllocator::new();
+        let base = vregs.alloc();
+        let first = vregs.alloc();
+        let value = vregs.alloc();
+        let overwrite = vregs.alloc();
+        let mut spill_descs = vec![SpillDesc::transient(); 4];
+        spill_descs[value.0 as usize].spill_cost = 1;
+        let mut func = MFunction::new(vregs, spill_descs);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: base,
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::BitNot {
+            dst: first,
+            src: base,
+        });
+        block.push(MInst::BitNot {
+            dst: value,
+            src: first,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 48,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: overwrite,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 48,
+            src: overwrite,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 16,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = plan(&func, &cfg, &next_use, 4).unwrap();
+        plan.point_ops.clear();
+        plan.edge_ops.clear();
+        plan.recipe_reloads.clear();
+        plan.recipe_homes.clear();
+        let logical = LogicalValue(value.0);
+        let home = plan.homes.of_logical(logical);
+        let point = |instruction| ProgramPoint {
+            block: BlockId(0),
+            instruction,
+            side: PointSide::Before,
+        };
+        plan.point_ops.extend([
+            (
+                point(3),
+                PlannedOp::Spill {
+                    value: logical,
+                    home,
+                },
+            ),
+            (
+                point(4),
+                PlannedOp::Reload {
+                    value: logical,
+                    home,
+                },
+            ),
+            (
+                point(7),
+                PlannedOp::Reload {
+                    value: logical,
+                    home,
+                },
+            ),
+        ]);
+        plan.recipe_reloads.insert((BlockId(0), 4, logical));
+        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        let recipe_cost = |instruction| {
+            recipes
+                .resolved_recipe_at_point(PointUse {
+                    block: BlockId(0),
+                    instruction,
+                    value,
+                })
+                .map(|recipe| recipe.steps.len() + 1)
+        };
+        assert_eq!(recipe_cost(4), Some(1));
+        assert_eq!(recipe_cost(7), Some(3));
+
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        assert!(
+            plan.recipe_homes.is_empty(),
+            "the all-recipe cost ties the selected point-recipe, stack-reload, and spill baseline"
+        );
     }
 
     #[test]

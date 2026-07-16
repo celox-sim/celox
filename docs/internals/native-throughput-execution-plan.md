@@ -1689,6 +1689,52 @@ not its substitute.
 Status: **structurally complete and qualified; execution effect unconfirmed;
 use-to-use interval selection remains open**.
 
+### Step 17b: Compare aggregate homes with the already-selected mixed plan
+
+The aggregate-home comparison in Step 17a still priced every point reload as
+if it came from a stack slot.  That is not the plan reconstruction actually
+executes: a final-use reload selected in Step 16 is already supplied by its
+exact MemorySSA recipe.  Treating that point as a stack reload can make a
+whole-recipe home appear strictly cheaper than the existing mixed plan when
+the two real alternatives only tie.
+
+Whole-home selection now uses the materialization cost of an already-selected
+`recipe_reloads` point and the normal stack cost everywhere else.  Spill and
+edge costs remain unchanged.  The focused fixture has a one-operation exact
+recipe at the first reload, a two-cost stack reload at the second point, and a
+one-cost spill.  Reconstructing both points from recipes costs one plus three,
+which ties that actual mixed baseline and is therefore rejected.  The former
+all-stack comparison incorrectly priced the baseline as two plus two plus one
+and selected the whole home.
+
+This does **not** revive the mixed-home trial rejected in Step 16.  A trial
+which automatically changed ordinary point and edge stack reloads into state
+recipes retained their stack stores and changed only the reload source.  Exact
+post-allocation MIR and normalized machine-code inspection exposed that some
+stack reloads had also been folded into their consumers, while the narrow
+state loads required explicit zero-extension.  That trial was removed in
+full; only the aggregate comparison against recipes already selected by the
+spill plan remains.
+
+The regenerated 58,353,245-byte pre-optimized, 19,582,017-byte post-optimized,
+and 20,041,423-byte native-optimized SIR files are byte-identical to Step 17a.
+The complete 190,924,170-byte MIR is also byte-identical, with SHA-256
+`9171e68fd6f6e23aaf721f706e01c00ba967d8cdf7e0d3e271ff6b26dde520a9`.
+Allocator tests pass 154/154, the complete library passes 766/766, native MIR
+passes 6/6, non-ignored native testbenches pass 60/60, and the native,
+Cranelift, and Wasm counter matrix passes 9/9.
+
+The current source was nevertheless exercised through a full CPU-0 non-LTO
+Linux run.  The runner directly reported 66.631243151 s for code generation
+and 128.829497024 s for generated-code execution, followed by normal power-down
+at the exact `cy=9ae070 x3=aa pass=1` marker.  Because the complete emitted MIR
+is byte-identical to Step 17a, no execution-time change is attributed to this
+step.  The next step remains the explicit use-to-use interval solver rather
+than another isolated reload substitution.
+
+Status: **complete; aggregate cost accounting matches the selected plan;
+generated code unchanged; use-to-use interval selection remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1718,6 +1764,7 @@ use-to-use interval selection remains open**.
 | 15 | point-specific MemorySSA reload costs | allocator 147/147; reload 30/30; spill plan 11/11; native MIR 6/6 | lib 759/759; native 60/60; counter 9/9; check, strict clippy, docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 64.748 s (`execute_ns=0`); full-run compile 65.313 s; full-run execute 128.602 s | exact-use placement works; runtime effect unconfirmed; state homes and use-cluster costing remain open |
 | 16 | final-use MemorySSA spill homes | allocator 149/149; native MIR 6/6 | lib 761/761; native 60/60; counter 9/9; check, strict clippy, docs | two CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; final-source MIR is byte-identical | inspected/final compile-only 65.240 / 65.983 s (`execute_ns=0`); full compile 64.344 / 66.136 s; execute 128.533 / 138.830 s | concrete stack traffic removed; runtime effect unconfirmed; multi-use cluster costing remains open |
 | 17a | straight-line join clusters and planner-owned aggregate recipe homes | allocator 153/153; native MIR 6/6 | lib 765/765; native 60/60; counter 9/9; fixtures, check, CI-target strict clippy, docs | final-source and two CPU-0 non-LTO candidate runs pass: `cy=9ae070 x3=aa pass=1`; final MIR is byte-identical | final compile 65.618 s; final execute 136.728 s; candidate intervals remain separately recorded above | structurally complete; runtime effect unconfirmed; interval solver remains open |
+| 17b | actual mixed-plan aggregate baseline | allocator 154/154; native MIR 6/6 | lib 766/766; native 60/60; counter 9/9; check and docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1`; complete SIR/MIR is byte-identical to Step 17a | compile 66.631 s; execute 128.829 s | cost-model correction complete; generated code unchanged; interval solver remains open |
 
 ## Related design records
 
