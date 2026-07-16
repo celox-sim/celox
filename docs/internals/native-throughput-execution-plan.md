@@ -1348,6 +1348,64 @@ the VitePress documentation build also pass.
 Status: **structurally complete; seven unconditional join reloads delayed or
 removed; timing effect unconfirmed**.
 
+### Step 14: Elide unchanged StateSSA writeback edges
+
+The next exact fused SIR inspection exposed a mem2reg writeback defect rather
+than a register-allocation defect.  Working-state promotion represents an FF
+path which does not update a fragment as `MemoryHome::Stable`.  When that path
+entered a writeback phi, the old implementation materialized the memory home
+as a STABLE load so that it could supply an ordinary register argument.
+`sink_phi_writebacks_to_predecessors` then moved the merged STABLE store to
+every incoming edge, including the unchanged edge.  The resulting edge code
+loaded an exact STABLE fragment and immediately stored the same register back
+to that fragment.
+
+StateSSA promotion now records the exact `StateFragment` only for loads which
+it creates at a predecessor tail to represent an unchanged STABLE phi input.
+When writeback sinking sees that same proven fragment, it omits the edge store
+if and only if the store has neither trigger nor capture effects.  The now-dead
+synthetic load and its register definition are removed.  This is provenance
+from the mem2reg construction, not a textual load/store peephole: an arbitrary
+same-address load is insufficient, and trigger/capture writebacks remain even
+when their value is unchanged.
+
+The complete pre-optimized and post-optimized SIR files are byte-identical to
+Step 13b, so the source optimization pipeline is unchanged.  The complete
+native-optimized SIR and both pre-/post-allocation MIRs contain the intended
+path-sensitive change.  For example, fused `b8186` previously began with four
+identity pairs for `inst41.var275[63:0]`, `var276[0]`, `var280[1:0]`, and
+`var296[0]`; those pairs are absent and the real sparse-state and `var264`
+writes remain.  The analogous four pairs in `b8195` are also absent while its
+actual `var264 = 0` write remains.  The full diff shows the same exact
+load-then-writeback pattern removed on other unchanged FF edges without
+removing their updated alternatives.
+
+Code generation and generated-code execution were measured separately with
+trace formatting disabled and CPU 0 fixed.  Host Cargo builds were outside the
+intervals.  The Step 13b / candidate / Step 13b A--B--A result was:
+
+- compile: 64.276 s / 62.684 s / 64.201 s;
+- execute: 132.360 s / 127.036 s / 131.116 s; and
+- result in every run: normal power-down at `cy=9ae070 x3=aa pass=1`.
+
+A post-test candidate qualification also passed at 68.105 s compile and
+129.461 s execute.  Thus both candidate executions are faster than both
+adjacent baselines; the means are 128.248 s candidate versus 131.738 s
+baseline, a 3.490 s (2.65%) reduction.  A separate trace-free compile-only run
+reported 65.406 s with `execute_ns=0`.  Candidate compilation spans
+62.684--68.105 s, so no code-generation-time improvement is claimed.
+
+Focused global StateSSA/mem2reg tests pass 19/19, including unchanged-edge
+elision and preservation of a trigger-bearing identity writeback.  The common
+non-LTO gates pass 751/751 library tests, 6/6 native-MIR tests, 60/60
+non-ignored native-testbench tests, and 9/9 non-ignored
+native/Cranelift/Wasm counter tests.  Formatting, `cargo check`, strict
+workspace clippy, both Heliodor shell fixture suites, and the documentation
+build also pass.
+
+Status: **complete; proved unchanged FF writebacks removed; generated-code
+execution improved 2.65% in the retained sample**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1373,6 +1431,7 @@ removed; timing effect unconfirmed**.
 | 12 | sparse SIR StateSSA GVN and correlated case-edge threading | StateSSA 8/8; GVN 17/17; CFS 16/16; native MIR 6/6 | lib 743/743; native 60/60; counter 9/9; strict clippy and Heliodor fixtures | all full runs pass: `cy=9ae070 x3=aa pass=1` | final compile-only 62.949 s; final execute 139.358 s; Step 11 adjacent compile-only 62.419 s / execute 142.445 s | structural result complete; compile regression removed; runtime effect unconfirmed |
 | 13a | shared reconstruction edge-reload tails | allocator 137/137; native MIR 6/6 | lib 746/746; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final qualification pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 69.770 / 63.295 / 66.919 s, execute 139.706 / 137.092 / 141.808 s; final candidate 70.140 s compile / 148.424 s execute | static duplication removed; timing effect unconfirmed; executed-edge reload reduction open |
 | 13b | cost-aware join residency with CFG anticipatability | allocator 141/141; native MIR 6/6 | lib 750/750; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and earlier candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 61.226 / 61.512 / 60.899 s, execute 137.664 / 135.005 / 131.713 s; earlier candidate 63.831 s compile / 131.116 s execute | seven unconditional join reloads removed or delayed; timing effect unconfirmed |
+| 14 | unchanged StateSSA writeback-edge elision | global StateSSA/mem2reg 19/19; native MIR 6/6 | lib 751/751; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 64.276 / 62.684 / 64.201 s, execute 132.360 / 127.036 / 131.116 s; final candidate 68.105 s compile / 129.461 s execute | exact identity writebacks removed; candidate mean execute -2.65%; compile effect unconfirmed |
 
 ## Related design records
 

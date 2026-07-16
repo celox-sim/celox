@@ -108,6 +108,7 @@ fn rewrite_global_static_slots(
     phases: &StatePhaseMap,
 ) -> bool {
     let mut rewritten = eu.clone();
+    let mut stable_passthroughs = HashMap::default();
     let Some(changed) = rewrite_global_static_slots_in_place(
         &mut rewritten,
         region,
@@ -115,6 +116,7 @@ fn rewrite_global_static_slots(
         fallback_definitions,
         eligible_load_blocks,
         phases,
+        &mut stable_passthroughs,
     ) else {
         return false;
     };
@@ -132,6 +134,7 @@ fn rewrite_global_static_slots_in_place(
     fallback_definitions: &HashMap<RegisterId, StateFragment>,
     eligible_load_blocks: Option<&HashSet<BlockId>>,
     phases: &StatePhaseMap,
+    stable_passthroughs: &mut HashMap<RegisterId, StateFragment>,
 ) -> Option<bool> {
     let cfg = SirCfg::analyze(eu).ok()?;
     let state = StateSsa::analyze(eu, &cfg, region, eligible_load_blocks, phases).ok()?;
@@ -367,10 +370,11 @@ fn rewrite_global_static_slots_in_place(
                                     &candidate.ty,
                                 );
                                 let mut address = candidate.fragment.addr;
-                                if matches!(
+                                let stable_passthrough = matches!(
                                     current,
                                     Some(ReachingValue::Memory(MemoryHome::Stable))
-                                ) {
+                                );
+                                if stable_passthrough {
                                     address.region = STABLE_REGION;
                                 }
                                 instructions.push(SIRInstruction::Load(
@@ -379,6 +383,16 @@ fn rewrite_global_static_slots_in_place(
                                     SIROffset::Static(candidate.fragment.bit_offset),
                                     candidate.fragment.width,
                                 ));
+                                if stable_passthrough {
+                                    // This exact load was inserted at the
+                                    // predecessor tail solely to represent an
+                                    // unchanged STABLE home as a phi input.
+                                    // Preserve that provenance instead of
+                                    // recognizing arbitrary load/store text.
+                                    let mut fragment = candidate.fragment;
+                                    fragment.addr.region = STABLE_REGION;
+                                    stable_passthroughs.insert(register, fragment);
+                                }
                                 values[slot].push(ReachingValue::Register(register));
                                 pushed_slots.push(slot);
                                 register
@@ -758,6 +772,7 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     let mut rewritten = eu.clone();
     let fallback_definitions =
         normalize_working_commits(&mut rewritten, &cfg.block_ids, &eligible, &slots);
+    let mut stable_passthroughs = HashMap::default();
     let Some(changed) = rewrite_global_static_slots_in_place(
         &mut rewritten,
         WORKING_REGION,
@@ -765,13 +780,14 @@ pub(crate) fn promote_eval_apply_working_round_trips(
         &fallback_definitions,
         phases.ff_blocks(),
         &phases,
+        &mut stable_passthroughs,
     ) else {
         return false;
     };
     if !changed {
         return false;
     }
-    sink_phi_writebacks_to_predecessors(&mut rewritten);
+    sink_phi_writebacks_to_predecessors(&mut rewritten, &stable_passthroughs);
     if rewritten.verify_result().is_err() {
         return false;
     }
@@ -902,12 +918,15 @@ fn instruction_blocks_writeback_motion(
 /// A writeback whose only operand is a merge value does not need an actual
 /// phi copy. Put the writeback on each single-successor incoming edge instead.
 /// Repeating this peels chains of merge-only live ranges back to their defs.
-fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+fn sink_phi_writebacks_to_predecessors(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    stable_passthroughs: &HashMap<RegisterId, StateFragment>,
+) -> bool {
     struct Candidate {
         instruction: usize,
         parameter: usize,
         register: RegisterId,
-        edge_stores: Vec<(BlockId, SIRInstruction<RegionedAbsoluteAddr>)>,
+        edge_stores: Vec<(BlockId, Option<SIRInstruction<RegionedAbsoluteAddr>>)>,
     }
 
     let mut changed = false;
@@ -966,16 +985,31 @@ fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                     let Some(&incoming) = arguments.get(parameter_index) else {
                         continue 'blocks;
                     };
+                    let writeback_fragment = StateFragment::from_access(
+                        *address,
+                        *offset,
+                        *width,
+                        &eu.register_map[&incoming],
+                    );
+                    // An ordinary load of the same address is not enough:
+                    // only a tail load created above proves that this edge
+                    // carries the untouched STABLE value. Trigger/capture
+                    // effects still require the writeback even for that value.
+                    let unchanged_stable_value = triggers.is_empty()
+                        && capture_sites.is_empty()
+                        && stable_passthroughs.get(&incoming) == Some(&writeback_fragment);
                     edge_stores.push((
                         predecessor_id,
-                        SIRInstruction::Store(
-                            *address,
-                            SIROffset::Static(*offset),
-                            *width,
-                            incoming,
-                            triggers.clone(),
-                            capture_sites.clone(),
-                        ),
+                        (!unchanged_stable_value).then(|| {
+                            SIRInstruction::Store(
+                                *address,
+                                SIROffset::Static(*offset),
+                                *width,
+                                incoming,
+                                triggers.clone(),
+                                capture_sites.clone(),
+                            )
+                        }),
                     ));
                 }
                 candidates.push(Candidate {
@@ -996,11 +1030,13 @@ fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAd
         };
         for candidate in &candidates {
             for (predecessor, store) in &candidate.edge_stores {
-                eu.blocks
-                    .get_mut(predecessor)
-                    .unwrap()
-                    .instructions
-                    .push(store.clone());
+                if let Some(store) = store {
+                    eu.blocks
+                        .get_mut(predecessor)
+                        .unwrap()
+                        .instructions
+                        .push(store.clone());
+                }
             }
         }
         candidates.sort_unstable_by_key(|candidate| candidate.parameter);
@@ -1027,6 +1063,30 @@ fn sink_phi_writebacks_to_predecessors(eu: &mut ExecutionUnit<RegionedAbsoluteAd
                 .unwrap()
                 .instructions
                 .remove(candidate.instruction);
+        }
+        changed = true;
+    }
+
+    let uses = count_register_uses(eu);
+    // Omitted writebacks make their synthetic phi-input loads dead. Remove
+    // only definitions carrying the pass-local provenance recorded above.
+    let dead_passthroughs = stable_passthroughs
+        .keys()
+        .copied()
+        .filter(|register| !uses.contains_key(register))
+        .collect::<HashSet<_>>();
+    if !dead_passthroughs.is_empty() {
+        for block in eu.blocks.values_mut() {
+            block.instructions.retain(|instruction| {
+                !matches!(
+                    instruction,
+                    SIRInstruction::Load(destination, _, _, _)
+                        if dead_passthroughs.contains(destination)
+                )
+            });
+        }
+        for register in dead_passthroughs {
+            eu.register_map.remove(&register);
         }
         changed = true;
     }
@@ -1585,12 +1645,80 @@ mod tests {
             [SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(1), _, _)]
                 if *address == stable
         ));
+        assert!(eu.blocks[&BlockId(2)].instructions.is_empty());
+    }
+
+    #[test]
+    fn writeback_keeps_an_unchanged_stable_value_when_it_has_triggers() {
+        let stable = address(0);
+        let trigger = TriggerIdWithKind {
+            kind: DomainKind::Other,
+            id: 7,
+        };
+        let mut eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(1)]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(2),
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(2)]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![RegisterId(3)],
+                    instructions: vec![SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(3),
+                        vec![trigger],
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+            ],
+        );
+        let mut passthroughs = HashMap::default();
+        passthroughs.insert(
+            RegisterId(2),
+            StateFragment::from_access(stable, 0, 8, &bit(8)),
+        );
+
+        assert!(sink_phi_writebacks_to_predecessors(&mut eu, &passthroughs));
+        eu.verify_result().unwrap();
         assert!(matches!(
             eu.blocks[&BlockId(2)].instructions.as_slice(),
             [
-                SIRInstruction::Load(source, load_address, SIROffset::Static(0), 8),
-                SIRInstruction::Store(store_address, SIROffset::Static(0), 8, stored, _, _),
-            ] if *load_address == stable && *store_address == stable && source == stored
+                SIRInstruction::Load(RegisterId(2), _, SIROffset::Static(0), 8),
+                SIRInstruction::Store(_, SIROffset::Static(0), 8, RegisterId(2), triggers, _),
+            ] if triggers == &[trigger]
         ));
     }
 
@@ -1654,7 +1782,10 @@ mod tests {
         );
 
         eu.verify_result().unwrap();
-        assert!(!sink_phi_writebacks_to_predecessors(&mut eu));
+        assert!(!sink_phi_writebacks_to_predecessors(
+            &mut eu,
+            &HashMap::default()
+        ));
         eu.verify_result().unwrap();
     }
 
