@@ -1889,13 +1889,36 @@ generation took
 131.123532304 s, a 6.541020709 s or 4.99% regression.  Every run reached
 normal power-down at exactly `cy=9ae070 x3=aa pass=1`.
 
-The trial was fully reverted.  Reload latency hiding must run after physical
-allocation, where a physical-liveness proof can move a load without changing
-coloring, or be integrated with a cost model which prices physical copies and
-coalescing rather than virtual pressure alone.
+The trial was fully reverted.  To isolate the assignment confounder, any
+latency-hiding follow-up had to run after physical allocation, where a
+physical-liveness proof could move a load without changing coloring.
+
+A follow-up trial then isolated that post-color alternative.  It froze the
+complete assignment and moved only a verified direct state load through a
+window where its assigned physical register was unused.  It did not cross an
+overlapping MemorySSA write, a physical definition/use, a fixed clobber, or a
+control barrier.  After every move, the independent assignment verifier and
+the independently rebuilt MemorySSA recipe verifier both passed.
+
+This removed the coloring confounder completely.  Relative to Step 18, all
+three SIR files, all pre-allocation MIR, every physical assignment, every
+non-load post-allocation instruction, and the multiset of direct state loads
+were byte-identical.  Only the positions of those loads changed.  Nevertheless,
+the CPU-0 non-LTO candidate--baseline--candidate sequence regressed.  Code
+generation was 69.308217182 s / 65.765700880 s / 67.862099740 s.  Generated
+execution was 132.671878073 s / 129.176485869 s / 137.150349833 s.  The
+candidate execution mean was 134.911113953 s, 5.734628084 s or 4.44% above the
+contemporaneous baseline; its code-generation mean was also 4.29% higher.
+Every run reached normal power-down at exactly `cy=9ae070 x3=aa pass=1`.
+
+The post-color trial was therefore also fully reverted.  This result does not
+justify a claim about a particular hardware stall source; it establishes that
+moving the same executed reloads by a fixed local distance is not the missing
+optimization.  The next interval work must reduce executed reloads or choose a
+better persistent home/split, while pricing the resulting physical-copy cost.
 
 Status: **rejected and fully reverted; post-allocation reload scheduling
-remains open**.
+by fixed local distance is closed; interval/home selection remains open**.
 
 ## Execution record
 
@@ -1930,6 +1953,7 @@ remains open**.
 | 17c trial | rejected (no commit) | allocator 156/156; native MIR 6/6 | trial stopped before the retained common gate | cost-only and no-home variants both pass: `cy=9ae070 x3=aa pass=1` | cost-only compile 64.069 s / execute 131.028 s; no-home compile 68.297 s / execute 141.171 s | both variants regressed and were fully reverted |
 | 18 | `40e29243` | color 5/5; allocator 155/155; native MIR 6/6 | lib 767/767; native 60/60; counter 9/9; check, strict clippy, format, docs | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; complete SIR and spill/reload MIR bodies are unchanged | compile candidate/baseline/candidate 64.924 / 64.495 / 65.235 s; execute 127.868 / 136.098 / 128.095 s | complete; candidate mean execute -5.96%; interval solver remains open |
 | 19 pre-RA reload-schedule trial | rejected (no commit) | focused reload scheduling 2/2; allocator 157/157; native MIR exposed the intended placement delta | trial reverted before retained common gate | CPU-0 non-LTO A--B--A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical | candidate compile 66.116 / 64.152 / 66.008 s vs baseline 63.882 / 65.501 s; candidate execute mean 137.665 s vs baseline 131.124 s | execute +4.99%; fully reverted; post-RA scheduling remains open |
+| 19 post-color reload-schedule trial | rejected (no commit) | focused physical-use/MemorySSA barriers 3/3; allocator 158/158; native MIR 6/6 | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; assignments and non-load instruction order byte-identical | candidate compile 69.308 / 67.862 s vs baseline 65.766 s; candidate execute mean 134.911 s vs baseline 129.176 s | execute +4.44%; fully reverted; fixed-distance scheduling closed |
 
 ## Related design records
 
