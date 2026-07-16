@@ -1579,6 +1579,99 @@ state, stack, or retained register residency for a multi-use range.
 Status: **structurally complete; final-use state homes remove concrete stack
 traffic; runtime effect unconfirmed; multi-use cluster costing remains open**.
 
+### Step 17a: Move straight-line cluster and whole-home costs into the spill plan
+
+Step 15 priced only the next local use when choosing a join-entry resident.
+That is insufficient even before loop weighting: all ordinary uses in one MIR
+basic block execute whenever the block is entered, and the exact MemorySSA
+recipe can differ at each use.  The verified next-use index now exposes the
+complete suffix of distinct local use positions without rebuilding def-use
+lists.  Join reconciliation sums the concrete materialization costs for that
+straight-line cluster while continuing to use anticipatability for uses beyond
+the block.  It does not count uses on mutually exclusive successor paths.
+
+This changed the concrete `eval_comb` region around `bb1008`.  Step 16 loaded
+state byte `33995435` separately at both join uses.  The cluster-aware join
+choice reloads the value on each incoming edge, merges it with a register phi,
+and uses that phi at the first join use.  The normal eviction decision still
+chooses the cheap state home before the second use, so one later point load
+remains.  On the `bb1006` and `bb1009` paths this is still two executed loads;
+on `bb1010`, whose predecessor already needed the value, it removes one of
+three executed loads.  This is partial interval placement, not a claim that
+the complete cluster is retained in one register.
+
+A trial which replaced every normal next-use eviction cost by the sum of all
+remaining local uses was rejected before a runtime run.  It assumed that one
+resident interval avoids every later reload, although intervening pressure may
+split that interval.  The target load still remained, `eval_comb`'s spill frame
+grew from 31,736 to 32,768 bytes, the fused frame grew from 38,696 to 40,032
+bytes, and full MIR grew to 191,246,400 bytes.  None of that trial remains.
+The next interval step must compare use-to-use segments and the alternative
+victim occupying the same register rather than summing use counts blindly.
+
+Whole-home selection has also moved out of reconstruction.  The completed W/S
+plan now records `recipe_homes` explicitly after every point and edge reload
+is known.  For each phi-congruence home it compares the aggregate stack cost
+of selected spills, reloads, and implicit incoming `SpillPhi` stores with the
+aggregate exact-recipe cost.  A recipe home is selected only when every reload
+has a MemorySSA-proved recipe and that complete recipe cost is strictly lower.
+Reconstruction materializes this decision and is no longer allowed to infer a
+different home kind opportunistically.  An independent spill-plan walk proves
+every selected point and edge recipe; the all-path stack-home verifier excludes
+only those proved recipe homes, and the existing post-reconstruction MemorySSA
+verification remains mandatory.
+
+Focused tests prove the complete local-use slice, a repeated-use join choice,
+rejection of a whole home after one selected reload loses its state version,
+rejection of an expensive pure recipe when an existing stack reload is
+cheaper, and selection of that same recipe when it avoids both a spill and a
+reload.  Allocator tests pass 153/153 and native MIR tests pass 6/6.  Common
+non-LTO gates pass 765/765 library tests, 60/60 non-ignored native-testbench
+tests, and 9/9 non-ignored native/Cranelift/Wasm counter tests, together with
+the result/gate fixtures, formatting, workspace check, CI-target strict
+clippy, and the documentation build.  Workspace-wide strict clippy separately
+reports an unchanged `celox-wasm` `explicit_counter_loop` under Rust 1.97;
+that crate is outside the repository's clippy CI command and was not changed
+as part of this step.
+
+The complete traced SIR files remain byte-identical to Step 16.  Aggregate
+home costing reduces full MIR from the join-only candidate's 191,093,808 bytes
+to 190,924,170 bytes, while changing the `eval_comb` and fused spill frames
+from 31,736/38,696 bytes to 32,392/39,384 bytes; exact generated code, not
+either size alone, is the retention criterion.  The runner rebuilt from the
+final source regenerated all three SIR files and the complete MIR.  All four
+are byte-identical to the inspected aggregate-home candidate; the final MIR's
+SHA-256 is
+`9171e68fd6f6e23aaf721f706e01c00ba967d8cdf7e0d3e271ff6b26dde520a9`.
+
+All performance intervals below come from the same trace-free full run on CPU
+0 with a prebuilt non-LTO `heliodor-dev` runner.  Cargo build and trace
+formatting are outside both intervals:
+
+- join-cluster candidate: 64.705698916 s code generation and 132.737511840 s
+  execution;
+- planner-owned aggregate home candidate: 66.344171947 s code generation and
+  133.368712303 s execution;
+- rebuilt final source: 65.618217361 s code generation and 136.727778623 s
+  execution; and
+- all three runs reached normal power-down at the exact
+  `cy=9ae070 x3=aa pass=1` marker.
+
+The 0.631 s execution difference is below the already observed run-to-run
+variation of byte-identical Step 16 MIR, so no execution improvement or
+regression is assigned.  Code-generation and execution results remain
+separate; neither process time nor a compile-only subtraction is used.
+
+The remaining Step 17 work is an explicit use-to-use interval model.  It must
+price register occupancy and the displaced interval at each pressure point,
+carry loop/edge frequency separately from correctness, and then let register,
+stack, or MemorySSA state homes compete for each split range.  The current
+join cluster and planner-owned home representation are inputs to that solver,
+not its substitute.
+
+Status: **structurally complete and qualified; execution effect unconfirmed;
+use-to-use interval selection remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1607,6 +1700,7 @@ traffic; runtime effect unconfirmed; multi-use cluster costing remains open**.
 | 14 | unchanged StateSSA writeback-edge elision | global StateSSA/mem2reg 19/19; native MIR 6/6 | lib 751/751; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 64.276 / 62.684 / 64.201 s, execute 132.360 / 127.036 / 131.116 s; final candidate 68.105 s compile / 129.461 s execute | exact identity writebacks removed; candidate mean execute -2.65%; compile effect unconfirmed |
 | 15 | point-specific MemorySSA reload costs | allocator 147/147; reload 30/30; spill plan 11/11; native MIR 6/6 | lib 759/759; native 60/60; counter 9/9; check, strict clippy, docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 64.748 s (`execute_ns=0`); full-run compile 65.313 s; full-run execute 128.602 s | exact-use placement works; runtime effect unconfirmed; state homes and use-cluster costing remain open |
 | 16 | final-use MemorySSA spill homes | allocator 149/149; native MIR 6/6 | lib 761/761; native 60/60; counter 9/9; check, strict clippy, docs | two CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; final-source MIR is byte-identical | inspected/final compile-only 65.240 / 65.983 s (`execute_ns=0`); full compile 64.344 / 66.136 s; execute 128.533 / 138.830 s | concrete stack traffic removed; runtime effect unconfirmed; multi-use cluster costing remains open |
+| 17a | straight-line join clusters and planner-owned aggregate recipe homes | allocator 153/153; native MIR 6/6 | lib 765/765; native 60/60; counter 9/9; fixtures, check, CI-target strict clippy, docs | final-source and two CPU-0 non-LTO candidate runs pass: `cy=9ae070 x3=aa pass=1`; final MIR is byte-identical | final compile 65.618 s; final execute 136.728 s; candidate intervals remain separately recorded above | structurally complete; runtime effect unconfirmed; interval solver remains open |
 
 ## Related design records
 

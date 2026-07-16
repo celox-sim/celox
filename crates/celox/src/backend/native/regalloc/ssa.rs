@@ -26,7 +26,7 @@ pub(super) fn allocate(
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let phase = timing.then(crate::timing::now);
-    let plan = super::spill_plan::plan_with_recipe_costs(
+    let mut plan = super::spill_plan::plan_with_recipe_costs(
         func,
         cfg,
         next_use,
@@ -53,6 +53,55 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
+    if let Some(start) = phase {
+        eprintln!(
+            "[regalloc-timing] ssa spill_plan elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    // Edge coupling operations are chosen by the spill planner, so their
+    // materialization points do not exist as MIR uses during the first recipe
+    // analysis.  Query the exact insertion point (immediately before the
+    // predecessor terminator) only after the complete plan is available.
+    let phase = timing.then(crate::timing::now);
+    let requested_points = planner_reload_queries(func, &plan)?;
+    let reload_recipes = super::reload::analyze_with_queries(func, cfg, &requested_points)
+        .map_err(|error| {
+            super::reload_recipe_error("spill-planner reload-recipe analysis", error)
+        })?;
+    plan.select_recipe_homes(func, cfg, &reload_recipes)
+        .map_err(|error| {
+            super::RegallocError::new(
+                "spill-home selection",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+    plan.verify(func, cfg, super::NUM_REGS).map_err(|error| {
+        super::RegallocError::new(
+            "final spill-plan verification",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
+    plan.verify_recipe_homes(func, &reload_recipes)
+        .map_err(|error| {
+            super::RegallocError::new(
+                "recipe-home verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
     if let Err(error) = super::home_verify::verify(func, cfg, &plan) {
         let (block, instruction) = match error.location {
             Some(super::home_verify::HomeLocation::Point(point)) => {
@@ -72,23 +121,6 @@ pub(super) fn allocate(
             error.message,
         ));
     }
-    if let Some(start) = phase {
-        eprintln!(
-            "[regalloc-timing] ssa spill_plan elapsed={:?}",
-            start.elapsed()
-        );
-    }
-
-    // Edge coupling operations are chosen by the spill planner, so their
-    // materialization points do not exist as MIR uses during the first recipe
-    // analysis.  Query the exact insertion point (immediately before the
-    // predecessor terminator) only after the complete plan is available.
-    let phase = timing.then(crate::timing::now);
-    let requested_points = planner_reload_queries(func, &plan)?;
-    let reload_recipes = super::reload::analyze_with_queries(func, cfg, &requested_points)
-        .map_err(|error| {
-            super::reload_recipe_error("spill-planner reload-recipe analysis", error)
-        })?;
     if let Some(start) = phase {
         eprintln!(
             "[regalloc-timing] ssa planner_reload_recipe_analyze_verify queries={} elapsed={:?}",

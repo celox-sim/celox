@@ -201,11 +201,13 @@ fn verify_with_work(
         }
         edge_ops.insert((predecessor, successor), operations.clone());
     }
-    let rematerializable_homes = universe
+    let mut rematerializable_homes = universe
         .iter()
         .copied()
         .filter(|home| is_rematerializable_home(func, plan, *home))
         .collect::<BTreeSet<_>>();
+    rematerializable_homes.extend(plan.recipe_homes.iter().copied());
+    let non_stack_homes = &rematerializable_homes;
     let mut required_homes = point_ops
         .iter()
         .enumerate()
@@ -216,6 +218,7 @@ fn verify_with_work(
                     .filter_map(move |operation| match operation {
                         PlannedOp::Reload { value, home }
                             if !is_rematerialized_logical(func, *value)
+                                && !non_stack_homes.contains(home)
                                 && !plan.recipe_reloads.contains(&(
                                     func.blocks[block].id,
                                     instruction,
@@ -234,7 +237,10 @@ fn verify_with_work(
             .values()
             .flatten()
             .filter_map(|operation| match operation {
-                PlannedOp::Reload { value, home } if !is_rematerialized_logical(func, *value) => {
+                PlannedOp::Reload { value, home }
+                    if !is_rematerialized_logical(func, *value)
+                        && !non_stack_homes.contains(home) =>
+                {
                     Some(*home)
                 }
                 _ => None,
@@ -243,7 +249,9 @@ fn verify_with_work(
     required_homes.extend(
         spilled_phis
             .iter()
-            .filter(|phi| !is_rematerialized_logical(func, phi.value))
+            .filter(|phi| {
+                !is_rematerialized_logical(func, phi.value) && !non_stack_homes.contains(&phi.home)
+            })
             .map(|phi| phi.home),
     );
 
@@ -536,7 +544,9 @@ fn rename_and_collect_queries(
         // but not ordinary point stores before instruction zero.
         for &spilled_index in &spilled_by_block[block] {
             let spilled = &spilled_phis[spilled_index];
-            if !is_rematerialized_logical(func, spilled.value) {
+            if !is_rematerialized_logical(func, spilled.value)
+                && !rematerializable_homes.contains(&spilled.home)
+            {
                 pending.push(PendingQuery {
                     rule: SPILL_PHI_RULE,
                     location: HomeLocation::Point(spilled.point),
@@ -571,6 +581,7 @@ fn rename_and_collect_queries(
                 work,
                 false,
                 None,
+                rematerializable_homes,
                 recipe_reloads,
             );
         }
@@ -603,6 +614,7 @@ fn rename_and_collect_queries(
                     work,
                     true,
                     stores,
+                    rematerializable_homes,
                     recipe_reloads,
                 );
             }
@@ -681,6 +693,7 @@ fn collect_reload_queries(
     work: &mut HomeVerifyWork,
     edge: bool,
     edge_stores: Option<&BTreeSet<SpillHome>>,
+    rematerializable_homes: &BTreeSet<SpillHome>,
     recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
 ) {
     for &operation in operations {
@@ -694,7 +707,7 @@ fn collect_reload_queries(
         ) {
             continue;
         }
-        if is_rematerialized_logical(func, value) {
+        if is_rematerialized_logical(func, value) || rematerializable_homes.contains(&home) {
             continue;
         }
         let definition = if edge_stores.is_some_and(|stores| stores.contains(&home)) {
@@ -894,6 +907,7 @@ mod tests {
         plan.point_ops.clear();
         plan.edge_ops.clear();
         plan.recipe_reloads.clear();
+        plan.recipe_homes.clear();
         for state in plan
             .w_entry
             .iter_mut()

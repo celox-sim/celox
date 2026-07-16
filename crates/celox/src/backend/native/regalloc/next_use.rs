@@ -530,6 +530,27 @@ impl NextUseAnalysis {
             .copied()
     }
 
+    /// Return every ordinary MIR use in this block at or after
+    /// `instruction`.  A basic block is a linear execution region, so all
+    /// returned positions execute whenever control reaches the first one.
+    /// Cross-block uses remain excluded: pricing those requires edge and loop
+    /// frequency rather than pretending that every CFG continuation executes.
+    pub(super) fn local_uses_from(
+        &self,
+        block: usize,
+        instruction: usize,
+        value: VReg,
+    ) -> &[usize] {
+        let Some(positions) = self
+            .use_positions
+            .get(block)
+            .and_then(|positions| positions.get(&value))
+        else {
+            return &[];
+        };
+        &positions[positions.partition_point(|position| *position < instruction)..]
+    }
+
     pub(super) fn region_at_entry(&self, block: usize) -> Option<usize> {
         self.entry_region[block]
     }
@@ -1931,6 +1952,46 @@ mod tests {
         assert!(analysis.anticipated_at_entry(join, merged));
         assert!(!analysis.anticipated_at_entry(join, left_value));
         assert!(!analysis.anticipated_at_entry(join, right_value));
+        analysis.verify(&func, &cfg).unwrap();
+    }
+
+    #[test]
+    fn local_use_slice_contains_every_distinct_straight_line_use() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let copy = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: value,
+            value: 1,
+        });
+        block.push(MInst::Add {
+            dst: copy,
+            lhs: value,
+            rhs: value,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: copy,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let analysis = analyze(&func, &cfg).unwrap();
+
+        assert_eq!(analysis.local_uses_from(0, 0, value), &[1, 3]);
+        assert_eq!(analysis.local_uses_from(0, 2, value), &[3]);
+        assert!(analysis.local_uses_from(0, 4, value).is_empty());
         analysis.verify(&func, &cfg).unwrap();
     }
 

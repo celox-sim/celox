@@ -8,7 +8,7 @@ use crate::backend::native::mir::{BlockId, MFunction, VReg};
 use super::assignment::clobbers;
 use super::cfg::NormalizedCfg;
 use super::next_use::{NextUseAnalysis, NextUseDistance};
-use super::reload::{EdgeUse, PlanningRecipes, PointUse};
+use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct LogicalValue(pub u32);
@@ -53,6 +53,9 @@ pub(super) struct SpillPlan {
     /// Point reloads whose value is supplied by an independently verified
     /// path-specific MemorySSA recipe rather than a persistent spill home.
     pub recipe_reloads: BTreeSet<(BlockId, usize, LogicalValue)>,
+    /// Phi-congruence homes whose complete selected reload set is supplied by
+    /// exact rematerialization recipes instead of a stack slot.
+    pub recipe_homes: BTreeSet<SpillHome>,
     pub w_entry: Vec<BTreeSet<LogicalValue>>,
     pub w_exit: Vec<BTreeSet<LogicalValue>>,
     pub s_entry: Vec<BTreeSet<LogicalValue>>,
@@ -407,6 +410,7 @@ pub(super) fn plan_with_recipe_costs(
         point_ops: Vec::new(),
         edge_ops: BTreeMap::new(),
         recipe_reloads: BTreeSet::new(),
+        recipe_homes: BTreeSet::new(),
         w_entry: vec![BTreeSet::new(); func.blocks.len()],
         w_exit: vec![BTreeSet::new(); func.blocks.len()],
         s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -806,14 +810,7 @@ fn init_usual(
             }
             if next_use.anticipated_at_entry(block, VReg(value.0)) {
                 drop_cost = drop_cost.saturating_add((processed.len() as u128).saturating_mul(
-                    u128::from(reload_cost_at_next_local_use(
-                        func,
-                        next_use,
-                        planning_recipes,
-                        block,
-                        0,
-                        value,
-                    )),
+                    local_use_cluster_cost(func, next_use, planning_recipes, block, 0, value),
                 ));
             }
             let savings = drop_cost
@@ -1184,6 +1181,36 @@ fn reload_cost_at_next_local_use(
     reload_cost(func, planning_recipes, LogicalValue(value.0))
 }
 
+/// Cost the complete guaranteed straight-line use cluster for a value which
+/// is absent at block entry.  Point-specific MemorySSA recipes may differ
+/// between uses, so every concrete point is queried independently.  If the
+/// first guaranteed use lies beyond this block, retain the existing
+/// cross-block fallback rather than assigning a zero cost.
+fn local_use_cluster_cost(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    block: usize,
+    instruction: usize,
+    value: LogicalValue,
+) -> u128 {
+    let value = VReg(value.0);
+    let uses = next_use.local_uses_from(block, instruction, value);
+    if uses.is_empty() {
+        return u128::from(reload_cost(func, planning_recipes, LogicalValue(value.0)));
+    }
+    uses.iter().fold(0u128, |cost, &instruction| {
+        let reload = planning_recipes
+            .materialization_cost_at_point(PointUse {
+                block: func.blocks[block].id,
+                instruction,
+                value,
+            })
+            .unwrap_or_else(|| reload_cost(func, planning_recipes, LogicalValue(value.0)));
+        cost.saturating_add(u128::from(reload))
+    })
+}
+
 fn reload_cost_on_edge(
     func: &MFunction,
     planning_recipes: &PlanningRecipes,
@@ -1206,6 +1233,10 @@ fn reload_cost(func: &MFunction, planning_recipes: &PlanningRecipes, value: Logi
     if let Some(cost) = planning_recipes.global_materialization_cost(VReg(value.0)) {
         return cost;
     }
+    stack_reload_cost(func, value)
+}
+
+fn stack_reload_cost(func: &MFunction, value: LogicalValue) -> u16 {
     let Some(desc) = func.spill_desc(VReg(value.0)) else {
         // A missing descriptor is rejected by MIR verification before this
         // phase.  Keep this helper total so malformed input remains a
@@ -1242,6 +1273,267 @@ fn logical_distance_at(
 }
 
 impl SpillPlan {
+    /// Finalize whole-home rematerialization after the W/S plan has exposed
+    /// every concrete point and edge reload.  Reconstruction must materialize
+    /// this decision; it may no longer infer a different home kind on its own.
+    pub(super) fn select_recipe_homes(
+        &mut self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        analysis: &ReloadRecipeAnalysis,
+    ) -> Result<(), SpillPlanError> {
+        let mut candidates = BTreeSet::<SpillHome>::new();
+        let mut rejected = BTreeSet::<SpillHome>::new();
+        let mut stack_costs = BTreeMap::<SpillHome, u128>::new();
+        let mut recipe_costs = BTreeMap::<SpillHome, u128>::new();
+        for &(point, operation) in &self.point_ops {
+            match operation {
+                PlannedOp::Reload { value, home } => {
+                    candidates.insert(home);
+                    let total = stack_costs.entry(home).or_default();
+                    *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
+                    let query = PointUse {
+                        block: point.block,
+                        instruction: point.instruction,
+                        value: VReg(value.0),
+                    };
+                    if let Some(recipe) = analysis.resolved_recipe_at_point(query) {
+                        let cost = u128::try_from(recipe.steps.len().saturating_add(1))
+                            .unwrap_or(u128::MAX);
+                        let total = recipe_costs.entry(home).or_default();
+                        *total = total.saturating_add(cost);
+                    } else {
+                        rejected.insert(home);
+                    }
+                }
+                PlannedOp::Spill { value, home } => {
+                    let total = stack_costs.entry(home).or_default();
+                    *total = total.saturating_add(u128::from(spill_cost(func, value)));
+                }
+                PlannedOp::SpillPhi { value, home } => {
+                    let Some(&block) = cfg.block_index.get(&point.block) else {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_HOME_PHI",
+                            Some(point.block),
+                            Some(point.instruction),
+                            vec![VReg(value.0)],
+                            "recipe-home SpillPhi block is outside the normalized CFG",
+                        ));
+                    };
+                    let Some(phi) = func.blocks[block]
+                        .phis
+                        .iter()
+                        .find(|phi| phi.dst.0 == value.0)
+                    else {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_HOME_PHI",
+                            Some(point.block),
+                            Some(point.instruction),
+                            vec![VReg(value.0)],
+                            "recipe-home SpillPhi has no matching MIR phi",
+                        ));
+                    };
+                    for &(predecessor, source) in &phi.sources {
+                        let Some(&predecessor) = cfg.block_index.get(&predecessor) else {
+                            return Err(SpillPlanError::new(
+                                "SPILL_PLAN.RECIPE_HOME_PHI",
+                                Some(point.block),
+                                Some(point.instruction),
+                                vec![VReg(value.0), source],
+                                "recipe-home SpillPhi source is outside the normalized CFG",
+                            ));
+                        };
+                        let source = LogicalValue(source.0);
+                        if !self.s_exit[predecessor].contains(&source) {
+                            let total = stack_costs.entry(home).or_default();
+                            *total = total.saturating_add(u128::from(spill_cost(func, source)));
+                        }
+                    }
+                }
+            }
+        }
+        for (&(predecessor, successor), operations) in &self.edge_ops {
+            let Some(predecessor_block) = func.blocks.get(predecessor) else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_EDGE",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!("recipe-home predecessor index {predecessor} is outside function"),
+                ));
+            };
+            if func.blocks.get(successor).is_none() {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_EDGE",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    format!("recipe-home successor index {successor} is outside function"),
+                ));
+            }
+            let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_EDGE",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    "recipe-home edge predecessor is empty",
+                ));
+            };
+            for &operation in operations {
+                match operation {
+                    PlannedOp::Reload { value, home } => {
+                        candidates.insert(home);
+                        let total = stack_costs.entry(home).or_default();
+                        *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
+                        let query = PointUse {
+                            block: predecessor_block.id,
+                            instruction,
+                            value: VReg(value.0),
+                        };
+                        if let Some(recipe) = analysis.resolved_recipe_at_point(query) {
+                            let cost = u128::try_from(recipe.steps.len().saturating_add(1))
+                                .unwrap_or(u128::MAX);
+                            let total = recipe_costs.entry(home).or_default();
+                            *total = total.saturating_add(cost);
+                        } else {
+                            rejected.insert(home);
+                        }
+                    }
+                    PlannedOp::Spill { value, home } => {
+                        let total = stack_costs.entry(home).or_default();
+                        *total = total.saturating_add(u128::from(spill_cost(func, value)));
+                    }
+                    PlannedOp::SpillPhi { .. } => {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_HOME_EDGE",
+                            Some(predecessor_block.id),
+                            None,
+                            Vec::new(),
+                            "SpillPhi cannot be an edge operation",
+                        ));
+                    }
+                }
+            }
+        }
+        candidates.retain(|home| {
+            !rejected.contains(home)
+                && recipe_costs.get(home).copied().unwrap_or(u128::MAX)
+                    < stack_costs.get(home).copied().unwrap_or_default()
+        });
+        self.recipe_homes = candidates;
+        Ok(())
+    }
+
+    /// Independently prove that every reload assigned to a recipe-only home
+    /// has an exact recipe at its final insertion point.  This verifier does
+    /// not trust the candidate/rejection sets used by selection.
+    pub(super) fn verify_recipe_homes(
+        &self,
+        func: &MFunction,
+        analysis: &ReloadRecipeAnalysis,
+    ) -> Result<(), SpillPlanError> {
+        for &home in &self.recipe_homes {
+            let mut reloads = 0usize;
+            for &(point, operation) in &self.point_ops {
+                let PlannedOp::Reload {
+                    value,
+                    home: reload_home,
+                } = operation
+                else {
+                    continue;
+                };
+                if reload_home != home {
+                    continue;
+                }
+                reloads += 1;
+                let query = PointUse {
+                    block: point.block,
+                    instruction: point.instruction,
+                    value: VReg(value.0),
+                };
+                if analysis.resolved_recipe_at_point(query).is_none() {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.RECIPE_HOME_POINT",
+                        Some(point.block),
+                        Some(point.instruction),
+                        vec![VReg(value.0)],
+                        format!("recipe home {home:?} has a point reload without an exact recipe"),
+                    ));
+                }
+            }
+            for (&(predecessor, successor), operations) in &self.edge_ops {
+                let Some(predecessor_block) = func.blocks.get(predecessor) else {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.RECIPE_HOME_EDGE",
+                        None,
+                        None,
+                        Vec::new(),
+                        format!("recipe home {home:?} references absent predecessor {predecessor}"),
+                    ));
+                };
+                let Some(successor_block) = func.blocks.get(successor) else {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.RECIPE_HOME_EDGE",
+                        Some(predecessor_block.id),
+                        None,
+                        Vec::new(),
+                        format!("recipe home {home:?} references absent successor {successor}"),
+                    ));
+                };
+                let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.RECIPE_HOME_EDGE",
+                        Some(predecessor_block.id),
+                        None,
+                        Vec::new(),
+                        "recipe-home edge predecessor is empty",
+                    ));
+                };
+                for &operation in operations {
+                    let PlannedOp::Reload {
+                        value,
+                        home: reload_home,
+                    } = operation
+                    else {
+                        continue;
+                    };
+                    if reload_home != home {
+                        continue;
+                    }
+                    reloads += 1;
+                    let query = PointUse {
+                        block: predecessor_block.id,
+                        instruction,
+                        value: VReg(value.0),
+                    };
+                    if analysis.resolved_recipe_at_point(query).is_none() {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_HOME_EDGE",
+                            Some(predecessor_block.id),
+                            None,
+                            vec![VReg(value.0)],
+                            format!(
+                                "recipe home {home:?} has no exact recipe on edge {} -> {}",
+                                predecessor_block.id, successor_block.id
+                            ),
+                        ));
+                    }
+                }
+            }
+            if reloads == 0 {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_RELOAD",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!("recipe home {home:?} has no selected reload"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn verify(
         &self,
         func: &MFunction,
@@ -1452,6 +1744,37 @@ impl SpillPlan {
                 ));
             }
         }
+        for &home in &self.recipe_homes {
+            if home.0 >= self.logical.count {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_RANGE",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!(
+                        "recipe home {} is outside the plan's {} logical values",
+                        home.0, self.logical.count
+                    ),
+                ));
+            }
+            let has_reload = self
+                .point_ops
+                .iter()
+                .map(|(_, operation)| operation)
+                .chain(self.edge_ops.values().flatten())
+                .any(|operation| {
+                    matches!(operation, PlannedOp::Reload { home: reload_home, .. } if *reload_home == home)
+                });
+            if !has_reload {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_HOME_RELOAD",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!("recipe home {home:?} has no selected reload"),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1529,6 +1852,7 @@ mod tests {
             point_ops: Vec::new(),
             edge_ops: BTreeMap::new(),
             recipe_reloads: BTreeSet::new(),
+            recipe_homes: BTreeSet::new(),
             w_entry: vec![BTreeSet::new(); func.blocks.len()],
             w_exit: vec![BTreeSet::new(); func.blocks.len()],
             s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -1624,6 +1948,7 @@ mod tests {
             point_ops: Vec::new(),
             edge_ops: BTreeMap::new(),
             recipe_reloads: BTreeSet::new(),
+            recipe_homes: BTreeSet::new(),
             w_entry: vec![BTreeSet::new(); func.blocks.len()],
             w_exit: vec![BTreeSet::new(); func.blocks.len()],
             s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -1651,6 +1976,93 @@ mod tests {
         );
 
         assert_eq!(retained, BTreeSet::from([LogicalValue(guaranteed.0)]));
+    }
+
+    #[test]
+    fn join_retention_prices_every_use_in_a_straight_line_cluster() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let single_use = vregs.alloc();
+        let repeated_use = vregs.alloc();
+        let sum = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: single_use,
+            value: 2,
+        });
+        entry.push(MInst::LoadImm {
+            dst: repeated_use,
+            value: 3,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut first = MBlock::new(BlockId(1));
+        first.push(MInst::Jump { target: BlockId(3) });
+        let mut second = MBlock::new(BlockId(2));
+        second.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        // Both values have the same first-use point.  A first-use-only model
+        // therefore chooses the lower VReg tie-break (`single_use`), while the
+        // complete local cluster must retain `repeated_use`.
+        join.push(MInst::Add {
+            dst: sum,
+            lhs: single_use,
+            rhs: repeated_use,
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: repeated_use,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, first, second, join];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let mut plan = SpillPlan {
+            logical,
+            homes,
+            point_ops: Vec::new(),
+            edge_ops: BTreeMap::new(),
+            recipe_reloads: BTreeSet::new(),
+            recipe_homes: BTreeSet::new(),
+            w_entry: vec![BTreeSet::new(); func.blocks.len()],
+            w_exit: vec![BTreeSet::new(); func.blocks.len()],
+            s_entry: vec![BTreeSet::new(); func.blocks.len()],
+            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+        };
+        let join = cfg.block_index[&BlockId(3)];
+        let predecessors = &cfg.predecessors[join];
+        plan.w_exit[predecessors[0]]
+            .extend([LogicalValue(single_use.0), LogicalValue(repeated_use.0)]);
+        let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
+
+        let retained = init_usual(
+            &func,
+            &cfg,
+            &next_use,
+            &planning_recipes,
+            &plan,
+            &translations,
+            join,
+            1,
+        );
+
+        assert_eq!(retained, BTreeSet::from([LogicalValue(repeated_use.0)]));
+        next_use.verify(&func, &cfg).unwrap();
     }
 
     #[test]
@@ -2009,6 +2421,168 @@ mod tests {
                     PlannedOp::Spill { value, .. } if *value == LogicalValue(stored.0)
                 )
         }));
+    }
+
+    #[test]
+    fn whole_recipe_home_requires_an_exact_recipe_at_every_selected_reload() {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let overwrite = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 16,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: overwrite,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: overwrite,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 24,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = plan(&func, &cfg, &next_use, 2).unwrap();
+        plan.point_ops.clear();
+        plan.edge_ops.clear();
+        plan.recipe_reloads.clear();
+        plan.recipe_homes.clear();
+        let logical = LogicalValue(stored.0);
+        let home = plan.homes.of_logical(logical);
+        let reload = |instruction| {
+            (
+                ProgramPoint {
+                    block: BlockId(0),
+                    instruction,
+                    side: PointSide::Before,
+                },
+                PlannedOp::Reload {
+                    value: logical,
+                    home,
+                },
+            )
+        };
+        plan.point_ops.extend([reload(2), reload(5)]);
+        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        assert!(plan.recipe_homes.is_empty());
+
+        plan.point_ops.pop();
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        assert_eq!(plan.recipe_homes, BTreeSet::from([home]));
+        plan.verify_recipe_homes(&func, &recipes).unwrap();
+
+        plan.point_ops.push(reload(5));
+        let error = plan.verify_recipe_homes(&func, &recipes).unwrap_err();
+        assert_eq!(error.rule, "SPILL_PLAN.RECIPE_HOME_POINT");
+        assert_eq!(error.block, Some(BlockId(0)));
+        assert_eq!(error.instruction, Some(5));
+    }
+
+    #[test]
+    fn whole_recipe_home_compares_complete_stack_and_recipe_costs() {
+        let mut vregs = VRegAllocator::new();
+        let base = vregs.alloc();
+        let first = vregs.alloc();
+        let value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: base,
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::BitNot {
+            dst: first,
+            src: base,
+        });
+        block.push(MInst::BitNot {
+            dst: value,
+            src: first,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = plan(&func, &cfg, &next_use, 3).unwrap();
+        plan.point_ops.clear();
+        plan.edge_ops.clear();
+        plan.recipe_reloads.clear();
+        plan.recipe_homes.clear();
+        let logical = LogicalValue(value.0);
+        let home = plan.homes.of_logical(logical);
+        let point = ProgramPoint {
+            block: BlockId(0),
+            instruction: 3,
+            side: PointSide::Before,
+        };
+        plan.point_ops.push((
+            point,
+            PlannedOp::Reload {
+                value: logical,
+                home,
+            },
+        ));
+        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        assert!(
+            plan.recipe_homes.is_empty(),
+            "a three-instruction pure recipe must not replace a two-cost stack reload"
+        );
+
+        plan.point_ops.push((
+            point,
+            PlannedOp::Spill {
+                value: logical,
+                home,
+            },
+        ));
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        assert_eq!(
+            plan.recipe_homes,
+            BTreeSet::from([home]),
+            "avoiding the spill and reload makes the three-instruction recipe cheaper"
+        );
+        plan.verify_recipe_homes(&func, &recipes).unwrap();
     }
 
     #[test]

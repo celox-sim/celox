@@ -115,9 +115,9 @@ pub(super) fn reconstruct(
     _next_use: &NextUseAnalysis,
     reload_recipes: &ReloadRecipeAnalysis,
 ) -> Result<ReconstructionResult, ReconstructError> {
-    let recipe_homes = recipe_only_homes(func, plan, reload_recipes)?;
-    let stack_offsets = stack_layout(func, plan, &recipe_homes)?;
-    verify_reload_homes(func, plan, &stack_offsets, &recipe_homes)?;
+    let recipe_homes = &plan.recipe_homes;
+    let stack_offsets = stack_layout(func, plan, recipe_homes)?;
+    verify_reload_homes(func, plan, &stack_offsets, recipe_homes)?;
     let original_vregs = func.vregs.count() as usize;
     let mut logical_for_vreg = (0..original_vregs)
         .map(|index| plan.logical.of(VReg(index as u32)))
@@ -190,7 +190,7 @@ pub(super) fn reconstruct(
             reload_recipes,
             point,
             operation,
-            &recipe_homes,
+            recipe_homes,
             &plan.recipe_reloads,
         )?;
         let _ = materialize_operation(
@@ -242,7 +242,7 @@ pub(super) fn reconstruct(
                 successor,
                 instruction,
                 operation,
-                &recipe_homes,
+                recipe_homes,
             )?;
             let materialized = materialize_operation(
                 func,
@@ -361,7 +361,7 @@ pub(super) fn reconstruct(
         &logical_for_vreg,
         &mut insertions,
         &mut stacks,
-        &recipe_homes,
+        recipe_homes,
         &mut recipe_reloads,
     )?;
     let shared_reload_blocks =
@@ -385,80 +385,6 @@ pub(super) fn reconstruct(
         recipe_reloads,
         shared_reload_blocks,
     })
-}
-
-fn recipe_only_homes(
-    func: &MFunction,
-    plan: &SpillPlan,
-    analysis: &ReloadRecipeAnalysis,
-) -> Result<BTreeSet<SpillHome>, ReconstructError> {
-    let mut candidates = BTreeSet::<SpillHome>::new();
-    let mut rejected = BTreeSet::<SpillHome>::new();
-    for &(point, operation) in &plan.point_ops {
-        match operation {
-            PlannedOp::Reload { value, home } => {
-                candidates.insert(home);
-                if available_recipe_at_point(analysis, point, value).is_none() {
-                    rejected.insert(home);
-                }
-            }
-            PlannedOp::SpillPhi { .. } => {}
-            PlannedOp::Spill { .. } => {}
-        }
-    }
-    for (&(predecessor, successor), operations) in &plan.edge_ops {
-        let Some(predecessor_block) = func.blocks.get(predecessor) else {
-            return Err(ReconstructError::new(
-                "RECONSTRUCT.EDGE_PREDECESSOR_EXISTS",
-                None,
-                None,
-                Vec::new(),
-                format!("edge operation predecessor index {predecessor} is outside function"),
-            ));
-        };
-        let Some(_successor_block) = func.blocks.get(successor) else {
-            return Err(ReconstructError::new(
-                "RECONSTRUCT.EDGE_SUCCESSOR_EXISTS",
-                Some(predecessor_block.id),
-                None,
-                Vec::new(),
-                format!("edge operation successor index {successor} is outside function"),
-            ));
-        };
-        let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
-            return Err(ReconstructError::new(
-                "RECONSTRUCT.EDGE_PREDECESSOR_TERMINATED",
-                Some(predecessor_block.id),
-                None,
-                Vec::new(),
-                "edge operation predecessor block is empty",
-            ));
-        };
-        for &operation in operations {
-            match operation {
-                PlannedOp::Reload { value, home } => {
-                    candidates.insert(home);
-                    if available_recipe_before_terminator(
-                        analysis,
-                        predecessor_block.id,
-                        instruction,
-                        value,
-                    )
-                    .is_none()
-                    {
-                        rejected.insert(home);
-                    }
-                }
-                PlannedOp::SpillPhi { .. } => {}
-                PlannedOp::Spill { .. } => {}
-            }
-        }
-    }
-    // A phi congruence class may use SimState itself as the merged home.  It
-    // is safe to omit its SpillPhi and edge stores only when every concrete
-    // reload selected by the planner has an exact recipe at that point.
-    candidates.retain(|home| !rejected.contains(home));
-    Ok(candidates)
 }
 
 fn available_recipe_at_point(
@@ -2071,7 +1997,7 @@ mod tests {
         let planning_recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         next_use.verify(&func, &cfg).unwrap();
-        let plan = super::super::spill_plan::plan_with_recipe_costs(
+        let mut plan = super::super::spill_plan::plan_with_recipe_costs(
             &func,
             &cfg,
             &next_use,
@@ -2079,11 +2005,13 @@ mod tests {
             registers,
         )
         .unwrap();
-        plan.verify(&func, &cfg, registers).unwrap();
-        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let requested_points = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
         let recipes =
             super::super::reload::analyze_with_queries(&func, &cfg, &requested_points).unwrap();
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        plan.verify(&func, &cfg, registers).unwrap();
+        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         let rebuilt_cfg = (result.shared_reload_blocks != 0)
             .then(|| super::super::cfg::normalize(&mut func).unwrap());
@@ -2133,7 +2061,7 @@ mod tests {
         let planning_recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         next_use.verify(&func, &cfg).unwrap();
-        let plan = super::super::spill_plan::plan_with_recipe_costs(
+        let mut plan = super::super::spill_plan::plan_with_recipe_costs(
             &func,
             &cfg,
             &next_use,
@@ -2141,8 +2069,6 @@ mod tests {
             2,
         )
         .unwrap();
-        plan.verify(&func, &cfg, 2).unwrap();
-        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let stored = LogicalValue(0);
         assert!(plan.recipe_reloads.contains(&(BlockId(1), 4, stored)));
         assert!(plan.point_ops.iter().all(|(point, operation)| {
@@ -2156,6 +2082,10 @@ mod tests {
 
         let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        plan.verify(&func, &cfg, 2).unwrap();
+        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
@@ -2416,7 +2346,7 @@ mod tests {
 
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
-        let plan = super::super::spill_plan::plan(&func, &cfg, &next_use, 2).unwrap();
+        let mut plan = super::super::spill_plan::plan(&func, &cfg, &next_use, 2).unwrap();
         plan.verify(&func, &cfg, 2).unwrap();
         assert!(
             plan.edge_ops.values().flatten().any(|operation| matches!(
@@ -2428,6 +2358,10 @@ mod tests {
         let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
         assert!(!requested.is_empty());
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
+        plan.verify(&func, &cfg, 2).unwrap();
+        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
