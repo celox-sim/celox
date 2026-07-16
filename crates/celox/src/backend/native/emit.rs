@@ -439,10 +439,28 @@ fn used_callee_saved(assignment: &AssignmentMap) -> Vec<PhysReg> {
 /// Result of code emission: raw machine code bytes.
 pub struct EmitResult {
     pub code: Vec<u8>,
+    /// Length of executable text before any RIP-relative constant tables.
+    pub text_size: usize,
     /// Stack frame size (bytes) for spill slots, excluding callee-saved pushes.
     pub frame_size: u32,
     /// Machine-code offsets for MIR basic-block entry labels.
     pub block_offsets: Vec<(BlockId, u64)>,
+}
+
+/// Exact intermediate forms captured while emitting one native function.
+///
+/// This is populated only for an explicit compilation trace.  Keeping the
+/// snapshots inside `emit_chained_eu_groups` guarantees that the dump observes
+/// the same merged SIR, MIR, allocation, and machine code as the executable
+/// function instead of independently lowering the source execution units.
+#[derive(Default)]
+pub(crate) struct NativeFunctionTrace {
+    pub optimized_sir: String,
+    pub mir_before_regalloc: String,
+    pub mir_after_regalloc: String,
+    pub register_assignment: String,
+    pub spill_frame_size: u32,
+    pub disassembly: String,
 }
 
 /// Failure of the final MIR/assignment contract required by x86 encoding.
@@ -1500,6 +1518,28 @@ fn emit_planned(
     }
 
     let result = asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    let text_size = if let Some(label) = constant_table_labels.first() {
+        usize::try_from(result.label_ip(label).map_err(|error| {
+            EmitInputError::new(
+                "EMIT.CONSTANT_TABLE_LABEL_IP",
+                None,
+                None,
+                None,
+                format!("failed to resolve native constant-table label: {error}"),
+            )
+        })?)
+        .map_err(|_| {
+            EmitInputError::new(
+                "EMIT.CONSTANT_TABLE_LABEL_IP",
+                None,
+                None,
+                None,
+                "native text size exceeds usize",
+            )
+        })?
+    } else {
+        result.inner.code_buffer.len()
+    };
     let mut block_offsets = Vec::with_capacity(func.blocks.len());
     for block in &func.blocks {
         let label = block_labels.label(block.id)?;
@@ -1516,6 +1556,7 @@ fn emit_planned(
     }
     Ok(EmitResult {
         code: result.inner.code_buffer,
+        text_size,
         frame_size,
         block_offsets,
     })
@@ -3429,7 +3470,17 @@ pub fn emit_chained_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[units], layout, four_state, label, None)
+    emit_chained_eu_groups(&[units], layout, four_state, label, None, None)
+}
+
+pub(crate) fn emit_chained_eus_with_trace(
+    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    trace: &mut NativeFunctionTrace,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_chained_eu_groups(&[units], layout, four_state, label, None, Some(trace))
 }
 
 // Cross-phase stable forwarding deliberately stays staged until the allocator
@@ -3455,6 +3506,26 @@ pub fn emit_comb_eval_apply_eus(
         four_state,
         label,
         stable_load_suffix,
+        None,
+    )
+}
+
+pub(crate) fn emit_comb_eval_apply_eus_with_trace(
+    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    trace: &mut NativeFunctionTrace,
+) -> Result<EmitResult, ChainedEmitError> {
+    let stable_load_suffix = (!ff_units.is_empty()).then_some(comb_units.len());
+    emit_chained_eu_groups(
+        &[comb_units, ff_units],
+        layout,
+        four_state,
+        label,
+        stable_load_suffix,
+        Some(trace),
     )
 }
 
@@ -3464,6 +3535,7 @@ fn emit_chained_eu_groups(
     four_state: bool,
     label: &str,
     stable_load_suffix: Option<usize>,
+    mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
     let units = groups
@@ -3523,6 +3595,9 @@ fn emit_chained_eu_groups(
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.optimized_sir = sir_eu.to_string();
+    }
     if let Some(start) = merge_start {
         let sir_insts: usize = sir_eu
             .blocks
@@ -3611,6 +3686,9 @@ fn emit_chained_eu_groups(
             phase: "after MIR optimization",
             error,
         })?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.mir_before_regalloc = mfunc.to_string();
+    }
     let regalloc_start = timing.then(crate::timing::now);
     let ra = regalloc::run_regalloc_with_label(&mut mfunc, label)?;
     if let Some(start) = regalloc_start {
@@ -3658,6 +3736,16 @@ fn emit_chained_eu_groups(
             phase: "after post-allocation MIR peepholes",
             error,
         })?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.mir_after_regalloc = mfunc.to_string();
+        trace.register_assignment.clear();
+        for (vreg, preg) in ra.assignment.sorted_entries() {
+            trace
+                .register_assignment
+                .push_str(&format!("  {vreg} -> {preg}\n"));
+        }
+        trace.spill_frame_size = ra.spill_frame_size;
+    }
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }
@@ -3672,6 +3760,9 @@ fn emit_chained_eu_groups(
         ra.spill_frame_size,
         &ra.ssa_destruction,
     )?;
+    if let Some(trace) = trace {
+        trace.disassembly = disassemble(&result.code[..result.text_size], 0);
+    }
     if let Some(start) = emit_start {
         eprintln!(
             "[native-timing] emit_chained emit bytes={} elapsed={:?}",
@@ -4731,8 +4822,14 @@ mod shift_encoding_tests {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         assert!(emitted.code.ends_with(&trailing_table));
+        assert_eq!(
+            emitted.code.len() - emitted.text_size,
+            (first_values.len() + second_values.len()) * std::mem::size_of::<u64>()
+        );
+        assert!(emitted.text_size < emitted.code.len());
 
-        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut decoder =
+            Decoder::new(64, &emitted.code[..emitted.text_size], DecoderOptions::NONE);
         let mut table_leas = 0;
         while decoder.can_decode() {
             let instruction = decoder.decode();

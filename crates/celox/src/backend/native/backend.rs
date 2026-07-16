@@ -97,12 +97,23 @@ fn codegen_err(msg: String) -> SimulatorError {
     SimulatorError::new(crate::simulator::SimulatorErrorKind::Codegen(msg))
 }
 
+struct CompiledNativeFunction {
+    code: jit_mem::JitCode,
+    trace: Option<emit::NativeFunctionTrace>,
+}
+
+pub(crate) struct NativeCodegenTrace {
+    pub optimized_sir: String,
+    pub mir: String,
+}
+
 fn compile_units(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
-) -> Result<jit_mem::JitCode, SimulatorError> {
+    capture_trace: bool,
+) -> Result<CompiledNativeFunction, SimulatorError> {
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     if units.is_empty() {
         // Empty function: just return 0
@@ -112,13 +123,20 @@ fn compile_units(
         empty_func.push_block(block);
         let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
             .map_err(|e| codegen_err(format!("emit error: {e}")))?;
-        return jit_mem::JitCode::new_named(&empty_result.code, label)
-            .map_err(|e| codegen_err(format!("mmap error: {e}")));
+        let trace = capture_trace.then(|| emit::NativeFunctionTrace {
+            optimized_sir: "<empty native function>\n".into(),
+            mir_before_regalloc: empty_func.to_string(),
+            mir_after_regalloc: empty_func.to_string(),
+            register_assignment: String::new(),
+            spill_frame_size: 0,
+            disassembly: emit::disassemble(&empty_result.code[..empty_result.text_size], 0),
+        });
+        let code = jit_mem::JitCode::new_named(&empty_result.code, label)
+            .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+        return Ok(CompiledNativeFunction { code, trace });
     }
 
-    // Multi-EU: compile each EU independently (ISel + regalloc), then
-    // chain their machine code into a single function. Each EU's return
-    // is patched to fall through to the next EU. One prologue/epilogue.
+    // Merge all EUs and compile the exact SIR/MIR function used at runtime.
     if timing {
         eprintln!(
             "[native-timing] compile_units start label={label} eus={}",
@@ -126,8 +144,13 @@ fn compile_units(
         );
     }
     let start = timing.then(crate::timing::now);
-    let emit_result = emit::emit_chained_eus(units, layout, four_state, label)
-        .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+    let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
+    let emit_result = if let Some(trace) = trace.as_mut() {
+        emit::emit_chained_eus_with_trace(units, layout, four_state, label, trace)
+    } else {
+        emit::emit_chained_eus(units, layout, four_state, label)
+    }
+    .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     if let Some(start) = start {
         eprintln!(
             "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
@@ -136,8 +159,9 @@ fn compile_units(
         );
     }
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
-    jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
-        .map_err(|e| codegen_err(format!("mmap error: {e}")))
+    let code = jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+    Ok(CompiledNativeFunction { code, trace })
 }
 
 fn compile_comb_eval_apply_units(
@@ -146,17 +170,25 @@ fn compile_comb_eval_apply_units(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
-) -> Result<jit_mem::JitCode, SimulatorError> {
-    let emit_result =
+    capture_trace: bool,
+) -> Result<CompiledNativeFunction, SimulatorError> {
+    let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
+    let emit_result = if let Some(trace) = trace.as_mut() {
+        emit::emit_comb_eval_apply_eus_with_trace(
+            comb_units, ff_units, layout, four_state, label, trace,
+        )
+    } else {
         emit::emit_comb_eval_apply_eus(comb_units, ff_units, layout, four_state, label)
-            .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+    }
+    .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
-    jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
-        .map_err(|e| codegen_err(format!("mmap error: {e}")))
+    let code = jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+    Ok(CompiledNativeFunction { code, trace })
 }
 
 fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<jit_mem::JitSymbol> {
-    let code_len = result.code.len();
+    let code_len = result.text_size;
     if result.block_offsets.is_empty() {
         return Vec::new();
     }
@@ -207,12 +239,14 @@ struct NativeCompileTask<'a> {
     units: &'a [crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     label: &'static str,
     compile_comb_prefix: bool,
+    bindings: Vec<String>,
 }
 
 fn collect_ff_compile_tasks<'a>(sir: &'a Program) -> Vec<NativeCompileTask<'a>> {
     let mut tasks = Vec::new();
     let mut seen = HashMap::<u64, usize>::default();
     collect_ff_compile_tasks_from(
+        sir,
         &sir.eval_apply_ffs,
         "eval_apply_ff",
         true,
@@ -220,17 +254,26 @@ fn collect_ff_compile_tasks<'a>(sir: &'a Program) -> Vec<NativeCompileTask<'a>> 
         &mut tasks,
     );
     collect_ff_compile_tasks_from(
+        sir,
         &sir.eval_only_ffs,
         "eval_only_ff",
         false,
         &mut seen,
         &mut tasks,
     );
-    collect_ff_compile_tasks_from(&sir.apply_ffs, "apply_ff", false, &mut seen, &mut tasks);
+    collect_ff_compile_tasks_from(
+        sir,
+        &sir.apply_ffs,
+        "apply_ff",
+        false,
+        &mut seen,
+        &mut tasks,
+    );
     tasks
 }
 
 fn collect_ff_compile_tasks_from<'a>(
+    sir: &Program,
     ff_map: &'a HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
@@ -240,10 +283,12 @@ fn collect_ff_compile_tasks_from<'a>(
     seen: &mut HashMap<u64, usize>,
     tasks: &mut Vec<NativeCompileTask<'a>>,
 ) {
-    for units in ff_map.values() {
+    for (addr, units) in ff_map {
         let fingerprint = fingerprint_ff_units(units);
+        let binding = format!("{label} trigger={}", sir.get_path(addr));
         if let Some(&index) = seen.get(&fingerprint) {
             tasks[index].compile_comb_prefix |= compile_comb_prefix;
+            tasks[index].bindings.push(binding);
             continue;
         }
         seen.insert(fingerprint, tasks.len());
@@ -252,14 +297,151 @@ fn collect_ff_compile_tasks_from<'a>(
             units,
             label,
             compile_comb_prefix,
+            bindings: vec![binding],
         });
     }
+}
+
+fn append_native_function_trace(
+    optimized_sir: &mut String,
+    mir: &mut String,
+    name: &str,
+    bindings: &[String],
+    trace: &emit::NativeFunctionTrace,
+) {
+    let mut bindings = bindings.to_vec();
+    bindings.sort();
+    bindings.dedup();
+
+    optimized_sir.push_str(&format!("=== Native function {name} ===\n"));
+    if !bindings.is_empty() {
+        optimized_sir.push_str("Bindings:\n");
+        for binding in &bindings {
+            optimized_sir.push_str(&format!("  {binding}\n"));
+        }
+    }
+    optimized_sir.push_str(&trace.optimized_sir);
+    if !trace.optimized_sir.ends_with('\n') {
+        optimized_sir.push('\n');
+    }
+    optimized_sir.push('\n');
+
+    mir.push_str(&format!("=== Native function {name} ===\n"));
+    if !bindings.is_empty() {
+        mir.push_str("Bindings:\n");
+        for binding in &bindings {
+            mir.push_str(&format!("  {binding}\n"));
+        }
+    }
+    mir.push_str("--- MIR after optimization, before register allocation ---\n");
+    mir.push_str(&trace.mir_before_regalloc);
+    if !trace.mir_before_regalloc.ends_with('\n') {
+        mir.push('\n');
+    }
+    mir.push_str("--- MIR after register allocation and post-RA peepholes ---\n");
+    mir.push_str(&trace.mir_after_regalloc);
+    if !trace.mir_after_regalloc.ends_with('\n') {
+        mir.push('\n');
+    }
+    mir.push_str(&format!("Spill frame: {} bytes\n", trace.spill_frame_size));
+    mir.push_str("Register assignment:\n");
+    mir.push_str(&trace.register_assignment);
+    mir.push_str("x86-64 disassembly of emitted function:\n");
+    mir.push_str(&trace.disassembly);
+    if !trace.disassembly.ends_with('\n') {
+        mir.push('\n');
+    }
+    mir.push('\n');
+}
+
+fn format_native_codegen_trace(
+    comb: &CompiledNativeFunction,
+    ff_codes: &HashMap<u64, CompiledNativeFunction>,
+    comb_apply_codes: &HashMap<u64, CompiledNativeFunction>,
+    tasks: &[NativeCompileTask<'_>],
+) -> NativeCodegenTrace {
+    let mut optimized_sir = String::from("=== Optimized SIR used by native emission ===\n");
+    let mut mir = String::from("=== MIR used by native emission ===\n");
+    append_native_function_trace(
+        &mut optimized_sir,
+        &mut mir,
+        "eval_comb",
+        &[],
+        comb.trace
+            .as_ref()
+            .expect("explicit native trace must capture eval_comb"),
+    );
+
+    let mut ff_entries = ff_codes
+        .keys()
+        .map(|&fingerprint| {
+            let task = tasks
+                .iter()
+                .find(|task| task.fingerprint == fingerprint)
+                .expect("compiled FF function must retain its source task");
+            let mut sort_key = task.bindings.clone();
+            sort_key.sort();
+            (sort_key, fingerprint, task)
+        })
+        .collect::<Vec<_>>();
+    ff_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut label_indices = HashMap::<&str, usize>::default();
+    for (_, fingerprint, task) in ff_entries {
+        let index = label_indices.entry(task.label).or_default();
+        let name = format!("{}[{index}]", task.label);
+        *index += 1;
+        append_native_function_trace(
+            &mut optimized_sir,
+            &mut mir,
+            &name,
+            &task.bindings,
+            ff_codes[&fingerprint]
+                .trace
+                .as_ref()
+                .expect("explicit native trace must capture every FF function"),
+        );
+    }
+
+    let mut comb_apply_entries = comb_apply_codes
+        .keys()
+        .map(|&fingerprint| {
+            let task = tasks
+                .iter()
+                .find(|task| task.fingerprint == fingerprint)
+                .expect("compiled comb/apply function must retain its source task");
+            let mut bindings = task
+                .bindings
+                .iter()
+                .filter(|binding| binding.starts_with("eval_apply_ff "))
+                .cloned()
+                .collect::<Vec<_>>();
+            bindings.sort();
+            (bindings, fingerprint)
+        })
+        .collect::<Vec<_>>();
+    comb_apply_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (index, (bindings, fingerprint)) in comb_apply_entries.into_iter().enumerate() {
+        let name = format!("eval_comb_apply_ff[{index}]");
+        append_native_function_trace(
+            &mut optimized_sir,
+            &mut mir,
+            &name,
+            &bindings,
+            comb_apply_codes[&fingerprint]
+                .trace
+                .as_ref()
+                .expect("explicit native trace must capture every fused comb/apply function"),
+        );
+    }
+
+    NativeCodegenTrace { optimized_sir, mir }
 }
 
 fn compile_program(
     sir: &Program,
     options: &SimulatorOptions,
-) -> Result<SharedNativeCode, SimulatorError> {
+    capture_trace: bool,
+) -> Result<(SharedNativeCode, Option<NativeCodegenTrace>), SimulatorError> {
     let layout = sir
         .layout
         .as_ref()
@@ -268,8 +450,15 @@ fn compile_program(
     let (comb_jit, mut compiled_ff_codes, mut compiled_comb_apply_codes) = std::thread::scope(
         |scope| {
             let four_state = options.four_state;
-            let comb_handle =
-                scope.spawn(move || compile_units(&sir.eval_comb, layout, four_state, "eval_comb"));
+            let comb_handle = scope.spawn(move || {
+                compile_units(
+                    &sir.eval_comb,
+                    layout,
+                    four_state,
+                    "eval_comb",
+                    capture_trace,
+                )
+            });
             let mut ff_handles = Vec::with_capacity(compile_tasks.len());
             let mut comb_apply_handles = Vec::new();
             for task in &compile_tasks {
@@ -277,7 +466,9 @@ fn compile_program(
                 let label = task.label;
                 ff_handles.push((
                     task.fingerprint,
-                    scope.spawn(move || compile_units(units, layout, four_state, label)),
+                    scope.spawn(move || {
+                        compile_units(units, layout, four_state, label, capture_trace)
+                    }),
                 ));
                 if task.compile_comb_prefix {
                     let units = task.units;
@@ -290,6 +481,7 @@ fn compile_program(
                                 layout,
                                 four_state,
                                 "eval_comb_apply_ff",
+                                capture_trace,
                             )
                         }),
                     ));
@@ -320,10 +512,18 @@ fn compile_program(
             Ok::<_, SimulatorError>((comb_jit, ff_codes, comb_apply_codes))
         },
     )?;
-    let comb_func = comb_jit.fn_ptr;
+    let codegen_trace = capture_trace.then(|| {
+        format_native_codegen_trace(
+            &comb_jit,
+            &compiled_ff_codes,
+            &compiled_comb_apply_codes,
+            &compile_tasks,
+        )
+    });
+    let comb_func = comb_jit.code.fn_ptr;
     let mut all_jit_codes: Vec<jit_mem::JitCode> =
         Vec::with_capacity(1 + compiled_ff_codes.len() + compiled_comb_apply_codes.len());
-    all_jit_codes.push(comb_jit);
+    all_jit_codes.push(comb_jit.code);
 
     // Compile FF units
     let mut next_id = 0usize;
@@ -335,11 +535,11 @@ fn compile_program(
     let mut addr_to_id = HashMap::default();
     let mut compiled_ff_cache: HashMap<u64, NativeSimFunc> = compiled_ff_codes
         .iter()
-        .map(|(&fingerprint, code)| (fingerprint, code.fn_ptr))
+        .map(|(&fingerprint, compiled)| (fingerprint, compiled.code.fn_ptr))
         .collect();
     let mut compiled_comb_apply_cache: HashMap<u64, NativeSimFunc> = compiled_comb_apply_codes
         .iter()
-        .map(|(&fingerprint, code)| (fingerprint, code.fn_ptr))
+        .map(|(&fingerprint, compiled)| (fingerprint, compiled.code.fn_ptr))
         .collect();
 
     let compile_ff_group = |ff_map: &HashMap<
@@ -436,7 +636,8 @@ fn compile_program(
         all_jit_codes.push(
             compiled_ff_codes
                 .remove(&fingerprint)
-                .expect("compiled FF key exists"),
+                .expect("compiled FF key exists")
+                .code,
         );
     }
     let mut compiled_comb_apply_keys = compiled_comb_apply_codes
@@ -448,7 +649,8 @@ fn compile_program(
         all_jit_codes.push(
             compiled_comb_apply_codes
                 .remove(&fingerprint)
-                .expect("compiled comb/apply key exists"),
+                .expect("compiled comb/apply key exists")
+                .code,
         );
     }
 
@@ -472,18 +674,21 @@ fn compile_program(
         }
     }
 
-    Ok(SharedNativeCode {
-        comb_func,
-        _jit_codes: all_jit_codes,
-        event_map,
-        eval_only_event_map,
-        apply_event_map,
-        id_to_addr,
-        id_to_event,
-        layout: layout.clone(),
-        options: options.clone(),
-        four_state_inits,
-    })
+    Ok((
+        SharedNativeCode {
+            comb_func,
+            _jit_codes: all_jit_codes,
+            event_map,
+            eval_only_event_map,
+            apply_event_map,
+            id_to_addr,
+            id_to_event,
+            layout: layout.clone(),
+            options: options.clone(),
+            four_state_inits,
+        },
+        codegen_trace,
+    ))
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -499,8 +704,22 @@ pub struct NativeBackend {
 
 impl NativeBackend {
     pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, SimulatorError> {
-        let shared = Arc::new(compile_program(sir, options)?);
+        let (shared, trace) = compile_program(sir, options, false)?;
+        debug_assert!(trace.is_none());
+        let shared = Arc::new(shared);
         Ok(Self::from_shared(shared))
+    }
+
+    pub(crate) fn new_with_codegen_trace(
+        sir: &Program,
+        options: &SimulatorOptions,
+    ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
+        let (shared, trace) = compile_program(sir, options, true)?;
+        let backend = Self::from_shared(Arc::new(shared));
+        Ok((
+            backend,
+            trace.expect("trace-enabled native compilation must return a trace"),
+        ))
     }
 
     /// Create a new backend instance from shared compiled code.

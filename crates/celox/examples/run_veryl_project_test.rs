@@ -82,20 +82,25 @@ fn run() -> Result<(), Box<dyn Error>> {
             .trace_post_optimized_sir()
             .trace_mir()
             .build_with_trace();
-        let pre_optimized_sir = trace_result
-            .trace
+        let celox::CompilationTraceResult { res, trace } = trace_result;
+        res.map_err(|error| format!("Celox build failed: {error:?}"))?;
+        let pre_optimized_sir = trace
             .format_pre_optimized_sir()
             .ok_or("pre-optimized SIR trace was not captured")?;
-        let sir = trace_result
-            .trace
+        let sir = trace
             .format_post_optimized_sir()
             .ok_or("post-optimized SIR trace was not captured")?;
-        let mir = trace_result.trace.mir.ok_or("MIR trace was not captured")?;
+        let native_sir = trace
+            .format_native_optimized_sir()
+            .ok_or("native optimized SIR trace was not captured")?;
+        let mir = trace.mir.ok_or("MIR trace was not captured")?;
         let pre_sir_path = output_dir.join("pre_optimized.sir");
         let sir_path = output_dir.join("post_optimized.sir");
+        let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
         fs::write(&pre_sir_path, &pre_optimized_sir)?;
         fs::write(&sir_path, &sir)?;
+        fs::write(&native_sir_path, &native_sir)?;
         fs::write(&mir_path, &mir)?;
         eprintln!(
             "wrote pre-optimized SIR ({} bytes) to {}",
@@ -108,13 +113,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             sir_path.display()
         );
         eprintln!(
+            "wrote native optimized SIR ({} bytes) to {}",
+            native_sir.len(),
+            native_sir_path.display()
+        );
+        eprintln!(
             "wrote full native MIR ({} bytes) to {}",
             mir.len(),
             mir_path.display()
         );
-        trace_result
-            .res
-            .map_err(|error| format!("Celox build failed: {error:?}"))?;
         println!(
             "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
             opts.test,

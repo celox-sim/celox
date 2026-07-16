@@ -2,55 +2,55 @@
 source: crates/celox/tests/native_mir.rs
 expression: output
 ---
-=== MIR (all native execution units) ===
-=== MIR (eval_comb) ===
-Execution Unit eval_comb[0] (before regalloc):
+=== MIR used by native emission ===
+=== Native function eval_comb ===
+--- MIR after optimization, before register allocation ---
 bb0:
   v0 = load.i32 [sim + 32]
-  v4 = load.i32 [sim + 40]
-  v7 = add.w32 v0, v4
+  v1 = load.i32 [sim + 36]
+  v7 = add.w32 v0, v1
   v2 = and.w32 v7, 0xffffffff
-  v6 = imm 0x1
-  v3 = and.w32 v2, v6
-  store.i32 [sim + 36], v3
-  v1 = imm 0x2
-  v5 = or.w32 v2, v1
-  store.i32 [sim + 44], v5
+  v3 = imm 0x1
+  v4 = and.w32 v2, v3
+  store.i32 [sim + 40], v4
+  v5 = imm 0x2
+  v6 = or.w32 v2, v5
+  store.i32 [sim + 44], v6
   ret
-
-Execution Unit eval_comb[0] (after regalloc):
+--- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i32 [sim + 32]
-  v4 = load.i32 [sim + 40]
-  v7 = add.w32 v0, v4
+  v1 = load.i32 [sim + 36]
+  v7 = add.w32 v0, v1
   v2 = and.w32 v7, 0xffffffff
-  v6 = imm 0x1
-  v3 = and.w32 v2, v6
-  store.i32 [sim + 36], v3
-  v1 = imm 0x2
-  v5 = or.w32 v2, v1
-  store.i32 [sim + 44], v5
+  v3 = imm 0x1
+  v4 = and.w32 v2, v3
+  store.i32 [sim + 40], v4
+  v5 = imm 0x2
+  v6 = or.w32 v2, v5
+  store.i32 [sim + 44], v6
   ret
-  Register assignment:
-    v0 -> rax
-    v1 -> rdx
-    v2 -> rax
-    v3 -> rdx
-    v4 -> rdx
-    v5 -> rax
-    v6 -> rdx
-    v7 -> rax
-  x86-64 disassembly:
+Spill frame: 0 bytes
+Register assignment:
+  v0 -> rax
+  v1 -> rdx
+  v2 -> rax
+  v3 -> rdx
+  v4 -> rdx
+  v5 -> rdx
+  v6 -> rax
+  v7 -> rax
+x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
   0x00000009  mov eax,[r15+20h]
-  0x0000000d  mov edx,[r15+28h]
+  0x0000000d  mov edx,[r15+24h]
   0x00000011  add eax,edx
   0x00000013  and eax,0FFFFFFFFh
   0x00000018  mov edx,1
   0x0000001d  and edx,eax
-  0x0000001f  mov [r15+24h],edx
+  0x0000001f  mov [r15+28h],edx
   0x00000023  mov edx,2
   0x00000028  or eax,edx
   0x0000002a  mov [r15+2Ch],eax

@@ -29,6 +29,10 @@ pub struct CompilationTrace {
     pub scheduled_units: Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub pre_optimized_sir: Option<crate::ir::Program>,
     pub post_optimized_sir: Option<crate::ir::Program>,
+    /// SIR after native EU merging, StateSSA promotion, and merged-chain
+    /// cleanup, captured from the exact functions passed to instruction
+    /// selection.
+    pub native_optimized_sir: Option<String>,
     pub analyzer_ir: Option<String>,
     pub pre_optimized_clif: Option<String>,
     pub post_optimized_clif: Option<String>,
