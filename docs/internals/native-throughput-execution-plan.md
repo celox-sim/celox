@@ -1735,6 +1735,120 @@ than another isolated reload substitution.
 Status: **complete; aggregate cost accounting matches the selected plan;
 generated code unchanged; use-to-use interval selection remains open**.
 
+### Step 17c: Select no-home use-to-use segments at pressure points
+
+The first explicit interval slice uses one forced eviction and the next
+ordinary use in the same MIR block as its unit.  The spill planner already
+knows both endpoints exactly and re-runs pressure selection after every use;
+the missing state is whether the evicted value owns a persistent home.  Each
+candidate therefore has one of three states:
+
+- resident, occupying one register until the interval endpoint;
+- absent with no persistent home, requiring either a new spill or an exact
+  recipe at that endpoint; or
+- absent with a persistent home, requiring only its normal reload.
+
+At a forced eviction, a value which already has a persistent home is never
+changed into an isolated state reload.  For a value without a home, the
+planner compares the actual `spill + persistent reload` alternative with the
+exact MemorySSA recipe at the next local use.  A non-final interval may choose
+the no-home recipe only when its materialization cost is no greater than one
+persistent reload and its complete immediate cost is strictly lower than
+creating the home.  This dominance condition is independent of how many later
+splits occur: every selected recipe is individually no more expensive than the
+reload it replaces, and it also postpones or removes the one-time spill.  The
+existing final-use rule remains less restrictive because no later interval can
+amortize a newly created home.
+
+Reaching the endpoint materializes the planned recipe and returns the value to
+the resident state without claiming that a stack home now exists.  A later
+pressure point solves the next interval again.  If the state version has gone
+stale, that later point creates the stack home while the earlier valid segment
+remains profitable.  Eviction cost density must use the materialization the
+planner will actually emit; an unselected point recipe may no longer lower a
+hypothetical stack victim cost.
+
+This slice is deliberately local.  CFG-edge and loop-carried intervals remain
+under the existing W/S coupling and aggregate-home rules until execution
+frequency and edge placement can be represented without treating mutually
+exclusive paths as jointly executed.  Acceptance requires focused fixtures
+for repeated exact segments, a later stale segment, and rejection of a recipe
+whose per-use cost exceeds a persistent reload, followed by the common tests,
+complete SIR/MIR inspection, and the split-timing Linux gate.
+
+The trial met those local invariants but failed the generated-code and Linux
+gate.  Around `sim + 33997909`, it replaced two predecessor loads and a
+live-through phi with one exact load at the merged use.  The pre-allocation
+MIR was unchanged and this local live range was genuinely shorter.  However,
+the resulting VReg order changed the existing row-by-row ordinary-phi
+coloring.  At a later wide switch join, every arm then needed four additional
+register moves before entering the common block.  A locally cheaper reload
+decision had therefore perturbed a much larger edge-copy problem which the
+scalar spill cost could not see.
+
+The eviction-cost correction by itself completed Linux boot in
+64.068906508 s of code generation and 131.027808444 s of generated-code
+execution.  Enabling non-final no-home intervals completed in 68.297044559 s
+and 141.170907960 s respectively.  Both reached normal power-down at exactly
+`cy=9ae070 x3=aa pass=1`, but both regressed from the Step 17b execution result
+of 128.829497024 s.  The complete trial changes to `spill_plan.rs` were
+reverted.  A future interval solver must include the downstream coloring and
+parallel-copy cost instead of proving profitability from materialization and
+stack costs alone.
+
+Status: **rejected and fully reverted; the use-to-use interval solver remains
+open**.
+
+### Step 18: Color ordinary live phi bundles jointly
+
+Ordinary phi results at one block entry are simultaneous definitions.  The
+former row-by-row greedy coloring could give an early phi a source register
+when it had an equally good alternative, leaving a later phi unable to retain
+its only source register.  This inserted avoidable copies on every affected
+predecessor and was the amplification mechanism exposed by the Step 17c
+trial.
+
+The allocator now colors all live ordinary phis in a block as one bundle.
+Existing constrained `Perm` matching remains separate and is installed first;
+dead ordinary phis receive a verifier-visible color without occupying the live
+bundle.  For the remaining rows, an exact subset dynamic program over the
+target's 14 allocatable registers maximizes already-colored incoming sources
+which remain in the destination register.  Required colors, forbidden colors,
+and registers occupied by live `Perm` results are hard constraints.  Target
+register order supplies a deterministic lexicographic tie-break.  This is
+bounded by the physical register set rather than by an arbitrary MIR-size
+threshold.  The focused regression has two phi rows for which greedy coloring
+keeps one incoming edge copy while joint matching removes both.
+
+The 58,353,245-byte pre-optimized, 19,582,017-byte post-optimized, and
+20,041,423-byte native-optimized SIR files are byte-identical to Step 17b.
+Every native function's virtual-register MIR before coloring and its planned
+spill/reload instruction body are also byte-identical.  Stack traffic remains
+17,472 loads and 13,550 stores.  Only physical assignment, phi destruction,
+and emitted x86 change.  Across the complete trace, `xchg` falls from 3,186 to
+2,686.  Disassembly lines fall by 1,001 in `eval_comb`, 204 in
+`eval_apply_ff`, 22 in `eval_only_ff`, and 964 in `eval_comb_apply_ff`, while
+`apply_ff` is unchanged.  In the inspected switch, arms which previously
+executed four moves before the join now jump directly to the canonical
+register assignment.
+
+The focused color tests pass 5/5, the complete library passes 767/767, native
+MIR passes 6/6, non-ignored native testbenches pass 60/60, and the backend
+counter matrix passes 9/9.  `cargo check`, the CI-target strict Clippy command,
+format checking, and the documentation build also pass.
+
+The CPU-0 non-LTO A--B--A sequence used the same split timing contract and
+exact RTL marker for every run.  Candidate code generation took 64.923728165 s
+and 65.234924356 s around an isolated Step 17b build taking 64.495442984 s;
+no code-generation improvement is claimed.  Generated-code execution took
+127.868454843 s, 136.098208142 s, and 128.095218025 s respectively.  The
+candidate mean is 127.981836434 s, 8.116371708 s or 5.96% below the
+contemporaneous baseline.  Every run reached normal power-down at exactly
+`cy=9ae070 x3=aa pass=1`.
+
+Status: **complete; avoidable phi-edge copies removed; the interval solver
+remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1765,6 +1879,8 @@ generated code unchanged; use-to-use interval selection remains open**.
 | 16 | final-use MemorySSA spill homes | allocator 149/149; native MIR 6/6 | lib 761/761; native 60/60; counter 9/9; check, strict clippy, docs | two CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; final-source MIR is byte-identical | inspected/final compile-only 65.240 / 65.983 s (`execute_ns=0`); full compile 64.344 / 66.136 s; execute 128.533 / 138.830 s | concrete stack traffic removed; runtime effect unconfirmed; multi-use cluster costing remains open |
 | 17a | straight-line join clusters and planner-owned aggregate recipe homes | allocator 153/153; native MIR 6/6 | lib 765/765; native 60/60; counter 9/9; fixtures, check, CI-target strict clippy, docs | final-source and two CPU-0 non-LTO candidate runs pass: `cy=9ae070 x3=aa pass=1`; final MIR is byte-identical | final compile 65.618 s; final execute 136.728 s; candidate intervals remain separately recorded above | structurally complete; runtime effect unconfirmed; interval solver remains open |
 | 17b | actual mixed-plan aggregate baseline | allocator 154/154; native MIR 6/6 | lib 766/766; native 60/60; counter 9/9; check and docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1`; complete SIR/MIR is byte-identical to Step 17a | compile 66.631 s; execute 128.829 s | cost-model correction complete; generated code unchanged; interval solver remains open |
+| 17c trial | rejected (no commit) | allocator 156/156; native MIR 6/6 | trial stopped before the retained common gate | cost-only and no-home variants both pass: `cy=9ae070 x3=aa pass=1` | cost-only compile 64.069 s / execute 131.028 s; no-home compile 68.297 s / execute 141.171 s | both variants regressed and were fully reverted |
+| 18 | `40e29243` | color 5/5; allocator 155/155; native MIR 6/6 | lib 767/767; native 60/60; counter 9/9; check, strict clippy, format, docs | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; complete SIR and spill/reload MIR bodies are unchanged | compile candidate/baseline/candidate 64.924 / 64.495 / 65.235 s; execute 127.868 / 136.098 / 128.095 s | complete; candidate mean execute -5.96%; interval solver remains open |
 
 ## Related design records
 
