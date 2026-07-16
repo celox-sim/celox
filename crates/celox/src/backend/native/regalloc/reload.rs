@@ -116,6 +116,13 @@ impl PlanningRecipes {
         )
     }
 
+    /// Cost of a path-specific MemorySSA recipe, excluding globally available
+    /// rematerialization. Spill placement uses this distinction only when it
+    /// can omit creation of a persistent stack home altogether.
+    pub(super) fn point_specific_materialization_cost(&self, point: PointUse) -> Option<u16> {
+        self.point_costs.get(&point).copied()
+    }
+
     pub(super) fn materialization_cost_on_edge(&self, edge: EdgeUse) -> Option<u16> {
         minimum_cost(
             self.global_materialization_cost(edge.value),

@@ -206,23 +206,46 @@ fn verify_with_work(
         .copied()
         .filter(|home| is_rematerializable_home(func, plan, *home))
         .collect::<BTreeSet<_>>();
-    let required_homes = point_ops
+    let mut required_homes = point_ops
         .iter()
-        .flat_map(|points| points.values().flatten())
-        .chain(edge_ops.values().flatten())
-        .filter_map(|operation| match operation {
-            PlannedOp::Reload { value, home } if !is_rematerialized_logical(func, *value) => {
-                Some(*home)
-            }
-            _ => None,
+        .enumerate()
+        .flat_map(|(block, points)| {
+            points.iter().flat_map(move |(&instruction, operations)| {
+                operations
+                    .iter()
+                    .filter_map(move |operation| match operation {
+                        PlannedOp::Reload { value, home }
+                            if !is_rematerialized_logical(func, *value)
+                                && !plan.recipe_reloads.contains(&(
+                                    func.blocks[block].id,
+                                    instruction,
+                                    *value,
+                                )) =>
+                        {
+                            Some(*home)
+                        }
+                        _ => None,
+                    })
+            })
         })
-        .chain(
-            spilled_phis
-                .iter()
-                .filter(|phi| !is_rematerialized_logical(func, phi.value))
-                .map(|phi| phi.home),
-        )
         .collect::<BTreeSet<_>>();
+    required_homes.extend(
+        edge_ops
+            .values()
+            .flatten()
+            .filter_map(|operation| match operation {
+                PlannedOp::Reload { value, home } if !is_rematerialized_logical(func, *value) => {
+                    Some(*home)
+                }
+                _ => None,
+            }),
+    );
+    required_homes.extend(
+        spilled_phis
+            .iter()
+            .filter(|phi| !is_rematerialized_logical(func, phi.value))
+            .map(|phi| phi.home),
+    );
 
     // Reconstruction turns a spilled phi into one store per incoming edge
     // unless the source's S_exit says that the shared congruence home is
@@ -343,6 +366,7 @@ fn verify_with_work(
         &exit_stores,
         &rematerializable_homes,
         &required_homes,
+        &plan.recipe_reloads,
         &spilled_phis,
         &phis_by_block,
         &mut phis,
@@ -443,6 +467,7 @@ fn rename_and_collect_queries(
     exit_stores: &[BTreeSet<SpillHome>],
     rematerializable_homes: &BTreeSet<SpillHome>,
     required_homes: &BTreeSet<SpillHome>,
+    recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
     spilled_phis: &[SpilledPhi],
     phis_by_block: &[Vec<(SpillHome, usize)>],
     phis: &mut [SparsePhi],
@@ -546,6 +571,7 @@ fn rename_and_collect_queries(
                 work,
                 false,
                 None,
+                recipe_reloads,
             );
         }
 
@@ -577,6 +603,7 @@ fn rename_and_collect_queries(
                     work,
                     true,
                     stores,
+                    recipe_reloads,
                 );
             }
             for &(home, phi) in &phis_by_block[successor] {
@@ -654,11 +681,19 @@ fn collect_reload_queries(
     work: &mut HomeVerifyWork,
     edge: bool,
     edge_stores: Option<&BTreeSet<SpillHome>>,
+    recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
 ) {
     for &operation in operations {
         let PlannedOp::Reload { value, home } = operation else {
             continue;
         };
+        if matches!(
+            location,
+            HomeLocation::Point(point)
+                if recipe_reloads.contains(&(point.block, point.instruction, value))
+        ) {
+            continue;
+        }
         if is_rematerialized_logical(func, value) {
             continue;
         }
@@ -858,6 +893,7 @@ mod tests {
         let mut plan = spill_plan::plan(func, cfg, &next_use, 32).unwrap();
         plan.point_ops.clear();
         plan.edge_ops.clear();
+        plan.recipe_reloads.clear();
         for state in plan
             .w_entry
             .iter_mut()

@@ -186,7 +186,13 @@ pub(super) fn reconstruct(
                 "spill-plan point names a block outside normalized CFG",
             ));
         };
-        let recipe = reload_recipe_at_point(reload_recipes, point, operation, &recipe_homes)?;
+        let recipe = reload_recipe_at_point(
+            reload_recipes,
+            point,
+            operation,
+            &recipe_homes,
+            &plan.recipe_reloads,
+        )?;
         let _ = materialize_operation(
             func,
             plan,
@@ -487,11 +493,13 @@ fn reload_recipe_at_point(
     point: ProgramPoint,
     operation: PlannedOp,
     recipe_homes: &BTreeSet<SpillHome>,
+    planned_recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
 ) -> Result<Option<ResolvedRecipe>, ReconstructError> {
     let PlannedOp::Reload { value, home } = operation else {
         return Ok(None);
     };
-    if !recipe_homes.contains(&home) {
+    let planned_recipe = planned_recipe_reloads.contains(&(point.block, point.instruction, value));
+    if !recipe_homes.contains(&home) && !planned_recipe {
         return Ok(None);
     }
     available_recipe_at_point(analysis, point, value)
@@ -503,7 +511,7 @@ fn reload_recipe_at_point(
                 Some(point.block),
                 Some(point.instruction),
                 vec![VReg(value.0)],
-                "spill-planner state recipe disappeared before reconstruction",
+                "planned MemorySSA recipe disappeared before reconstruction",
             )
         })
 }
@@ -649,6 +657,9 @@ fn verify_reload_homes(
         if let PlannedOp::Reload { value, home } = operation
             && rematerialized_logical_value(func, value).is_none()
             && !recipe_homes.contains(&home)
+            && !plan
+                .recipe_reloads
+                .contains(&(point.block, point.instruction, value))
         {
             if !stack_offsets.contains_key(&home) {
                 return Err(ReconstructError::new(
@@ -1933,6 +1944,124 @@ mod tests {
         func
     }
 
+    fn path_specific_final_recipe_fixture() -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let condition = vregs.alloc();
+        let left_first = vregs.alloc();
+        let left_second = vregs.alloc();
+        let overwrite = vregs.alloc();
+        let right_first = vregs.alloc();
+        let right_second = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 7]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 80,
+            src: stored,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Load {
+            dst: left_first,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Load {
+            dst: left_second,
+            base: BaseReg::StackFrame,
+            offset: 16,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 24,
+            src: left_first,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 32,
+            src: left_second,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 40,
+            src: stored,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Load {
+            dst: overwrite,
+            base: BaseReg::StackFrame,
+            offset: 48,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 80,
+            src: overwrite,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Load {
+            dst: right_first,
+            base: BaseReg::StackFrame,
+            offset: 56,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Load {
+            dst: right_second,
+            base: BaseReg::StackFrame,
+            offset: 64,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 72,
+            src: right_first,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 80,
+            src: right_second,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 88,
+            src: stored,
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+        func
+    }
+
     fn reconstruct_with_registers(
         mut func: MFunction,
         registers: usize,
@@ -1994,6 +2123,49 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn planner_uses_recipe_on_final_path_and_stack_on_overwritten_path() {
+        let mut func = path_specific_final_recipe_fixture();
+        func.verify();
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let planning_recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        next_use.verify(&func, &cfg).unwrap();
+        let plan = super::super::spill_plan::plan_with_recipe_costs(
+            &func,
+            &cfg,
+            &next_use,
+            &planning_recipes,
+            2,
+        )
+        .unwrap();
+        plan.verify(&func, &cfg, 2).unwrap();
+        super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
+        let stored = LogicalValue(0);
+        assert!(plan.recipe_reloads.contains(&(BlockId(1), 4, stored)));
+        assert!(plan.point_ops.iter().all(|(point, operation)| {
+            !(point.block == BlockId(1)
+                && matches!(operation, PlannedOp::Spill { value, .. } if *value == stored))
+        }));
+        assert!(plan.point_ops.iter().any(|(point, operation)| {
+            point.block == BlockId(2)
+                && matches!(operation, PlannedOp::Spill { value, .. } if *value == stored)
+        }));
+
+        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        super::super::reload::verify_expected_materialized_reloads(
+            &func,
+            &cfg,
+            &result.recipe_reloads,
+        )
+        .unwrap();
+
+        assert_eq!(result.frame_size, 8);
+        assert_eq!(result.recipe_reloads.len(), 1);
     }
 
     #[test]

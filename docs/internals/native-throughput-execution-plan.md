@@ -1500,6 +1500,85 @@ Status: **point-specific costs are structurally working and semantically
 qualified; execution effect is unconfirmed; allocator-owned state homes and
 use-cluster costing remain open**.
 
+### Step 16: Use a valid state version as the final-use spill home
+
+The first state-home slice is deliberately narrower than general per-use
+rematerialization.  When pressure evicts a value, the planner may omit creation
+of a persistent stack home only if all of the following are true:
+
+- the next local use is the value's final use over the complete CFG;
+- sparse MemorySSA proves a path-specific state recipe at that exact use;
+- materializing that recipe is strictly cheaper than creating and reloading a
+  stack home; and
+- reconstruction independently rebuilds the same physical recipe and the
+  post-reconstruction MemorySSA verifier accepts its memory version.
+
+The pending recipe is part of the spill plan rather than an opportunistic
+reconstruction choice.  It must be consumed at the exact planned use.  The
+stack-home verifier excludes only that annotated point; every ordinary point
+and edge reload still requires an all-path stack store.  If the value has any
+later use, the optimization is rejected and the existing stack path is kept.
+This final-use restriction means the recipe reload cannot create a second
+reload of the same split range.  Pricing a multi-use cluster remains a later
+allocator problem.
+
+An earlier mixed-home trial was rejected.  It kept the allocator's stack
+store, then replaced an individual stack reload with a same-cost state load.
+The generated MIR therefore retained the store without reducing the reload
+count and made locality worse.  Its separated measurements were 65.083 s for
+compile-only, 64.040 s compile plus 132.347 s execute for the full run; a
+strictly-cheaper variant measured 64.297 s compile-only and 133.574 s execute.
+None of that trial remains in the tree.
+
+The retained MIR has the intended allocator behavior.  In one `eval_comb`
+region the baseline kept `v12139` live after
+`store.i8 [sim + 33996575], v12139` until a later store and instead emitted a
+stack store/reload for `v12233`.  The candidate evicts `v12139` without a
+stack store, emits `load.i8 [sim + 33996575]` only at its final use, and keeps
+`v12233` resident, removing that stack store and load.  Equivalent changes
+occur for the exact homes at `33995064` and `34006548`.  The fused function
+also coalesces identical branch reload tails exposed by the changed residency;
+the complete post-allocation MIR was inspected with VReg, stack-slot, and
+block identities retained.  The spill frames change from 31,760 to 31,728
+bytes for `eval_comb` and from 38,712 to 38,696 bytes for
+`eval_comb_apply_ff`; the SIR files are byte-identical to Step 15.
+After the final source cleanup, all three SIR files and the complete
+191,062,398-byte MIR were regenerated with the rebuilt runner and compared
+byte for byte with the inspected candidate; all four match.  The final MIR's
+SHA-256 is `9a5854a85f8b78723b69d4ea0d11b4f2e516684d9a5741ba6b5f35ec61c37c4f`.
+
+Focused allocator tests pass 149/149.  They include a branch fixture where the
+same logical home uses the final state recipe on the non-overwritten arm and a
+normal stack spill/reload on the overwritten arm.  Spill-plan verification,
+the all-path home verifier, reconstruction, and the independent final-MIR
+MemorySSA verifier all accept that fixture.  Common non-LTO gates pass 761/761
+library tests, 6/6 native-MIR tests, 60/60 non-ignored native-testbench tests,
+and 9/9 non-ignored native/Cranelift/Wasm counter tests, together with
+formatting, `cargo check`, strict workspace clippy, and the documentation
+build.
+
+Code generation and execution were measured separately on CPU 0 using
+prebuilt non-LTO `heliodor-dev` runners, with tracing and Cargo build time
+outside both intervals.  The first inspected candidate measured:
+
+- compile-only: 65.239625733 s and `execute_ns=0`;
+- full-run compile: 64.343935736 s;
+- full-run execute: 128.532642253 s.
+
+The runner rebuilt from the final source measured 65.982896312 s compile-only
+with `execute_ns=0`, followed by 66.136450286 s full-run compile and
+138.830020431 s execute.  Both full runs reached normal power-down at the exact
+`cy=9ae070 x3=aa pass=1` marker.  Since the independently regenerated final
+MIR is byte-identical while the two executions differ by 10.297 s, neither a
+runtime improvement nor a runtime regression is assigned to this step.  It
+establishes the missing state-home representation only for a range which dies
+at the reload.  The next allocator step must price complete use clusters,
+register occupancy, loop frequency, and edge placement before selecting
+state, stack, or retained register residency for a multi-use range.
+
+Status: **structurally complete; final-use state homes remove concrete stack
+traffic; runtime effect unconfirmed; multi-use cluster costing remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -1527,6 +1606,7 @@ use-cluster costing remain open**.
 | 13b | cost-aware join residency with CFG anticipatability | allocator 141/141; native MIR 6/6 | lib 750/750; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and earlier candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 61.226 / 61.512 / 60.899 s, execute 137.664 / 135.005 / 131.713 s; earlier candidate 63.831 s compile / 131.116 s execute | seven unconditional join reloads removed or delayed; timing effect unconfirmed |
 | 14 | unchanged StateSSA writeback-edge elision | global StateSSA/mem2reg 19/19; native MIR 6/6 | lib 751/751; native 60/60; counter 9/9; strict clippy, Heliodor fixtures, docs | CPU-0 A--B--A and final candidate pass: `cy=9ae070 x3=aa pass=1` | A--B--A compile 64.276 / 62.684 / 64.201 s, execute 132.360 / 127.036 / 131.116 s; final candidate 68.105 s compile / 129.461 s execute | exact identity writebacks removed; candidate mean execute -2.65%; compile effect unconfirmed |
 | 15 | point-specific MemorySSA reload costs | allocator 147/147; reload 30/30; spill plan 11/11; native MIR 6/6 | lib 759/759; native 60/60; counter 9/9; check, strict clippy, docs | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 64.748 s (`execute_ns=0`); full-run compile 65.313 s; full-run execute 128.602 s | exact-use placement works; runtime effect unconfirmed; state homes and use-cluster costing remain open |
+| 16 | final-use MemorySSA spill homes | allocator 149/149; native MIR 6/6 | lib 761/761; native 60/60; counter 9/9; check, strict clippy, docs | two CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; final-source MIR is byte-identical | inspected/final compile-only 65.240 / 65.983 s (`execute_ns=0`); full compile 64.344 / 66.136 s; execute 128.533 / 138.830 s | concrete stack traffic removed; runtime effect unconfirmed; multi-use cluster costing remains open |
 
 ## Related design records
 
