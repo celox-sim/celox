@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784257031206,
+  "lastUpdate": 1784257032904,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -122902,6 +122902,215 @@ window.BENCHMARK_DATA = {
           {
             "name": "verilator/testbench_tick_lfsr_w32_x1000000",
             "value": 42911.481,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "29139614+renovate[bot]@users.noreply.github.com",
+            "name": "renovate[bot]",
+            "username": "renovate[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bb3c93efae1e7cf1758cc9a260c5dd99d9bb51ad",
+          "message": "Merge pull request #288 from celox-sim/renovate/pnpm-11.x\n\nUpdate pnpm to v11.11.0",
+          "timestamp": "2026-07-17T02:18:27Z",
+          "tree_id": "d19a2597676f2314520aeaf4c859ac94d9805a42",
+          "url": "https://github.com/celox-sim/celox/commit/bb3c93efae1e7cf1758cc9a260c5dd99d9bb51ad"
+        },
+        "date": 1784257032187,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "value": 12916443.436,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_linear_sec_p6",
+            "value": 993030.872,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_countones_w64",
+            "value": 993619.634,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_std_counter_w32",
+            "value": 952183.699,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_gray_counter_w32",
+            "value": 960592.616,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_fifo_w8_d16",
+            "value": 1036584.857,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_gray_codec_w32",
+            "value": 967891.431,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_edge_detector_w32",
+            "value": 941015.611,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_onehot_w64",
+            "value": 1053081.694,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_build_lfsr_w32",
+            "value": 936779.294,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "value": 0.17298060744828772,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "value": 172619.35733333335,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "value": 0.17522373558579057,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "value": 172686.63666666666,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1",
+            "value": 0.032254238656053244,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1000000",
+            "value": 32457.058,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_eval_linear_sec_p6_x1000000",
+            "value": 32369.393999999997,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_countones_w64_x1",
+            "value": 0.06121478734662991,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_countones_w64_x1000000",
+            "value": 61712.17333333333,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_std_counter_w32_x1",
+            "value": 0.05127715909905048,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_std_counter_w32_x1000000",
+            "value": 51491.07,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_std_counter_w32_x1000000",
+            "value": 52085.16333333334,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_gray_counter_w32_x1",
+            "value": 0.05145303940257673,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_gray_counter_w32_x1000000",
+            "value": 51484.85633333334,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_gray_counter_w32_x1000000",
+            "value": 51825.05966666666,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_fifo_w8_d16_x1",
+            "value": 0.06118146332217979,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_fifo_w8_d16_x1000000",
+            "value": 60652.42766666666,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_fifo_w8_d16_x1000000",
+            "value": 61001.41066666666,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_gray_codec_w32_x1",
+            "value": 0.03399509495735301,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_gray_codec_w32_x1000000",
+            "value": 34647.844666666664,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_edge_detector_w32_x1",
+            "value": 0.052188765501198574,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_edge_detector_w32_x1000000",
+            "value": 52543.277,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_onehot_w64_x1",
+            "value": 0.07010913552596262,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_eval_onehot_w64_x1000000",
+            "value": 70155.99333333333,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_lfsr_w32_x1",
+            "value": 0.05407627466694616,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/simulation_tick_lfsr_w32_x1000000",
+            "value": 53941.755666666664,
+            "unit": "us"
+          },
+          {
+            "name": "verilator/testbench_tick_lfsr_w32_x1000000",
+            "value": 54712.810666666664,
             "unit": "us"
           }
         ]
