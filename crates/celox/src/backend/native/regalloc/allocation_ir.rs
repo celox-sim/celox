@@ -9,16 +9,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, Uses, VReg,
 };
 
+use super::assignment::{PhysReg, RegConstraint, clobbers, use_constraints};
 use super::cfg::NormalizedCfg;
 use super::home_graph::{HomeGraph, LiveBundleId, RecipeId, RecipeNode};
 use super::live_interval::{
     DefinitionSite, LiveIntervalError, LiveIntervals, LivenessProgram, UseSite, analyze_program,
 };
-use super::reload::materialize_pure_step;
+use super::reload::{PureStep, materialize_pure_step};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct StackHomeId(pub u32);
@@ -139,6 +141,33 @@ pub(super) struct AllocationIr {
     next_synthetic_instruction: u32,
     block_index: HashMap<BlockId, usize>,
     blocks: Vec<AllocationBlock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum AllocationAffinityKind {
+    Copy,
+    Phi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct AllocationAffinity {
+    pub left: VReg,
+    pub right: VReg,
+    pub kind: AllocationAffinityKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AllocationInstructionConstraints {
+    pub block: BlockId,
+    pub instruction: usize,
+    pub fixed_uses: Vec<(VReg, PhysReg)>,
+    pub clobbers: Vec<PhysReg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AllocationMachineFacts {
+    pub instructions: Vec<AllocationInstructionConstraints>,
+    pub affinities: Vec<AllocationAffinity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -759,6 +788,116 @@ impl AllocationIr {
     pub(super) fn analyze(&self, cfg: &NormalizedCfg) -> Result<LiveIntervals, AllocationIrError> {
         self.verify_structure()?;
         analyze_program(self, cfg).map_err(AllocationIrError::live)
+    }
+
+    /// Rebuild target constraints and copy affinities from the current
+    /// allocation-IR operands. Original opcode snapshots remain the target
+    /// authority, while rewritten operands identify the machine values which
+    /// must satisfy each fixed use. Synthetic recipes are classified from
+    /// their exact HomeGraph node rather than inferred from def/use arity.
+    pub(super) fn machine_facts(
+        &self,
+        graph: &HomeGraph,
+        shift_encoding: VariableShiftEncoding,
+    ) -> Result<AllocationMachineFacts, AllocationIrError> {
+        self.verify_structure()?;
+        let mut instructions = Vec::new();
+        let mut affinities = BTreeSet::new();
+        for block in &self.blocks {
+            for phi in &block.phis {
+                if !phi.register_definition {
+                    continue;
+                }
+                for ((_, source), in_register) in phi.sources.iter().zip(&phi.register_sources) {
+                    if *in_register {
+                        insert_affinity(
+                            &mut affinities,
+                            *source,
+                            phi.destination,
+                            AllocationAffinityKind::Phi,
+                        );
+                    }
+                }
+            }
+            for (position, instruction) in block.instructions.iter().enumerate() {
+                let (fixed_uses, instruction_clobbers, copy) = match instruction.origin {
+                    AllocationInstructionOrigin::Original { .. } => {
+                        let original = instruction.original.as_ref().ok_or_else(|| {
+                            AllocationIrError::new(
+                                "ALLOCATION_IR.CONSTRAINT_SNAPSHOT",
+                                Some(block.id),
+                                Some(position),
+                                instruction.uses.to_vec(),
+                                "original allocation instruction has no target-opcode snapshot",
+                            )
+                        })?;
+                        let constraints = use_constraints(original, shift_encoding);
+                        if constraints.len() != instruction.uses.len() {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.CONSTRAINT_ARITY",
+                                Some(block.id),
+                                Some(position),
+                                instruction.uses.to_vec(),
+                                "target operand constraints do not match rewritten MIR arity",
+                            ));
+                        }
+                        let fixed = instruction
+                            .uses
+                            .into_iter()
+                            .zip(constraints)
+                            .filter_map(|(value, constraint)| match constraint {
+                                RegConstraint::Any => None,
+                                RegConstraint::Fixed(register) => Some((value, register)),
+                            })
+                            .collect();
+                        let copy = match original {
+                            MInst::Mov { .. } | MInst::Mov32 { .. } => {
+                                copy_operands(block.id, position, instruction)?
+                            }
+                            _ => None,
+                        };
+                        (fixed, clobbers(original).to_vec(), copy)
+                    }
+                    AllocationInstructionOrigin::Synthetic { operation, .. } => {
+                        let copy = match operation {
+                            SyntheticOperation::RecipeNode { node, .. }
+                                if matches!(
+                                    graph.recipe_nodes.get(node.0 as usize),
+                                    Some(RecipeNode::Unary {
+                                        operation: PureStep::Copy64 | PureStep::Copy32,
+                                        ..
+                                    })
+                                ) =>
+                            {
+                                copy_operands(block.id, position, instruction)?
+                            }
+                            _ => None,
+                        };
+                        (Vec::new(), Vec::new(), copy)
+                    }
+                };
+                if let Some((source, destination)) = copy {
+                    insert_affinity(
+                        &mut affinities,
+                        source,
+                        destination,
+                        AllocationAffinityKind::Copy,
+                    );
+                }
+                if !fixed_uses.is_empty() || !instruction_clobbers.is_empty() {
+                    instructions.push(AllocationInstructionConstraints {
+                        block: block.id,
+                        instruction: position,
+                        fixed_uses,
+                        clobbers: instruction_clobbers,
+                    });
+                }
+            }
+        }
+        Ok(AllocationMachineFacts {
+            instructions,
+            affinities: affinities.into_iter().collect(),
+        })
     }
 
     /// Resolve an immutable original-MIR use anchor to its position in the
@@ -1583,6 +1722,41 @@ impl AllocationIr {
         }
         Ok(())
     }
+}
+
+fn copy_operands(
+    block: BlockId,
+    instruction_index: usize,
+    instruction: &AllocationInstruction,
+) -> Result<Option<(VReg, VReg)>, AllocationIrError> {
+    let operands = instruction.uses.to_vec();
+    let ([source], Some(destination)) = (operands.as_slice(), instruction.definition) else {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.COPY_SIGNATURE",
+            Some(block),
+            Some(instruction_index),
+            operands,
+            "copy-class machine instruction does not have one source and one destination",
+        ));
+    };
+    Ok(Some((*source, destination)))
+}
+
+fn insert_affinity(
+    affinities: &mut BTreeSet<AllocationAffinity>,
+    left: VReg,
+    right: VReg,
+    kind: AllocationAffinityKind,
+) {
+    if left == right {
+        return;
+    }
+    let (left, right) = if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    affinities.insert(AllocationAffinity { left, right, kind });
 }
 
 fn rewrite_original_instruction(

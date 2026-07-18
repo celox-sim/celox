@@ -2931,10 +2931,29 @@ and independently verifies both that plan and its frame bounds. The
 planning, explicit expansion, splitting to the joint fixed point, atomic MIR
 lowering, filtered physical-liveness reconstruction, and SSA-destruction
 verification as one gate. Production MIR remains on the interim allocator, so
-this step makes no Linux or throughput claim. Step 27d7 must integrate target
-fixed/clobber constraints, copy and phi affinities/coalescing, and final
-stack-slot interference coloring into the same closed result before any
-production switch.
+this step makes no Linux or throughput claim. Step 27d7 integrates target
+constraints and copy/phi coalescing first, then final stack-slot interference
+coloring into the same closed result before any production switch.
+
+Step 27d7a integrates target constraints without globally pinning a long live
+range. A private diagnostic clone is split at every fixed-operand or clobber
+point by an explicit complete-live-set SSA permutation. Unlike the old
+post-spill entry point, allocation-time permutation verification accepts more
+than K rows and hands them to ordinary home selection and joint splitting.
+After each allocation-IR rewrite, fixed uses are rebuilt from the immutable
+opcode and current operands, while RAX/RDX-style clobbers remove colors only
+from sparse intervals live across both sides of the exact instruction.
+
+Copy and register-resident phi edges now form weighted affinities. They affect
+initial register order and a transactional conservative coalescer which
+temporarily removes both endpoints from the physical interval matrix. A
+common color is published only when masks permit it, the sparse union remains
+interference-free, and satisfied incident affinity weight strictly increases.
+The constraint model and final assignment are independently rebuilt and
+verified. The complete diagnostic library, native-testbench, and counter
+gates pass. Production MIR is unchanged, so there is no Linux or throughput
+claim. Step 27d7b must derive exact stack-home live ranges and color frame-slot
+interference before the production switch can be considered.
 
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
@@ -3001,6 +3020,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d4 joint original/synthetic allocation boundary | this step | joint allocation 4/4 including affinity override, sibling-arm sharing, split requests, and fixed-pressure rejection | lib 819/819; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | split requests are not yet resolved and production MIR is unchanged | n/a | old assignments are affinities only; every machine range is jointly colored or returned in an exact split obligation |
 | 27d5 exact pressure-region splitting and joint fixed point | this step | allocation split 5/5 including complete synthetic-pressure allocation, sibling-arm isolation, loop reentry, partial stack residency, and repeated-entry termination | lib 824/824; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | exact result is not yet lowered to production MIR; no Linux semantic claim | n/a | reachable suffixes become multiple dominance regions or exact homes; dead synthetic DAGs are compacted and every value re-enters joint allocation |
 | 27d6 atomic MIR and out-of-SSA location lowering | this step | allocation lowering 3/3 including exact stack/recipe lowering, stale-input rejection, and more-than-K phi rows | lib 827/827 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | the closed joint result lowers atomically; exact stack/immediate phi locations avoid fictitious source and destination pressure; constraints, coalescing, and stack coloring remain next |
+| 27d7a split target constraints and weighted coalescing | this step | allocation constraints 2/2; pre-spill Perm pressure regression 1/1; joint allocation 4/4; split 5/5; lowering 3/3 | lib 830/830 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | fixed/clobber boundaries split SSA ranges before allocation; rewritten operands own mandatory masks; sparse transactional coalescing preserves correctness; stack-home lifetime coloring remains next |
 
 ## Related design records
 

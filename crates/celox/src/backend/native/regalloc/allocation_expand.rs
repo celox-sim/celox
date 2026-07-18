@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
 
 use super::allocation_ir::{
@@ -131,6 +132,7 @@ pub(super) enum ExpandedStackHomeKind {
 pub(super) struct ExpandedAllocationProblem {
     pub ir: AllocationIr,
     pub intervals: LiveIntervals,
+    pub shift_encoding: VariableShiftEncoding,
     pub roots: Vec<ExpandedRoot>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
     pub stack_homes: Vec<ExpandedStackHome>,
@@ -483,6 +485,7 @@ pub(super) fn expand(
     Ok(ExpandedAllocationProblem {
         ir,
         intervals,
+        shift_encoding: func.target_features.variable_shift_encoding(),
         roots,
         register_regions,
         stack_homes,

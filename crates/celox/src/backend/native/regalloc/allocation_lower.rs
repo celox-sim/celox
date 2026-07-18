@@ -145,8 +145,8 @@ pub(super) fn lower(
         .ir
         .verify_stack_homes(cfg)
         .map_err(AllocationLowerError::ir)?;
-    let problem =
-        JointAllocationProblem::build(expanded, cfg).map_err(AllocationLowerError::joint)?;
+    let problem = JointAllocationProblem::build(expanded, cfg, graph, registers)
+        .map_err(AllocationLowerError::joint)?;
     problem
         .verify(cfg, registers, allocation)
         .map_err(AllocationLowerError::joint)?;

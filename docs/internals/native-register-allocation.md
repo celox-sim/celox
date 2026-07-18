@@ -233,8 +233,10 @@ Each retained slice ends at a verified representation boundary:
    locations, independently rebuilt physical liveness, and the complete
    out-of-SSA parallel-copy plan before publication. **Complete in the
    diagnostic path.**
-7. Integrate fixed constraints, copy/phi coalescing, and final stack-slot
-   coloring, then run the complete native and counter suites.
+7. Split live ranges at fixed/clobber boundaries, rebuild mandatory masks from
+   rewritten machine operands, coalesce copy/phi affinities transactionally,
+   and color exact stack-home interference. The first three parts are complete
+   in the diagnostic path; stack-slot coloring remains.
 8. Replace production W/S only after differential MIR execution and the exact
    Heliodor Linux marker pass.  Measure code generation and generated-code
    execution separately; use non-LTO builds during iteration and a final
@@ -324,8 +326,30 @@ to an explicit edge-local stack home; all recipe intermediates still enter
 joint allocation. This is required for functions with more phi rows on one
 edge than physical registers. The resulting `AssignmentMap` and complete SSA
 destruction plan are independently verified. Production code generation is
-still the interim allocator below until fixed constraints, coalescing, and
-stack-slot coloring are part of the same closed result.
+still the interim allocator below until stack-slot coloring completes the
+same closed result.
+
+Target constraints no longer pin an unsplit long-lived VReg. Before home
+selection, every fixed-operand or clobbering instruction receives an explicit
+SSA permutation boundary containing the complete live set. The allocation
+entry point permits more than K rows at this pre-spill boundary; those rows
+are ordinary roots which may select stack/state/rematerialized homes and
+re-enter the joint fixed point. This localizes a legacy shift's RCX
+requirement and a divide's RAX/RDX exclusion to the representative spanning
+that machine boundary.
+
+After every allocation-IR rewrite, target facts are rebuilt from the immutable
+opcode snapshot and the current operand row. A fixed use therefore constrains
+the actual reload or recipe result consumed by the instruction, not a stale
+source VReg. Clobber exclusions apply only when an exact sparse segment covers
+both the instruction-use and instruction-definition slots. Mandatory masks
+are checked during coloring and independently during result verification.
+Mov and register-resident phi edges form a weighted affinity graph. Greedy
+color choice consults already assigned neighbors, then a conservative
+post-color pass removes both endpoints from the sparse interval matrix and
+publishes a common color only if allowed masks, exact interference, and total
+incident affinity weight all improve. Production remains unchanged until
+stack-home lifetimes and frame-slot coloring close the remaining boundary.
 
 ## Interim allocator architecture
 

@@ -12,13 +12,16 @@ use std::fmt;
 
 use crate::backend::native::mir::{BlockId, VReg};
 
+use super::allocation_constraints::{
+    AllocationConstraintError, AllocationConstraintModel, RegisterMask, WeightedAffinity,
+};
 use super::allocation_expand::{
     ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition,
     ExpandedStackHomeKind, ExpandedUseSource,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
-use super::home_graph::{BundleUseId, LiveBundleId};
+use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_union::{
     AllocationBundleId, IntervalUnionError, LiveIntervalMatrix, SparseRange,
 };
@@ -44,6 +47,7 @@ pub(super) struct AllocationValue {
     pub interval: LiveInterval,
     pub class: AllocationValueClass,
     pub preferred_register: Option<PhysReg>,
+    pub allowed_registers: RegisterMask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +56,8 @@ pub(super) struct JointAllocationProblem {
     pub values: Vec<AllocationValue>,
     value_ids: Vec<Option<AllocationBundleId>>,
     definition_order: Vec<AllocationBundleId>,
+    target_registers: Vec<PhysReg>,
+    affinities: Vec<WeightedAffinity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +127,15 @@ impl JointAllocationError {
             error.message,
         )
     }
+
+    fn constraints(error: AllocationConstraintError) -> Self {
+        Self::new(
+            error.rule,
+            error.block,
+            error.values.first().copied(),
+            error.message,
+        )
+    }
 }
 
 impl fmt::Display for JointAllocationError {
@@ -150,7 +165,11 @@ impl JointAllocationProblem {
     pub(super) fn build(
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
     ) -> Result<Self, JointAllocationError> {
+        let constraints = AllocationConstraintModel::build(expanded, cfg, graph, registers)
+            .map_err(JointAllocationError::constraints)?;
         let recomputed = expanded.ir.analyze(cfg).map_err(|error| {
             JointAllocationError::new(
                 error.rule,
@@ -459,6 +478,14 @@ impl JointAllocationProblem {
                 interval: interval.clone(),
                 class,
                 preferred_register,
+                allowed_registers: constraints.allowed(value).ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.CONSTRAINT_VALUE",
+                        Some(interval.definition.block()),
+                        Some(value),
+                        "machine value has no target-register constraint row",
+                    )
+                })?,
             });
         }
         if let Some((&value, region)) = regions.first_key_value() {
@@ -476,6 +503,8 @@ impl JointAllocationProblem {
             values,
             value_ids,
             definition_order,
+            target_registers: registers.to_vec(),
+            affinities: constraints.affinities,
         })
     }
 
@@ -489,6 +518,14 @@ impl JointAllocationProblem {
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<JointAllocationOutcome, JointAllocationError> {
+        if registers != self.target_registers {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.TARGET_REGISTER_SET",
+                None,
+                None,
+                "allocation register order differs from the verified constraint model",
+            ));
+        }
         let mut matrix =
             LiveIntervalMatrix::new(cfg, registers).map_err(JointAllocationError::union)?;
         let mut ranges = Vec::<SparseRange>::with_capacity(self.values.len());
@@ -507,6 +544,18 @@ impl JointAllocationProblem {
                     Some(value.interval.definition.block()),
                     Some(value.value),
                     "expanded register preference is outside the target register set",
+                ));
+            }
+            if value.allowed_registers.is_empty()
+                || !registers
+                    .iter()
+                    .any(|register| value.allowed_registers.contains(*register))
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.EMPTY_ALLOWED_REGISTERS",
+                    Some(value.interval.definition.block()),
+                    Some(value.value),
+                    "machine value has no allowed register in the target set",
                 ));
             }
         }
@@ -529,18 +578,25 @@ impl JointAllocationProblem {
                     "allocation value has no validated sparse range",
                 )
             })?;
-            let mut register_order = Vec::with_capacity(registers.len());
-            if let Some(preferred) = value.preferred_register {
-                register_order.push(preferred);
-            }
-            register_order.extend(
-                registers
-                    .iter()
-                    .copied()
-                    .filter(|register| Some(*register) != value.preferred_register),
-            );
+            let mut register_order = registers
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, register)| value.allowed_registers.contains(*register))
+                .collect::<Vec<_>>();
+            register_order.sort_by(|(left_order, left), (right_order, right)| {
+                let left_score = self.assigned_affinity_score(value.value, *left, &assignments);
+                let right_score = self.assigned_affinity_score(value.value, *right, &assignments);
+                right_score
+                    .cmp(&left_score)
+                    .then_with(|| {
+                        (Some(*right) == value.preferred_register)
+                            .cmp(&(Some(*left) == value.preferred_register))
+                    })
+                    .then_with(|| left_order.cmp(right_order))
+            });
             let mut selected = None;
-            for register in register_order {
+            for (_, register) in register_order {
                 if !matrix
                     .interferes_validated(register, range.validated())
                     .map_err(JointAllocationError::union)?
@@ -562,7 +618,10 @@ impl JointAllocationProblem {
             if matches!(value.class, AllocationValueClass::Region { .. }) {
                 split_values.insert(value.value);
             }
-            for &register in registers {
+            for &register in registers
+                .iter()
+                .filter(|register| value.allowed_registers.contains(**register))
+            {
                 let residents = matrix
                     .conflicts_validated(register, range.validated())
                     .map_err(JointAllocationError::union)?;
@@ -641,10 +700,203 @@ impl JointAllocationProblem {
             }));
         }
 
+        self.coalesce_affinities(&mut matrix, &ranges, &mut assignments)?;
         let result = JointAllocation { assignments };
         self.verify(cfg, registers, &result)?;
         matrix.verify().map_err(JointAllocationError::union)?;
         Ok(JointAllocationOutcome::Complete(result))
+    }
+
+    fn assigned_affinity_score(
+        &self,
+        value: VReg,
+        register: PhysReg,
+        assignments: &[Option<PhysReg>],
+    ) -> u64 {
+        self.affinities
+            .iter()
+            .filter_map(|affinity| {
+                let other = if affinity.left == value {
+                    affinity.right
+                } else if affinity.right == value {
+                    affinity.left
+                } else {
+                    return None;
+                };
+                (assignments.get(other.0 as usize).copied().flatten() == Some(register))
+                    .then_some(u64::from(affinity.weight))
+            })
+            .sum()
+    }
+
+    /// Conservative post-color coalescing. Every attempted recolor removes
+    /// both endpoints from the exact sparse matrix, requires a common allowed
+    /// color, proves the union interference-free, and publishes only when the
+    /// total satisfied incident affinity weight strictly increases.
+    fn coalesce_affinities(
+        &self,
+        matrix: &mut LiveIntervalMatrix,
+        ranges: &[SparseRange],
+        assignments: &mut [Option<PhysReg>],
+    ) -> Result<(), JointAllocationError> {
+        let mut affinities = self.affinities.clone();
+        affinities.sort_unstable_by(|left, right| {
+            right
+                .weight
+                .cmp(&left.weight)
+                .then_with(|| (left.left, left.right).cmp(&(right.left, right.right)))
+        });
+        for affinity in affinities {
+            let Some(left) = self.value(affinity.left) else {
+                continue;
+            };
+            let Some(right) = self.value(affinity.right) else {
+                continue;
+            };
+            if left.interval.interferes(&right.interval) {
+                continue;
+            }
+            let left_register = assignments[left.value.0 as usize].ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.COALESCE_ASSIGNMENT",
+                    Some(left.interval.definition.block()),
+                    Some(left.value),
+                    "affinity endpoint has no physical assignment",
+                )
+            })?;
+            let right_register = assignments[right.value.0 as usize].ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.COALESCE_ASSIGNMENT",
+                    Some(right.interval.definition.block()),
+                    Some(right.value),
+                    "affinity endpoint has no physical assignment",
+                )
+            })?;
+            if left_register == right_register {
+                continue;
+            }
+            let before = self.incident_affinity_score(left.value, right.value, None, assignments);
+            let mut candidates = self
+                .target_registers
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, register)| {
+                    left.allowed_registers.contains(*register)
+                        && right.allowed_registers.contains(*register)
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(
+                |(left_order, left_candidate), (right_order, right_candidate)| {
+                    let left_score = self.incident_affinity_score(
+                        left.value,
+                        right.value,
+                        Some(*left_candidate),
+                        assignments,
+                    );
+                    let right_score = self.incident_affinity_score(
+                        left.value,
+                        right.value,
+                        Some(*right_candidate),
+                        assignments,
+                    );
+                    right_score
+                        .cmp(&left_score)
+                        .then_with(|| left_order.cmp(right_order))
+                },
+            );
+
+            let left_range = ranges.get(left.id.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.COALESCE_RANGE",
+                    Some(left.interval.definition.block()),
+                    Some(left.value),
+                    "left affinity endpoint has no validated sparse range",
+                )
+            })?;
+            let right_range = ranges.get(right.id.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.COALESCE_RANGE",
+                    Some(right.interval.definition.block()),
+                    Some(right.value),
+                    "right affinity endpoint has no validated sparse range",
+                )
+            })?;
+            matrix
+                .unassign_validated(left.id, left_range.validated())
+                .map_err(JointAllocationError::union)?;
+            if let Err(error) = matrix.unassign_validated(right.id, right_range.validated()) {
+                matrix
+                    .assign_validated(left.id, left_register, left_range.validated())
+                    .map_err(JointAllocationError::union)?;
+                return Err(JointAllocationError::union(error));
+            }
+
+            let mut selected = None;
+            for (_, candidate) in candidates {
+                let after = self.incident_affinity_score(
+                    left.value,
+                    right.value,
+                    Some(candidate),
+                    assignments,
+                );
+                if after <= before
+                    || matrix
+                        .interferes_validated(candidate, left_range.validated())
+                        .map_err(JointAllocationError::union)?
+                    || matrix
+                        .interferes_validated(candidate, right_range.validated())
+                        .map_err(JointAllocationError::union)?
+                {
+                    continue;
+                }
+                selected = Some(candidate);
+                break;
+            }
+            if let Some(register) = selected {
+                matrix
+                    .assign_validated(left.id, register, left_range.validated())
+                    .map_err(JointAllocationError::union)?;
+                matrix
+                    .assign_validated(right.id, register, right_range.validated())
+                    .map_err(JointAllocationError::union)?;
+                assignments[left.value.0 as usize] = Some(register);
+                assignments[right.value.0 as usize] = Some(register);
+            } else {
+                matrix
+                    .assign_validated(left.id, left_register, left_range.validated())
+                    .map_err(JointAllocationError::union)?;
+                matrix
+                    .assign_validated(right.id, right_register, right_range.validated())
+                    .map_err(JointAllocationError::union)?;
+            }
+        }
+        matrix.verify().map_err(JointAllocationError::union)
+    }
+
+    fn incident_affinity_score(
+        &self,
+        left: VReg,
+        right: VReg,
+        override_register: Option<PhysReg>,
+        assignments: &[Option<PhysReg>],
+    ) -> u64 {
+        let assigned = |value: VReg| {
+            if matches!(value, candidate if candidate == left || candidate == right) {
+                override_register.or_else(|| assignments[value.0 as usize])
+            } else {
+                assignments[value.0 as usize]
+            }
+        };
+        self.affinities
+            .iter()
+            .filter(|affinity| {
+                matches!(affinity.left, value if value == left || value == right)
+                    || matches!(affinity.right, value if value == left || value == right)
+            })
+            .filter(|affinity| assigned(affinity.left) == assigned(affinity.right))
+            .map(|affinity| u64::from(affinity.weight))
+            .sum()
     }
 
     pub(super) fn verify(
@@ -653,6 +905,14 @@ impl JointAllocationProblem {
         registers: &[PhysReg],
         allocation: &JointAllocation,
     ) -> Result<(), JointAllocationError> {
+        if registers != self.target_registers {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.TARGET_REGISTER_SET",
+                None,
+                None,
+                "verification register order differs from the constraint model",
+            ));
+        }
         if allocation.assignments.len() != self.value_count as usize {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.ASSIGNMENT_SHAPE",
@@ -688,6 +948,14 @@ impl JointAllocationProblem {
                     "machine definition has no physical register",
                 )
             })?;
+            if !value.allowed_registers.contains(register) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.CONSTRAINT_ASSIGNMENT",
+                    Some(value.interval.definition.block()),
+                    Some(value.value),
+                    format!("assigned register {register} violates the machine-value mask"),
+                ));
+            }
             rebuilt
                 .assign(value.id, register, &value.interval.segments)
                 .map_err(JointAllocationError::union)?;
@@ -825,7 +1093,11 @@ mod tests {
         (cfg, graph)
     }
 
-    fn fixed_problem(function: &MFunction, cfg: &NormalizedCfg) -> JointAllocationProblem {
+    fn fixed_problem(
+        function: &MFunction,
+        cfg: &NormalizedCfg,
+        registers: &[PhysReg],
+    ) -> JointAllocationProblem {
         let intervals = live_interval::analyze(function, cfg).unwrap();
         let value_count = function.vregs.count();
         let mut values = Vec::new();
@@ -842,6 +1114,7 @@ mod tests {
                 interval,
                 class: AllocationValueClass::Fixed,
                 preferred_register: None,
+                allowed_registers: RegisterMask::from_registers(registers),
             });
         }
         let definition_order = definition_order(&values, cfg).unwrap();
@@ -850,6 +1123,8 @@ mod tests {
             values,
             value_ids,
             definition_order,
+            target_registers: registers.to_vec(),
+            affinities: Vec::new(),
         }
     }
 
@@ -889,7 +1164,7 @@ mod tests {
             }
         }
 
-        let problem = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let problem = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert_eq!(
             problem.values.len(),
             expanded
@@ -979,7 +1254,7 @@ mod tests {
         let registers = [PhysReg::RAX, PhysReg::RDX];
         let plan = allocate_roots(&graph, &cfg, &registers).unwrap();
         let expanded = expand(&function, &cfg, &graph, &plan, &registers).unwrap();
-        let problem = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let problem = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
 
         let JointAllocationOutcome::NeedsSplit(request) =
             problem.allocate(&cfg, &registers).unwrap()
@@ -1023,9 +1298,10 @@ mod tests {
         ];
         let mut function = function(3, instructions);
         let cfg = super::super::cfg::normalize(&mut function).unwrap();
-        let problem = fixed_problem(&function, &cfg);
+        let registers = [PhysReg::RAX];
+        let problem = fixed_problem(&function, &cfg, &registers);
 
-        let error = problem.allocate(&cfg, &[PhysReg::RAX]).unwrap_err();
+        let error = problem.allocate(&cfg, &registers).unwrap_err();
         assert_eq!(error.rule, "JOINT_ALLOC.UNSPLITTABLE_PRESSURE");
     }
 
@@ -1074,10 +1350,11 @@ mod tests {
         merge.push(MInst::Return);
         function.blocks = vec![entry, left, right, merge];
         let cfg = super::super::cfg::normalize(&mut function).unwrap();
-        let problem = fixed_problem(&function, &cfg);
+        let registers = [PhysReg::RAX];
+        let problem = fixed_problem(&function, &cfg, &registers);
 
         let JointAllocationOutcome::Complete(allocation) =
-            problem.allocate(&cfg, &[PhysReg::RAX]).unwrap()
+            problem.allocate(&cfg, &registers).unwrap()
         else {
             panic!("branch-exclusive ranges must not be linearized into interference");
         };

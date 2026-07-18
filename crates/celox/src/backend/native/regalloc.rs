@@ -5,6 +5,8 @@
 //! colors chordal SSA live ranges without an explicit interference graph.
 
 #[allow(dead_code)]
+mod allocation_constraints;
+#[allow(dead_code)]
 mod allocation_expand;
 #[allow(dead_code)]
 mod allocation_ir;
@@ -282,6 +284,17 @@ fn allocation_lower_error(
     )
 }
 
+fn allocation_perm_error(phase: &'static str, error: legalize::PermError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
 fn ssa_destruction_error(
     phase: &'static str,
     error: super::ssa_destroy::SsaDestructionError,
@@ -450,8 +463,21 @@ fn run_regalloc_in_place(
     }
     if interval_diagnostic {
         let interval_start = timing.then(crate::timing::now);
+        let constraint_perm_start = timing.then(crate::timing::now);
+        let mut interval_func = func.clone();
+        let (interval_cfg, _constraint_perms) =
+            legalize::materialize_allocation_constraint_perms(&mut interval_func, &normalized_cfg)
+                .map_err(|error| {
+                    allocation_perm_error("interval constraint permutation construction", error)
+                })?;
+        if let Some(start) = constraint_perm_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_constraint_perms elapsed={:?}",
+                start.elapsed()
+            );
+        }
         let home_start = timing.then(crate::timing::now);
-        let homes = home_graph::build(func, &normalized_cfg)
+        let homes = home_graph::build(&interval_func, &interval_cfg)
             .map_err(|error| home_graph_error("interval HomeGraph construction", error))?;
         if let Some(start) = home_start {
             eprintln!(
@@ -460,12 +486,11 @@ fn run_regalloc_in_place(
             );
         }
         let allocation_start = timing.then(crate::timing::now);
-        let plan = interval_allocator::allocate_roots(
-            &homes,
-            &normalized_cfg,
-            assignment::ALLOCATABLE_REGS,
-        )
-        .map_err(|error| interval_allocation_error("interval allocation diagnostics", error))?;
+        let plan =
+            interval_allocator::allocate_roots(&homes, &interval_cfg, assignment::ALLOCATABLE_REGS)
+                .map_err(|error| {
+                    interval_allocation_error("interval allocation diagnostics", error)
+                })?;
         if let Some(start) = allocation_start {
             eprintln!(
                 "[regalloc-timing] label={label} interval_allocation elapsed={:?}",
@@ -474,8 +499,8 @@ fn run_regalloc_in_place(
         }
         let expand_start = timing.then(crate::timing::now);
         let mut expanded = allocation_expand::expand(
-            func,
-            &normalized_cfg,
+            &interval_func,
+            &interval_cfg,
             &homes,
             &plan,
             assignment::ALLOCATABLE_REGS,
@@ -491,7 +516,7 @@ fn run_regalloc_in_place(
         let allocation = allocation_split::allocate_with_splitting(
             &mut expanded,
             &homes,
-            &normalized_cfg,
+            &interval_cfg,
             assignment::ALLOCATABLE_REGS,
         )
         .map_err(|error| allocation_split_error("interval joint reallocation", error))?;
@@ -503,8 +528,8 @@ fn run_regalloc_in_place(
         }
         let lowering_start = timing.then(crate::timing::now);
         let _lowered = allocation_lower::lower(
-            func,
-            &normalized_cfg,
+            &interval_func,
+            &interval_cfg,
             &homes,
             &expanded,
             &allocation,

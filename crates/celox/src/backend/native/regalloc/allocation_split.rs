@@ -418,6 +418,7 @@ pub(super) fn apply_split(
     joint: &JointAllocationProblem,
     plan: &RegionSplitPlan,
     cfg: &NormalizedCfg,
+    registers: &[PhysReg],
 ) -> Result<(), AllocationSplitError> {
     let candidate = candidate_from_plan(joint, plan)?;
     let dominance = Dominance::build(cfg)?;
@@ -540,7 +541,8 @@ pub(super) fn apply_split(
     normalize_register_regions(&mut next)?;
     prune_dead_materializations(&mut next)?;
     allocation_expand::refresh(&mut next, cfg).map_err(AllocationSplitError::expand)?;
-    JointAllocationProblem::build(&next, cfg).map_err(AllocationSplitError::joint)?;
+    JointAllocationProblem::build(&next, cfg, graph, registers)
+        .map_err(AllocationSplitError::joint)?;
     let after = split_progress(&next);
     if after >= before {
         return Err(AllocationSplitError::new(
@@ -589,8 +591,8 @@ pub(super) fn allocate_with_splitting(
         })?;
     let mut steps = 0u128;
     loop {
-        let joint =
-            JointAllocationProblem::build(expanded, cfg).map_err(AllocationSplitError::joint)?;
+        let joint = JointAllocationProblem::build(expanded, cfg, graph, registers)
+            .map_err(AllocationSplitError::joint)?;
         match joint
             .allocate(cfg, registers)
             .map_err(AllocationSplitError::joint)?
@@ -607,7 +609,7 @@ pub(super) fn allocate_with_splitting(
                     ));
                 }
                 let plan = plan_split(expanded, graph, &joint, &request, cfg)?;
-                apply_split(expanded, graph, &joint, &plan, cfg)?;
+                apply_split(expanded, graph, &joint, &plan, cfg, registers)?;
                 steps += 1;
             }
         }
@@ -1881,7 +1883,7 @@ mod tests {
         let registers = [PhysReg::RAX, PhysReg::RDX];
         let mut function = function(12, instructions);
         let (cfg, graph, expanded) = model(&mut function, &registers);
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let JointAllocationOutcome::NeedsSplit(request) = joint.allocate(&cfg, &registers).unwrap()
         else {
             panic!("explicit state materialization should expose root pressure");
@@ -1894,7 +1896,7 @@ mod tests {
 
         let mut solved = expanded;
         let allocation = allocate_with_splitting(&mut solved, &graph, &cfg, &registers).unwrap();
-        JointAllocationProblem::build(&solved, &cfg)
+        JointAllocationProblem::build(&solved, &cfg, &graph, &registers)
             .unwrap()
             .verify(&cfg, &registers, &allocation)
             .unwrap();
@@ -1955,7 +1957,7 @@ mod tests {
         function.blocks = vec![entry, left, right, merge];
         let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX, PhysReg::RBX];
         let (cfg, graph, mut expanded) = model(&mut function, &registers);
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let candidate = candidate(&joint, VReg(0));
         let request = request(&joint, VReg(3), candidate.clone());
         let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
@@ -1974,7 +1976,7 @@ mod tests {
             .map(|use_| (use_.id, use_.value, use_.source.clone()))
             .collect::<Vec<_>>();
 
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
         let root = root_for(&expanded, VReg(0));
         for (use_id, value, source) in right_uses {
             let use_ = &root.uses[use_id.0 as usize];
@@ -2025,7 +2027,7 @@ mod tests {
         function.blocks = vec![entry, loop_block, exit];
         let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX, PhysReg::RBX];
         let (cfg, graph, mut expanded) = model(&mut function, &registers);
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let candidate = candidate(&joint, VReg(0));
         let request = request(&joint, VReg(3), candidate.clone());
         let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
@@ -2035,7 +2037,7 @@ mod tests {
                 .iter()
                 .all(|entry| entry.kind == SplitEntryKind::Materialized)
         );
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
         assert!(
             root_for(&expanded, VReg(0))
                 .uses
@@ -2087,7 +2089,7 @@ mod tests {
         ];
         let mut function = function(7, instructions);
         let (cfg, graph, mut expanded) = model(&mut function, &registers);
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let candidate = candidate(&joint, VReg(2));
         let request = request(&joint, VReg(4), candidate);
         let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
@@ -2099,7 +2101,7 @@ mod tests {
                 .all(|entry| entry.home.kind == HomeKind::Stack)
         );
 
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
         let root = root_for(&expanded, VReg(2));
         assert!(matches!(
             root.uses[plan.retained[0].0 as usize].source,
@@ -2111,7 +2113,7 @@ mod tests {
                 .iter()
                 .any(|home| home.root == plan.root)
         );
-        let rebuilt = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert!(matches!(
             rebuilt.value(VReg(2)).unwrap().class,
             AllocationValueClass::Region { .. }
@@ -2146,13 +2148,13 @@ mod tests {
         let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX];
         let mut function = function(5, instructions);
         let (cfg, graph, mut expanded) = model(&mut function, &registers);
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let first_candidate = candidate(&joint, VReg(0));
         let first_request = request(&joint, VReg(1), first_candidate);
         let first_plan = plan_split(&expanded, &graph, &joint, &first_request, &cfg).unwrap();
         assert_eq!(first_plan.entries.len(), 1);
         assert_eq!(first_plan.entries[0].kind, SplitEntryKind::RegisterRegion);
-        apply_split(&mut expanded, &graph, &joint, &first_plan, &cfg).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &first_plan, &cfg, &registers).unwrap();
 
         let metadata = expanded
             .register_regions
@@ -2160,7 +2162,7 @@ mod tests {
             .find(|region| region.root == first_plan.root)
             .unwrap()
             .clone();
-        let joint = JointAllocationProblem::build(&expanded, &cfg).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let second_candidate = candidate(&joint, metadata.value);
         let second_request = request(&joint, metadata.value, second_candidate.clone());
         let second_plan = plan_split(&expanded, &graph, &joint, &second_request, &cfg).unwrap();
@@ -2174,7 +2176,15 @@ mod tests {
             entry.entry == metadata.entry_use && entry.kind == SplitEntryKind::Materialized
         }));
         let values_before_replacement = expanded.ir.value_count();
-        apply_split(&mut expanded, &graph, &joint, &second_plan, &cfg).unwrap();
+        apply_split(
+            &mut expanded,
+            &graph,
+            &joint,
+            &second_plan,
+            &cfg,
+            &registers,
+        )
+        .unwrap();
         assert_eq!(
             expanded.ir.value_count(),
             values_before_replacement + 1,
