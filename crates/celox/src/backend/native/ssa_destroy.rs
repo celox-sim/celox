@@ -202,6 +202,9 @@ impl SsaDestructionPlan {
                 for phi in &successor.phis {
                     let source =
                         unique_phi_source(phi.dst, &phi.sources, predecessor, successor.id)?;
+                    if assignment.is_semantic_phi_definition(phi.dst) {
+                        continue;
+                    }
                     rows.push(ParallelCopy {
                         phi_destination: phi.dst,
                         source_value: source,
@@ -300,13 +303,17 @@ impl SsaDestructionPlan {
                     )
                     .edge(predecessor, successor.id));
                 }
-                if edge.rows.len() != successor.phis.len() {
+                let expected_rows = successor
+                    .phis
+                    .iter()
+                    .filter(|phi| !assignment.is_semantic_phi_definition(phi.dst))
+                    .count();
+                if edge.rows.len() != expected_rows {
                     return Err(SsaDestructionError::new(
                         "SSA_DEST.INCOMPLETE_EDGE_ROWS",
                         format!(
-                            "plan has {} rows but successor has {} phi nodes",
+                            "plan has {} rows but successor has {expected_rows} located phi nodes",
                             edge.rows.len(),
-                            successor.phis.len()
                         ),
                     )
                     .edge(predecessor, successor.id));
@@ -344,6 +351,17 @@ impl SsaDestructionPlan {
                 for phi in &successor.phis {
                     let source =
                         unique_phi_source(phi.dst, &phi.sources, predecessor, successor.id)?;
+                    if assignment.is_semantic_phi_definition(phi.dst) {
+                        if rows_by_destination.contains_key(&phi.dst) {
+                            return Err(SsaDestructionError::new(
+                                "SSA_DEST.SEMANTIC_PHI_ROW",
+                                "semantic-only phi unexpectedly owns a machine copy row",
+                            )
+                            .edge(predecessor, successor.id)
+                            .values(phi.dst, Some(source)));
+                        }
+                        continue;
+                    }
                     let Some(row) = rows_by_destination.get(&phi.dst).copied() else {
                         return Err(SsaDestructionError::new(
                             "SSA_DEST.MISSING_PHI_ROW",
@@ -514,21 +532,14 @@ fn source_location(
     destination: VReg,
     source: VReg,
 ) -> Result<ParallelCopySource, SsaDestructionError> {
-    if let Some(location) = assignment
-        .phi_edge_location(predecessor, successor, destination, source)
-        .or_else(|| assignment.edge_location(predecessor, source))
+    if let Some(location) =
+        assignment.resolved_phi_source_location(predecessor, successor, destination, source)
     {
         return Ok(match location {
             EdgeLocation::Register(register) => ParallelCopySource::Register(register),
             EdgeLocation::Stack(slot) => ParallelCopySource::Stack(slot),
             EdgeLocation::Immediate(value) => ParallelCopySource::Immediate(value),
         });
-    }
-    if let Some(slot) = assignment.edge_spill_slot(source) {
-        return Ok(ParallelCopySource::Stack(slot));
-    }
-    if let Some(register) = assignment.get(source) {
-        return Ok(ParallelCopySource::Register(register));
     }
     Err(SsaDestructionError::new(
         "SSA_DEST.SOURCE_LOCATION",
@@ -1122,6 +1133,23 @@ mod tests {
                 .unwrap()
                 .has_effective_copies()
         );
+    }
+
+    #[test]
+    fn semantic_only_phi_retains_ssa_row_without_a_machine_copy() {
+        let function = one_edge_function(&[(VReg(1), VReg(0))]);
+        let mut assignment = AssignmentMap::default();
+        assignment.set_semantic_phi_definition(VReg(1));
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        plan.verify(&function, &assignment, 0).unwrap();
+
+        let edge = plan.edge(BlockId(0), BlockId(1)).unwrap();
+        assert!(edge.rows.is_empty());
+        assert!(edge.operations.is_empty());
+        assert_eq!(plan.stats().edges, 1);
+        assert_eq!(plan.stats().rows, 0);
+        assert_eq!(function.blocks[1].phis.len(), 1);
     }
 
     #[test]

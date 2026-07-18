@@ -3132,6 +3132,57 @@ a recoloring/spill action. The next slice must classify that exact fixed
 pressure and repair the transition/live-range model; changing search order or
 adding a threshold is not an acceptable resolution.
 
+Step 27d9g establishes that the reported fixed-only pressure was not a demand
+for another color. The blocked value and resident set were phi definitions
+whose allocation-IR use lists were empty after exact stack/immediate edge
+homes had replaced all of their physical uses. A MIR-wide dead-SSA deletion
+trial reached the same location and was rejected: one of those phi results was
+still named by a downstream semantic phi row, so removing its definition made
+the strict-SSA MIR invalid even though no machine instruction needed its
+value. This separates two identities which the previous allocator had
+conflated:
+
+- a strict-SSA phi identity may remain in MIR so downstream phi rows retain a
+  well-defined source;
+- a machine live range exists only when that identity must occupy a register
+  or stack destination at some instruction or out-of-SSA copy.
+
+Zero-physical-use phi definitions therefore have no live interval and do not
+enter constraint affinities or joint coloring. Atomic lowering marks them as
+semantic-only destinations, retains their MIR rows, and emits no incoming
+parallel copy. A destination-qualified edge home can still carry such an
+identity into a later located phi. `AssignmentMap` now owns the canonical
+resolution order for that source location, shared by assignment verification
+and SSA destruction; ordinary instruction uses cannot resolve a semantic-only
+value and are rejected. Complete and differential liveness independently
+agree on the absent machine interval.
+
+The first CPU-0 non-LTO run of this model reached atomic lowering for all
+large units but stopped after 476.017 s because the independent completed-
+assignment verifier omitted destination-qualified edge homes from its source
+lookup. SSA destruction had already resolved the same row successfully. The
+retained canonical lookup fixes that disagreement. The identical compile-only
+gate at
+`target/heliodor/results/20260718T212145Z_celox_test_soc_linux_boot.log`
+completed all four units with `compile_ns=456876096868` and `execute_ns=0`.
+The trace-free full run at
+`target/heliodor/results/20260718T213011Z_celox_test_soc_linux_boot.log`
+then powered down at the exact `cy=9ae070 x3=aa pass=1` marker, with
+`compile_ns=442109357275` and `execute_ns=267182563217`.
+
+This is a correctness and termination milestone, not a throughput win. The
+new allocator executes 2.33 times slower than the retained Step 26a result of
+114.833 s. Its emitted `eval_comb` contains 115,377 phi rows and 98,037
+effective edge copies. The current constraint lowering creates complete-live-
+set SSA permutations around fixed uses and clobbers; that mechanism changes
+the physical location of unrelated live values and pays for those changes at
+out-of-SSA edges. The next architectural slice must replace those whole-live-
+set permutations with position-specific fixed-use/clobber intervals and
+independently splittable value fragments. It must move only a constrained
+fragment when its adjacent colors differ. Tuning coalescing order, spill
+weights, or copy peepholes around the existing permutation graph is not an
+acceptable substitute.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3205,7 +3256,8 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9c differential allocation liveness | this step | incremental instruction/phi-edge liveness 2/2; regalloc 221/221; split 5/5 | candidate lib 840/840; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global constraint/region/joint-row rebuilding remains in the split loop | n/a | changed block facts rebuild only affected sparse SSA ranges; independent whole-program proofs remain at publication; session-owned constraints and semantic rows are next |
 | 27d9d differential target constraints | this step | incremental clobber/phi-affinity constraints 2/2; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global joint region/value rebuilding and full transactional clones remain | n/a | fixed/clobber/copy/phi facts are block indexed and masks update only changed VRegs; complete constraints are independently rebuilt at publication |
 | 27d9e persistent semantic rows and in-place split session | `ae170fbc` | differential/full joint identity in partial-stack split; differential/full DCE identity; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: actual-scale compile stopped on stale cross-block region liveness | 217.609 s; execute unavailable | stable ownership/definition/region indexes update changed rows only; actual scale exposed an incomplete split mutation set |
-| 27d9f unified split mutation journal | this step | cross-block register-region differential/full identity; regalloc 224/224; split 6/6 | candidate lib 843/843; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: two functions published, then fixed-only joint pressure stopped compilation | 266.162 s; execute unavailable | all operand rewrites update liveness and constraints from one transaction journal; fixed transition production/coloring is the next architectural boundary |
+| 27d9f unified split mutation journal | `a8b8d2cb` | cross-block register-region differential/full identity; regalloc 224/224; split 6/6 | candidate lib 843/843; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: two functions published, then fixed-only joint pressure stopped compilation | 266.162 s; execute unavailable | all operand rewrites update liveness and constraints from one transaction journal; fixed transition production/coloring remained open |
+| 27d9g semantic-only phi identities and canonical edge locations | this step | unused-phi physical liveness; semantic-only assignment/SSA-destruction boundaries; regalloc 228/228; SSA destruction 21/21 | candidate lib 848/848; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 456.876 s; full compile 442.109 s; execute 267.183 s | fixed-only false pressure removed and all units publish; runtime is 2.33x Step 26a, exposing whole-live-set constraint permutations as the next rejected design |
 
 ## Related design records
 

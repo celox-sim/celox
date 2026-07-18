@@ -551,6 +551,7 @@ impl IncrementalLiveness {
         for (value, interval) in intervals.intervals.iter().enumerate() {
             match (definitions[value], interval) {
                 (None, None) if uses[value].is_empty() => {}
+                (Some(DefinitionSite::Phi { .. }), None) if uses[value].is_empty() => {}
                 (Some(definition), Some(interval))
                     if interval.value == VReg(value as u32)
                         && interval.definition == definition
@@ -891,6 +892,14 @@ fn build_sparse_value_interval<P: LivenessProgram + ?Sized>(
     let value_uses = uses
         .get(value.0 as usize)
         .ok_or_else(|| value_range_error(program.block_id(0), value, "use list"))?;
+    // A phi is not an emitted machine instruction. Once allocation-owned
+    // homes have removed every register use of its result, the definition has
+    // no physical live range at all. Instruction definitions remain one-slot
+    // ranges even without uses because the instruction still needs a concrete
+    // destination until dead-code elimination removes it.
+    if value_uses.is_empty() && matches!(definition, Some(DefinitionSite::Phi { .. })) {
+        return Ok(None);
+    }
     let Some(definition) = definition else {
         if value_uses.is_empty() {
             return Ok(None);
@@ -1445,6 +1454,9 @@ fn build_intervals<P: LivenessProgram + ?Sized>(
     for (value, definition) in facts.definitions.iter().copied().enumerate() {
         let value = VReg(value as u32);
         match definition {
+            Some(DefinitionSite::Phi { .. }) if facts.uses[value.0 as usize].is_empty() => {
+                intervals.push(None);
+            }
             Some(definition) => {
                 let mut value_segments = std::mem::take(&mut segments[value.0 as usize]);
                 value_segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
@@ -1521,7 +1533,13 @@ impl LiveIntervals {
         for (value_index, interval) in self.intervals.iter().enumerate() {
             let value = VReg(value_index as u32);
             let Some(interval) = interval else {
-                if facts.definitions[value_index].is_some() || !facts.uses[value_index].is_empty() {
+                let unused_phi = matches!(
+                    facts.definitions[value_index],
+                    Some(DefinitionSite::Phi { .. })
+                ) && facts.uses[value_index].is_empty();
+                if (!unused_phi && facts.definitions[value_index].is_some())
+                    || !facts.uses[value_index].is_empty()
+                {
                     return Err(LiveIntervalError::new(
                         "LIVE_INTERVAL.MISSING_INTERVAL",
                         None,
@@ -1824,6 +1842,40 @@ mod tests {
             destination.segments[0].start,
             intervals.block_slots[0].instruction_def(1).unwrap()
         );
+    }
+
+    #[test]
+    fn unused_phi_has_no_machine_range_but_unused_instruction_definition_does() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.phis.push(PhiNode {
+            dst: VReg(1),
+            sources: vec![(BlockId(0), VReg(0))],
+        });
+        exit.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 11,
+        });
+        exit.push(MInst::Return);
+        let mut function = function(3, vec![entry, exit]);
+        let cfg = normalize(&mut function);
+
+        let intervals = analyze(&function, &cfg).unwrap();
+        intervals.verify(&function, &cfg).unwrap();
+
+        assert!(intervals.intervals[0].is_some());
+        assert!(intervals.intervals[1].is_none());
+        let instruction = intervals.intervals[2].as_ref().unwrap();
+        assert!(instruction.uses.is_empty());
+        assert!(matches!(
+            instruction.definition,
+            DefinitionSite::Instruction { .. }
+        ));
     }
 
     #[test]

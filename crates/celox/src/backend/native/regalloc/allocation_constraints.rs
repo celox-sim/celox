@@ -424,7 +424,7 @@ impl IncrementalConstraintModel {
         for facts in result.block_facts.clone() {
             result.add_facts(&facts)?;
         }
-        let rebuilt_affinities = weighted_affinities(&result.affinity_counts)?;
+        let rebuilt_affinities = weighted_affinities(&result.affinity_counts, &expanded.intervals)?;
         if result.model.affinities != rebuilt_affinities {
             return Err(AllocationConstraintError::new(
                 "ALLOCATION_CONSTRAINT.BLOCK_FACT_IDENTITY",
@@ -508,7 +508,7 @@ impl IncrementalConstraintModel {
                 self.model.allowed[index] = next;
             }
         }
-        self.model.affinities = weighted_affinities(&self.affinity_counts)?;
+        self.model.affinities = weighted_affinities(&self.affinity_counts, &expanded.intervals)?;
         Ok(changed)
     }
 
@@ -753,10 +753,22 @@ fn fact_values(facts: &AllocationMachineFacts) -> impl Iterator<Item = VReg> + '
 
 fn weighted_affinities(
     counts: &BTreeMap<AllocationAffinity, u32>,
+    intervals: &super::live_interval::LiveIntervals,
 ) -> Result<Vec<WeightedAffinity>, AllocationConstraintError> {
     let mut weights = BTreeMap::<(VReg, VReg), u32>::new();
     for (affinity, count) in counts {
         if *count == 0 {
+            continue;
+        }
+        if intervals
+            .intervals
+            .get(affinity.left.0 as usize)
+            .is_none_or(Option::is_none)
+            || intervals
+                .intervals
+                .get(affinity.right.0 as usize)
+                .is_none_or(Option::is_none)
+        {
             continue;
         }
         let weight = match affinity.kind {

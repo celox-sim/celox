@@ -3,7 +3,7 @@
 //! Defines `PhysReg`, `RegConstraint`, `AssignmentMap`, and helpers for
 //! querying instruction constraints and clobbers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::backend::native::features::VariableShiftEncoding;
@@ -180,6 +180,10 @@ pub struct AssignmentMap {
     /// multiple phi rows on one edge through independently materialized
     /// stack/immediate locations.
     pub phi_edge_locations: HashMap<(BlockId, BlockId, VReg, VReg), EdgeLocation>,
+    /// Phi results retained only as strict-SSA identities. Every physical use
+    /// has been resolved through an exact stack/immediate edge location, so
+    /// out-of-SSA must validate the row but emit no destination copy.
+    semantic_phi_definitions: HashSet<VReg>,
 }
 
 impl AssignmentMap {
@@ -199,6 +203,14 @@ impl AssignmentMap {
         self.edge_spill_slots.insert(vreg, offset);
     }
 
+    pub fn set_semantic_phi_definition(&mut self, vreg: VReg) {
+        self.semantic_phi_definitions.insert(vreg);
+    }
+
+    pub fn is_semantic_phi_definition(&self, vreg: VReg) -> bool {
+        self.semantic_phi_definitions.contains(&vreg)
+    }
+
     pub fn edge_location(&self, pred: BlockId, vreg: VReg) -> Option<EdgeLocation> {
         self.edge_locations.get(&(pred, vreg)).copied()
     }
@@ -213,6 +225,27 @@ impl AssignmentMap {
         self.phi_edge_locations
             .get(&(pred, succ, destination, source))
             .copied()
+    }
+
+    /// Resolve the physical source of one semantic phi row.
+    ///
+    /// Destination-qualified edge locations take precedence because one VReg
+    /// may feed multiple rows through different stack/immediate homes. The
+    /// remaining fallbacks describe value-wide edge, stack, and register
+    /// residency respectively. Keeping this precedence in the assignment
+    /// model prevents verifiers and out-of-SSA lowering from interpreting the
+    /// same completed assignment differently.
+    pub fn resolved_phi_source_location(
+        &self,
+        pred: BlockId,
+        succ: BlockId,
+        destination: VReg,
+        source: VReg,
+    ) -> Option<EdgeLocation> {
+        self.phi_edge_location(pred, succ, destination, source)
+            .or_else(|| self.edge_location(pred, source))
+            .or_else(|| self.edge_spill_slot(source).map(EdgeLocation::Stack))
+            .or_else(|| self.get(source).map(EdgeLocation::Register))
     }
 
     pub fn set_phi_edge_location(

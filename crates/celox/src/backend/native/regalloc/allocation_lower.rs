@@ -259,6 +259,7 @@ pub(super) fn lower(
         }
         assignment.set_edge_spill_slot(definition.value, offset);
     }
+    mark_semantic_phi_definitions(&function, expanded, &mut assignment)?;
     let ssa_destruction =
         crate::backend::native::ssa_destroy::SsaDestructionPlan::build(&function, &assignment)
             .map_err(AllocationLowerError::ssa)?;
@@ -274,6 +275,51 @@ pub(super) fn lower(
         stack_slot_count,
         ssa_destruction,
     })
+}
+
+/// Mark phi rows whose results have no machine location.
+///
+/// Allocation IR retains original phi identities while homes and exact edge
+/// locations rewrite their physical uses. Such a phi still defines an SSA
+/// identity referenced by downstream semantic edge rows, but it owns no
+/// register or stack destination and out-of-SSA must emit no incoming copy.
+fn mark_semantic_phi_definitions(
+    function: &MFunction,
+    expanded: &ExpandedAllocationProblem,
+    assignment: &mut AssignmentMap,
+) -> Result<(), AllocationLowerError> {
+    if expanded.intervals.intervals.len() != expanded.ir.value_count() as usize {
+        return Err(AllocationLowerError::new(
+            "ALLOCATION_LOWER.PHI_INTERVAL_SHAPE",
+            None,
+            None,
+            Vec::new(),
+            "expanded live intervals do not cover the allocation VReg domain",
+        ));
+    }
+    for block in &function.blocks {
+        for phi in &block.phis {
+            if assignment.get(phi.dst).is_some() || assignment.edge_spill_slot(phi.dst).is_some() {
+                continue;
+            }
+            if expanded
+                .intervals
+                .intervals
+                .get(phi.dst.0 as usize)
+                .is_some_and(Option::is_some)
+            {
+                return Err(AllocationLowerError::new(
+                    "ALLOCATION_LOWER.UNLOCATED_PHI_INTERVAL",
+                    Some(block.id),
+                    None,
+                    vec![phi.dst],
+                    "live phi result has neither a register nor a stack destination",
+                ));
+            }
+            assignment.set_semantic_phi_definition(phi.dst);
+        }
+    }
+    Ok(())
 }
 
 fn phi_destinations(
@@ -625,7 +671,9 @@ mod tests {
 
     #[test]
     fn phi_sources_and_destinations_use_edge_locations_instead_of_fake_pressure() {
-        const PHIS: u32 = 20;
+        const LIVE_PHIS: u32 = 20;
+        const DEAD_PHIS: u32 = 2;
+        const PHIS: u32 = LIVE_PHIS + DEAD_PHIS;
         let mut values = VRegAllocator::new();
         let mut descriptors = Vec::new();
         let mut left_values = Vec::new();
@@ -686,7 +734,7 @@ mod tests {
             });
         }
         let mut sum = merged_values[0];
-        for &value in &merged_values[1..] {
+        for &value in &merged_values[1..LIVE_PHIS as usize] {
             let destination = source.vregs.alloc();
             source.spill_descs.push(SpillDesc::transient());
             merge.push(MInst::Add {
@@ -729,8 +777,25 @@ mod tests {
                 .any(|location| matches!(location, EdgeLocation::Immediate(_)))
         );
         assert!(!lowered.assignment.edge_spill_slots.is_empty());
+        assert!(
+            merged_values[LIVE_PHIS as usize..]
+                .iter()
+                .all(|value| lowered.assignment.get(*value).is_none()
+                    && lowered.assignment.is_semantic_phi_definition(*value))
+        );
+        assert_eq!(
+            lowered
+                .function
+                .blocks
+                .iter()
+                .find(|block| block.id == BlockId(3))
+                .unwrap()
+                .phis
+                .len(),
+            PHIS as usize
+        );
         let stats = lowered.ssa_destruction.stats();
         assert_eq!(stats.edges, 2);
-        assert_eq!(stats.rows, PHIS as usize * 2);
+        assert_eq!(stats.rows, LIVE_PHIS as usize * 2);
     }
 }

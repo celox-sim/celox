@@ -1524,11 +1524,28 @@ impl JointAllocationSession {
                 });
             }
             if split_values.is_empty() {
+                let resident_summary = conflicts
+                    .iter()
+                    .map(|conflict| {
+                        let values = conflict
+                            .values
+                            .iter()
+                            .filter_map(|resident| self.problem.value(*resident))
+                            .map(allocation_value_summary)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("{:?}=[{values}]", conflict.register)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.UNSPLITTABLE_PRESSURE",
                     Some(value.interval.definition.block()),
                     Some(value.value),
-                    "explicit transition ranges exceed the physical register set",
+                    format!(
+                        "explicit transition ranges exceed the physical register set; blocked={}; residents={resident_summary}",
+                        allocation_value_summary(&value)
+                    ),
                 ));
             }
             let candidates = split_values
@@ -1575,6 +1592,18 @@ impl JointAllocationSession {
         self.matrix.verify().map_err(JointAllocationError::union)?;
         Ok(JointAllocationOutcome::Complete(result))
     }
+}
+
+fn allocation_value_summary(value: &AllocationValue) -> String {
+    format!(
+        "{} class={:?} def={:?} uses={} segments={} allowed={:?}",
+        value.value,
+        value.class,
+        value.interval.definition,
+        value.interval.uses.len(),
+        value.interval.segments.len(),
+        value.allowed_registers
+    )
 }
 
 fn session_allocation_value(

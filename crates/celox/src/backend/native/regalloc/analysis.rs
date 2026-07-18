@@ -44,13 +44,24 @@ pub(super) fn analyze_for_assignment(
     func: &MFunction,
     assignment: &AssignmentMap,
 ) -> AnalysisResult {
-    let ignored_phi_sources = assignment
+    let mut ignored_phi_sources = assignment
         .phi_edge_locations
         .iter()
         .filter_map(|(&edge, &location)| {
             (!matches!(location, EdgeLocation::Register(_))).then_some(edge)
         })
         .collect::<HashSet<_>>();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            if assignment.is_semantic_phi_definition(phi.dst) {
+                ignored_phi_sources.extend(
+                    phi.sources
+                        .iter()
+                        .map(|&(predecessor, source)| (predecessor, block.id, phi.dst, source)),
+                );
+            }
+        }
+    }
     let stack_values = assignment
         .edge_spill_slots
         .keys()
