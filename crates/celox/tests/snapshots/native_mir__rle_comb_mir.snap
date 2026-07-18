@@ -12,6 +12,14 @@ bb0:
   v2 = and.w32 v3, 0xffffffff
   store.i32 [sim + 40], v2
   ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v0 = load.i32 [sim + 32]
+  v1 = load.i32 [sim + 36]
+  v3 = add.w32 v0, v1
+  v2 = and.w32 v3, 0xffffffff
+  store.i32 [sim + 40], v2
+  ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i32 [sim + 32]

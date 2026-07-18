@@ -457,6 +457,7 @@ pub struct EmitResult {
 pub(crate) struct NativeFunctionTrace {
     pub optimized_sir: String,
     pub mir_before_regalloc: String,
+    pub mir_after_scheduling: String,
     pub mir_after_regalloc: String,
     pub register_assignment: String,
     pub spill_frame_size: u32,
@@ -3695,7 +3696,12 @@ fn emit_chained_eu_groups(
         trace.mir_before_regalloc = mfunc.to_string();
     }
     let regalloc_start = timing.then(crate::timing::now);
-    let ra = regalloc::run_regalloc_with_label(&mut mfunc, label)?;
+    let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
+    let ra =
+        regalloc::run_regalloc_with_label_and_trace(&mut mfunc, label, regalloc_trace.as_mut())?;
+    if let (Some(trace), Some(regalloc_trace)) = (trace.as_deref_mut(), regalloc_trace.as_mut()) {
+        trace.mir_after_scheduling = std::mem::take(&mut regalloc_trace.mir_after_scheduling);
+    }
     if let Some(start) = regalloc_start {
         eprintln!(
             "[native-timing] emit_chained regalloc mir_blocks={} mir_insts={} vregs={} spill_frame={} elapsed={:?}",

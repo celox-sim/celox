@@ -126,6 +126,7 @@ fn compile_units(
         let trace = capture_trace.then(|| emit::NativeFunctionTrace {
             optimized_sir: "<empty native function>\n".into(),
             mir_before_regalloc: empty_func.to_string(),
+            mir_after_scheduling: empty_func.to_string(),
             mir_after_regalloc: empty_func.to_string(),
             register_assignment: String::new(),
             spill_frame_size: 0,
@@ -336,6 +337,11 @@ fn append_native_function_trace(
     mir.push_str("--- MIR after optimization, before register allocation ---\n");
     mir.push_str(&trace.mir_before_regalloc);
     if !trace.mir_before_regalloc.ends_with('\n') {
+        mir.push('\n');
+    }
+    mir.push_str("--- MIR after pressure scheduling, before CSSA and spilling ---\n");
+    mir.push_str(&trace.mir_after_scheduling);
+    if !trace.mir_after_scheduling.ends_with('\n') {
         mir.push('\n');
     }
     mir.push_str("--- MIR after register allocation and post-RA peepholes ---\n");

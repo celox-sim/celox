@@ -7,6 +7,9 @@ expression: output
 --- MIR after optimization, before register allocation ---
 bb0:
   ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   ret
@@ -32,6 +35,16 @@ bb0:
   v1 = and.w32 v0, 0xff
   v2 = load.i8 [sim + 35]
   v4 = and.w64 v2, 0xffffffffffffff00
+  v5 = mov.w32 v1
+  v3 = or.w64 v4, v5
+  store.i8 [sim + 35], v3
+  ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v2 = load.i8 [sim + 35]
+  v4 = and.w64 v2, 0xffffffffffffff00
+  v0 = load.i8 [sim + 40]
+  v1 = and.w32 v0, 0xff
   v5 = mov.w32 v1
   v3 = or.w64 v4, v5
   store.i8 [sim + 35], v3
@@ -85,6 +98,26 @@ bb1:
   v3 = imm 0x0
   store.i8 [sim + 35], v3
   jmp bb3
+bb2:
+  v6 = load.i8 [sim + 34]
+  store.i8 [sim + 35], v6
+  jmp bb3
+bb3:
+  ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v0 = load.i8 [sim + 33]
+  v1 = cmp.Eq v0, 0
+  v2 = mov.w32 v1
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v3 = imm 0x0
+  store.i8 [sim + 35], v3
+  jmp bb3
+bb5:
+  jmp bb2
 bb2:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 35], v6
@@ -161,6 +194,33 @@ bb1:
   v3 = imm 0x0
   store.i8 [sim + 40], v3
   jmp bb3
+bb2:
+  v6 = load.i8 [sim + 34]
+  store.i8 [sim + 40], v6
+  jmp bb3
+bb3:
+  ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v7 = load.i8 [sim + 35]
+  v8 = and.w32 v7, 0xff
+  v9 = load.i8 [sim + 40]
+  v11 = and.w64 v9, 0xffffffffffffff00
+  v12 = mov.w32 v8
+  v10 = or.w64 v11, v12
+  store.i8 [sim + 40], v10
+  v0 = load.i8 [sim + 33]
+  v1 = cmp.Eq v0, 0
+  v2 = mov.w32 v1
+  br v2, bb4, bb5
+bb4:
+  jmp bb1
+bb1:
+  v3 = imm 0x0
+  store.i8 [sim + 40], v3
+  jmp bb3
+bb5:
+  jmp bb2
 bb2:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 40], v6
@@ -250,6 +310,26 @@ bb2:
   v3 = imm 0x0
   store.i8 [sim + 35], v3
   jmp bb4
+bb3:
+  v6 = load.i8 [sim + 34]
+  store.i8 [sim + 35], v6
+  jmp bb4
+bb4:
+  ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v0 = load.i8 [sim + 33]
+  v1 = cmp.Eq v0, 0
+  v2 = mov.w32 v1
+  br v2, bb5, bb6
+bb5:
+  jmp bb2
+bb2:
+  v3 = imm 0x0
+  store.i8 [sim + 35], v3
+  jmp bb4
+bb6:
+  jmp bb3
 bb3:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 35], v6

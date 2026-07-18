@@ -17,6 +17,19 @@ bb0:
   v6 = or.w32 v2, v5
   store.i32 [sim + 44], v6
   ret
+--- MIR after pressure scheduling, before CSSA and spilling ---
+bb0:
+  v0 = load.i32 [sim + 32]
+  v1 = load.i32 [sim + 36]
+  v7 = add.w32 v0, v1
+  v2 = and.w32 v7, 0xffffffff
+  v3 = imm 0x1
+  v4 = and.w32 v2, v3
+  store.i32 [sim + 40], v4
+  v5 = imm 0x2
+  v6 = or.w32 v2, v5
+  store.i32 [sim + 44], v6
+  ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i32 [sim + 32]

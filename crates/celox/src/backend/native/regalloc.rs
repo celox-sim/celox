@@ -50,6 +50,11 @@ pub struct RegallocResult {
     pub(crate) ssa_destruction: super::ssa_destroy::SsaDestructionPlan,
 }
 
+#[derive(Default)]
+pub(crate) struct RegallocTrace {
+    pub mir_after_scheduling: String,
+}
+
 /// Structured failure from a verified register-allocation phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegallocError {
@@ -219,6 +224,14 @@ pub fn run_regalloc_with_label(
     func: &mut MFunction,
     label: &str,
 ) -> Result<RegallocResult, RegallocError> {
+    run_regalloc_with_label_and_trace(func, label, None)
+}
+
+pub(crate) fn run_regalloc_with_label_and_trace(
+    func: &mut MFunction,
+    label: &str,
+    trace: Option<&mut RegallocTrace>,
+) -> Result<RegallocResult, RegallocError> {
     let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
     if !matches!(requested.as_str(), "auto" | "ssa") {
         return Err(RegallocError::new(
@@ -234,7 +247,7 @@ pub fn run_regalloc_with_label(
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label)?;
+    let allocation = run_regalloc_in_place(&mut working, label, trace)?;
     *func = working;
     Ok(allocation)
 }
@@ -242,6 +255,7 @@ pub fn run_regalloc_with_label(
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
+    mut trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -308,6 +322,9 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.mir_after_scheduling = func.to_string();
+    }
     let cssa_start = timing.then(crate::timing::now);
     let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
         .map_err(|error| cssa_error("CSSA normalization", error))?;
