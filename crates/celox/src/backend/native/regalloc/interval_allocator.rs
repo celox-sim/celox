@@ -198,100 +198,20 @@ fn choose_use_home(
     })
 }
 
-fn partition_homes(
-    graph: &HomeGraph,
-    root: LiveBundleId,
-    uses: &[BundleUseId],
-) -> Result<HomePartition, IntervalAllocationError> {
-    let Some(homes) = graph.homes.get(root.0 as usize) else {
-        return Err(IntervalAllocationError::new(
-            "INTERVAL_ALLOC.HOME_ROOT",
-            None,
-            None,
-            format!("root bundle {root:?} has no use-home row"),
-        ));
-    };
-    let build = |stack_available: bool| -> Option<HomePartition> {
-        let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
-        for &use_id in uses {
-            let options = homes.uses.get(use_id.0 as usize)?;
-            let choice = choose_use_home(options, use_id, stack_available)?;
-            let group = grouped.entry(choice.kind).or_default();
-            group.0.push(use_id);
-            if let Some(materialization) = choice.materialization {
-                group.1.push(materialization);
-            }
-        }
-
-        let stack_creation = if grouped.contains_key(&HomeKind::Stack) {
-            Some(STACK_HOME_CREATION_COST)
-        } else {
-            None
-        };
-        let mut total_cost = u64::from(stack_creation.unwrap_or(0));
-        let mut pieces = Vec::with_capacity(grouped.len());
-        for (kind, (piece_uses, materializations)) in grouped {
-            let materialization_cost = match kind {
-                HomeKind::Stack => STACK_HOME_MATERIALIZATION_COST
-                    .saturating_mul(u32::try_from(piece_uses.len()).unwrap_or(u32::MAX)),
-                HomeKind::Rematerialize(_) | HomeKind::State(_) => materializations
-                    .iter()
-                    .fold(0_u32, |cost, item| cost.saturating_add(item.cost)),
-                HomeKind::Register => return None,
-            };
-            let creation_cost = if kind == HomeKind::Stack {
-                stack_creation.unwrap_or(0)
-            } else {
-                0
-            };
-            total_cost = total_cost.saturating_add(u64::from(materialization_cost));
-            pieces.push(HomePiece {
-                uses: piece_uses,
-                selection: HomeSelection {
-                    kind,
-                    materializations,
-                    creation_cost,
-                    materialization_cost,
-                },
-            });
-        }
-        Some(HomePartition { pieces, total_cost })
-    };
-
-    let without_stack = build(false);
-    let with_stack = build(true).ok_or_else(|| {
-        IntervalAllocationError::new(
-            "INTERVAL_ALLOC.NO_STACK_HOME",
-            None,
-            None,
-            format!("root bundle {root:?} lacks its mandatory stack candidate"),
-        )
-    })?;
-    Ok(without_stack
-        .filter(|partition| partition.total_cost <= with_stack.total_cost)
-        .unwrap_or(with_stack))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UsePartitionCost {
-    without_stack: Option<u64>,
-    with_stack: u64,
-    with_stack_uses_stack: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PartitionCost {
     total: u64,
     uses_stack: bool,
 }
 
-/// Additive exact cost index for one allocation bundle's use set.  Split
-/// candidates remove their disjoint register-covered uses from these totals;
-/// only the winning complement is materialized into `HomePiece`s.
-#[derive(Debug)]
-struct HomeCostIndex {
-    root: LiveBundleId,
-    rows: Vec<Option<UsePartitionCost>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannedUseHomes {
+    without_stack: Option<UseHomeChoice>,
+    with_stack: UseHomeChoice,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HomeCostTotals {
     use_count: usize,
     without_stack_total: u64,
     without_stack_missing: usize,
@@ -299,51 +219,219 @@ struct HomeCostIndex {
     with_stack_use_count: usize,
 }
 
-impl HomeCostIndex {
-    fn new(
-        graph: &HomeGraph,
+impl HomeCostTotals {
+    fn add(
+        &mut self,
         root: LiveBundleId,
-        uses: &[BundleUseId],
-    ) -> Result<Self, IntervalAllocationError> {
-        let Some(homes) = graph.homes.get(root.0 as usize) else {
+        row: PlannedUseHomes,
+    ) -> Result<(), IntervalAllocationError> {
+        self.use_count = self.use_count.checked_add(1).ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                None,
+                None,
+                format!("root bundle {root:?} use count exceeds usize"),
+            )
+        })?;
+        if let Some(choice) = row.without_stack {
+            self.without_stack_total = self
+                .without_stack_total
+                .checked_add(u64::from(choice.cost))
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        format!("root bundle {root:?} non-stack home cost exceeds u64"),
+                    )
+                })?;
+        } else {
+            self.without_stack_missing =
+                self.without_stack_missing.checked_add(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        format!("root bundle {root:?} missing-home count exceeds usize"),
+                    )
+                })?;
+        }
+        self.with_stack_total = self
+            .with_stack_total
+            .checked_add(u64::from(row.with_stack.cost))
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                    None,
+                    None,
+                    format!("root bundle {root:?} stack-enabled home cost exceeds u64"),
+                )
+            })?;
+        if row.with_stack.kind == HomeKind::Stack {
+            self.with_stack_use_count =
+                self.with_stack_use_count.checked_add(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        format!("root bundle {root:?} stack-use count exceeds usize"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn remove(
+        &mut self,
+        root: LiveBundleId,
+        row: PlannedUseHomes,
+    ) -> Result<(), IntervalAllocationError> {
+        self.use_count = self.use_count.checked_sub(1).ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_INDEX",
+                None,
+                None,
+                format!("root bundle {root:?} complement use count underflowed"),
+            )
+        })?;
+        if let Some(choice) = row.without_stack {
+            self.without_stack_total = self
+                .without_stack_total
+                .checked_sub(u64::from(choice.cost))
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        format!("root bundle {root:?} non-stack complement cost underflowed"),
+                    )
+                })?;
+        } else {
+            self.without_stack_missing =
+                self.without_stack_missing.checked_sub(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        format!("root bundle {root:?} missing-home count underflowed"),
+                    )
+                })?;
+        }
+        self.with_stack_total = self
+            .with_stack_total
+            .checked_sub(u64::from(row.with_stack.cost))
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_INDEX",
+                    None,
+                    None,
+                    format!("root bundle {root:?} stack complement cost underflowed"),
+                )
+            })?;
+        if row.with_stack.kind == HomeKind::Stack {
+            self.with_stack_use_count =
+                self.with_stack_use_count.checked_sub(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        format!("root bundle {root:?} stack-use count underflowed"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn finish(self, root: LiveBundleId) -> Result<PartitionCost, IntervalAllocationError> {
+        let stack_creation_cost = if self.with_stack_use_count != 0 {
+            u64::from(STACK_HOME_CREATION_COST)
+        } else {
+            0
+        };
+        let with_stack = self
+            .with_stack_total
+            .checked_add(stack_creation_cost)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                    None,
+                    None,
+                    format!("root bundle {root:?} stack-home creation cost exceeds u64"),
+                )
+            })?;
+        if self.without_stack_missing == 0 && self.without_stack_total <= with_stack {
+            Ok(PartitionCost {
+                total: self.without_stack_total,
+                uses_stack: false,
+            })
+        } else {
+            Ok(PartitionCost {
+                total: with_stack,
+                uses_stack: self.with_stack_use_count != 0,
+            })
+        }
+    }
+}
+
+/// Immutable home policy for one root bundle.  Per-use choices and full-root
+/// additive totals are computed once; allocation asks only subset/complement
+/// cost questions and materializes grouped homes after a decision wins.
+#[derive(Debug)]
+struct RootHomePlan {
+    root: LiveBundleId,
+    rows: Vec<PlannedUseHomes>,
+    totals: HomeCostTotals,
+}
+
+impl RootHomePlan {
+    fn build(graph: &HomeGraph, root: &LiveBundle) -> Result<Self, IntervalAllocationError> {
+        let Some(homes) = graph.homes.get(root.id.0 as usize) else {
             return Err(IntervalAllocationError::new(
                 "INTERVAL_ALLOC.HOME_ROOT",
+                Some(root.definition.block()),
                 None,
-                None,
-                format!("root bundle {root:?} has no use-home row"),
+                format!("root bundle {:?} has no use-home row", root.id),
             ));
         };
-        let mut rows = vec![None; homes.uses.len()];
-        let mut without_stack_total = 0_u64;
-        let mut without_stack_missing = 0_usize;
-        let mut with_stack_total = 0_u64;
-        let mut with_stack_use_count = 0_usize;
-        let mut previous = None;
-        for &use_id in uses {
-            if previous.is_some_and(|prior| prior >= use_id) {
+        if homes.uses.len() != root.uses.len() {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_USE_ROWS",
+                Some(root.definition.block()),
+                None,
+                format!(
+                    "root bundle {:?} has {} uses but {} home rows",
+                    root.id,
+                    root.uses.len(),
+                    homes.uses.len()
+                ),
+            ));
+        }
+
+        let mut rows = Vec::with_capacity(root.uses.len());
+        let mut totals = HomeCostTotals::default();
+        for (index, use_) in root.uses.iter().enumerate() {
+            if use_.id.0 as usize != index {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.USE_ORDER",
+                    Some(use_.site.block()),
                     None,
-                    None,
-                    format!("root bundle {root:?} has duplicate or unsorted uses"),
+                    format!(
+                        "root bundle {:?} use {:?} differs from dense row {index}",
+                        root.id, use_.id
+                    ),
                 ));
             }
-            previous = Some(use_id);
-            let Some(options) = homes.uses.get(use_id.0 as usize) else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.USE_RANGE",
-                    None,
-                    None,
-                    format!("bundle use {use_id:?} is outside root {root:?}"),
-                ));
-            };
-            let without_stack = choose_use_home(options, use_id, false);
-            let with_stack = choose_use_home(options, use_id, true).ok_or_else(|| {
+            let options = &homes.uses[index];
+            let without_stack = choose_use_home(options, use_.id, false);
+            let with_stack = choose_use_home(options, use_.id, true).ok_or_else(|| {
                 IntervalAllocationError::new(
                     "INTERVAL_ALLOC.NO_STACK_HOME",
+                    Some(use_.site.block()),
                     None,
-                    None,
-                    format!("root bundle {root:?} lacks its mandatory stack candidate"),
+                    format!(
+                        "root bundle {:?} lacks its mandatory stack candidate",
+                        root.id
+                    ),
                 )
             })?;
             if matches!(
@@ -353,185 +441,269 @@ impl HomeCostIndex {
             {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.USE_HOME_CLASS",
-                    None,
+                    Some(use_.site.block()),
                     None,
                     "use-local HomeGraph row contains an allocator-owned home",
                 ));
             }
-            let without_stack = without_stack.map(|choice| u64::from(choice.cost));
-            if let Some(cost) = without_stack {
-                without_stack_total = without_stack_total.checked_add(cost).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                        None,
-                        None,
-                        "non-stack home cost exceeds u64",
-                    )
-                })?;
-            } else {
-                without_stack_missing = without_stack_missing.checked_add(1).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                        None,
-                        None,
-                        "missing-home count exceeds usize",
-                    )
-                })?;
-            }
-            with_stack_total = with_stack_total
-                .checked_add(u64::from(with_stack.cost))
-                .ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                        None,
-                        None,
-                        "stack-enabled home cost exceeds u64",
-                    )
-                })?;
-            let with_stack_uses_stack = with_stack.kind == HomeKind::Stack;
-            if with_stack_uses_stack {
-                with_stack_use_count = with_stack_use_count.checked_add(1).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                        None,
-                        None,
-                        "stack-use count exceeds usize",
-                    )
-                })?;
-            }
-            let row = UsePartitionCost {
+            let row = PlannedUseHomes {
                 without_stack,
-                with_stack: u64::from(with_stack.cost),
-                with_stack_uses_stack,
+                with_stack,
             };
-            if rows[use_id.0 as usize].replace(row).is_some() {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.USE_ORDER",
-                    None,
-                    None,
-                    format!("bundle use {use_id:?} appears more than once"),
-                ));
-            }
+            totals.add(root.id, row)?;
+            rows.push(row);
         }
         Ok(Self {
-            root,
+            root: root.id,
             rows,
-            use_count: uses.len(),
-            without_stack_total,
-            without_stack_missing,
-            with_stack_total,
-            with_stack_use_count,
+            totals,
         })
     }
 
-    fn excluding(
+    fn row(&self, use_id: BundleUseId) -> Result<PlannedUseHomes, IntervalAllocationError> {
+        self.rows.get(use_id.0 as usize).copied().ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.USE_RANGE",
+                None,
+                None,
+                format!("bundle use {use_id:?} is outside root {:?}", self.root),
+            )
+        })
+    }
+
+    fn visit_uses(
         &self,
-        excluded: &[BundleUseId],
-    ) -> Result<PartitionCost, IntervalAllocationError> {
-        let mut without_stack_total = self.without_stack_total;
-        let mut without_stack_missing = self.without_stack_missing;
-        let mut with_stack_total = self.with_stack_total;
-        let mut with_stack_use_count = self.with_stack_use_count;
+        uses: &[BundleUseId],
+        mut visit: impl FnMut(PlannedUseHomes) -> Result<(), IntervalAllocationError>,
+    ) -> Result<(), IntervalAllocationError> {
         let mut previous = None;
-        for &use_id in excluded {
+        for &use_id in uses {
             if previous.is_some_and(|prior| prior >= use_id) {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.USE_ORDER",
                     None,
                     None,
-                    "split candidate contains duplicate or unsorted uses",
+                    format!("root bundle {:?} has duplicate or unsorted uses", self.root),
                 ));
             }
             previous = Some(use_id);
-            let row = self
-                .rows
-                .get(use_id.0 as usize)
-                .and_then(Option::as_ref)
-                .ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.USE_RANGE",
-                        None,
-                        None,
-                        format!(
-                            "split candidate use {use_id:?} is outside root {:?}",
-                            self.root
-                        ),
-                    )
-                })?;
-            if let Some(cost) = row.without_stack {
-                without_stack_total = without_stack_total.checked_sub(cost).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_INDEX",
-                        None,
-                        None,
-                        "non-stack complement cost underflowed",
-                    )
-                })?;
-            } else {
-                without_stack_missing = without_stack_missing.checked_sub(1).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_INDEX",
-                        None,
-                        None,
-                        "missing-home complement count underflowed",
-                    )
-                })?;
-            }
-            with_stack_total = with_stack_total
-                .checked_sub(row.with_stack)
-                .ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_INDEX",
-                        None,
-                        None,
-                        "stack-enabled complement cost underflowed",
-                    )
-                })?;
-            if row.with_stack_uses_stack {
-                with_stack_use_count = with_stack_use_count.checked_sub(1).ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_INDEX",
-                        None,
-                        None,
-                        "stack-use complement count underflowed",
-                    )
-                })?;
-            }
+            visit(self.row(use_id)?)?;
         }
-        self.use_count.checked_sub(excluded.len()).ok_or_else(|| {
-            IntervalAllocationError::new(
+        Ok(())
+    }
+
+    fn full_cost(&self) -> Result<PartitionCost, IntervalAllocationError> {
+        self.totals.finish(self.root)
+    }
+
+    fn cost_for(&self, uses: &[BundleUseId]) -> Result<PartitionCost, IntervalAllocationError> {
+        let mut totals = HomeCostTotals::default();
+        self.visit_uses(uses, |row| totals.add(self.root, row))?;
+        totals.finish(self.root)
+    }
+
+    fn cost_excluding(
+        &self,
+        excluded: &[BundleUseId],
+    ) -> Result<PartitionCost, IntervalAllocationError> {
+        let mut totals = self.totals;
+        self.visit_uses(excluded, |row| totals.remove(self.root, row))?;
+        totals.finish(self.root)
+    }
+
+    fn single_choice(
+        &self,
+        use_id: BundleUseId,
+    ) -> Result<(UseHomeChoice, u64), IntervalAllocationError> {
+        let row = self.row(use_id)?;
+        let mut totals = HomeCostTotals::default();
+        totals.add(self.root, row)?;
+        let cost = totals.finish(self.root)?;
+        let choice = if cost.uses_stack {
+            row.with_stack
+        } else {
+            row.without_stack.ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_INDEX",
+                    None,
+                    None,
+                    format!(
+                        "root bundle {:?} selected a missing non-stack home",
+                        self.root
+                    ),
+                )
+            })?
+        };
+        Ok((choice, cost.total))
+    }
+
+    fn selection_for_use(
+        &self,
+        use_id: BundleUseId,
+    ) -> Result<HomeSelection, IntervalAllocationError> {
+        let (choice, expected_cost) = self.single_choice(use_id)?;
+        let selection = match choice.kind {
+            HomeKind::Stack => HomeSelection {
+                kind: choice.kind,
+                materializations: Vec::new(),
+                creation_cost: STACK_HOME_CREATION_COST,
+                materialization_cost: STACK_HOME_MATERIALIZATION_COST,
+            },
+            HomeKind::Rematerialize(_) | HomeKind::State(_) => HomeSelection {
+                kind: choice.kind,
+                materializations: vec![choice.materialization.ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "non-stack use choice has no exact materialization",
+                    )
+                })?],
+                creation_cost: 0,
+                materialization_cost: choice.cost,
+            },
+            HomeKind::Register => {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_HOME_CLASS",
+                    None,
+                    None,
+                    "root home plan selected allocator-owned register residency",
+                ));
+            }
+        };
+        if selection.total_cost() != expected_cost {
+            return Err(IntervalAllocationError::new(
                 "INTERVAL_ALLOC.HOME_COST_INDEX",
                 None,
                 None,
-                "split candidate covers more uses than its root bundle",
-            )
-        })?;
-        let stack_creation_cost = if with_stack_use_count != 0 {
-            u64::from(STACK_HOME_CREATION_COST)
-        } else {
-            0
-        };
-        let with_stack = with_stack_total
-            .checked_add(stack_creation_cost)
-            .ok_or_else(|| {
-                IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                    None,
-                    None,
-                    "stack-home creation cost exceeds u64",
-                )
-            })?;
-        if without_stack_missing == 0 && without_stack_total <= with_stack {
-            Ok(PartitionCost {
-                total: without_stack_total,
-                uses_stack: false,
-            })
-        } else {
-            Ok(PartitionCost {
-                total: with_stack,
-                uses_stack: with_stack_use_count != 0,
-            })
+                "single-use home selection differs from its indexed cost",
+            ));
         }
+        Ok(selection)
+    }
+
+    fn partition(&self, uses: &[BundleUseId]) -> Result<HomePartition, IntervalAllocationError> {
+        let cost = self.cost_for(uses)?;
+        let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
+        let mut previous = None;
+        for &use_id in uses {
+            if previous.is_some_and(|prior| prior >= use_id) {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_ORDER",
+                    None,
+                    None,
+                    format!("root bundle {:?} has duplicate or unsorted uses", self.root),
+                ));
+            }
+            previous = Some(use_id);
+            let row = self.row(use_id)?;
+            let choice = if cost.uses_stack {
+                row.with_stack
+            } else {
+                row.without_stack.ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        format!(
+                            "root bundle {:?} selected a missing non-stack home",
+                            self.root
+                        ),
+                    )
+                })?
+            };
+            let group = grouped.entry(choice.kind).or_default();
+            group.0.push(use_id);
+            if let Some(materialization) = choice.materialization {
+                group.1.push(materialization);
+            }
+        }
+
+        let mut pieces = Vec::with_capacity(grouped.len());
+        let mut materialized_total = 0_u64;
+        for (kind, (piece_uses, materializations)) in grouped {
+            let materialization_cost = match kind {
+                HomeKind::Stack => {
+                    let count = u32::try_from(piece_uses.len()).map_err(|_| {
+                        IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                            None,
+                            None,
+                            "stack materialization count exceeds u32",
+                        )
+                    })?;
+                    STACK_HOME_MATERIALIZATION_COST
+                        .checked_mul(count)
+                        .ok_or_else(|| {
+                            IntervalAllocationError::new(
+                                "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                                None,
+                                None,
+                                "stack materialization cost exceeds u32",
+                            )
+                        })?
+                }
+                HomeKind::Rematerialize(_) | HomeKind::State(_) => materializations
+                    .iter()
+                    .try_fold(0_u32, |total, item| total.checked_add(item.cost))
+                    .ok_or_else(|| {
+                        IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                            None,
+                            None,
+                            "recipe materialization cost exceeds u32",
+                        )
+                    })?,
+                HomeKind::Register => {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.USE_HOME_CLASS",
+                        None,
+                        None,
+                        "root home plan grouped allocator-owned register residency",
+                    ));
+                }
+            };
+            let creation_cost = if kind == HomeKind::Stack {
+                STACK_HOME_CREATION_COST
+            } else {
+                0
+            };
+            let selection = HomeSelection {
+                kind,
+                materializations,
+                creation_cost,
+                materialization_cost,
+            };
+            materialized_total = materialized_total
+                .checked_add(selection.total_cost())
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        "materialized partition cost exceeds u64",
+                    )
+                })?;
+            pieces.push(HomePiece {
+                uses: piece_uses,
+                selection,
+            });
+        }
+        if materialized_total != cost.total {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_INDEX",
+                None,
+                None,
+                format!(
+                    "root bundle {:?} indexed cost {} differs from materialized cost {materialized_total}",
+                    self.root, cost.total
+                ),
+            ));
+        }
+        Ok(HomePartition {
+            pieces,
+            total_cost: cost.total,
+        })
     }
 }
 
@@ -713,7 +885,8 @@ struct RegionCandidate {
     register_order: usize,
     segments: Vec<LiveSegment>,
     uses: Vec<BundleUseId>,
-    transition: BundleTransition,
+    transition_use: BundleUseId,
+    transition_at: UseSite,
     total_cost: u64,
 }
 
@@ -909,6 +1082,7 @@ struct Allocator<'a> {
     matrix: LiveIntervalMatrix,
     conflict_collector: ConflictCollector,
     bundles: Vec<AllocatedBundle>,
+    home_plans: Vec<RootHomePlan>,
     split_topologies: Vec<Option<Arc<SplitTopology>>>,
     queue: BinaryHeap<QueueItem>,
 }
@@ -922,6 +1096,7 @@ impl<'a> Allocator<'a> {
         let matrix =
             LiveIntervalMatrix::new(cfg, registers).map_err(IntervalAllocationError::union)?;
         let mut bundles = Vec::with_capacity(graph.bundles.len());
+        let mut home_plans = Vec::with_capacity(graph.bundles.len());
         let mut queue = BinaryHeap::new();
         for (index, root) in graph.bundles.iter().enumerate() {
             if root.id.0 as usize != index {
@@ -944,13 +1119,11 @@ impl<'a> Allocator<'a> {
             let segments = matrix
                 .make_range(root.segments.clone())
                 .map_err(IntervalAllocationError::union)?;
+            let home_plan = RootHomePlan::build(graph, root)?;
             let (spill_cost, assignment) = if uses.is_empty() {
                 (0, BundleAssignment::Dead)
             } else {
-                (
-                    partition_homes(graph, root.id, &uses)?.total_cost,
-                    BundleAssignment::Unassigned,
-                )
+                (home_plan.full_cost()?.total, BundleAssignment::Unassigned)
             };
             let length = live_length(&segments).ok_or_else(|| {
                 IntervalAllocationError::new(
@@ -981,6 +1154,7 @@ impl<'a> Allocator<'a> {
                 transitions: Vec::new(),
                 assignment,
             });
+            home_plans.push(home_plan);
             if !root.uses.is_empty() {
                 queue.push(QueueItem {
                     id,
@@ -998,6 +1172,7 @@ impl<'a> Allocator<'a> {
             matrix,
             conflict_collector: ConflictCollector::default(),
             bundles,
+            home_plans,
             split_topologies: vec![None; graph.bundles.len()],
             queue,
         })
@@ -1030,6 +1205,26 @@ impl<'a> Allocator<'a> {
                 "allocation bundle is outside the stable bundle table",
             )
         })
+    }
+
+    fn home_plan(&self, root: LiveBundleId) -> Result<&RootHomePlan, IntervalAllocationError> {
+        let plan = self.home_plans.get(root.0 as usize).ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_ROOT",
+                None,
+                None,
+                format!("root bundle {root:?} has no allocation-owned home plan"),
+            )
+        })?;
+        if plan.root != root {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_ROOT",
+                None,
+                None,
+                format!("home plan {:?} occupies root slot {root:?}", plan.root),
+            ));
+        }
+        Ok(plan)
     }
 
     fn split_topology(
@@ -1309,7 +1504,7 @@ impl<'a> Allocator<'a> {
         register: PhysReg,
         register_order: usize,
         topology: &SplitTopology,
-        home_costs: &HomeCostIndex,
+        home_plan: &RootHomePlan,
     ) -> Result<Vec<RegionCandidate>, IntervalAllocationError> {
         let bundle = self.bundle(id)?;
         let root = self
@@ -1584,28 +1779,17 @@ impl<'a> Allocator<'a> {
                 continue;
             }
 
-            let entry_partition = partition_homes(self.graph, bundle.root, &[seed.use_id])?;
-            let [entry_piece] = entry_partition.pieces.as_slice() else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.TRANSITION_HOME",
+            let (entry_choice, entry_cost) = home_plan.single_choice(seed.use_id)?;
+            let entry_uses_stack = entry_choice.kind == HomeKind::Stack;
+            let remaining = home_plan.cost_excluding(covered)?;
+            let mut total_cost = entry_cost.checked_add(remaining.total).ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
                     Some(seed.site.block()),
                     Some(id),
-                    "one transition use produced more than one home piece",
-                ));
-            };
-            let entry_uses_stack = entry_piece.selection.kind == HomeKind::Stack;
-            let remaining = home_costs.excluding(covered)?;
-            let mut total_cost = entry_partition
-                .total_cost
-                .checked_add(remaining.total)
-                .ok_or_else(|| {
-                    IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                        Some(seed.site.block()),
-                        Some(id),
-                        "split candidate cost exceeds u64",
-                    )
-                })?;
+                    "split candidate cost exceeds u64",
+                )
+            })?;
             if entry_uses_stack && remaining.uses_stack {
                 total_cost = total_cost
                     .checked_sub(u64::from(STACK_HOME_CREATION_COST))
@@ -1623,10 +1807,8 @@ impl<'a> Allocator<'a> {
                 register_order,
                 segments,
                 uses: covered.clone(),
-                transition: BundleTransition {
-                    at: seed.site,
-                    home: entry_piece.selection.clone(),
-                },
+                transition_use: seed.use_id,
+                transition_at: seed.site,
                 total_cost,
             });
         }
@@ -1644,13 +1826,12 @@ impl<'a> Allocator<'a> {
         }
         let baseline = bundle.spill_cost;
         let root = bundle.root;
-        let uses = bundle.uses.clone();
         let topology = self.split_topology(id)?;
-        let home_costs = HomeCostIndex::new(self.graph, root, &uses)?;
+        let home_plan = self.home_plan(root)?;
         let mut best = None::<RegionCandidate>;
         for probe in probes {
             for candidate in
-                self.region_candidates(id, probe.register, probe.order, &topology, &home_costs)?
+                self.region_candidates(id, probe.register, probe.order, &topology, home_plan)?
             {
                 if candidate.total_cost >= baseline {
                     continue;
@@ -1659,7 +1840,7 @@ impl<'a> Allocator<'a> {
                     candidate.total_cost,
                     std::cmp::Reverse(candidate.uses.len()),
                     candidate.register_order,
-                    candidate.transition.at,
+                    candidate.transition_at,
                 );
                 if best.as_ref().is_none_or(|current| {
                     candidate_key
@@ -1667,7 +1848,7 @@ impl<'a> Allocator<'a> {
                             current.total_cost,
                             std::cmp::Reverse(current.uses.len()),
                             current.register_order,
-                            current.transition.at,
+                            current.transition_at,
                         )
                 }) {
                     best = Some(candidate);
@@ -1684,7 +1865,8 @@ impl<'a> Allocator<'a> {
             register_order: _,
             segments,
             uses: register_uses,
-            transition,
+            transition_use,
+            transition_at,
             total_cost,
         } = candidate;
         let remaining_uses = parent
@@ -1693,7 +1875,11 @@ impl<'a> Allocator<'a> {
             .copied()
             .filter(|use_id| register_uses.binary_search(use_id).is_err())
             .collect::<Vec<_>>();
-        let remaining = partition_homes(self.graph, parent.root, &remaining_uses)?;
+        let transition = BundleTransition {
+            at: transition_at,
+            home: home_plan.selection_for_use(transition_use)?,
+        };
+        let remaining = home_plan.partition(&remaining_uses)?;
         let transition_uses_stack = transition.home.kind == HomeKind::Stack;
         let remaining_uses_stack = remaining
             .pieces
@@ -1743,8 +1929,7 @@ impl<'a> Allocator<'a> {
                     "split bundle count exceeds u32",
                 )
             })?);
-        let register_spill_cost =
-            partition_homes(self.graph, parent.root, &register_uses)?.total_cost;
+        let register_spill_cost = home_plan.cost_for(&register_uses)?.total;
         let register_segments = self
             .matrix
             .make_range(segments)
@@ -1808,7 +1993,7 @@ impl<'a> Allocator<'a> {
         let origin = bundle.origin;
         let definition = bundle.definition;
         let uses = bundle.uses.clone();
-        let partition = partition_homes(self.graph, root, &uses)?;
+        let partition = self.home_plan(root)?.partition(&uses)?;
         if let [piece] = partition.pieces.as_slice() {
             self.bundles[id.0 as usize].assignment =
                 BundleAssignment::Home(piece.selection.clone());
@@ -2116,6 +2301,11 @@ impl AllocationPlan {
             .verify()
             .map_err(IntervalAllocationError::union)?;
         let dominance = Dominance::new(cfg)?;
+        let home_plans = graph
+            .bundles
+            .iter()
+            .map(|root| RootHomePlan::build(graph, root))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut rebuilt =
             LiveIntervalMatrix::new(cfg, registers).map_err(IntervalAllocationError::union)?;
         for (index, bundle) in self.bundles.iter().enumerate() {
@@ -2135,6 +2325,7 @@ impl AllocationPlan {
                     "allocation bundle references a missing HomeGraph root",
                 ));
             };
+            let home_plan = &home_plans[bundle.root.0 as usize];
             if bundle.id != expected_id
                 || bundle.origin != root.origin
                 || bundle.definition != root.definition
@@ -2217,13 +2408,11 @@ impl AllocationPlan {
                                 "transition point is not a use of the HomeGraph root",
                             ));
                         };
-                        let expected_entry = partition_homes(graph, bundle.root, &[entry_use])?;
+                        let expected_entry = home_plan.selection_for_use(entry_use)?;
                         if !bundle.uses.contains(&entry_use)
-                            || expected_entry.pieces.len() != 1
-                            || expected_entry.pieces[0].selection != transition.home
+                            || expected_entry != transition.home
                             || bundle.segments.is_empty()
-                            || bundle.spill_cost
-                                != partition_homes(graph, bundle.root, &bundle.uses)?.total_cost
+                            || bundle.spill_cost != home_plan.cost_for(&bundle.uses)?.total
                             || !bundle.segments.iter().all(|segment| {
                                 root.segments.iter().any(|root_segment| {
                                     root_segment.block == segment.block
@@ -2282,7 +2471,7 @@ impl AllocationPlan {
             let partition = if bundle.uses.is_empty() {
                 None
             } else {
-                Some(partition_homes(graph, bundle.root, &bundle.uses)?)
+                Some(home_plan.partition(&bundle.uses)?)
             };
             let expected_cost = partition
                 .as_ref()
@@ -2444,8 +2633,7 @@ impl AllocationPlan {
                             .copied()
                             .filter(|use_id| register_child.uses.binary_search(use_id).is_err())
                             .collect::<Vec<_>>();
-                        let remaining_partition =
-                            partition_homes(graph, bundle.root, &remaining_uses)?;
+                        let remaining_partition = home_plan.partition(&remaining_uses)?;
                         if home_children.len() != remaining_partition.pieces.len()
                             || home_children.iter().zip(&remaining_partition.pieces).any(
                                 |(child, piece)| {
@@ -2471,15 +2659,14 @@ impl AllocationPlan {
                             .find(|use_| use_.site == transition.at)
                             .map(|use_| use_.id)
                             .expect("register-child transition was structurally checked above");
-                        let entry_partition = partition_homes(graph, bundle.root, &[entry_use])?;
+                        let (_, entry_cost) = home_plan.single_choice(entry_use)?;
                         let transition_uses_stack = transition.home.kind == HomeKind::Stack;
                         let remainder_uses_stack = remaining_partition
                             .pieces
                             .iter()
                             .any(|piece| piece.selection.kind == HomeKind::Stack);
-                        let mut split_cost = entry_partition
-                            .total_cost
-                            .saturating_add(remaining_partition.total_cost);
+                        let mut split_cost =
+                            entry_cost.saturating_add(remaining_partition.total_cost);
                         if transition_uses_stack && remainder_uses_stack {
                             split_cost =
                                 split_cost.saturating_sub(u64::from(STACK_HOME_CREATION_COST));
@@ -2858,7 +3045,8 @@ mod tests {
             .find(|bundle| bundle.origin == VReg(0))
             .unwrap();
         let uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
-        let partition = partition_homes(&graph, root.id, &uses).unwrap();
+        let plan = RootHomePlan::build(&graph, root).unwrap();
+        let partition = plan.partition(&uses).unwrap();
         assert_eq!(partition.pieces.len(), 2);
         let stack = partition
             .pieces
@@ -2873,6 +3061,15 @@ mod tests {
         assert_eq!(state.uses, vec![BundleUseId(0)]);
         assert_eq!(stack.uses, vec![BundleUseId(1)]);
         assert_eq!(partition.total_cost, 3);
+        assert_eq!(plan.full_cost().unwrap().total, partition.total_cost);
+        assert_eq!(
+            plan.cost_excluding(&state.uses).unwrap(),
+            plan.cost_for(&stack.uses).unwrap()
+        );
+        assert_eq!(
+            plan.selection_for_use(state.uses[0]).unwrap(),
+            state.selection
+        );
     }
 
     #[test]
@@ -2896,6 +3093,13 @@ mod tests {
         let (cfg, graph) = model(&mut function);
         let mut allocator = Allocator::new(&graph, &cfg, &[PhysReg::RAX]).unwrap();
         let root = bundle_id(&graph, VReg(0));
+
+        {
+            let home_root = graph.bundles[root.0 as usize].id;
+            let first = allocator.home_plan(home_root).unwrap();
+            let second = allocator.home_plan(home_root).unwrap();
+            assert!(std::ptr::eq(first, second));
+        }
 
         let first = allocator.split_topology(root).unwrap();
         let second = allocator.split_topology(root).unwrap();
