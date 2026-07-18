@@ -6,7 +6,7 @@
 //! them against immutable original-MIR anchors without mutating `MFunction`;
 //! successful allocation can later lower the complete result atomically.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
 use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
@@ -357,6 +357,15 @@ impl AllocationIr {
         analyze_program(self, cfg).map_err(AllocationIrError::live)
     }
 
+    /// Independently prove that every synthetic stack reload observes a
+    /// same-home store on every path. The proof constructs sparse Boolean SSA
+    /// only for homes which are actually reloaded; it never creates a dense
+    /// block-by-home table.
+    pub(super) fn verify_stack_homes(&self, cfg: &NormalizedCfg) -> Result<(), AllocationIrError> {
+        self.verify_structure()?;
+        verify_stack_home_reaching_definitions(self, cfg)
+    }
+
     fn insert_synthetic(
         &mut self,
         anchor: SyntheticAnchor,
@@ -537,13 +546,15 @@ impl AllocationIr {
                 successor,
                 phi,
             } => {
-                if !self.blocks[block].successors.contains(&successor) {
+                if self.blocks[block].successors.as_slice() != [successor] {
                     return Err(AllocationIrError::new(
-                        "ALLOCATION_IR.PHI_EDGE",
+                        "ALLOCATION_IR.EDGE_NOT_ISOLATED",
                         Some(predecessor),
                         None,
                         Vec::new(),
-                        format!("block has no CFG edge to {successor}"),
+                        format!(
+                            "phi-edge insertion requires a dedicated edge block to {successor}"
+                        ),
                     ));
                 }
                 let successor_index = self.block(successor)?;
@@ -715,6 +726,298 @@ impl AllocationIr {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackDefinition {
+    False,
+    True,
+    Phi(usize),
+}
+
+#[derive(Debug)]
+struct StackPhi {
+    block: usize,
+    home: StackHomeId,
+    inputs: Vec<StackDefinition>,
+}
+
+#[derive(Debug)]
+struct StackReloadQuery {
+    block: BlockId,
+    instruction: SyntheticInstructionId,
+    home: StackHomeId,
+    definition: StackDefinition,
+}
+
+fn verify_stack_home_reaching_definitions(
+    program: &AllocationIr,
+    cfg: &NormalizedCfg,
+) -> Result<(), AllocationIrError> {
+    let block_count = program.blocks.len();
+    if cfg.predecessors.len() != block_count
+        || cfg.successors.len() != block_count
+        || cfg.idom.len() != block_count
+        || cfg.dominance_frontier.len() != block_count
+        || cfg.block_index.len() != block_count
+        || (0..block_count)
+            .any(|block| cfg.block_index.get(&program.blocks[block].id) != Some(&block))
+        || cfg
+            .predecessors
+            .iter()
+            .chain(&cfg.successors)
+            .flatten()
+            .any(|&block| block >= block_count)
+        || cfg
+            .dominance_frontier
+            .iter()
+            .flatten()
+            .any(|&block| block >= block_count)
+    {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.STACK_HOME_MODEL",
+            program.blocks.first().map(|block| block.id),
+            None,
+            Vec::new(),
+            "normalized CFG does not exactly cover stack-home operations",
+        ));
+    }
+
+    let mut required_homes = BTreeSet::<StackHomeId>::new();
+    let mut definition_blocks = HashMap::<StackHomeId, BTreeSet<usize>>::new();
+    for (block, row) in program.blocks.iter().enumerate() {
+        for instruction in &row.instructions {
+            let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
+            else {
+                continue;
+            };
+            match operation {
+                SyntheticOperation::StackStore { home } => {
+                    definition_blocks.entry(home).or_default().insert(block);
+                }
+                SyntheticOperation::StackReload { home } => {
+                    required_homes.insert(home);
+                }
+                SyntheticOperation::RecipeNode { .. } => {}
+            }
+        }
+    }
+    if required_homes.is_empty() {
+        return Ok(());
+    }
+
+    let mut phis = Vec::<StackPhi>::new();
+    let mut phis_by_block = vec![Vec::<(StackHomeId, usize)>::new(); block_count];
+    for &home in &required_homes {
+        // Function entry is the explicit false definition. Store definitions
+        // and their iterated dominance frontiers form sparse Boolean SSA.
+        let mut definitions = definition_blocks.get(&home).cloned().unwrap_or_default();
+        definitions.insert(0);
+        let mut queue = definitions.iter().copied().collect::<VecDeque<_>>();
+        let mut placed = BTreeSet::<usize>::new();
+        while let Some(definition) = queue.pop_front() {
+            for &frontier in &cfg.dominance_frontier[definition] {
+                if frontier == 0 || !placed.insert(frontier) {
+                    continue;
+                }
+                let phi = phis.len();
+                phis.push(StackPhi {
+                    block: frontier,
+                    home,
+                    inputs: Vec::with_capacity(cfg.predecessors[frontier].len()),
+                });
+                phis_by_block[frontier].push((home, phi));
+                if definitions.insert(frontier) {
+                    queue.push_back(frontier);
+                }
+            }
+        }
+    }
+
+    let mut children = vec![Vec::<usize>::new(); block_count];
+    for block in 1..block_count {
+        let Some(parent) = cfg.idom[block] else {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STACK_HOME_DOMINANCE",
+                Some(program.blocks[block].id),
+                None,
+                Vec::new(),
+                "reachable non-entry block has no immediate dominator",
+            ));
+        };
+        if parent >= block_count {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STACK_HOME_DOMINANCE",
+                Some(program.blocks[block].id),
+                None,
+                Vec::new(),
+                "immediate dominator is outside the allocation IR",
+            ));
+        }
+        children[parent].push(block);
+    }
+
+    enum Action {
+        Enter(usize),
+        Exit(Vec<(StackHomeId, Option<StackDefinition>)>),
+    }
+
+    let mut current = HashMap::<StackHomeId, StackDefinition>::new();
+    let mut queries = Vec::<StackReloadQuery>::new();
+    let mut visited = 0usize;
+    let mut actions = vec![Action::Enter(0)];
+    while let Some(action) = actions.pop() {
+        let block = match action {
+            Action::Exit(changes) => {
+                for (home, previous) in changes.into_iter().rev() {
+                    if let Some(previous) = previous {
+                        current.insert(home, previous);
+                    } else {
+                        current.remove(&home);
+                    }
+                }
+                continue;
+            }
+            Action::Enter(block) => block,
+        };
+        visited = visited.checked_add(1).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.STACK_HOME_DOMINANCE",
+                Some(program.blocks[block].id),
+                None,
+                Vec::new(),
+                "dominator traversal count exceeds usize",
+            )
+        })?;
+        let mut changes = Vec::<(StackHomeId, Option<StackDefinition>)>::new();
+        for &(home, phi) in &phis_by_block[block] {
+            set_stack_definition(&mut current, &mut changes, home, StackDefinition::Phi(phi));
+        }
+        for instruction in &program.blocks[block].instructions {
+            let AllocationInstructionOrigin::Synthetic { id, operation, .. } = instruction.origin
+            else {
+                continue;
+            };
+            match operation {
+                SyntheticOperation::StackStore { home } if required_homes.contains(&home) => {
+                    set_stack_definition(&mut current, &mut changes, home, StackDefinition::True);
+                }
+                SyntheticOperation::StackReload { home } => {
+                    queries.push(StackReloadQuery {
+                        block: program.blocks[block].id,
+                        instruction: id,
+                        home,
+                        definition: current
+                            .get(&home)
+                            .copied()
+                            .unwrap_or(StackDefinition::False),
+                    });
+                }
+                SyntheticOperation::StackStore { .. } | SyntheticOperation::RecipeNode { .. } => {}
+            }
+        }
+        for &successor in &cfg.successors[block] {
+            for &(home, phi) in &phis_by_block[successor] {
+                phis[phi].inputs.push(
+                    current
+                        .get(&home)
+                        .copied()
+                        .unwrap_or(StackDefinition::False),
+                );
+            }
+        }
+        actions.push(Action::Exit(changes));
+        actions.extend(
+            children[block]
+                .iter()
+                .rev()
+                .map(|&child| Action::Enter(child)),
+        );
+    }
+    if visited != block_count {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.STACK_HOME_DOMINANCE",
+            None,
+            None,
+            Vec::new(),
+            "dominator tree does not reach every allocation-IR block",
+        ));
+    }
+
+    let mut users = vec![Vec::<usize>::new(); phis.len()];
+    let mut false_phis = vec![false; phis.len()];
+    let mut queue = VecDeque::<usize>::new();
+    for (phi, node) in phis.iter().enumerate() {
+        if node.inputs.len() != cfg.predecessors[node.block].len() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STACK_HOME_PHI_INPUTS",
+                Some(program.blocks[node.block].id),
+                None,
+                Vec::new(),
+                format!(
+                    "stack home {:?} meet has {} inputs for {} predecessors",
+                    node.home,
+                    node.inputs.len(),
+                    cfg.predecessors[node.block].len()
+                ),
+            ));
+        }
+        let mut is_false = node.inputs.is_empty();
+        for &input in &node.inputs {
+            match input {
+                StackDefinition::False => is_false = true,
+                StackDefinition::True => {}
+                StackDefinition::Phi(definition) => users[definition].push(phi),
+            }
+        }
+        if is_false {
+            false_phis[phi] = true;
+            queue.push_back(phi);
+        }
+    }
+    while let Some(phi) = queue.pop_front() {
+        for &user in &users[phi] {
+            if !false_phis[user] {
+                false_phis[user] = true;
+                queue.push_back(user);
+            }
+        }
+    }
+
+    for query in queries {
+        let initialized = match query.definition {
+            StackDefinition::False => false,
+            StackDefinition::True => true,
+            StackDefinition::Phi(phi) => !false_phis[phi],
+        };
+        if !initialized {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STACK_RELOAD_ALL_PATH_STORE",
+                Some(query.block),
+                Some(query.instruction.0 as usize),
+                Vec::new(),
+                format!(
+                    "reload from {:?} is reachable without a prior same-home store",
+                    query.home
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn set_stack_definition(
+    current: &mut HashMap<StackHomeId, StackDefinition>,
+    changes: &mut Vec<(StackHomeId, Option<StackDefinition>)>,
+    home: StackHomeId,
+    definition: StackDefinition,
+) {
+    let previous = current.get(&home).copied();
+    if previous == Some(definition) {
+        return;
+    }
+    changes.push((home, previous));
+    current.insert(home, definition);
 }
 
 impl LivenessProgram for AllocationIr {
@@ -993,5 +1296,138 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.rule, "ALLOCATION_IR.SYNTHETIC_SIGNATURE");
         assert_eq!(allocation_ir, before);
+    }
+
+    fn stack_home_diamond() -> (MFunction, NormalizedCfg, LiveIntervals) {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 11,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 13,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.phis.push(PhiNode {
+            dst: VReg(3),
+            sources: vec![(BlockId(1), VReg(1)), (BlockId(2), VReg(2))],
+        });
+        merge.push(MInst::Mov {
+            dst: VReg(4),
+            src: VReg(3),
+        });
+        merge.push(MInst::Return);
+        let mut function = function(5, vec![entry, left, right, merge]);
+        let cfg = normalize(&mut function);
+        let intervals = super::super::live_interval::analyze(&function, &cfg).unwrap();
+        (function, cfg, intervals)
+    }
+
+    #[test]
+    fn stack_home_stores_on_every_arm_reach_a_join_reload() {
+        let (function, cfg, intervals) = stack_home_diamond();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        for value in [VReg(1), VReg(2)] {
+            allocation_ir
+                .insert_after_definition(
+                    intervals.intervals[value.0 as usize]
+                        .as_ref()
+                        .unwrap()
+                        .definition,
+                    SyntheticOperation::StackStore {
+                        home: StackHomeId(0),
+                    },
+                    Uses::one(value),
+                    false,
+                )
+                .unwrap();
+        }
+        allocation_ir
+            .insert_before_use(
+                intervals.intervals[3].as_ref().unwrap().uses[0],
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+
+        allocation_ir.analyze(&cfg).unwrap();
+        allocation_ir.verify_stack_homes(&cfg).unwrap();
+    }
+
+    #[test]
+    fn one_arm_store_does_not_establish_a_join_stack_home() {
+        let (function, cfg, intervals) = stack_home_diamond();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        allocation_ir
+            .insert_after_definition(
+                intervals.intervals[1].as_ref().unwrap().definition,
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(0),
+                },
+                Uses::one(VReg(1)),
+                false,
+            )
+            .unwrap();
+        allocation_ir
+            .insert_before_use(
+                intervals.intervals[3].as_ref().unwrap().uses[0],
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+
+        let error = allocation_ir.verify_stack_homes(&cfg).unwrap_err();
+        assert_eq!(error.rule, "ALLOCATION_IR.STACK_RELOAD_ALL_PATH_STORE");
+    }
+
+    #[test]
+    fn a_later_same_block_store_does_not_reach_an_earlier_reload() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let intervals = super::super::live_interval::analyze(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        allocation_ir
+            .insert_before_use(
+                intervals.intervals[0].as_ref().unwrap().uses[0],
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+        allocation_ir
+            .insert_after_definition(
+                intervals.intervals[1].as_ref().unwrap().definition,
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(0),
+                },
+                Uses::one(VReg(1)),
+                false,
+            )
+            .unwrap();
+
+        let error = allocation_ir.verify_stack_homes(&cfg).unwrap_err();
+        assert_eq!(error.rule, "ALLOCATION_IR.STACK_RELOAD_ALL_PATH_STORE");
     }
 }

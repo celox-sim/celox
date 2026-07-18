@@ -225,9 +225,16 @@ shared liveness boundary.  Original MIR instructions and phis are represented
 by immutable anchors; synthetic stack stores, reloads, and recipe nodes receive
 checked machine-value definitions.  Both representations use the exact same
 CFG-sparse live-interval construction and independent equation verifier.  Home
-selection, explicit stack reaching definitions, recursive child allocation,
-and MIR lowering remain disconnected, so production code generation is still
-the interim allocator below.
+selection, recursive child allocation, and MIR lowering remain disconnected,
+so production code generation is still the interim allocator below.
+
+Explicit synthetic stack operations now also have an independent sparse
+all-path verifier.  It builds Boolean SSA only for homes with reload demands,
+places AND meets through iterated dominance frontiers, and respects exact
+operation order and normalized edge isolation.  Stores on every join arm
+establish a home; a missing arm or a store after the reload does not.  The next
+slice must make allocator home selection emit operations which satisfy this
+proof and return all resulting machine values to allocation.
 
 ## Interim allocator architecture
 

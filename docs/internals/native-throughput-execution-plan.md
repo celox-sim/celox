@@ -2803,6 +2803,24 @@ remains unchanged.  This slice does not yet connect home selection to the
 allocation IR or change production MIR, so it makes no Linux or execution-time
 claim.
 
+Step 27d2 adds the independent stack-home proof required before any plan may
+insert reloads.  It scans the actual ordered synthetic operations in the
+allocation IR, selects only homes which have a reload demand, and constructs
+sparse Boolean SSA from their store-definition blocks plus the explicit false
+definition at function entry.  Iterated dominance frontiers contain the AND
+meets; a dominance-tree rename resolves stores and reloads in exact
+instruction order, and a final fixed point propagates every false phi input.
+The representation is proportional to stores, reloads, and placed sparse phis,
+not the product of CFG blocks and all stack homes.
+
+The verifier accepts a join reload only when both incoming arms store the same
+home.  It rejects a store on one arm and also rejects a same-block store which
+occurs after the reload.  Phi-edge synthetic operations are accepted only on a
+dedicated normalized edge block, so treating them as ordered block operations
+cannot move a store or reload onto a sibling path.  This slice still does not
+lower `AllocationPlan` homes or change production MIR; it establishes the
+all-path contract which the next home-expansion slice must satisfy.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2863,6 +2881,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c5f staged conflict/cut queries and streaming region selection | this step | interval union 6/6 including exact canonical cuts; allocator 11/11 including same-block, cross-block, and sibling-arm split semantics | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 111.349 s; allocation 21.190 / 23.277 / 30.433 / 11.727 s | second interval-union search and fully materialized losing candidates removed; compile-only improves 14.862 s |
 | post-27c conflict discovery-order trial | rejected (no commit) | interval union 6/6; allocator 11/11 | focused check/clippy passed before measurement; full candidate reverted | CPU-0 diagnostic compile-only completed; production MIR unchanged | 135.893 s vs 111.349 s retained baseline | 22.0% compile regression; fully reverted; local container-order tuning closed |
 | 27d1 allocation IR and shared synthetic-value liveness | this step | allocation IR 5/5; live interval 5/5 | lib 809/809; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | analysis/rewrite infrastructure is disconnected from production MIR | n/a | original and synthetic machine values now share exact CFG/phi-edge liveness; explicit home placement remains next |
+| 27d2 sparse all-path stack-home verification | this step | allocation IR 8/8 including both-arm, one-arm, and same-block-order home proofs | lib 812/812; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; strict clippy | stack verifier is not yet connected to `AllocationPlan` or production MIR | n/a | explicit synthetic stack operations now have a sparse reaching-store proof; home expansion remains next |
 
 ## Related design records
 
