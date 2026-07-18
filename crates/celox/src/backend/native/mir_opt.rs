@@ -279,6 +279,14 @@ fn unsigned_upper_bound(
             OpSize::S64 => u64::MAX,
         }),
         MInst::Mov { src, .. } => unsigned_upper_bound(*src, defs, memo, visiting),
+        MInst::Mov32 { .. }
+        | MInst::Add32 { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul32 { .. }
+        | MInst::And32 { .. }
+        | MInst::Or32 { .. }
+        | MInst::Xor32 { .. } => Some(u32::MAX as u64),
+        MInst::AndImm32 { imm, .. } => Some(u64::from(*imm)),
         MInst::AndImm { src, imm, .. } => Some(
             unsigned_upper_bound(*src, defs, memo, visiting)
                 .unwrap_or(u64::MAX)
@@ -3566,21 +3574,45 @@ fn invalidate_overlapping_byte_range<T>(
     });
 }
 
-/// Copy propagation: for each `Mov { dst, src }`, replace all uses of dst
-/// with src throughout the function. Then remove the Mov.
+/// Copy propagation: replace every full-word copy, and every `Mov32` whose
+/// source is already structurally proven zero-extended to 32 bits, with its
+/// source throughout the function. A `Mov32` from an arbitrary 64-bit source
+/// remains a real truncating definition.
 fn copy_propagate(func: &mut MFunction) {
     // Build alias map: dst → src (transitively resolved)
     let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    let definitions = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| inst.def().map(|dst| (dst, inst.clone())))
+        .collect::<HashMap<_, _>>();
+    let mut upper_bounds = HashMap::new();
 
     for block in &func.blocks {
         for inst in &block.insts {
-            if let MInst::Mov { dst, src } = inst {
+            let copy = match inst {
+                MInst::Mov { dst, src } => Some((*dst, *src)),
+                MInst::Mov32 { dst, src }
+                    if unsigned_upper_bound(
+                        *src,
+                        &definitions,
+                        &mut upper_bounds,
+                        &mut HashSet::new(),
+                    )
+                    .is_some_and(|bound| bound <= u32::MAX as u64) =>
+                {
+                    Some((*dst, *src))
+                }
+                _ => None,
+            };
+            if let Some((dst, src)) = copy {
                 // Resolve transitively: if src is itself an alias, follow the chain
-                let mut target = *src;
+                let mut target = src;
                 while let Some(&next) = aliases.get(&target) {
                     target = next;
                 }
-                aliases.insert(*dst, target);
+                aliases.insert(dst, target);
             }
         }
     }
@@ -3608,7 +3640,7 @@ fn copy_propagate(func: &mut MFunction) {
     // or whose dst is aliased away
     for block in &mut func.blocks {
         block.insts.retain(|inst| {
-            if let MInst::Mov { dst, src } = inst {
+            if let MInst::Mov { dst, src } | MInst::Mov32 { dst, src } = inst {
                 // Keep only if dst is not aliased (it's still needed)
                 if aliases.contains_key(dst) {
                     return false; // Remove: dst was aliased to src
@@ -3700,6 +3732,67 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn copy_propagates_only_redundant_word32_snapshots() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Mov32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                },
+                MInst::Mov32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                },
+                MInst::Mov32 {
+                    dst: VReg(3),
+                    src: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        copy_propagate(&mut func);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::Mov32 { .. }))
+                .count(),
+            1,
+            "the first Mov32 is a real 64-to-32 truncation"
+        );
+        let stored = func.blocks[0]
+            .insts
+            .iter()
+            .filter_map(|inst| match inst {
+                MInst::Store { src, .. } => Some(*src),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored, vec![VReg(1), VReg(1)]);
     }
 
     #[test]

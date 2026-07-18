@@ -2016,6 +2016,76 @@ allocator cause.
 Status: **complete as a behavior-preserving analysis refactor; remaining
 throughput cause is not yet established**.
 
+### Step 22: Expose pressure scheduling and remove redundant word32 snapshots
+
+The earlier native trace labelled its first MIR section as being before
+register allocation.  That section is also before the allocator's internal
+pressure scheduler, so it cannot establish the order seen by liveness and
+spilling.  Native tracing now has a separate
+`MIR after pressure scheduling, before CSSA and spilling` section.  It is
+captured only for an explicitly requested compilation trace; normal
+compilation does not stringify this additional MIR.  This correction is
+analysis infrastructure and was committed separately as `278f6ecb`.
+
+The new observation point exposed a concrete MIR defect in the PLIC priority
+scan.  Its RTL computes one predicate per interrupt source and uses that same
+predicate both to reduce `best_pri` and to reduce `best_id`.  Selection had
+already represented each predicate with a machine-width `Mov32`, but each
+consumer received another `Mov32`.  For example, the old optimized MIR
+contained a predicate definition and consumer snapshot of the form
+`v186 = mov.w32 v184; v51519 = mov.w32 v186`, followed later by a second
+`v51669 = mov.w32 v186`.  Copy propagation handled only full-width `Mov`, so
+these consumer-specific snapshots remained real nodes and real emitted moves.
+
+The retained correction treats `Mov32` as a copy only when the defining MIR
+instruction structurally proves that its source is already zero-extended to
+32 bits.  A `Mov32` from an arbitrary 64-bit source remains a real truncating
+definition.  The proof uses only the machine widths represented by MIR; it
+does not add arbitrary HDL widths to virtual registers.  The regression test
+starts with a 64-bit load, retains the first truncating `Mov32`, and removes
+only two later snapshots of that narrowed value.
+
+This is a proved generated-work defect, but not the complete explanation of
+the Celox/Veryl gap.  After the redundant copies are removed, the exact
+post-scheduler PLIC MIR still completes the priority reduction through
+`v334`, then starts the ID reduction at `v366 = select v184, ...`.  Thus the
+shared predicates from `v184` onward remain live between the two reductions.
+The post-allocation trace stores later predicates to stack slots and reloads
+them for the ID reduction.  The next scheduler step must address this shared
+frontier without applying the rejected global depth heuristic, which enlarged
+the complete Heliodor frames.
+
+All three SIR outputs are byte-identical to Step 21a, so this result is
+isolated below SIR:
+
+- pre-optimized SIR:
+  `336d6b7bd66ea0c824293dd69c25fe2c7aa9f862b7a070ab73949db0bf3771d4`;
+- post-optimized SIR:
+  `54886e73f2879a75bf7158351dc39f6a1980cf18916b86518d0780b13cdc27a8`;
+  and
+- native-optimized SIR:
+  `cf909d3946bb1b70bfa084417414caf4406392b3959f7bf7953eba4e716eeddc`.
+
+The exact spill-frame changes for `eval_comb`, `apply_ff`, `eval_apply_ff`,
+`eval_only_ff`, and fused `eval_comb_apply_ff` are respectively
+32,352 to 30,696 bytes, 0 to 0 bytes, 7,216 to 7,288 bytes, 13,048 to 7,024
+bytes, and 39,344 to 37,960 bytes.  The small `eval_apply_ff` increase is
+retained rather than hidden; the full workload is the acceptance gate.
+
+The focused width regression passes, all 53 MIR-optimization tests pass, all
+155 native allocator tests pass, the complete library passes 768/768, and
+native MIR passes 6/6.  A same-process, CPU-0, non-LTO Linux run reached
+normal `reboot: Power down` at exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 70.552166860 s and generated
+execution took 123.199303086 s.  The comparable Step 21a run took
+74.178878989 s and 144.438914063 s respectively.  This exact pair establishes
+that removing the snapshots is useful; it does not assign the whole runtime
+change to stack traffic, and it does not explain the remaining Veryl gap.
+
+Status: **one concrete MIR work defect removed and qualified; shared-predicate
+scheduling, state traffic, and the remaining generated-execution gap remain
+open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -2052,6 +2122,7 @@ throughput cause is not yet established**.
 | 19 post-color reload-schedule trial | rejected (no commit) | focused physical-use/MemorySSA barriers 3/3; allocator 158/158; native MIR 6/6 | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; assignments and non-load instruction order byte-identical | candidate compile 69.308 / 67.862 s vs baseline 65.766 s; candidate execute mean 134.911 s vs baseline 129.176 s | execute +4.44%; fully reverted; fixed-distance scheduling closed |
 | 20 first-use join-cost trial | rejected (no commit) | focused first-use regression 1/1; allocator 155/155; non-LTO runner build | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical; original `bb1767` path has two extra loads and one extra store | candidate compile 69.352 / 66.218 s vs baseline 66.532 s; candidate execute mean 133.411 s vs baseline 128.487 s | execute +3.83%; fully reverted; complete block-transition pricing required |
 | 21a exact block-transition extraction | `e10c9c2e` | allocator 155/155; native MIR 6/6 | format, docs, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR and MIR byte-identical to isolated Step 18 baseline | compile 74.179 s; execute 144.439 s; no timing claim | analysis infrastructure only; remaining throughput cause not established |
+| 22 word32 snapshot propagation | `278f6ecb` plus this step | width regression 1/1; MIR optimization 53/53; allocator 155/155; native MIR 6/6 | lib 768/768; docs, format, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical to Step 21a | compile 70.552 s; execute 123.199 s | concrete redundant work removed; shared-predicate live range and remaining gap open |
 
 ## Related design records
 
