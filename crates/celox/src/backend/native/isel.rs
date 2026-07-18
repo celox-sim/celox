@@ -5013,7 +5013,9 @@ fn lower_instruction(
                                         SpillDesc::transient()
                                             .with_state_insert(src_vreg, intra, part_width)
                                     } else {
-                                        SpillDesc::transient()
+                                        SpillDesc::transient().with_state_insert_fragment(
+                                            src_vreg, consumed, intra, part_width,
+                                        )
                                     };
                                     let new_word = ctx.alloc_vreg(descriptor);
                                     ctx.emit_bfi(
@@ -5299,7 +5301,9 @@ fn lower_instruction(
                                                 SpillDesc::transient()
                                                     .with_state_insert(mask_vreg, intra, part_width)
                                             } else {
-                                                SpillDesc::transient()
+                                                SpillDesc::transient().with_state_insert_fragment(
+                                                    mask_vreg, consumed, intra, part_width,
+                                                )
                                             };
                                         let new_word = ctx.alloc_vreg(descriptor);
                                         ctx.emit_bfi(

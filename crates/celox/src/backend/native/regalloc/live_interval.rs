@@ -64,13 +64,13 @@ pub(super) enum DefinitionSite {
 }
 
 impl DefinitionSite {
-    fn block(self) -> BlockId {
+    pub(super) fn block(self) -> BlockId {
         match self {
             Self::Phi { block, .. } | Self::Instruction { block, .. } => block,
         }
     }
 
-    fn slot(self) -> SlotIndex {
+    pub(super) fn slot(self) -> SlotIndex {
         match self {
             Self::Phi { slot, .. } | Self::Instruction { slot, .. } => slot,
         }
@@ -93,14 +93,14 @@ pub(super) enum UseSite {
 }
 
 impl UseSite {
-    fn block(self) -> BlockId {
+    pub(super) fn block(self) -> BlockId {
         match self {
             Self::Instruction { block, .. } => block,
             Self::PhiEdge { predecessor, .. } => predecessor,
         }
     }
 
-    fn slot(self) -> SlotIndex {
+    pub(super) fn slot(self) -> SlotIndex {
         match self {
             Self::Instruction { slot, .. } | Self::PhiEdge { slot, .. } => slot,
         }
@@ -158,7 +158,7 @@ impl LiveInterval {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LiveIntervals {
     pub block_slots: Vec<BlockSlots>,
     pub intervals: Vec<Option<LiveInterval>>,

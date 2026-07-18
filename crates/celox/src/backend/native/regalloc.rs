@@ -12,6 +12,8 @@ mod constraints;
 #[allow(dead_code)]
 mod cssa;
 #[allow(dead_code)]
+mod home_graph;
+#[allow(dead_code)]
 mod home_verify;
 mod legalize;
 #[allow(dead_code)]

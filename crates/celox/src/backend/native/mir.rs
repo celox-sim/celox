@@ -226,8 +226,16 @@ pub enum SpillKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StateInsertDesc {
     pub value: VReg,
+    /// First bit of `value` represented by this stored fragment.  This is a
+    /// relation between two machine values, not an HDL width attached to the
+    /// VReg.
+    pub value_bit_offset: usize,
+    /// First bit within the physical word written by the store.
     pub bit_offset: usize,
     pub width_bits: usize,
+    /// The fragment alone contains every significant bit of `value` expected
+    /// by the legacy single-load reload path.
+    pub complete_value: bool,
 }
 
 /// Cost information for spilling / reloading a virtual register.
@@ -330,8 +338,29 @@ impl SpillDesc {
     ) -> Self {
         self.state_insert = Some(StateInsertDesc {
             value,
+            value_bit_offset: 0,
             bit_offset,
             width_bits,
+            complete_value: true,
+        });
+        self
+    }
+
+    /// Record one physical fragment of a 32/64-bit machine value committed by
+    /// a later static SimState store.
+    pub(crate) fn with_state_insert_fragment(
+        mut self,
+        value: VReg,
+        value_bit_offset: usize,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Self {
+        self.state_insert = Some(StateInsertDesc {
+            value,
+            value_bit_offset,
+            bit_offset,
+            width_bits,
+            complete_value: false,
         });
         self
     }

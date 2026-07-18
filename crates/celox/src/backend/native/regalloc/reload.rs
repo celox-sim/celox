@@ -63,6 +63,33 @@ pub(super) struct StateRecipe {
     observed_bits: StateBitRange,
 }
 
+impl StateRecipe {
+    /// Version-independent physical identity used to group one state home
+    /// across uses.  Exact MemorySSA versions remain in the use-specific
+    /// recipe and are never discarded for validation.
+    pub(super) fn home_shape_key(&self) -> (StateLoad, i64, i64) {
+        (self.load, self.observed_bits.start, self.observed_bits.end)
+    }
+}
+
+/// One independently versioned physical fragment of a 32/64-bit machine
+/// value.  `value_bit_offset` describes assembly of that machine value; it is
+/// not an arbitrary-width VReg type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct StateFragmentRecipe {
+    pub state: StateRecipe,
+    pub value_bit_offset: usize,
+    pub state_bit_offset: usize,
+    pub width_bits: usize,
+}
+
+/// A closed recipe which reconstructs the significant low bits of one machine
+/// value from multiple independently checked MemorySSA fragments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct CompositeStateRecipe {
+    pub fragments: Box<[StateFragmentRecipe]>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct StateBitRange {
     start: i64,
@@ -357,7 +384,17 @@ struct StoreHome {
     steps: Vec<PureStep>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateFragmentHome {
+    state: StateRecipe,
+    value_bit_offset: usize,
+    state_bit_offset: usize,
+    width_bits: usize,
+}
+
 type StoreHomeIndex = BTreeMap<i64, BTreeMap<VReg, usize>>;
+
+type FragmentHomeIndex = BTreeMap<i64, BTreeMap<VReg, usize>>;
 
 fn index_store_home(index: &mut StoreHomeIndex, value: VReg, home: &StoreHome) {
     let bytes = home
@@ -396,6 +433,43 @@ fn unindex_store_home(index: &mut StoreHomeIndex, value: VReg, home: &StoreHome)
     }
 }
 
+fn index_fragment_home(index: &mut FragmentHomeIndex, value: VReg, home: &StateFragmentHome) {
+    let bytes = home
+        .state
+        .load
+        .bytes()
+        .expect("validated fragment-home load has a finite byte range");
+    for byte in bytes {
+        *index.entry(byte).or_default().entry(value).or_default() += 1;
+    }
+}
+
+fn unindex_fragment_home(index: &mut FragmentHomeIndex, value: VReg, home: &StateFragmentHome) {
+    let bytes = home
+        .state
+        .load
+        .bytes()
+        .expect("validated fragment-home load has a finite byte range");
+    for byte in bytes {
+        let remove_byte = {
+            let values = index
+                .get_mut(&byte)
+                .expect("popped fragment home is present in its byte index");
+            let count = values
+                .get_mut(&value)
+                .expect("popped fragment-home value is present in its byte index");
+            *count -= 1;
+            if *count == 0 {
+                values.remove(&value);
+            }
+            values.is_empty()
+        };
+        if remove_byte {
+            index.remove(&byte);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct PointUse {
     pub block: BlockId,
@@ -420,9 +494,12 @@ pub(super) struct ReloadRecipeAnalysis {
     requested_points: BTreeSet<PointUse>,
     point_recipes: BTreeMap<PointUse, ResolvedRecipe>,
     edge_recipes: BTreeMap<EdgeUse, ResolvedRecipe>,
+    point_fragment_recipes: BTreeMap<PointUse, CompositeStateRecipe>,
+    edge_fragment_recipes: BTreeMap<EdgeUse, CompositeStateRecipe>,
     valid_point_uses: BTreeSet<PointUse>,
     valid_edge_uses: BTreeSet<EdgeUse>,
     collect_all_uses: bool,
+    collect_fragment_homes: bool,
 }
 
 impl ReloadRecipeAnalysis {
@@ -454,6 +531,21 @@ impl ReloadRecipeAnalysis {
 
     pub fn resolved_recipe_at_point(&self, point: PointUse) -> Option<&ResolvedRecipe> {
         self.point_recipes.get(&point)
+    }
+
+    pub(super) fn resolved_recipe_on_edge(&self, edge: EdgeUse) -> Option<&ResolvedRecipe> {
+        self.edge_recipes.get(&edge)
+    }
+
+    pub(super) fn fragment_recipe_at_point(
+        &self,
+        point: PointUse,
+    ) -> Option<&CompositeStateRecipe> {
+        self.point_fragment_recipes.get(&point)
+    }
+
+    pub(super) fn fragment_recipe_on_edge(&self, edge: EdgeUse) -> Option<&CompositeStateRecipe> {
+        self.edge_fragment_recipes.get(&edge)
     }
 
     #[cfg(test)]
@@ -532,6 +624,7 @@ impl ReloadRecipeAnalysis {
             cfg,
             &self.requested_points,
             self.collect_all_uses,
+            self.collect_fragment_homes,
         )?;
         for index in 0..self.recipes.len() {
             let value = VReg(index as u32);
@@ -600,6 +693,24 @@ impl ReloadRecipeAnalysis {
                 None,
                 None,
                 "cached edge recipes differ from independently rebuilt MemorySSA",
+            ));
+        }
+        if self.point_fragment_recipes != rebuilt.point_fragment_recipes {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.POINT_FRAGMENTS_MATCH_MEMORY_SSA",
+                None,
+                None,
+                None,
+                "cached point fragment recipes differ from independently rebuilt MemorySSA",
+            ));
+        }
+        if self.edge_fragment_recipes != rebuilt.edge_fragment_recipes {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.EDGE_FRAGMENTS_MATCH_MEMORY_SSA",
+                None,
+                None,
+                None,
+                "cached edge fragment recipes differ from independently rebuilt MemorySSA",
             ));
         }
         if self.valid_point_uses != rebuilt.valid_point_uses {
@@ -770,7 +881,7 @@ pub(super) fn analyze_for_planning(
     let (point_costs, edge_costs) = if requested_points.is_empty() {
         (BTreeMap::new(), BTreeMap::new())
     } else {
-        let exact = analyze_unverified_with_queries(func, cfg, &requested_points, false)?;
+        let exact = analyze_unverified_with_queries(func, cfg, &requested_points, false, false)?;
         (
             exact
                 .point_recipes
@@ -934,7 +1045,7 @@ pub(super) fn analyze(
     func: &MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
-    let analysis = analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true)?;
+    let analysis = analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true, false)?;
     analysis.verify(func, cfg)?;
     Ok(analysis)
 }
@@ -944,7 +1055,19 @@ pub(super) fn analyze_with_queries(
     cfg: &NormalizedCfg,
     requested_points: &BTreeSet<PointUse>,
 ) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
-    let analysis = analyze_unverified_with_queries(func, cfg, requested_points, false)?;
+    let analysis = analyze_unverified_with_queries(func, cfg, requested_points, false, false)?;
+    analysis.verify(func, cfg)?;
+    Ok(analysis)
+}
+
+/// Build every ordinary and fragment-backed recipe needed by the replacement
+/// live-range allocator.  The production W/S planner deliberately does not
+/// consume this result; home choice belongs to the bundle allocator.
+pub(super) fn analyze_for_home_graph(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
+    let analysis = analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true, true)?;
     analysis.verify(func, cfg)?;
     Ok(analysis)
 }
@@ -977,6 +1100,7 @@ fn analyze_unverified_with_queries(
     cfg: &NormalizedCfg,
     requested_points: &BTreeSet<PointUse>,
     collect_all_uses: bool,
+    collect_fragment_homes: bool,
 ) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
     if func.blocks.len() != cfg.predecessors.len()
         || func.blocks.len() != cfg.successors.len()
@@ -1064,11 +1188,17 @@ fn analyze_unverified_with_queries(
         collect_all_uses,
     )?;
     let mut store_homes = HashMap::<(usize, usize), Vec<StoreHomeSpec>>::new();
-    let mut preserving_writes = HashMap::<(usize, usize), ValidatedStateInsert>::new();
+    let mut preserving_writes = HashMap::<(usize, usize), ValidatedStateFragment>::new();
+    let mut fragment_homes = HashMap::<(usize, usize), ValidatedStateFragment>::new();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            if let Some(insert) = validated_state_insert(func, inst, &canonical_bits) {
-                preserving_writes.insert((block, instruction), insert);
+            if let Some(insert) = validated_state_fragment(func, inst) {
+                if insert.complete_value || collect_fragment_homes {
+                    preserving_writes.insert((block, instruction), insert);
+                }
+                if collect_fragment_homes && relevant_values.contains(&insert.value) {
+                    fragment_homes.insert((block, instruction), insert);
+                }
             }
             let homes = store_home_specs(func, inst, &canonical_bits)
                 .into_iter()
@@ -1099,10 +1229,20 @@ fn analyze_unverified_with_queries(
             tracked_bytes.extend(bytes);
         }
     }
+    for fragment in fragment_homes.values() {
+        tracked_bytes.extend(
+            fragment
+                .load
+                .bytes()
+                .expect("validated state fragment has a finite byte range"),
+        );
+    }
 
     let mut memory_ssa = build_memory_ssa(func, cfg, &tracked_bytes)?;
     let mut point_recipes = BTreeMap::new();
     let mut edge_recipes = BTreeMap::new();
+    let mut point_fragment_recipes = BTreeMap::new();
+    let mut edge_fragment_recipes = BTreeMap::new();
     let mut valid_point_uses = BTreeSet::new();
     let mut valid_edge_uses = BTreeSet::new();
     rename_memory_ssa(
@@ -1113,12 +1253,17 @@ fn analyze_unverified_with_queries(
         &mut recipes,
         &mut memory_ssa,
         &store_homes,
+        &fragment_homes,
         &preserving_writes,
+        &canonical_bits,
+        collect_fragment_homes,
         &relevant_values,
         requested_points,
         collect_all_uses,
         &mut point_recipes,
         &mut edge_recipes,
+        &mut point_fragment_recipes,
+        &mut edge_fragment_recipes,
         &mut valid_point_uses,
         &mut valid_edge_uses,
     )?;
@@ -1130,6 +1275,11 @@ fn analyze_unverified_with_queries(
         &mut edge_recipes,
         &phi_aliases,
     );
+    canonicalize_fragment_recipes(
+        &mut point_fragment_recipes,
+        &mut edge_fragment_recipes,
+        &phi_aliases,
+    );
 
     Ok(ReloadRecipeAnalysis {
         recipes,
@@ -1137,26 +1287,27 @@ fn analyze_unverified_with_queries(
         requested_points: requested_points.clone(),
         point_recipes,
         edge_recipes,
+        point_fragment_recipes,
+        edge_fragment_recipes,
         valid_point_uses,
         valid_edge_uses,
         collect_all_uses,
+        collect_fragment_homes,
     })
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ValidatedStateInsert {
+struct ValidatedStateFragment {
     value: VReg,
     load: StateLoad,
+    value_bit_offset: usize,
     bit_offset: usize,
     width_bits: usize,
+    complete_value: bool,
     observed_bits: StateBitRange,
 }
 
-fn validated_state_insert(
-    func: &MFunction,
-    inst: &MInst,
-    canonical_bits: &[u8],
-) -> Option<ValidatedStateInsert> {
+fn validated_state_fragment(func: &MFunction, inst: &MInst) -> Option<ValidatedStateFragment> {
     let MInst::Store {
         base: BaseReg::SimState,
         offset,
@@ -1173,20 +1324,22 @@ fn validated_state_insert(
     };
     let insert = func.spill_desc(*src)?.state_insert?;
     let end_bit = insert.bit_offset.checked_add(insert.width_bits)?;
+    let value_end_bit = insert.value_bit_offset.checked_add(insert.width_bits)?;
     if insert.width_bits == 0
         || insert.width_bits > 64
         || end_bit > stored_bits
-        || canonical_bits
-            .get(insert.value.0 as usize)
-            .is_none_or(|bits| usize::from(*bits) > insert.width_bits)
+        || value_end_bit > 64
+        || usize::try_from(insert.value.0).ok()? >= func.vregs.count() as usize
     {
         return None;
     }
-    Some(ValidatedStateInsert {
+    Some(ValidatedStateFragment {
         value: insert.value,
         load,
+        value_bit_offset: insert.value_bit_offset,
         bit_offset: insert.bit_offset,
         width_bits: insert.width_bits,
+        complete_value: insert.complete_value,
         observed_bits: StateBitRange::inserted(load, insert.bit_offset, insert.width_bits)?,
     })
 }
@@ -1221,9 +1374,17 @@ fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Ve
         });
     }
 
-    let Some(insert) = validated_state_insert(func, inst, canonical_bits) else {
+    let Some(insert) = validated_state_fragment(func, inst) else {
         return homes;
     };
+    if !insert.complete_value
+        || insert.value_bit_offset != 0
+        || canonical_bits
+            .get(insert.value.0 as usize)
+            .is_none_or(|bits| usize::from(*bits) > insert.width_bits)
+    {
+        return homes;
+    }
     let mut steps = Vec::with_capacity(2);
     if insert.bit_offset != 0 {
         let Ok(immediate) = u8::try_from(insert.bit_offset) else {
@@ -1826,12 +1987,17 @@ fn rename_memory_ssa(
     recipes: &mut [ReloadRecipe],
     memory_ssa: &mut MemorySsa,
     store_homes: &HashMap<(usize, usize), Vec<StoreHomeSpec>>,
-    preserving_writes: &HashMap<(usize, usize), ValidatedStateInsert>,
+    fragment_homes: &HashMap<(usize, usize), ValidatedStateFragment>,
+    preserving_writes: &HashMap<(usize, usize), ValidatedStateFragment>,
+    canonical_bits: &[u8],
+    collect_fragment_homes: bool,
     relevant_values: &BTreeSet<VReg>,
     requested_points: &BTreeSet<PointUse>,
     collect_all_uses: bool,
     point_recipes: &mut BTreeMap<PointUse, ResolvedRecipe>,
     edge_recipes: &mut BTreeMap<EdgeUse, ResolvedRecipe>,
+    point_fragment_recipes: &mut BTreeMap<PointUse, CompositeStateRecipe>,
+    edge_fragment_recipes: &mut BTreeMap<EdgeUse, CompositeStateRecipe>,
     valid_point_uses: &mut BTreeSet<PointUse>,
     valid_edge_uses: &mut BTreeSet<EdgeUse>,
 ) -> Result<(), ReloadRecipeError> {
@@ -1854,12 +2020,15 @@ fn rename_memory_ssa(
         Exit {
             memory_changes: Vec<(MemoryVariable, Option<MemoryVersion>)>,
             home_pushes: Vec<VReg>,
+            fragment_pushes: Vec<VReg>,
         },
     }
 
     let mut current = BTreeMap::<MemoryVariable, MemoryVersion>::new();
     let mut current_homes = BTreeMap::<VReg, Vec<StoreHome>>::new();
     let mut current_home_index = StoreHomeIndex::new();
+    let mut current_fragments = BTreeMap::<VReg, Vec<StateFragmentHome>>::new();
+    let mut current_fragment_index = FragmentHomeIndex::new();
     let requested_by_location = requested_points.iter().fold(
         BTreeMap::<(BlockId, usize), Vec<VReg>>::new(),
         |mut locations, point| {
@@ -1876,7 +2045,26 @@ fn rename_memory_ssa(
             Action::Exit {
                 memory_changes,
                 home_pushes,
+                fragment_pushes,
             } => {
+                for value in fragment_pushes.into_iter().rev() {
+                    let Some(fragments) = current_fragments.get_mut(&value) else {
+                        return Err(ReloadRecipeError::new(
+                            "RELOAD_RECIPE.FRAGMENT_HOME_SCOPE",
+                            None,
+                            None,
+                            Some(value),
+                            "state fragment disappeared before dominator exit",
+                        ));
+                    };
+                    let fragment = fragments
+                        .pop()
+                        .expect("dominator-scoped fragment push has a matching pop");
+                    unindex_fragment_home(&mut current_fragment_index, value, &fragment);
+                    if fragments.is_empty() {
+                        current_fragments.remove(&value);
+                    }
+                }
                 for value in home_pushes.into_iter().rev() {
                     let Some(homes) = current_homes.get_mut(&value) else {
                         return Err(ReloadRecipeError::new(
@@ -1908,6 +2096,7 @@ fn rename_memory_ssa(
         };
         let mut memory_changes = Vec::new();
         let mut home_pushes = Vec::new();
+        let mut fragment_pushes = Vec::new();
         for &(variable, phi) in &memory_ssa.phis_by_block[block] {
             set_current(
                 &mut current,
@@ -2020,6 +2209,17 @@ fn rename_memory_ssa(
                         point_recipes.insert(point, recipe);
                         valid_point_uses.insert(point);
                     }
+                    if collect_fragment_homes
+                        && let Some(recipe) = available_fragment_recipe(
+                            value,
+                            canonical_bits,
+                            &current_fragments,
+                            &current,
+                            memory_ssa,
+                        )?
+                    {
+                        point_fragment_recipes.insert(point, recipe);
+                    }
                 }
             }
             if let Some(values) = requested_by_location.get(&(block_id, instruction)) {
@@ -2038,6 +2238,17 @@ fn rename_memory_ssa(
                         memory_ssa,
                     )? {
                         point_recipes.insert(point, recipe);
+                    }
+                    if collect_fragment_homes
+                        && let Some(recipe) = available_fragment_recipe(
+                            value,
+                            canonical_bits,
+                            &current_fragments,
+                            &current,
+                            memory_ssa,
+                        )?
+                    {
+                        point_fragment_recipes.insert(point, recipe);
                     }
                 }
             }
@@ -2062,6 +2273,7 @@ fn rename_memory_ssa(
             }
 
             let mut preserved_homes = Vec::<(VReg, StoreHome)>::new();
+            let mut preserved_fragments = Vec::<(VReg, StateFragmentHome)>::new();
             if let Some(insert) = preserving_writes.get(&(block, instruction)).copied() {
                 let written_bits = insert.observed_bits;
                 let mut candidates = BTreeSet::<VReg>::new();
@@ -2081,6 +2293,26 @@ fn rename_memory_ssa(
                                 == home.state.version
                         {
                             preserved_homes.push((value, home.clone()));
+                        }
+                    }
+                }
+                let mut fragment_candidates = BTreeSet::<VReg>::new();
+                for byte in insert
+                    .load
+                    .bytes()
+                    .expect("validated preserving write has a finite byte range")
+                {
+                    if let Some(values) = current_fragment_index.get(&byte) {
+                        fragment_candidates.extend(values.keys().copied());
+                    }
+                }
+                for value in fragment_candidates {
+                    for fragment in &current_fragments[&value] {
+                        if !fragment.state.observed_bits.overlaps(written_bits)
+                            && current_state_version(fragment.state.load, &current, memory_ssa)?
+                                == fragment.state.version
+                        {
+                            preserved_fragments.push((value, fragment.clone()));
                         }
                     }
                 }
@@ -2113,6 +2345,17 @@ fn rename_memory_ssa(
                 home_pushes.push(value);
             }
 
+            for (value, mut fragment) in preserved_fragments {
+                let version = current_state_version(fragment.state.load, &current, memory_ssa)?;
+                if version == fragment.state.version {
+                    continue;
+                }
+                fragment.state.version = version;
+                index_fragment_home(&mut current_fragment_index, value, &fragment);
+                current_fragments.entry(value).or_default().push(fragment);
+                fragment_pushes.push(value);
+            }
+
             if let Some(homes) = store_homes.get(&(block, instruction)) {
                 for home in homes {
                     let stored = StoreHome {
@@ -2127,6 +2370,24 @@ fn rename_memory_ssa(
                     current_homes.entry(home.value).or_default().push(stored);
                     home_pushes.push(home.value);
                 }
+            }
+            if let Some(fragment) = fragment_homes.get(&(block, instruction)).copied() {
+                let stored = StateFragmentHome {
+                    state: StateRecipe {
+                        load: fragment.load,
+                        version: current_state_version(fragment.load, &current, memory_ssa)?,
+                        observed_bits: fragment.observed_bits,
+                    },
+                    value_bit_offset: fragment.value_bit_offset,
+                    state_bit_offset: fragment.bit_offset,
+                    width_bits: fragment.width_bits,
+                };
+                index_fragment_home(&mut current_fragment_index, fragment.value, &stored);
+                current_fragments
+                    .entry(fragment.value)
+                    .or_default()
+                    .push(stored);
+                fragment_pushes.push(fragment.value);
             }
         }
 
@@ -2159,6 +2420,17 @@ fn rename_memory_ssa(
                     edge_recipes.insert(edge, recipe);
                     valid_edge_uses.insert(edge);
                 }
+                if collect_fragment_homes
+                    && let Some(recipe) = available_fragment_recipe(
+                        *value,
+                        canonical_bits,
+                        &current_fragments,
+                        &current,
+                        memory_ssa,
+                    )?
+                {
+                    edge_fragment_recipes.insert(edge, recipe);
+                }
             }
             for &(_, phi) in &memory_ssa.phis_by_block[successor] {
                 let variable = memory_ssa.phis[phi].variable;
@@ -2170,6 +2442,7 @@ fn rename_memory_ssa(
         actions.push(Action::Exit {
             memory_changes,
             home_pushes,
+            fragment_pushes,
         });
         actions.extend(children[block].iter().rev().copied().map(Action::Enter));
     }
@@ -2499,6 +2772,128 @@ fn available_store_home(
     Ok(None)
 }
 
+fn fragment_materialization_cost(fragment: &StateFragmentHome) -> u16 {
+    let mut cost = 1u16; // physical load
+    if fragment.state_bit_offset != 0 {
+        cost = cost.saturating_add(1);
+    }
+    if fragment.width_bits < 64 {
+        cost = cost.saturating_add(if fragment.width_bits <= 32 { 1 } else { 2 });
+    }
+    if fragment.value_bit_offset != 0 {
+        cost = cost.saturating_add(1);
+    }
+    cost
+}
+
+/// Select a complete, minimum-machine-operation cover of the significant bits
+/// of `value`.  Every selected physical fragment has an independently checked
+/// MemorySSA version at this exact point.  The cover is allowed to overlap but
+/// never to contain a hole.
+fn available_fragment_recipe(
+    value: VReg,
+    canonical_bits: &[u8],
+    current_fragments: &BTreeMap<VReg, Vec<StateFragmentHome>>,
+    current: &BTreeMap<MemoryVariable, MemoryVersion>,
+    memory_ssa: &MemorySsa,
+) -> Result<Option<CompositeStateRecipe>, ReloadRecipeError> {
+    let Some(&required_bits) = canonical_bits.get(value.0 as usize) else {
+        return Err(ReloadRecipeError::new(
+            "RELOAD_RECIPE.VALUE_COVERAGE",
+            None,
+            None,
+            Some(value),
+            "fragment recipe value is outside the canonical-value table",
+        ));
+    };
+    let required_bits = usize::from(required_bits);
+    if required_bits == 0 || required_bits > 64 {
+        return Ok(None);
+    }
+    let Some(homes) = current_fragments.get(&value) else {
+        return Ok(None);
+    };
+    let mut available = Vec::<&StateFragmentHome>::new();
+    for home in homes {
+        let Some(end) = home.value_bit_offset.checked_add(home.width_bits) else {
+            continue;
+        };
+        if home.value_bit_offset >= required_bits || end <= home.value_bit_offset {
+            continue;
+        }
+        if current_state_version(home.state.load, current, memory_ssa)? == home.state.version {
+            available.push(home);
+        }
+    }
+    available.sort_by_key(|home| {
+        (
+            home.value_bit_offset,
+            std::cmp::Reverse(home.value_bit_offset.saturating_add(home.width_bits)),
+            fragment_materialization_cost(home),
+            home.state.load.offset,
+            home.state.load.size.bytes(),
+            home.state_bit_offset,
+            home.width_bits,
+        )
+    });
+
+    #[derive(Clone)]
+    struct Cover {
+        cost: u16,
+        fragments: Vec<usize>,
+    }
+    let mut best = vec![None::<Cover>; required_bits + 1];
+    best[0] = Some(Cover {
+        cost: 0,
+        fragments: Vec::new(),
+    });
+    for covered in 0..required_bits {
+        let Some(prefix) = best[covered].clone() else {
+            continue;
+        };
+        for (fragment_index, fragment) in available.iter().enumerate() {
+            let end = fragment
+                .value_bit_offset
+                .saturating_add(fragment.width_bits)
+                .min(required_bits);
+            if fragment.value_bit_offset > covered || end <= covered {
+                continue;
+            }
+            let mut candidate = prefix.clone();
+            candidate.cost = candidate
+                .cost
+                .saturating_add(fragment_materialization_cost(fragment))
+                .saturating_add(u16::from(!candidate.fragments.is_empty()));
+            candidate.fragments.push(fragment_index);
+            let replace = best[end].as_ref().is_none_or(|existing| {
+                (candidate.cost, candidate.fragments.as_slice())
+                    < (existing.cost, existing.fragments.as_slice())
+            });
+            if replace {
+                best[end] = Some(candidate);
+            }
+        }
+    }
+    let Some(cover) = best[required_bits].take() else {
+        return Ok(None);
+    };
+    let fragments = cover
+        .fragments
+        .into_iter()
+        .map(|index| {
+            let fragment = available[index];
+            StateFragmentRecipe {
+                state: fragment.state.clone(),
+                value_bit_offset: fragment.value_bit_offset,
+                state_bit_offset: fragment.state_bit_offset,
+                width_bits: fragment.width_bits,
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    Ok(Some(CompositeStateRecipe { fragments }))
+}
+
 /// Collapse MemorySSA phis whose complete SCC has one external version.
 ///
 /// Iterated dominance-frontier placement is intentionally structural and can
@@ -2691,6 +3086,21 @@ fn canonicalize_reload_recipes(
     }
     for recipe in edge_recipes.values_mut() {
         canonicalize_resolved_recipe(recipe, aliases);
+    }
+}
+
+fn canonicalize_fragment_recipes(
+    point_recipes: &mut BTreeMap<PointUse, CompositeStateRecipe>,
+    edge_recipes: &mut BTreeMap<EdgeUse, CompositeStateRecipe>,
+    aliases: &HashMap<MemoryVersion, MemoryVersion>,
+) {
+    if aliases.is_empty() {
+        return;
+    }
+    for recipe in point_recipes.values_mut().chain(edge_recipes.values_mut()) {
+        for fragment in &mut recipe.fragments {
+            canonicalize_state_recipe(&mut fragment.state, aliases);
+        }
     }
 }
 

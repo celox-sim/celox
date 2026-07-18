@@ -2480,7 +2480,9 @@ tests before generated code is allowed to change:
 - **27a:** exact slot indexes, live segments, instruction/phi-edge use lists,
   interference queries, and an independent dataflow verifier;
 - **27b:** live bundles and a home graph containing stack, unary remat, exact
-  state, and multi-load state recipes, with MemorySSA validity at every use;
+  state, and multi-load state recipes.  Physical home identity is independent
+  of MemorySSA version, while every covered use retains its own exact versioned
+  materialization proof;
 - **27c:** interval-union allocation, eviction, bounded recoloring, and
   dominance/loop/use-cluster splitting behind a diagnostic implementation
   selector;
@@ -2490,6 +2492,39 @@ tests before generated code is allowed to change:
 - **27e:** expose range StateSSA values to this allocator and enable lazy
   packed writeback.  No broad cross-phase load/store removal is enabled before
   the allocator can choose all four homes for every resulting live bundle.
+
+Step 27b now implements the allocation-owned root bundles and HomeGraph without
+connecting them to the production allocator.  Every candidate records its
+exact covered instruction/phi-edge uses.  Materialization has two deliberately
+separate identities: an interned, version-independent shape DAG groups the same
+physical home across uses, while each use points to an exact recipe DAG whose
+state leaves retain the MemorySSA versions proved at that point.  A disjoint
+RMW therefore changes the exact recipe but does not create a false home
+boundary.  Multiple physical fragments are assembled with explicit shift,
+mask, and OR nodes.  Static-store provenance records source and physical bit
+offsets but does not attach an HDL width to a VReg.  Partial-fragment metadata
+is invisible to the legacy W/S planner; only the HomeGraph consumes it.
+
+The focused tests cover a two-load reconstruction, a source-range hole,
+overlapping invalidation, path-specific phi-edge validity, and independent
+rejection of a corrupted use set.  The disjoint-RMW regression additionally
+proves that two uses share one home shape while retaining distinct exact
+MemorySSA recipe IDs.  To prove that the legacy path did not change,
+`bbd6ed81` and the candidate were built in separate non-LTO worktrees and given
+the same ordered source list, working directory, and O2 configuration.  All
+four complete outputs were byte-identical:
+
+- pre-optimized SIR: `38190d2c41df1f9b00df308f6249132a8ac511817f9fc03c6b8341714f9a383e`;
+- post-optimized SIR: `e21dd4020124c4ad0c8796be6a2c950db285ea398a2d5b0cfe9604bc17c8fca4`;
+- native-optimized SIR: `ca588bdf0a97d76c4c5c164a0b8bb1f4503c3f40b2de3512fed6d6ebb062538a`;
+- complete MIR: `a2c7746d55bf4bbdbf1454763177dd055694db8cbf058584174924e83b123741`.
+
+The retained candidate trace is
+`target/heliodor/analysis/step27b-home-graph-v2-20260718`; its parent comparison
+is `target/heliodor/analysis/step27b-parent-bbd6ed81-v1-20260718`.  The older
+Step 26d trace used a different source registration order and consequently
+already differed in pre-optimization SIR, so it was not used to infer a backend
+change.
 
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
@@ -2538,6 +2573,7 @@ new allocator produces a substantial non-LTO execution win.
 | 24 cross-phase stable-forwarding diagnostic | rejected (no commit) | exact full SIR/MIR comparison | unchanged source and pre/post SIR hashes | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1` | compile 82.193 s; execute 121.003 s | no improvement; switch remains disabled |
 | 26a disjoint bit-range state reload homes | this step | reload 32/32; complete normalized post-RA MIR inspection | lib 776/776; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR unchanged | compile 75.665 s; execute 114.833 s | allocator prerequisite retained; one stack home removed; aggregate promotion remains open |
 | 27a exact sparse live intervals | this step | live-interval construction and independent verification 5/5 | lib 781/781; check and format pass | analysis-only module is not connected to allocation; generated MIR is unchanged | n/a | stable instruction/phi-edge slots, CFG-sparse segments, and an independent liveness verifier complete |
+| 27b live bundles and HomeGraph | this step | HomeGraph 6/6; legacy reload 32/32 | lib 787/787; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | parent/candidate complete pre/post/native SIR and MIR byte-identical; parent exact Linux marker remains applicable | trace-only compile: parent 74.106 s, candidate 72.213 s; no timing claim | version-independent home shapes plus exact per-use MemorySSA recipes represented; production allocator unchanged |
 
 ## Related design records
 
