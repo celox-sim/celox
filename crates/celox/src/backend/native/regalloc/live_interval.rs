@@ -519,7 +519,6 @@ fn check_model_shape<P: LivenessProgram + ?Sized>(
 fn assign_slots<P: LivenessProgram + ?Sized>(
     program: &P,
 ) -> Result<Vec<BlockSlots>, LiveIntervalError> {
-    let mut next = 0u64;
     let mut result = Vec::with_capacity(program.block_count());
     for block in 0..program.block_count() {
         let block_id = program.block_id(block);
@@ -533,18 +532,14 @@ fn assign_slots<P: LivenessProgram + ?Sized>(
                 "instruction count exceeds the slot-index domain",
             )
         })?;
-        let phi_def = next.checked_add(1).ok_or_else(|| {
-            LiveIntervalError::new(
-                "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block_id),
-                None,
-                Vec::new(),
-                "phi-definition slot overflows u64",
-            )
-        })?;
+        // Slot coordinates are block-local. LiveSegment already carries its
+        // BlockId, so adding instructions to one allocation-IR block must not
+        // renumber every interval in all later blocks.
+        let entry = 0u64;
+        let phi_def = 1u64;
         let exit = instruction_count
             .checked_mul(2)
-            .and_then(|width| next.checked_add(width))
+            .and_then(|width| entry.checked_add(width))
             .and_then(|slot| slot.checked_add(2))
             .ok_or_else(|| {
                 LiveIntervalError::new(
@@ -556,20 +551,11 @@ fn assign_slots<P: LivenessProgram + ?Sized>(
                 )
             })?;
         result.push(BlockSlots {
-            entry: SlotIndex(next),
+            entry: SlotIndex(entry),
             phi_def: SlotIndex(phi_def),
             exit: SlotIndex(exit),
             instruction_count: block_instruction_count,
         });
-        next = exit.checked_add(2).ok_or_else(|| {
-            LiveIntervalError::new(
-                "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block_id),
-                None,
-                Vec::new(),
-                "function slot range overflows u64",
-            )
-        })?;
     }
     Ok(result)
 }
@@ -1324,6 +1310,45 @@ mod tests {
         assert_eq!(
             destination.segments[0].start,
             intervals.block_slots[0].instruction_def(1).unwrap()
+        );
+    }
+
+    #[test]
+    fn block_local_slots_do_not_renumber_an_unchanged_successor() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        exit.push(MInst::Return);
+        let mut before = function(2, vec![entry.clone(), exit.clone()]);
+        let before_cfg = normalize(&mut before);
+        let before_intervals = analyze(&before, &before_cfg).unwrap();
+
+        entry.insts.insert(
+            1,
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(0),
+            },
+        );
+        let mut after = function(3, vec![entry, exit]);
+        let after_cfg = normalize(&mut after);
+        let after_intervals = analyze(&after, &after_cfg).unwrap();
+
+        assert_ne!(
+            before_intervals.block_slots[0],
+            after_intervals.block_slots[0]
+        );
+        assert_eq!(
+            before_intervals.block_slots[1],
+            after_intervals.block_slots[1]
         );
     }
 

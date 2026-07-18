@@ -3003,6 +3003,23 @@ new values. Dead synthetic identities are compacted once at the final atomic
 lowering boundary. Complete liveness, constraints, interference, stack SSA,
 and out-of-SSA plans are still rebuilt independently once before publication.
 
+Step 27d9a establishes the stable coordinate and identity domain required by
+that session. Live-interval slots are now block-local: a segment already owns
+its `BlockId`, so inserting one synthetic operation cannot legitimately
+renumber every slot in every later block. A regression inserts an instruction
+in one predecessor and proves that the unchanged successor's entry, phi, and
+exit coordinates remain identical.
+
+Dead synthetic reload/recipe sweeping no longer compacts VRegs or synthetic
+instruction IDs after every split. Removed definitions become unused holes;
+new transitions receive monotonically fresh identities, and liveness emits no
+interval for a removed value. This removes the allocation-wide metadata repair
+which previously changed every later identity. The final MIR may retain unused
+VReg-number holes; they have no definition, use, assignment, or emitted code.
+Independent final liveness continues to reject any live reference to such a
+hole. Region identity and the persistent physical matrix remain the next
+session slice; this step alone does not rerun the 900-second Heliodor gate.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3071,6 +3088,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d7a split target constraints and weighted coalescing | this step | allocation constraints 2/2; pre-spill Perm pressure regression 1/1; joint allocation 4/4; split 5/5; lowering 3/3 | lib 830/830 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | fixed/clobber boundaries split SSA ranges before allocation; rewritten operands own mandatory masks; sparse transactional coalescing preserves correctness; stack-home lifetime coloring remains next |
 | 27d7b exact stack-home liveness and sparse slot coloring | this step | stack coloring 3/3 for exact reuse/interference/direct phi edges; allocation lowering 3/3; more-than-K phi-edge regression 1/1 | lib 833/833 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | stores/stack phis define location SSA; reload/direct-edge uses share the CFG-sparse verifier; a dynamic interval matrix colors and independently rebuilds final frame slots |
 | 27d8 explicit replacement publication and actual-scale rejection | this step | destination-qualified final-liveness regression 1/1; candidate regalloc 12/12 including 32-phi JIT execution | candidate/default lib 834/834; candidate native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: non-LTO candidate remained in code generation and timed out before Linux execution | 900.256 s timeout; compile/execute record unavailable | explicit publication is verified on common workloads, but the all-world split/reanalyse/recolor fixed point is rejected; persistent incremental allocation is next |
+| 27d9a stable block slots and allocation-session identities | this step | stable cross-block slot 1/1; stable dead-materialization identity 1/1; split 5/5; lowering 3/3 | candidate lib 836/836; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | not rerun; this prerequisite does not yet replace whole-problem liveness/recoloring | n/a | block-local coordinates and monotonic synthetic IDs remove global renumbering; persistent region/matrix state remains next |
 
 ## Related design records
 

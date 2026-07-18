@@ -14,8 +14,8 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, Uses, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedMaterialization, ExpandedRegisterRegion,
-    ExpandedStackHome, ExpandedUseSource, RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedRegisterRegion, ExpandedStackHome, ExpandedUseSource,
+    RegisterRegionId,
 };
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
@@ -1623,7 +1623,7 @@ fn normalize_register_regions(
 fn prune_dead_materializations(
     expanded: &mut ExpandedAllocationProblem,
 ) -> Result<(), AllocationSplitError> {
-    let compaction = expanded.ir.prune_dead_materializations().map_err(|error| {
+    expanded.ir.prune_dead_materializations().map_err(|error| {
         AllocationSplitError::new(
             error.rule,
             error.block,
@@ -1631,90 +1631,7 @@ fn prune_dead_materializations(
             None,
             error.message,
         )
-    })?;
-    for root in &mut expanded.roots {
-        for use_ in &mut root.uses {
-            use_.value = compaction.value(use_.value).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.DCE_LIVE_VALUE",
-                    Some(use_.site.block()),
-                    Some(use_.value),
-                    Some(root.id),
-                    "expanded root use references a removed materialization value",
-                )
-            })?;
-            if let ExpandedUseSource::Materialized(materialization) = &mut use_.source {
-                compact_materialization(&compaction, materialization, root.id, use_.value)?;
-            }
-        }
-    }
-    for region in &mut expanded.register_regions {
-        region.value = compaction.value(region.value).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.DCE_LIVE_VALUE",
-                None,
-                Some(region.value),
-                Some(region.root),
-                "register region references a removed materialization value",
-            )
-        })?;
-        compact_materialization(&compaction, &mut region.entry, region.root, region.value)?;
-    }
-    for home in &mut expanded.stack_homes {
-        if let super::allocation_expand::ExpandedStackDefinition::Store { instruction, value } =
-            &mut home.definition
-        {
-            *instruction = compaction.instruction(*instruction).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.DCE_STACK_STORE",
-                    None,
-                    None,
-                    Some(home.root),
-                    "explicit stack home references a removed store",
-                )
-            })?;
-            *value = compaction.value(*value).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.DCE_STACK_VALUE",
-                    None,
-                    Some(*value),
-                    Some(home.root),
-                    "explicit stack store references a removed value",
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn compact_materialization(
-    compaction: &super::allocation_ir::AllocationIrCompaction,
-    materialization: &mut ExpandedMaterialization,
-    root: LiveBundleId,
-    value: VReg,
-) -> Result<(), AllocationSplitError> {
-    let compact = |instruction| {
-        compaction.instruction(instruction).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.DCE_LIVE_INSTRUCTION",
-                None,
-                Some(value),
-                Some(root),
-                "live expanded materialization references a removed instruction",
-            )
-        })
-    };
-    match materialization {
-        ExpandedMaterialization::Stack { instruction, .. } => {
-            *instruction = compact(*instruction)?;
-        }
-        ExpandedMaterialization::Recipe { instructions, .. } => {
-            for instruction in instructions {
-                *instruction = compact(*instruction)?;
-            }
-        }
-    }
-    Ok(())
+    })
 }
 
 fn split_progress(expanded: &ExpandedAllocationProblem) -> SplitProgress {
@@ -2187,8 +2104,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             expanded.ir.value_count(),
-            values_before_replacement + 1,
-            "one dead entry recipe must be removed while two replacement recipes remain"
+            values_before_replacement + 2,
+            "replacement recipes receive fresh stable session identities"
+        );
+        assert!(
+            expanded.intervals.intervals[metadata.value.0 as usize].is_none(),
+            "the replaced entry recipe must be dead without renumbering later values"
+        );
+        assert_eq!(
+            expanded.intervals.intervals[values_before_replacement as usize..]
+                .iter()
+                .filter(|interval| interval.is_some())
+                .count(),
+            2,
+            "both replacement recipes must remain live"
         );
     }
 }

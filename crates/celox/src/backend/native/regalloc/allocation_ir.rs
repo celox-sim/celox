@@ -116,25 +116,6 @@ pub(super) struct InsertedSynthetic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AllocationIrCompaction {
-    values: Vec<Option<VReg>>,
-    instructions: Vec<Option<SyntheticInstructionId>>,
-}
-
-impl AllocationIrCompaction {
-    pub(super) fn value(&self, old: VReg) -> Option<VReg> {
-        self.values.get(old.0 as usize).copied().flatten()
-    }
-
-    pub(super) fn instruction(
-        &self,
-        old: SyntheticInstructionId,
-    ) -> Option<SyntheticInstructionId> {
-        self.instructions.get(old.0 as usize).copied().flatten()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AllocationIr {
     original_value_count: u32,
     next_value: u32,
@@ -992,10 +973,9 @@ impl AllocationIr {
     }
 
     /// Resolve an immutable original-MIR use anchor to its position in the
-    /// current allocation IR. Synthetic instructions can shift both an
-    /// instruction's local index and every later block's global slot range;
-    /// callers must therefore not compare original [`UseSite`] slots with
-    /// intervals computed after expansion.
+    /// current allocation IR. Synthetic instructions shift later local
+    /// positions in the same block; block-local slot coordinates leave all
+    /// other blocks unchanged.
     pub(super) fn resolve_original_use_site(
         &self,
         original: UseSite,
@@ -1175,11 +1155,13 @@ impl AllocationIr {
     /// pressure splitting can replace a whole register region; keeping its old
     /// reload/recipe definitions would turn dead code into artificial fixed
     /// register pressure. Original MIR and stack stores are never removed.
-    /// Surviving synthetic values and instruction identities are compacted in
-    /// old-identity order and returned for metadata repair.
-    pub(super) fn prune_dead_materializations(
-        &mut self,
-    ) -> Result<AllocationIrCompaction, AllocationIrError> {
+    ///
+    /// Value and instruction identities are deliberately not compacted here.
+    /// They are allocation-session identities: renumbering every live value
+    /// after one split makes differential interval and matrix updates
+    /// impossible. Removed identities remain unused holes in the dense ID
+    /// bounds and are ignored by liveness.
+    pub(super) fn prune_dead_materializations(&mut self) -> Result<(), AllocationIrError> {
         self.verify_structure()?;
         let mut synthetic_definitions =
             vec![None::<(SyntheticInstructionId, Uses)>; self.next_value as usize];
@@ -1281,115 +1263,20 @@ impl AllocationIr {
             queue.extend(uses.iter().copied());
         }
 
-        let mut instruction_map = vec![None; self.next_synthetic_instruction as usize];
-        let mut retained_instruction_count = 0usize;
-        for (old, retained) in retained_instructions.iter().copied().enumerate() {
-            if !retained {
-                continue;
-            }
-            let next = retained_instruction_count;
-            retained_instruction_count += 1;
-            let next = u32::try_from(next).map_err(|_| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
-                    None,
-                    None,
-                    Vec::new(),
-                    "retained synthetic instruction count exceeds u32",
-                )
-            })?;
-            instruction_map[old] = Some(SyntheticInstructionId(next));
-        }
-
-        let mut value_map = vec![None; self.next_value as usize];
-        for original in 0..self.original_value_count {
-            value_map[original as usize] = Some(VReg(original));
-        }
-        let mut next_value = self.original_value_count;
-        for old in self.original_value_count..self.next_value {
-            let old_value = VReg(old);
-            let Some((instruction, _)) = synthetic_definitions[old as usize] else {
-                return Err(AllocationIrError::new(
-                    "ALLOCATION_IR.DCE_DEFINITION",
-                    None,
-                    None,
-                    vec![old_value],
-                    "synthetic value domain contains no defining materialization",
-                ));
-            };
-            if !retained_instructions[instruction.0 as usize] {
-                continue;
-            }
-            value_map[old as usize] = Some(VReg(next_value));
-            next_value = next_value.checked_add(1).ok_or_else(|| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.DCE_VALUE_RANGE",
-                    None,
-                    None,
-                    vec![old_value],
-                    "compacted synthetic value identity exceeds u32",
-                )
-            })?;
-        }
-
         for block in &mut self.blocks {
-            for phi in &mut block.phis {
-                for (_, value) in &mut phi.sources {
-                    *value = compact_value(&value_map, *value, block.id)?;
-                }
-            }
             let mut instructions = Vec::with_capacity(block.instructions.len());
-            for mut instruction in std::mem::take(&mut block.instructions) {
+            for instruction in std::mem::take(&mut block.instructions) {
                 if let AllocationInstructionOrigin::Synthetic { id, .. } = instruction.origin
                     && !retained_instructions[id.0 as usize]
                 {
                     continue;
                 }
-                instruction.uses = compact_uses(&value_map, instruction.uses, block.id)?;
-                if let Some(definition) = instruction.definition {
-                    instruction.definition = Some(compact_value(&value_map, definition, block.id)?);
-                }
-                if let AllocationInstructionOrigin::Synthetic {
-                    id,
-                    anchor,
-                    operation,
-                } = instruction.origin
-                {
-                    let id = instruction_map[id.0 as usize].ok_or_else(|| {
-                        AllocationIrError::new(
-                            "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
-                            Some(block.id),
-                            None,
-                            Vec::new(),
-                            "retained synthetic instruction has no compact identity",
-                        )
-                    })?;
-                    instruction.origin = AllocationInstructionOrigin::Synthetic {
-                        id,
-                        anchor,
-                        operation,
-                    };
-                }
                 instructions.push(instruction);
             }
             block.instructions = instructions;
         }
-        self.next_value = next_value;
-        self.next_synthetic_instruction =
-            u32::try_from(retained_instruction_count).map_err(|_| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
-                    None,
-                    None,
-                    Vec::new(),
-                    "retained synthetic instruction count exceeds u32",
-                )
-            })?;
         self.verify_structure()?;
-        Ok(AllocationIrCompaction {
-            values: value_map,
-            instructions: instruction_map,
-        })
+        Ok(())
     }
 
     fn insert_synthetic(
@@ -1760,7 +1647,10 @@ impl AllocationIr {
                 if let AllocationInstructionOrigin::Synthetic { id, anchor, .. } =
                     instruction.origin
                 {
-                    if anchor.block() != block.id || !synthetic_ids.insert(id) {
+                    if id.0 >= self.next_synthetic_instruction
+                        || anchor.block() != block.id
+                        || !synthetic_ids.insert(id)
+                    {
                         return Err(AllocationIrError::new(
                             "ALLOCATION_IR.SYNTHETIC_IDENTITY",
                             Some(block.id),
@@ -1783,33 +1673,6 @@ impl AllocationIr {
                     }
                 }
             }
-        }
-        let expected_instruction_ids = (0..self.next_synthetic_instruction)
-            .map(SyntheticInstructionId)
-            .collect::<BTreeSet<_>>();
-        if synthetic_ids != expected_instruction_ids {
-            return Err(AllocationIrError::new(
-                "ALLOCATION_IR.SYNTHETIC_COVERAGE",
-                None,
-                None,
-                Vec::new(),
-                "synthetic instruction table has a missing or unallocated identity",
-            ));
-        }
-        let expected_definitions = (self.original_value_count..self.next_value)
-            .map(VReg)
-            .collect::<BTreeSet<_>>();
-        if synthetic_definitions != expected_definitions {
-            return Err(AllocationIrError::new(
-                "ALLOCATION_IR.SYNTHETIC_COVERAGE",
-                None,
-                None,
-                expected_definitions
-                    .symmetric_difference(&synthetic_definitions)
-                    .copied()
-                    .collect(),
-                "synthetic machine values do not have one exact definition each",
-            ));
         }
         Ok(())
     }
@@ -2132,50 +1995,6 @@ fn verify_recipe_input(
         ));
     }
     Ok(())
-}
-
-fn compact_value(
-    map: &[Option<VReg>],
-    value: VReg,
-    block: BlockId,
-) -> Result<VReg, AllocationIrError> {
-    map.get(value.0 as usize).copied().flatten().ok_or_else(|| {
-        AllocationIrError::new(
-            "ALLOCATION_IR.DCE_LIVE_REFERENCE",
-            Some(block),
-            None,
-            vec![value],
-            "retained instruction references a removed synthetic value",
-        )
-    })
-}
-
-fn compact_uses(
-    map: &[Option<VReg>],
-    uses: Uses,
-    block: BlockId,
-) -> Result<Uses, AllocationIrError> {
-    let values = uses
-        .iter()
-        .map(|value| compact_value(map, *value, block))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(match values.as_slice() {
-        [] => Uses::none(),
-        [a] => Uses::one(*a),
-        [a, b] => Uses::two(*a, *b),
-        [a, b, c] => Uses::three(*a, *b, *c),
-        [a, b, c, d] => Uses::four(*a, *b, *c, *d),
-        [a, b, c, d, e] => Uses::five(*a, *b, *c, *d, *e),
-        _ => {
-            return Err(AllocationIrError::new(
-                "ALLOCATION_IR.DCE_USE_ARITY",
-                Some(block),
-                None,
-                values,
-                "allocation instruction exceeds the fixed MIR use arity",
-            ));
-        }
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2668,6 +2487,63 @@ mod tests {
         assert!(reload_interval.uses[0].slot() < recipe_interval.uses[0].slot());
         assert_eq!(recipe_interval.uses, vec![resolved_use]);
         assert_ne!(resolved_use, use_site);
+    }
+
+    #[test]
+    fn dead_materialization_sweep_preserves_session_identities() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let original = super::super::live_interval::analyze(&function, &cfg).unwrap();
+        let use_site = original.intervals[0].as_ref().unwrap().uses[0];
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+
+        let dead = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        let live = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        allocation_ir.rewrite_use(use_site, VReg(0), live).unwrap();
+        let identity_bound = allocation_ir.value_count();
+
+        allocation_ir.prune_dead_materializations().unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        assert_eq!(allocation_ir.value_count(), identity_bound);
+        assert!(intervals.intervals[dead.0 as usize].is_none());
+        assert!(intervals.intervals[live.0 as usize].is_some());
+
+        let later = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        assert_eq!(later, VReg(identity_bound));
+        assert_ne!(later, dead);
     }
 
     #[test]

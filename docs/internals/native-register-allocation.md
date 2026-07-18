@@ -140,6 +140,12 @@ Its liveness index accepts original and synthetic machine values uniformly.
 Successful completion lowers it into a new strict-SSA `MFunction` atomically;
 failure leaves the input untouched.
 
+Allocation-session coordinates are block-local, and synthetic instruction and
+machine-value identities are monotonic. Splitting may make an identity dead but
+never renumbers a surviving one; its liveness row becomes empty. This is what
+allows a later session to update affected sparse ranges without invalidating
+unrelated blocks or allocation units.
+
 ### Allocation algorithm
 
 The allocator operates on immutable root liveness and creates allocation units
