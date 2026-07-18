@@ -60,6 +60,41 @@ pub(super) struct StateVersion {
 pub(super) struct StateRecipe {
     pub load: StateLoad,
     version: StateVersion,
+    observed_bits: StateBitRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StateBitRange {
+    start: i64,
+    end: i64,
+}
+
+impl StateBitRange {
+    fn from_load(load: StateLoad) -> Option<Self> {
+        let bytes = load.bytes()?;
+        Some(Self {
+            start: bytes.start.checked_mul(8)?,
+            end: bytes.end.checked_mul(8)?,
+        })
+    }
+
+    fn inserted(load: StateLoad, bit_offset: usize, width_bits: usize) -> Option<Self> {
+        if width_bits == 0 {
+            return None;
+        }
+        let base = i64::from(load.offset).checked_mul(8)?;
+        let bit_offset = i64::try_from(bit_offset).ok()?;
+        let width_bits = i64::try_from(width_bits).ok()?;
+        let start = base.checked_add(bit_offset)?;
+        let end = start.checked_add(width_bits)?;
+        let range = Self { start, end };
+        let physical = Self::from_load(load)?;
+        (range.start >= physical.start && range.end <= physical.end).then_some(range)
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
 }
 
 /// A value's preferred reload mechanism before a concrete spill plan chooses
@@ -313,12 +348,52 @@ struct StoreHomeSpec {
     value: VReg,
     load: StateLoad,
     steps: Vec<PureStep>,
+    observed_bits: StateBitRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoreHome {
     state: StateRecipe,
     steps: Vec<PureStep>,
+}
+
+type StoreHomeIndex = BTreeMap<i64, BTreeMap<VReg, usize>>;
+
+fn index_store_home(index: &mut StoreHomeIndex, value: VReg, home: &StoreHome) {
+    let bytes = home
+        .state
+        .load
+        .bytes()
+        .expect("validated store-home load has a finite byte range");
+    for byte in bytes {
+        *index.entry(byte).or_default().entry(value).or_default() += 1;
+    }
+}
+
+fn unindex_store_home(index: &mut StoreHomeIndex, value: VReg, home: &StoreHome) {
+    let bytes = home
+        .state
+        .load
+        .bytes()
+        .expect("validated store-home load has a finite byte range");
+    for byte in bytes {
+        let remove_byte = {
+            let values = index
+                .get_mut(&byte)
+                .expect("popped store home is present in its byte index");
+            let count = values
+                .get_mut(&value)
+                .expect("popped store home value is present in its byte index");
+            *count -= 1;
+            if *count == 0 {
+                values.remove(&value);
+            }
+            values.is_empty()
+        };
+        if remove_byte {
+            index.remove(&byte);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -989,8 +1064,12 @@ fn analyze_unverified_with_queries(
         collect_all_uses,
     )?;
     let mut store_homes = HashMap::<(usize, usize), Vec<StoreHomeSpec>>::new();
+    let mut preserving_writes = HashMap::<(usize, usize), ValidatedStateInsert>::new();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
+            if let Some(insert) = validated_state_insert(func, inst, &canonical_bits) {
+                preserving_writes.insert((block, instruction), insert);
+            }
             let homes = store_home_specs(func, inst, &canonical_bits)
                 .into_iter()
                 .filter(|home| relevant_values.contains(&home.value))
@@ -1034,6 +1113,7 @@ fn analyze_unverified_with_queries(
         &mut recipes,
         &mut memory_ssa,
         &store_homes,
+        &preserving_writes,
         &relevant_values,
         requested_points,
         collect_all_uses,
@@ -1063,6 +1143,54 @@ fn analyze_unverified_with_queries(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ValidatedStateInsert {
+    value: VReg,
+    load: StateLoad,
+    bit_offset: usize,
+    width_bits: usize,
+    observed_bits: StateBitRange,
+}
+
+fn validated_state_insert(
+    func: &MFunction,
+    inst: &MInst,
+    canonical_bits: &[u8],
+) -> Option<ValidatedStateInsert> {
+    let MInst::Store {
+        base: BaseReg::SimState,
+        offset,
+        src,
+        size,
+    } = inst
+    else {
+        return None;
+    };
+    let stored_bits = usize::try_from(size.bytes()).ok()?.checked_mul(8)?;
+    let load = StateLoad {
+        offset: *offset,
+        size: *size,
+    };
+    let insert = func.spill_desc(*src)?.state_insert?;
+    let end_bit = insert.bit_offset.checked_add(insert.width_bits)?;
+    if insert.width_bits == 0
+        || insert.width_bits > 64
+        || end_bit > stored_bits
+        || canonical_bits
+            .get(insert.value.0 as usize)
+            .is_none_or(|bits| usize::from(*bits) > insert.width_bits)
+    {
+        return None;
+    }
+    Some(ValidatedStateInsert {
+        value: insert.value,
+        load,
+        bit_offset: insert.bit_offset,
+        width_bits: insert.width_bits,
+        observed_bits: StateBitRange::inserted(load, insert.bit_offset, insert.width_bits)?,
+    })
+}
+
 fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Vec<StoreHomeSpec> {
     let MInst::Store {
         base: BaseReg::SimState,
@@ -1078,6 +1206,8 @@ fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Ve
         offset: *offset,
         size: *size,
     };
+    let full_bits = StateBitRange::from_load(load)
+        .expect("a fixed-width i32-addressed state load has a valid bit range");
     let mut homes = Vec::with_capacity(2);
     if canonical_bits
         .get(src.0 as usize)
@@ -1087,24 +1217,13 @@ fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Ve
             value: *src,
             load,
             steps: Vec::new(),
+            observed_bits: full_bits,
         });
     }
 
-    let Some(insert) = func.spill_desc(*src).and_then(|desc| desc.state_insert) else {
+    let Some(insert) = validated_state_insert(func, inst, canonical_bits) else {
         return homes;
     };
-    let Some(end_bit) = insert.bit_offset.checked_add(insert.width_bits) else {
-        return homes;
-    };
-    if insert.width_bits == 0
-        || insert.width_bits > 64
-        || end_bit > usize::from(stored_bits)
-        || canonical_bits
-            .get(insert.value.0 as usize)
-            .is_none_or(|bits| usize::from(*bits) > insert.width_bits)
-    {
-        return homes;
-    }
     let mut steps = Vec::with_capacity(2);
     if insert.bit_offset != 0 {
         let Ok(immediate) = u8::try_from(insert.bit_offset) else {
@@ -1129,8 +1248,9 @@ fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Ve
     }
     let inserted = StoreHomeSpec {
         value: insert.value,
-        load,
+        load: insert.load,
         steps,
+        observed_bits: insert.observed_bits,
     };
     if !homes.contains(&inserted) {
         homes.push(inserted);
@@ -1706,6 +1826,7 @@ fn rename_memory_ssa(
     recipes: &mut [ReloadRecipe],
     memory_ssa: &mut MemorySsa,
     store_homes: &HashMap<(usize, usize), Vec<StoreHomeSpec>>,
+    preserving_writes: &HashMap<(usize, usize), ValidatedStateInsert>,
     relevant_values: &BTreeSet<VReg>,
     requested_points: &BTreeSet<PointUse>,
     collect_all_uses: bool,
@@ -1738,6 +1859,7 @@ fn rename_memory_ssa(
 
     let mut current = BTreeMap::<MemoryVariable, MemoryVersion>::new();
     let mut current_homes = BTreeMap::<VReg, Vec<StoreHome>>::new();
+    let mut current_home_index = StoreHomeIndex::new();
     let requested_by_location = requested_points.iter().fold(
         BTreeMap::<(BlockId, usize), Vec<VReg>>::new(),
         |mut locations, point| {
@@ -1765,7 +1887,10 @@ fn rename_memory_ssa(
                             "store-backed recipe disappeared before dominator exit",
                         ));
                     };
-                    homes.pop();
+                    let home = homes
+                        .pop()
+                        .expect("dominator-scoped store-home push has a matching pop");
+                    unindex_store_home(&mut current_home_index, value, &home);
                     if homes.is_empty() {
                         current_homes.remove(&value);
                     }
@@ -1804,6 +1929,7 @@ fn rename_memory_ssa(
                 continue;
             }
             let mut common_load = None::<StateLoad>;
+            let mut common_observed_bits = None::<StateBitRange>;
             let mut common_steps = None::<Vec<PureStep>>;
             let mut complete = !phi.sources.is_empty();
             for &(predecessor, source) in &phi.sources {
@@ -1837,6 +1963,14 @@ fn rename_memory_ssa(
                     Some(_) => {}
                     None => common_load = Some(state.load),
                 }
+                match common_observed_bits {
+                    Some(bits) if bits != state.observed_bits => {
+                        complete = false;
+                        break;
+                    }
+                    Some(_) => {}
+                    None => common_observed_bits = Some(state.observed_bits),
+                }
                 match &common_steps {
                     Some(common) if *common != steps => {
                         complete = false;
@@ -1850,13 +1984,19 @@ fn rename_memory_ssa(
                 let Some(load) = common_load else {
                     continue;
                 };
-                current_homes.entry(phi.dst).or_default().push(StoreHome {
+                let Some(observed_bits) = common_observed_bits else {
+                    continue;
+                };
+                let home = StoreHome {
                     state: StateRecipe {
                         load,
                         version: current_state_version(load, &current, memory_ssa)?,
+                        observed_bits,
                     },
                     steps: common_steps.unwrap_or_default(),
-                });
+                };
+                index_store_home(&mut current_home_index, phi.dst, &home);
+                current_homes.entry(phi.dst).or_default().push(home);
                 home_pushes.push(phi.dst);
             }
         }
@@ -1909,7 +2049,41 @@ fn rename_memory_ssa(
                 recipes[definition.0 as usize] = ReloadRecipe::StateVersion(StateRecipe {
                     load,
                     version: current_state_version(load, &current, memory_ssa)?,
+                    observed_bits: StateBitRange::from_load(load).ok_or_else(|| {
+                        ReloadRecipeError::new(
+                            "RELOAD_RECIPE.STATE_RANGE",
+                            Some(block_id),
+                            Some(instruction),
+                            Some(definition),
+                            "state load bit range overflows i64",
+                        )
+                    })?,
                 });
+            }
+
+            let mut preserved_homes = Vec::<(VReg, StoreHome)>::new();
+            if let Some(insert) = preserving_writes.get(&(block, instruction)).copied() {
+                let written_bits = insert.observed_bits;
+                let mut candidates = BTreeSet::<VReg>::new();
+                for byte in insert
+                    .load
+                    .bytes()
+                    .expect("validated preserving write has a finite byte range")
+                {
+                    if let Some(values) = current_home_index.get(&byte) {
+                        candidates.extend(values.keys().copied());
+                    }
+                }
+                for value in candidates {
+                    for home in &current_homes[&value] {
+                        if !home.state.observed_bits.overlaps(written_bits)
+                            && current_state_version(home.state.load, &current, memory_ssa)?
+                                == home.state.version
+                        {
+                            preserved_homes.push((value, home.clone()));
+                        }
+                    }
+                }
             }
 
             for variable in affected_variables(inst, &memory_ssa.tracked_bytes)? {
@@ -1928,15 +2102,28 @@ fn rename_memory_ssa(
                 set_current(&mut current, &mut memory_changes, variable, version);
             }
 
+            for (value, mut home) in preserved_homes {
+                let version = current_state_version(home.state.load, &current, memory_ssa)?;
+                if version == home.state.version {
+                    continue;
+                }
+                home.state.version = version;
+                index_store_home(&mut current_home_index, value, &home);
+                current_homes.entry(value).or_default().push(home);
+                home_pushes.push(value);
+            }
+
             if let Some(homes) = store_homes.get(&(block, instruction)) {
                 for home in homes {
                     let stored = StoreHome {
                         state: StateRecipe {
                             load: home.load,
                             version: current_state_version(home.load, &current, memory_ssa)?,
+                            observed_bits: home.observed_bits,
                         },
                         steps: home.steps.clone(),
                     };
+                    index_store_home(&mut current_home_index, home.value, &stored);
                     current_homes.entry(home.value).or_default().push(stored);
                     home_pushes.push(home.value);
                 }
@@ -2077,6 +2264,13 @@ fn verify_resolved_recipe_match(
     match (&original.base, &materialized.base) {
         (ResolvedBase::Constant(left), ResolvedBase::Constant(right)) if left == right => {}
         (ResolvedBase::State(left), ResolvedBase::State(right)) => {
+            // `observed_bits` proves that the selected store home survives
+            // intervening semantic RMWs. Once reconstruction emits the
+            // selected physical load, the rebuilt base observes the full
+            // machine word and the identical `steps` extract the value. The
+            // original point recipe was independently rebuilt before this
+            // check; materialization must match its load, version, and
+            // operations, not that pre-load proof aid.
             if left.load != right.load {
                 return Err(ReloadRecipeError::new(
                     "RELOAD_RECIPE.PHYSICAL_SHAPE_MATCHES",
@@ -3362,6 +3556,132 @@ mod tests {
                 PureStep::ShrImm64 { immediate: 12 },
             ]
         );
+    }
+
+    fn two_partial_rmw_stores(second_bit: usize) -> (MFunction, VReg, PointUse) {
+        let (mut func, values) = function_with_values(12);
+        func.spill_descs[values[4].0 as usize] =
+            SpillDesc::transient().with_state_insert(values[1], 0, 1);
+        func.spill_descs[values[10].0 as usize] =
+            SpillDesc::transient().with_state_insert(values[6], second_bit, 1);
+
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: values[0],
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::AndImm {
+            dst: values[1],
+            src: values[0],
+            imm: 1,
+        });
+        block.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S8,
+        });
+        block.push(MInst::AndImm {
+            dst: values[3],
+            src: values[2],
+            imm: !1,
+        });
+        block.push(MInst::Or {
+            dst: values[4],
+            lhs: values[3],
+            rhs: values[1],
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[4],
+            size: OpSize::S8,
+        });
+        block.push(MInst::Load {
+            dst: values[5],
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::AndImm {
+            dst: values[6],
+            src: values[5],
+            imm: 1,
+        });
+        block.push(MInst::ShlImm {
+            dst: values[7],
+            src: values[6],
+            imm: second_bit as u8,
+        });
+        block.push(MInst::Load {
+            dst: values[8],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S8,
+        });
+        block.push(MInst::AndImm {
+            dst: values[9],
+            src: values[8],
+            imm: !(1u64 << second_bit),
+        });
+        block.push(MInst::Or {
+            dst: values[10],
+            lhs: values[9],
+            rhs: values[7],
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[10],
+            size: OpSize::S8,
+        });
+        block.push(MInst::Mov {
+            dst: values[11],
+            src: values[1],
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let point = PointUse {
+            block: BlockId(0),
+            instruction: 13,
+            value: values[1],
+        };
+        (func, values[1], point)
+    }
+
+    #[test]
+    fn disjoint_partial_rmw_preserves_an_existing_bit_home() {
+        let (func, value, point) = two_partial_rmw_stores(1);
+        let (_, _, analysis) = analyze_function(func);
+
+        let recipe = analysis.resolved_recipe_at_point(point).unwrap();
+        assert!(analysis.point_recipe_uses_store_home(point));
+        assert!(matches!(
+            &recipe.base,
+            ResolvedBase::State(StateRecipe {
+                load: StateLoad {
+                    offset: 40,
+                    size: OpSize::S8,
+                },
+                observed_bits: StateBitRange {
+                    start: 320,
+                    end: 321,
+                },
+                ..
+            })
+        ));
+        assert_eq!(recipe.steps, vec![PureStep::AndImm32 { immediate: 1 }]);
+        assert_eq!(point.value, value);
+    }
+
+    #[test]
+    fn overlapping_partial_rmw_invalidates_an_existing_bit_home() {
+        let (func, _, point) = two_partial_rmw_stores(0);
+        let (_, _, analysis) = analyze_function(func);
+
+        assert!(analysis.resolved_recipe_at_point(point).is_none());
     }
 
     #[test]

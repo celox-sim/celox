@@ -2331,8 +2331,77 @@ not the identity or declared width of those values.
    tune allocator heuristics against an IR which has already discarded the
    aggregate versions they need.
 
-Status: **planned; access-boundary range analysis and its independent verifier
-are the first implementation slice**.
+The first implementation trial deliberately stopped after access-boundary
+range SSA and load replacement.  It built pruned range phis over the complete
+fused CFG and passed an independent dominance, predecessor-coverage, partition,
+and source-width verifier.  In the exact native SIR, fused `b13977` changed
+from reloading the 839-bit `inst51,var6` object and its fields to composing the
+same value from the reaching comb definitions.  The pre- and post-optimization
+source SIR hashes remained unchanged, so this was an isolated native-fusion
+experiment.
+
+That trial also proved why load replacement alone is not mem2reg.  It retained
+all packed-state stores while making the reaching comb definitions ordinary
+SSA operands of the FF suffix.  The allocator therefore had to preserve those
+long ranges in registers or stack in addition to writing the existing packed
+home.  The fused spill frame grew from 37,768 to 38,632 bytes.  In particular,
+an unaligned logical range can span more than one physical state load, while
+the current reload recipe represents only one load followed by unary
+operations.  Such a range cannot select its packed state as a reload home and
+falls back to an additional stack home.
+
+All 780 library tests, 60 non-ignored native-testbench tests, and 9
+native/Cranelift/Wasm counter tests passed.  A trace-free CPU-0 Linux run also
+reached normal `reboot: Power down` at exactly
+`cy=9ae070 x3=aa pass=1`.  Nevertheless, code generation regressed from the
+Step 23 77.247215690 s to 124.736860207 s, and generated execution regressed
+from 120.989709386 s to 155.679387691 s.  A separate compile-only phase run
+located 24.229301002 s in fused SIR merge/optimization and 12.161295906 s in
+fused allocation; these phase numbers are locators, not a performance claim
+against an unmeasured phase baseline.  The implementation was completely
+removed without a commit.
+
+The next slice must therefore combine range SSA with lazy writeback or an
+equivalent optional reload/carry representation.  A promoted range may not
+keep both an eagerly updated packed home and a newly mandatory stack home.
+Unaligned ranges also need a verified multi-load state recipe, or must retain
+their load until allocation chooses to carry the value.  CFG construction must
+share one sparse range dataflow across fragments rather than running an
+independent whole-CFG liveness traversal for every partition.
+
+As a prerequisite, the allocator now records the logical bit range observed by
+each packed-state reload home.  A validated physical read-modify-write advances
+the MemorySSA version of a pre-existing home when it changes only disjoint
+logical bits; an overlapping update still invalidates the home.  Candidate
+homes are found through a byte-indexed sparse map, so a physical write does not
+scan all live homes.  Focused tests cover both preservation and invalidation.
+This is deliberately store-home metadata, not a declaration that a MIR virtual
+register has an arbitrary HDL width.
+
+The complete Step 26a trace has byte-identical pre-optimization,
+post-optimization, and final native SIR to Step 23.  The pre-allocation and
+pressure-scheduled MIR bodies are also byte-identical after virtual-register
+renumbering.  Complete normalized post-allocation inspection found four local
+changes in both `eval_comb` and the fused function: one 12-bit stack
+spill/reload pair became a reload/extract from its still-valid packed home, and
+two one-bit reloads moved from separately materialized state bytes to their
+containing packed bytes plus shift/mask extraction.  The fused spill frame fell
+from 37,768 to 37,760 bytes.  This removes one unnecessary secondary home but
+does not yet remove the repeated packed update dataflow.
+
+All 776 library tests, 60 non-ignored native-testbench tests, and 9
+native/Cranelift/Wasm counter tests pass.  A trace-free non-LTO CPU-0 run
+reached `reboot: Power down` at the unchanged
+`cy=9ae070 x3=aa pass=1`.  Code generation took 75.664875519 s and generated
+execution took 114.832519883 s, versus the Step 23 77.247215690 s and
+120.989709386 s.  This retained prerequisite is therefore non-regressing and
+removes concrete stack traffic, but its approximately 5% execution reduction
+is not the large aggregate-promotion result required by this step.
+
+Status: **in progress; disjoint bit-range state homes are retained as an
+allocator prerequisite.  Forwarding-only range SSA was rejected, and lazy
+writeback plus allocation-owned materialization remains the next implementation
+boundary**.
 
 ## Execution record
 
@@ -2373,6 +2442,7 @@ are the first implementation slice**.
 | 22 word32 snapshot propagation | `278f6ecb` plus this step | width regression 1/1; MIR optimization 53/53; allocator 155/155; native MIR 6/6 | lib 768/768; docs, format, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical to Step 21a | compile 70.552 s; execute 123.199 s | concrete redundant work removed; shared-predicate live range and remaining gap open |
 | 23 coupled update short-circuit and dynamic StateSSA placement | this step | BranchifyMux 44/44; placement 12/12; StateSSA 8/8 | lib 774/774; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; exact final SIR/MIR trace retained | compile 77.247 s; execute 120.990 s | exact local defect fixed; execute -1.79%; dominant gap remains open |
 | 24 cross-phase stable-forwarding diagnostic | rejected (no commit) | exact full SIR/MIR comparison | unchanged source and pre/post SIR hashes | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1` | compile 82.193 s; execute 121.003 s | no improvement; switch remains disabled |
+| 26a disjoint bit-range state reload homes | this step | reload 32/32; complete normalized post-RA MIR inspection | lib 776/776; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR unchanged | compile 75.665 s; execute 114.833 s | allocator prerequisite retained; one stack home removed; aggregate promotion remains open |
 
 ## Related design records
 
