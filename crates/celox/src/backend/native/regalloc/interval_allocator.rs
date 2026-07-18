@@ -14,7 +14,8 @@ use crate::backend::native::mir::{BlockId, VReg};
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{
-    BundleUseId, HomeCandidate, HomeGraph, HomeKind, LiveBundleId, UseMaterialization,
+    BundleUseId, HomeGraph, HomeKind, LiveBundleId, STACK_HOME_CREATION_COST,
+    STACK_HOME_MATERIALIZATION_COST, UseMaterialization,
 };
 use super::interval_union::{
     AllocationBundleId, IntervalUnionError, LiveIntervalMatrix, live_length,
@@ -159,12 +160,12 @@ fn partition_homes(
     root: LiveBundleId,
     uses: &[BundleUseId],
 ) -> Result<HomePartition, IntervalAllocationError> {
-    let Some(candidates) = graph.candidates.get(root.0 as usize) else {
+    let Some(homes) = graph.homes.get(root.0 as usize) else {
         return Err(IntervalAllocationError::new(
             "INTERVAL_ALLOC.HOME_ROOT",
             None,
             None,
-            format!("root bundle {root:?} has no home-candidate row"),
+            format!("root bundle {root:?} has no use-home row"),
         ));
     };
     let build = |stack_available: bool| -> Option<HomePartition> {
@@ -172,28 +173,24 @@ fn partition_homes(
         for &use_id in uses {
             let mut best = None::<(u32, u8, HomeKind, Option<UseMaterialization>)>;
             if stack_available {
-                best = Some((1, home_rank(HomeKind::Stack), HomeKind::Stack, None));
+                best = Some((
+                    STACK_HOME_MATERIALIZATION_COST,
+                    home_rank(HomeKind::Stack),
+                    HomeKind::Stack,
+                    None,
+                ));
             }
-            for candidate in candidates {
-                if !matches!(
-                    candidate.kind,
-                    HomeKind::Rematerialize(_) | HomeKind::State(_)
-                ) || candidate.creation_cost != 0
-                {
-                    continue;
-                }
-                let materialization = candidate
-                    .materializations
-                    .iter()
-                    .find(|item| item.use_id == use_id)
-                    .copied();
-                let Some(materialization) = materialization else {
-                    continue;
+            let options = homes.uses.get(use_id.0 as usize)?;
+            for option in options {
+                let materialization = UseMaterialization {
+                    use_id,
+                    recipe: option.recipe,
+                    cost: option.cost,
                 };
                 let choice = (
                     materialization.cost,
-                    home_rank(candidate.kind),
-                    candidate.kind,
+                    home_rank(option.kind),
+                    option.kind,
                     Some(materialization),
                 );
                 if best.as_ref().is_none_or(|current| choice < *current) {
@@ -209,12 +206,7 @@ fn partition_homes(
         }
 
         let stack_creation = if grouped.contains_key(&HomeKind::Stack) {
-            Some(
-                candidates
-                    .iter()
-                    .find(|candidate| candidate.kind == HomeKind::Stack)
-                    .map(|candidate| candidate.creation_cost)?,
-            )
+            Some(STACK_HOME_CREATION_COST)
         } else {
             None
         };
@@ -222,7 +214,8 @@ fn partition_homes(
         let mut pieces = Vec::with_capacity(grouped.len());
         for (kind, (piece_uses, materializations)) in grouped {
             let materialization_cost = match kind {
-                HomeKind::Stack => u32::try_from(piece_uses.len()).unwrap_or(u32::MAX),
+                HomeKind::Stack => STACK_HOME_MATERIALIZATION_COST
+                    .saturating_mul(u32::try_from(piece_uses.len()).unwrap_or(u32::MAX)),
                 HomeKind::Rematerialize(_) | HomeKind::State(_) => materializations
                     .iter()
                     .fold(0_u32, |cost, item| cost.saturating_add(item.cost)),
@@ -261,33 +254,40 @@ fn partition_homes(
         .unwrap_or(with_stack))
 }
 
-fn candidate_covers(
-    candidate: &HomeCandidate,
+fn selection_covers(
+    graph: &HomeGraph,
+    root: LiveBundleId,
     uses: &[BundleUseId],
     selection: &HomeSelection,
 ) -> bool {
-    if candidate.kind != selection.kind
-        || candidate.creation_cost != selection.creation_cost
-        || !uses
-            .iter()
-            .all(|use_id| candidate.uses.binary_search(use_id).is_ok())
-    {
+    let Some(homes) = graph.homes.get(root.0 as usize) else {
         return false;
-    }
-    match candidate.kind {
+    };
+    match selection.kind {
         HomeKind::Register => false,
         HomeKind::Stack => {
-            selection.materializations.is_empty()
-                && selection.materialization_cost == u32::try_from(uses.len()).unwrap_or(u32::MAX)
+            selection.creation_cost == STACK_HOME_CREATION_COST
+                && selection.materialization_cost
+                    == STACK_HOME_MATERIALIZATION_COST
+                        .saturating_mul(u32::try_from(uses.len()).unwrap_or(u32::MAX))
+                && selection.materializations.is_empty()
         }
         HomeKind::Rematerialize(_) | HomeKind::State(_) => {
-            selection.materializations
-                == candidate
-                    .materializations
+            selection.creation_cost == 0
+                && selection.materializations.len() == uses.len()
+                && uses
                     .iter()
-                    .copied()
-                    .filter(|item| uses.binary_search(&item.use_id).is_ok())
-                    .collect::<Vec<_>>()
+                    .zip(&selection.materializations)
+                    .all(|(&use_id, materialization)| {
+                        materialization.use_id == use_id
+                            && homes.uses.get(use_id.0 as usize).is_some_and(|options| {
+                                options.iter().any(|option| {
+                                    option.kind == selection.kind
+                                        && option.recipe == materialization.recipe
+                                        && option.cost == materialization.cost
+                                })
+                            })
+                    })
                 && selection.materialization_cost
                     == selection
                         .materializations
@@ -847,11 +847,7 @@ impl<'a> Allocator<'a> {
                 .total_cost
                 .saturating_add(remaining.total_cost);
             if entry_uses_stack && remaining_uses_stack {
-                let creation = self.graph.candidates[bundle.root.0 as usize]
-                    .iter()
-                    .find(|candidate| candidate.kind == HomeKind::Stack)
-                    .map_or(0, |candidate| u64::from(candidate.creation_cost));
-                total_cost = total_cost.saturating_sub(creation);
+                total_cost = total_cost.saturating_sub(u64::from(STACK_HOME_CREATION_COST));
             }
             candidates.push(RegionCandidate {
                 register,
@@ -1274,11 +1270,7 @@ impl AllocationPlan {
                         if !bundle.segments.is_empty()
                             || !bundle.transitions.is_empty()
                             || bundle.spill_cost != selection.total_cost()
-                            || !graph.candidates[bundle.root.0 as usize]
-                                .iter()
-                                .any(|candidate| {
-                                    candidate_covers(candidate, &bundle.uses, selection)
-                                })
+                            || !selection_covers(graph, bundle.root, &bundle.uses, selection)
                         {
                             return Err(IntervalAllocationError::new(
                                 "INTERVAL_ALLOC.HOME_SELECTION",
@@ -1574,11 +1566,8 @@ impl AllocationPlan {
                             .total_cost
                             .saturating_add(remaining_partition.total_cost);
                         if transition_uses_stack && remainder_uses_stack {
-                            let creation = graph.candidates[bundle.root.0 as usize]
-                                .iter()
-                                .find(|candidate| candidate.kind == HomeKind::Stack)
-                                .map_or(0, |candidate| u64::from(candidate.creation_cost));
-                            split_cost = split_cost.saturating_sub(creation);
+                            split_cost =
+                                split_cost.saturating_sub(u64::from(STACK_HOME_CREATION_COST));
                         }
                         if split_cost >= bundle.spill_cost {
                             return Err(IntervalAllocationError::new(

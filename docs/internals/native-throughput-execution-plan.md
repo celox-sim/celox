@@ -2582,6 +2582,31 @@ its sibling.  The plan verifier independently checks transition recipe
 validity, point dominance, child segment containment, exact use partitioning,
 shared stack identity, and a freshly rebuilt physical interval matrix.
 
+Step 27c5 begins the actual-scale correction of that diagnostic design.  The
+first Heliodor connection exposed two independent complexity defects rather
+than a tuning issue.  HomeGraph stored homes transposed by physical shape, so
+selecting a home for a use searched every candidate and then searched that
+candidate's use list.  Its verifier also nested complete live-interval and
+all-use MemorySSA reconstruction, causing the same MemorySSA to be built up to
+four times while native functions were compiled concurrently.  HomeGraph now
+owns a direct use-to-exact-recipe index.  Register and stack residency are
+allocator mechanisms and are implicit; only use-local state/rematerialization
+proofs occupy the graph.  Each producer verifies its own dataflow once, and
+the HomeGraph boundary verifies bundle ownership and recipe-DAG structure
+without recursively rebuilding its inputs.  A later post-allocation boundary
+still has to re-derive every selected home from MIR before this allocator can
+replace production allocation.
+
+The CPU-0 non-LTO Heliodor diagnostic after this change built the four large
+HomeGraphs far enough to report 8.128 s for `eval_comb`, 6.755 s for
+`eval_only_ff`, and 6.611 s for `eval_apply_ff` while those compile threads
+shared one CPU.  The run was then deliberately stopped: allocation itself did
+not finish in the following 50 seconds and process RSS reached about 5.1 GiB.
+This rejects the current cloned interval matrix and per-use free-region search;
+it is not a compile-only success or a Linux correctness result.  The next
+slice replaces those structures with shared sparse interval storage,
+transactional undo, and one region dataflow per register.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2634,6 +2659,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c2 complete-bundle allocation policy | this step | allocation queue/eviction/recolor/home selection 4/4 | lib 795/795; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | terminating work queue, transactional recolor, monotonic eviction, and independent plan verification complete |
 | 27c3 per-use home partition | this step | allocator 5/5 including path-specific state/stack partition | lib 796/796; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact shared-stack versus per-use recipe partition replaces VReg-wide fallback |
 | 27c4 dominance/use-cluster region splitting | this step | allocator 8/8 including same-block, cross-block, and sibling-arm splits | lib 799/799; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact-use transitions and CFG-connected sparse register children complete |
+| 27c5a use-indexed HomeGraph | this step | HomeGraph 6/6; allocator 8/8 | lib 799/799; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic intentionally stopped after HomeGraph completion; production MIR unchanged | HomeGraph 8.128 / 6.755 / 6.611 s for the three reported large functions | nested full-analysis rebuild and quadratic home lookup removed; allocator core still fails the actual-scale gate |
 
 ## Related design records
 

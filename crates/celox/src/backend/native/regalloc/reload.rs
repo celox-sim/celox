@@ -1067,9 +1067,13 @@ pub(super) fn analyze_for_home_graph(
     func: &MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
-    let analysis = analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true, true)?;
-    analysis.verify(func, cfg)?;
-    Ok(analysis)
+    // This builder already checks MemorySSA phi equations and every selected
+    // use against the rename state. Rebuilding the complete all-use analysis
+    // here used to be nested again by HomeGraph verification, multiplying
+    // both memory and work for each concurrently compiled native function.
+    // This diagnostic cannot authorize MIR emission; production integration
+    // must independently re-derive every selected home after reconstruction.
+    analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

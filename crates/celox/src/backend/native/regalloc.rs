@@ -195,6 +195,31 @@ fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
     )
 }
 
+fn home_graph_error(phase: &'static str, error: home_graph::HomeGraphError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
+fn interval_allocation_error(
+    phase: &'static str,
+    error: interval_allocator::IntervalAllocationError,
+) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        None,
+        Vec::new(),
+        error.message,
+    )
+}
+
 fn ssa_destruction_error(
     phase: &'static str,
     error: super::ssa_destroy::SsaDestructionError,
@@ -241,21 +266,28 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
     let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
-    if !matches!(requested.as_str(), "auto" | "ssa") {
+    if !matches!(requested.as_str(), "auto" | "ssa" | "interval-diagnostic") {
         return Err(RegallocError::new(
             "configuration",
             "CONFIG.IMPLEMENTATION",
             None,
             None,
             Vec::new(),
-            format!("unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto or ssa"),
+            format!(
+                "unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, or interval-diagnostic"
+            ),
         ));
     }
 
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label, trace)?;
+    let allocation = run_regalloc_in_place(
+        &mut working,
+        label,
+        trace,
+        requested == "interval-diagnostic",
+    )?;
     *func = working;
     Ok(allocation)
 }
@@ -264,6 +296,7 @@ fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
     trace: Option<&mut RegallocTrace>,
+    interval_diagnostic: bool,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -352,6 +385,37 @@ fn run_regalloc_in_place(
             "[regalloc-timing] label={label} cssa_verify elapsed={:?}",
             start.elapsed()
         );
+    }
+    if interval_diagnostic {
+        let interval_start = timing.then(crate::timing::now);
+        let home_start = timing.then(crate::timing::now);
+        let homes = home_graph::build(func, &normalized_cfg)
+            .map_err(|error| home_graph_error("interval HomeGraph construction", error))?;
+        if let Some(start) = home_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_home_graph elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        let allocation_start = timing.then(crate::timing::now);
+        let _plan = interval_allocator::allocate_roots(
+            &homes,
+            &normalized_cfg,
+            assignment::ALLOCATABLE_REGS,
+        )
+        .map_err(|error| interval_allocation_error("interval allocation diagnostics", error))?;
+        if let Some(start) = allocation_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_allocation elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        if let Some(start) = interval_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_diagnostic elapsed={:?}",
+                start.elapsed()
+            );
+        }
     }
     let constraint_start = timing.then(crate::timing::now);
     let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
