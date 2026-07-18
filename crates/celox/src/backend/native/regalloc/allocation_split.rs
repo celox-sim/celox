@@ -292,6 +292,33 @@ struct AppliedSplit {
     changed_values: Vec<VReg>,
 }
 
+/// Physical and semantic fact owners touched by one private split transaction.
+///
+/// A register region may enter in one block and rewrite uses in many later
+/// blocks.  Recording only the entry block leaves liveness stale while region
+/// ownership already names the rewritten values.  Every operand rewrite is
+/// therefore journaled at the mutation boundary, and both incremental
+/// liveness and target constraints consume this same journal.
+#[derive(Debug, Default)]
+struct SplitMutationJournal {
+    liveness_blocks: BTreeSet<BlockId>,
+    constraint_blocks: BTreeSet<BlockId>,
+}
+
+impl SplitMutationJournal {
+    fn record_block(&mut self, block: BlockId) {
+        self.liveness_blocks.insert(block);
+        self.constraint_blocks.insert(block);
+    }
+
+    fn record_use(&mut self, use_: UseSite) {
+        self.record_block(use_.block());
+        if let UseSite::PhiEdge { successor, .. } = use_ {
+            self.constraint_blocks.insert(successor);
+        }
+    }
+}
+
 /// Select one exact resident region whose removal at `request.definition` has
 /// minimum proved transition cost.  Physical assignments are deliberately not
 /// considered final here; the returned values re-enter joint allocation.
@@ -437,8 +464,7 @@ fn apply_split(
     verify_plan(expanded, graph, joint, &candidate, plan, cfg, &dominance)?;
     let before = root_split_progress(expanded_root(expanded, plan.root)?);
     let graph_root = graph_root(graph, plan.root)?;
-    let mut changed_blocks = BTreeSet::new();
-    let mut constraint_blocks = BTreeSet::new();
+    let mut journal = SplitMutationJournal::default();
 
     let needs_stack = plan
         .entries
@@ -447,8 +473,7 @@ fn apply_split(
     let existing_stack_home = stack_home(expanded, plan.root)?;
     let stack_home = if needs_stack {
         if existing_stack_home.is_none() {
-            changed_blocks.insert(graph_root.definition.block());
-            constraint_blocks.insert(graph_root.definition.block());
+            journal.record_block(graph_root.definition.block());
         }
         Some(ensure_stack_home(expanded, graph_root)?)
     } else {
@@ -457,11 +482,9 @@ fn apply_split(
 
     for entry in &plan.entries {
         let entry_use = expanded_use(expanded, plan.root, entry.entry)?.clone();
-        changed_blocks.insert(entry_use.original_site.block());
-        constraint_blocks.insert(entry_use.original_site.block());
-        if let UseSite::PhiEdge { successor, .. } = entry_use.original_site {
-            constraint_blocks.insert(successor);
-        }
+        // The entry materialization itself changes this fact-owner block even
+        // before any region operands are rewritten.
+        journal.record_use(entry_use.original_site);
         let lowered = allocation_expand::lower_use_materialization(
             &mut expanded.ir,
             graph,
@@ -494,6 +517,7 @@ fn apply_split(
                             plan.value,
                             lowered.value,
                             ExpandedUseSource::Materialized(lowered.source),
+                            &mut journal,
                         )?;
                     }
                     allocation_expand::LoweredUseMaterialization::Edge(location) => {
@@ -565,6 +589,7 @@ fn apply_split(
                             region,
                             preferred_register: plan.preferred_register,
                         },
+                        &mut journal,
                     )?;
                 }
             }
@@ -572,7 +597,7 @@ fn apply_split(
     }
 
     prune_replaced_register_region(expanded, plan.root, plan.value, plan.source_region)?;
-    let mut changed_values = allocation_expand::refresh(expanded, cfg, &changed_blocks)
+    let mut changed_values = allocation_expand::refresh(expanded, cfg, &journal.liveness_blocks)
         .map_err(AllocationSplitError::expand)?
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -589,8 +614,9 @@ fn apply_split(
             )
         })?;
     if !pruned_blocks.is_empty() {
-        changed_blocks.extend(pruned_blocks.iter().copied());
-        constraint_blocks.extend(pruned_blocks.iter().copied());
+        for &block in &pruned_blocks {
+            journal.record_block(block);
+        }
         changed_values.extend(
             allocation_expand::refresh(expanded, cfg, &pruned_blocks)
                 .map_err(AllocationSplitError::expand)?,
@@ -608,7 +634,7 @@ fn apply_split(
     }
     Ok(AppliedSplit {
         root: plan.root,
-        constraint_blocks,
+        constraint_blocks: journal.constraint_blocks,
         changed_values: changed_values.into_iter().collect(),
     })
 }
@@ -1566,6 +1592,7 @@ fn rewrite_expanded_use(
     original: VReg,
     replacement: VReg,
     source: ExpandedUseSource,
+    journal: &mut SplitMutationJournal,
 ) -> Result<(), AllocationSplitError> {
     let root_index = root.0 as usize;
     let use_index = use_id.0 as usize;
@@ -1592,6 +1619,7 @@ fn rewrite_expanded_use(
             "rewritten use no longer belongs to the selected region",
         ));
     }
+    journal.record_use(use_.original_site);
     expanded
         .ir
         .rewrite_use(use_.original_site, original, replacement)
@@ -1936,6 +1964,102 @@ mod tests {
         assert!(plan.entries.iter().any(|entry| {
             entry.kind == SplitEntryKind::RegisterRegion && entry.uses.len() == 2
         }));
+    }
+
+    #[test]
+    fn cross_block_region_updates_liveness_and_ownership_from_one_journal() {
+        let mut values = VRegAllocator::new();
+        for _ in 0..8 {
+            values.alloc();
+        }
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 8]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(3),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        left.push(MInst::LoadImm {
+            dst: VReg(3),
+            value: 19,
+        });
+        left.push(MInst::Mov {
+            dst: VReg(4),
+            src: VReg(0),
+        });
+        left.push(MInst::Jump { target: BlockId(2) });
+        let mut left_tail = MBlock::new(BlockId(2));
+        left_tail.push(MInst::Mov {
+            dst: VReg(5),
+            src: VReg(0),
+        });
+        left_tail.push(MInst::Jump { target: BlockId(4) });
+        let mut right = MBlock::new(BlockId(3));
+        right.push(MInst::Mov {
+            dst: VReg(6),
+            src: VReg(0),
+        });
+        right.push(MInst::Mov {
+            dst: VReg(7),
+            src: VReg(0),
+        });
+        right.push(MInst::Jump { target: BlockId(4) });
+        let mut merge = MBlock::new(BlockId(4));
+        merge.push(MInst::Return);
+        function.blocks = vec![entry, left, left_tail, right, merge];
+
+        let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX, PhysReg::RBX];
+        let (cfg, graph, mut expanded) = model(&mut function, &registers);
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let request = request(&joint, VReg(3), candidate(&joint, VReg(0)));
+        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        assert!(plan.entries.iter().any(|entry| {
+            entry.kind == SplitEntryKind::RegisterRegion
+                && entry
+                    .uses
+                    .iter()
+                    .map(|use_id| {
+                        root_for(&expanded, VReg(0)).uses[use_id.0 as usize]
+                            .site
+                            .block()
+                    })
+                    .collect::<BTreeSet<_>>()
+                    == BTreeSet::from([BlockId(1), BlockId(2)])
+        }));
+
+        let mut session =
+            JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
+                .unwrap();
+        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        assert!(update.constraint_blocks.contains(&BlockId(1)));
+        assert!(update.constraint_blocks.contains(&BlockId(2)));
+        session
+            .update_from_expanded(
+                &expanded,
+                &cfg,
+                &graph,
+                &registers,
+                &update.constraint_blocks,
+                &update.changed_values,
+                update.root,
+            )
+            .unwrap();
+
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert_eq!(session.problem(), &rebuilt);
     }
 
     #[test]

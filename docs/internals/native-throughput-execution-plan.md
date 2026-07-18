@@ -3108,6 +3108,30 @@ semantic rows, matrix restart, expanded clone, DCE, progress scan, and region
 renumbering are now absent from the split loop. The next action is therefore an
 actual-scale non-LTO compile/run gate, not another local container tweak.
 
+The first actual-scale compile-only gate reached the split loop but stopped
+after 217.609 s with `JOINT_ALLOC.SESSION_REGION_IDENTITY` for `v248304` in
+`bb6`. A multi-block register region rewrote every owned operand, while the
+split transaction reported only its entry block to incremental liveness.
+Ownership therefore observed the complete new region but the exact interval
+still described an old later-block use. Step 27d9f makes operand rewriting the
+single mutation boundary: every rewrite records its physical fact-owner block
+and a phi rewrite also records its semantic successor. Liveness and target
+constraints consume that same transaction journal. A cross-block-region
+regression requires the differential session to equal a complete independent
+rebuild.
+
+The journal candidate passed 224 allocator tests and the complete common
+suites. A second identical CPU-0 non-LTO compile-only gate passed the original
+failure point. `eval_only_ff` and `eval_apply_ff` completed joint allocation,
+atomic lowering, and publication verification, but the run stopped after
+266.162 s at `JOINT_ALLOC.UNSPLITTABLE_PRESSURE` for `v165177` in `bb11825`.
+This is not a compile or Linux result. It exposes the next allocator design
+boundary: fixed transition ranges are currently fed to a greedy coloring walk
+and, unlike root regions, have neither a proved pressure-bounded producer nor
+a recoloring/spill action. The next slice must classify that exact fixed
+pressure and repair the transition/live-range model; changing search order or
+adding a threshold is not an acceptable resolution.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3180,7 +3204,8 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9b persistent physical interval allocation | this step | stable bundle-hole 1/1; retained matrix-membership 1/1; joint allocation 6/6; split 5/5 | candidate lib 838/838; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | no result: compile-only candidate timed out with three joint-allocation workers active | 600.292 s timeout; HomeGraph/root/expand phases complete | unchanged values retain matrix membership, but repeated whole-IR liveness remains dominant and is the next architectural boundary |
 | 27d9c differential allocation liveness | this step | incremental instruction/phi-edge liveness 2/2; regalloc 221/221; split 5/5 | candidate lib 840/840; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global constraint/region/joint-row rebuilding remains in the split loop | n/a | changed block facts rebuild only affected sparse SSA ranges; independent whole-program proofs remain at publication; session-owned constraints and semantic rows are next |
 | 27d9d differential target constraints | this step | incremental clobber/phi-affinity constraints 2/2; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global joint region/value rebuilding and full transactional clones remain | n/a | fixed/clobber/copy/phi facts are block indexed and masks update only changed VRegs; complete constraints are independently rebuilt at publication |
-| 27d9e persistent semantic rows and in-place split session | this step | differential/full joint identity in partial-stack split; differential/full DCE identity; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | pending actual-scale gate after commit | n/a | stable ownership/definition/region indexes update changed rows only; full expanded clones, global DCE/progress scans, and region renumbering are removed |
+| 27d9e persistent semantic rows and in-place split session | `ae170fbc` | differential/full joint identity in partial-stack split; differential/full DCE identity; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: actual-scale compile stopped on stale cross-block region liveness | 217.609 s; execute unavailable | stable ownership/definition/region indexes update changed rows only; actual scale exposed an incomplete split mutation set |
+| 27d9f unified split mutation journal | this step | cross-block register-region differential/full identity; regalloc 224/224; split 6/6 | candidate lib 843/843; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: two functions published, then fixed-only joint pressure stopped compilation | 266.162 s; execute unavailable | all operand rewrites update liveness and constraints from one transaction journal; fixed transition production/coloring is the next architectural boundary |
 
 ## Related design records
 
