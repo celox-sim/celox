@@ -1,8 +1,8 @@
 //! Exact pressure-driven splitting for the expanded allocation problem.
 //!
-//! A coloring failure is resolved at the definition which is simultaneously
-//! covered by every earlier interfering SSA range.  Only root uses reachable
-//! from that point through the candidate's exact live-range graph are moved.
+//! A coloring failure is resolved at an owner-qualified occupancy cut returned
+//! by the physical interval union. Only root uses reachable from that exact
+//! point through the candidate's sparse live-range graph are moved.
 //! The moved uses are partitioned into dominance-connected regions, each
 //! entered by one proved home materialization; isolated and loop-carried entry
 //! uses are materialized independently.  The resulting machine values are fed
@@ -19,9 +19,9 @@ use super::allocation_expand::{
 };
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
-    AllocationValue, AllocationValueClass, JointAllocation, JointAllocationError,
-    JointAllocationOutcome, JointAllocationProblem, JointAllocationSession, RegionSplitCandidate,
-    RegionSplitRequest,
+    AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
+    JointAllocationError, JointAllocationOutcome, JointAllocationProblem, JointAllocationSession,
+    RegionSplitCandidate, RegionSplitRequest,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -30,7 +30,7 @@ use super::home_graph::{
     STACK_HOME_MATERIALIZATION_COST,
 };
 use super::interval_allocator::{HomeSelection, IntervalAllocationError, RootHomePlan};
-use super::live_interval::{DefinitionSite, LiveSegment, UseSite};
+use super::live_interval::{LiveSegment, UseSite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SplitEntryKind {
@@ -49,7 +49,7 @@ pub(super) struct SplitEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RegionSplitPlan {
     pub blocked_value: VReg,
-    pub cut: DefinitionSite,
+    pub cut: AllocationPressurePoint,
     pub value: VReg,
     pub root: LiveBundleId,
     pub source_region: Option<RegisterRegionId>,
@@ -236,11 +236,11 @@ impl Dominance {
         }
     }
 
-    fn use_dominates_definition(
+    fn use_dominates_point(
         &self,
         cfg: &NormalizedCfg,
         use_: UseSite,
-        definition: DefinitionSite,
+        point: AllocationPressurePoint,
     ) -> bool {
         let UseSite::Instruction {
             block: use_block,
@@ -253,13 +253,13 @@ impl Dominance {
         let Some(&use_block) = cfg.block_index.get(&use_block) else {
             return false;
         };
-        let Some(&definition_block) = cfg.block_index.get(&definition.block()) else {
+        let Some(&point_block) = cfg.block_index.get(&point.block) else {
             return false;
         };
-        if use_block == definition_block {
-            use_slot <= definition.slot()
+        if use_block == point_block {
+            use_slot <= point.slot
         } else {
-            self.block_dominates(use_block, definition_block)
+            self.block_dominates(use_block, point_block)
         }
     }
 }
@@ -319,8 +319,8 @@ impl SplitMutationJournal {
     }
 }
 
-/// Select one exact resident region whose removal at `request.definition` has
-/// minimum proved transition cost.  Physical assignments are deliberately not
+/// Select one exact resident region and one owner-qualified occupancy cut with
+/// minimum proved transition cost. Physical assignments are deliberately not
 /// considered final here; the returned values re-enter joint allocation.
 pub(super) fn plan_split(
     expanded: &ExpandedAllocationProblem,
@@ -351,90 +351,45 @@ pub(super) fn plan_split(
     let dominance = Dominance::build(cfg)?;
     let mut best = None::<RegionSplitPlan>;
     for candidate in &request.candidates {
-        let value = verify_candidate(joint, candidate, request.definition)?;
-        let root = expanded_root(expanded, candidate.root)?;
-        let source = region_source(expanded, root, candidate, value)?;
-        let moved = match reachable_uses(expanded, root, candidate, value, request.definition, cfg)
+        if candidate.pressure_points.is_empty()
+            || candidate
+                .pressure_points
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
         {
-            Ok(moved) => moved,
-            Err(error) if error.rule == "ALLOCATION_SPLIT.NO_REACHABLE_USE" => continue,
-            Err(error) => return Err(error),
-        };
-        let clusters = partition_moved_uses(
-            root,
-            candidate,
-            &moved,
-            source.entry_use,
-            request.definition,
-            cfg,
-            &dominance,
-        )?;
-        let entry_uses = clusters
-            .iter()
-            .map(|cluster| cluster.entry)
-            .collect::<Vec<_>>();
-        let stack_exists = stack_home(expanded, candidate.root)?.is_some();
-        let home_plan = RootHomePlan::build(graph, graph_root(graph, candidate.root)?)
-            .map_err(|error| AllocationSplitError::home(error, candidate.root))?;
-        let (mut selections, transition_cost) =
-            entry_selections(&home_plan, &entry_uses, stack_exists, candidate.root)?;
-        let entries = clusters
-            .into_iter()
-            .map(|cluster| {
-                let home = selections.remove(&cluster.entry).ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.HOME_COVERAGE",
-                        root.uses
-                            .get(cluster.entry.0 as usize)
-                            .map(|use_| use_.site.block()),
-                        Some(candidate.value),
-                        Some(candidate.root),
-                        "home partition did not select a transition for a region entry",
-                    )
-                })?;
-                Ok(SplitEntry {
-                    entry: cluster.entry,
-                    uses: cluster.uses,
-                    kind: cluster.kind,
-                    home,
-                })
-            })
-            .collect::<Result<Vec<_>, AllocationSplitError>>()?;
-        if !selections.is_empty() {
             return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.HOME_COVERAGE",
+                "ALLOCATION_SPLIT.PRESSURE_POINTS",
                 Some(request.definition.block()),
                 Some(candidate.value),
                 Some(candidate.root),
-                "home partition selected an entry not owned by the split plan",
+                "candidate pressure points are empty, duplicated, or unordered",
             ));
         }
-        let moved_set = moved.iter().copied().collect::<BTreeSet<_>>();
-        let retained = candidate
-            .uses
-            .iter()
-            .copied()
-            .filter(|use_id| !moved_set.contains(use_id))
-            .collect::<Vec<_>>();
-        let plan = RegionSplitPlan {
-            blocked_value: request.blocked_value,
-            cut: request.definition,
-            value: candidate.value,
-            root: candidate.root,
-            source_region: source.region,
-            preferred_register: source.preferred_register,
-            retained,
-            moved,
-            entries,
-            transition_cost,
-        };
-        verify_plan(expanded, graph, joint, candidate, &plan, cfg, &dominance)?;
-        let key = (plan.transition_cost, plan.value, plan.root);
-        if best
-            .as_ref()
-            .is_none_or(|current| key < (current.transition_cost, current.value, current.root))
-        {
-            best = Some(plan);
+        for &cut in &candidate.pressure_points {
+            let Some(plan) = plan_candidate_at(
+                expanded,
+                graph,
+                joint,
+                request.blocked_value,
+                candidate,
+                cut,
+                cfg,
+                &dominance,
+            )?
+            else {
+                continue;
+            };
+            let key = (plan.transition_cost, plan.value, plan.root, plan.cut);
+            if best.as_ref().is_none_or(|current| {
+                key < (
+                    current.transition_cost,
+                    current.value,
+                    current.root,
+                    current.cut,
+                )
+            }) {
+                best = Some(plan);
+            }
         }
     }
     best.ok_or_else(|| {
@@ -446,6 +401,97 @@ pub(super) fn plan_split(
             "no requested root region can be shortened at the pressure point",
         )
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_candidate_at(
+    expanded: &ExpandedAllocationProblem,
+    graph: &HomeGraph,
+    joint: &JointAllocationProblem,
+    blocked_value: VReg,
+    candidate: &RegionSplitCandidate,
+    cut: AllocationPressurePoint,
+    cfg: &NormalizedCfg,
+    dominance: &Dominance,
+) -> Result<Option<RegionSplitPlan>, AllocationSplitError> {
+    let value = verify_candidate(joint, candidate, cut)?;
+    let root = expanded_root(expanded, candidate.root)?;
+    let source = region_source(expanded, root, candidate, value)?;
+    let moved = match reachable_uses(expanded, root, candidate, value, cut, cfg) {
+        Ok(moved) => moved,
+        Err(error) if error.rule == "ALLOCATION_SPLIT.NO_REACHABLE_USE" => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let clusters = partition_moved_uses(
+        root,
+        candidate,
+        &moved,
+        source.entry_use,
+        cut,
+        cfg,
+        dominance,
+    )?;
+    let entry_uses = clusters
+        .iter()
+        .map(|cluster| cluster.entry)
+        .collect::<Vec<_>>();
+    let stack_exists = stack_home(expanded, candidate.root)?.is_some();
+    let home_plan = RootHomePlan::build(graph, graph_root(graph, candidate.root)?)
+        .map_err(|error| AllocationSplitError::home(error, candidate.root))?;
+    let (mut selections, transition_cost) =
+        entry_selections(&home_plan, &entry_uses, stack_exists, candidate.root)?;
+    let entries = clusters
+        .into_iter()
+        .map(|cluster| {
+            let home = selections.remove(&cluster.entry).ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.HOME_COVERAGE",
+                    root.uses
+                        .get(cluster.entry.0 as usize)
+                        .map(|use_| use_.site.block()),
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "home partition did not select a transition for a region entry",
+                )
+            })?;
+            Ok(SplitEntry {
+                entry: cluster.entry,
+                uses: cluster.uses,
+                kind: cluster.kind,
+                home,
+            })
+        })
+        .collect::<Result<Vec<_>, AllocationSplitError>>()?;
+    if !selections.is_empty() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.HOME_COVERAGE",
+            Some(cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "home partition selected an entry not owned by the split plan",
+        ));
+    }
+    let moved_set = moved.iter().copied().collect::<BTreeSet<_>>();
+    let retained = candidate
+        .uses
+        .iter()
+        .copied()
+        .filter(|use_id| !moved_set.contains(use_id))
+        .collect::<Vec<_>>();
+    let plan = RegionSplitPlan {
+        blocked_value,
+        cut,
+        value: candidate.value,
+        root: candidate.root,
+        source_region: source.region,
+        preferred_register: source.preferred_register,
+        retained,
+        moved,
+        entries,
+        transition_cost,
+    };
+    verify_plan(expanded, graph, joint, candidate, &plan, cfg, dominance)?;
+    Ok(Some(plan))
 }
 
 /// Apply a verified split inside the private allocation session. Every
@@ -715,7 +761,7 @@ pub(super) fn allocate_with_splitting(
 fn verify_candidate<'a>(
     joint: &'a JointAllocationProblem,
     candidate: &RegionSplitCandidate,
-    cut: DefinitionSite,
+    cut: AllocationPressurePoint,
 ) -> Result<&'a AllocationValue, AllocationSplitError> {
     let value = joint.value(candidate.value).ok_or_else(|| {
         AllocationSplitError::new(
@@ -744,13 +790,22 @@ fn verify_candidate<'a>(
             "split request and joint region ownership disagree",
         ));
     }
+    if candidate.pressure_points.binary_search(&cut).is_err() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PRESSURE_POINT_IDENTITY",
+            Some(cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "split cut is not one of the owner-qualified interference points",
+        ));
+    }
     if !value.interval.covers(cut.block(), cut.slot()) {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.PRESSURE_POINT",
             Some(cut.block()),
             Some(candidate.value),
             Some(candidate.root),
-            "candidate live range does not cover the blocked definition",
+            "candidate live range does not cover the exact pressure point",
         ));
     }
     Ok(value)
@@ -791,6 +846,7 @@ fn candidate_from_plan(
         value: plan.value,
         root: plan.root,
         uses: uses.clone(),
+        pressure_points: vec![plan.cut],
     })
 }
 
@@ -989,7 +1045,7 @@ fn reachable_uses(
     root: &super::allocation_expand::ExpandedRoot,
     candidate: &RegionSplitCandidate,
     value: &AllocationValue,
-    cut: DefinitionSite,
+    cut: AllocationPressurePoint,
     cfg: &NormalizedCfg,
 ) -> Result<Vec<BundleUseId>, AllocationSplitError> {
     let block_count = cfg.idom.len();
@@ -1033,7 +1089,7 @@ fn reachable_uses(
             Some(cut.block()),
             Some(candidate.value),
             Some(candidate.root),
-            "blocked definition is outside the normalized CFG",
+            "exact pressure point is outside the normalized CFG",
         )
     })?;
     if !segments[start].is_some_and(|segment| segment.contains(cut.slot())) {
@@ -1042,7 +1098,7 @@ fn reachable_uses(
             Some(cut.block()),
             Some(candidate.value),
             Some(candidate.root),
-            "candidate segment does not contain the blocked definition slot",
+            "candidate segment does not contain the exact pressure slot",
         ));
     }
 
@@ -1129,7 +1185,7 @@ fn partition_moved_uses(
     candidate: &RegionSplitCandidate,
     moved: &[BundleUseId],
     previous_entry: Option<BundleUseId>,
-    cut: DefinitionSite,
+    cut: AllocationPressurePoint,
     cfg: &NormalizedCfg,
     dominance: &Dominance,
 ) -> Result<Vec<EntryCluster>, AllocationSplitError> {
@@ -1147,7 +1203,7 @@ fn partition_moved_uses(
             continue;
         }
         let seed_site = root.uses[seed.0 as usize].site;
-        let unsafe_loop_entry = dominance.use_dominates_definition(cfg, seed_site, cut);
+        let unsafe_loop_entry = dominance.use_dominates_point(cfg, seed_site, cut);
         let repeats_same_boundary = full_existing_region && previous_entry == Some(seed);
         let mut uses = if matches!(seed_site, UseSite::PhiEdge { .. })
             || unsafe_loop_entry
@@ -1771,17 +1827,23 @@ mod tests {
             value: value.value,
             root: *root,
             uses: uses.clone(),
+            pressure_points: Vec::new(),
         }
     }
 
     fn request(
         joint: &JointAllocationProblem,
         blocked: VReg,
-        candidate: RegionSplitCandidate,
+        mut candidate: RegionSplitCandidate,
     ) -> RegionSplitRequest {
+        let definition = joint.value(blocked).unwrap().interval.definition;
+        candidate.pressure_points = vec![AllocationPressurePoint {
+            block: definition.block(),
+            slot: definition.slot(),
+        }];
         RegionSplitRequest {
             blocked_value: blocked,
-            definition: joint.value(blocked).unwrap().interval.definition,
+            definition,
             conflicts: Vec::new(),
             candidates: vec![candidate],
         }

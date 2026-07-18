@@ -1,10 +1,10 @@
 //! Target-register constraints and copy affinities for allocation IR.
 //!
-//! Constraint permutation boundaries split long SSA ranges before home
-//! selection. This model then rebuilds fixed operands and clobber exclusions
-//! from the rewritten allocation IR, so synthetic reloads and recipes cannot
-//! inherit stale source-MIR constraints. Copy and phi affinities are hints;
-//! allowed-register masks are mandatory correctness constraints.
+//! Local SSA fragments carry fixed-operand requirements. Target clobbers are
+//! instead immutable physical-register intervals over exact instruction
+//! barriers; they never remove a color from an entire VReg. This model rebuilds
+//! both from allocation IR, so synthetic reloads and recipes cannot inherit
+//! stale source-MIR constraints. Copy and phi affinities remain hints.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -16,7 +16,8 @@ use super::allocation_ir::{AllocationAffinity, AllocationAffinityKind, Allocatio
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::HomeGraph;
-use super::live_interval::{LiveInterval, SlotIndex};
+use super::interval_union::FixedRegisterReservation;
+use super::live_interval::LiveSegment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RegisterMask(u16);
@@ -37,12 +38,6 @@ impl RegisterMask {
 
     fn intersect(&mut self, other: Self) {
         self.0 &= other.0;
-    }
-
-    fn remove(&mut self, registers: &[PhysReg]) {
-        for &register in registers {
-            self.0 &= !register_bit(register);
-        }
     }
 
     pub(super) fn contains(self, register: PhysReg) -> bool {
@@ -70,6 +65,7 @@ pub(super) struct AllocationConstraintModel {
     value_count: u32,
     allowed: Vec<RegisterMask>,
     pub affinities: Vec<WeightedAffinity>,
+    pub fixed_reservations: Vec<FixedRegisterReservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,14 +77,15 @@ struct FixedConstraintPoint {
 
 /// Persistent target-constraint facts for one allocation session.
 ///
-/// Synthetic insertion can shift every clobber point in one block, while a
+/// Synthetic insertion can shift every fixed interval in one block, while a
 /// rewritten fixed operand or copy changes only that block's semantic facts.
-/// The index replaces those rows and recomputes masks only for values whose
-/// sparse interval or local facts changed.
+/// The index replaces those rows and recomputes fixed-use masks only for values
+/// whose local facts changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IncrementalConstraintModel {
     registers: Vec<PhysReg>,
     block_facts: Vec<AllocationMachineFacts>,
+    reservations_by_block: Vec<Vec<FixedRegisterReservation>>,
     fixed_by_value: Vec<Vec<FixedConstraintPoint>>,
     affinity_counts: BTreeMap<AllocationAffinity, u32>,
     model: AllocationConstraintModel,
@@ -138,15 +135,6 @@ impl fmt::Display for AllocationConstraintError {
 }
 
 impl std::error::Error for AllocationConstraintError {}
-
-#[derive(Debug, Clone)]
-struct ClobberPoint {
-    use_slot: SlotIndex,
-    def_slot: SlotIndex,
-    block: BlockId,
-    instruction: usize,
-    registers: Vec<PhysReg>,
-}
 
 impl AllocationConstraintModel {
     pub(super) fn build(
@@ -248,7 +236,7 @@ impl AllocationConstraintModel {
             })?;
         let target = RegisterMask::from_registers(registers);
         let mut allowed = vec![target; expanded.ir.value_count() as usize];
-        let mut clobbers_by_block = BTreeMap::<BlockId, Vec<ClobberPoint>>::new();
+        let mut fixed_reservations = Vec::new();
         for instruction in &facts.instructions {
             let block = cfg
                 .block_index
@@ -264,15 +252,15 @@ impl AllocationConstraintModel {
                     )
                 })?;
             let slots = expanded.intervals.block_slots[block];
-            let use_slot = slots
-                .instruction_use(instruction.instruction)
+            let clobber_slot = slots
+                .instruction_clobber(instruction.instruction)
                 .ok_or_else(|| {
                     AllocationConstraintError::new(
                         "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
                         Some(instruction.block),
                         Some(instruction.instruction),
                         Vec::new(),
-                        "constrained instruction has no allocation use slot",
+                        "constrained instruction has no allocation clobber slot",
                     )
                 })?;
             let def_slot = slots
@@ -312,41 +300,24 @@ impl AllocationConstraintModel {
                 }
             }
             if !instruction.clobbers.is_empty() {
-                let registers = instruction
+                for register in instruction
                     .clobbers
                     .iter()
                     .copied()
                     .filter(|register| register_set.contains(register))
-                    .collect::<Vec<_>>();
-                if !registers.is_empty() {
-                    clobbers_by_block
-                        .entry(instruction.block)
-                        .or_default()
-                        .push(ClobberPoint {
-                            use_slot,
-                            def_slot,
+                {
+                    fixed_reservations.push(FixedRegisterReservation {
+                        register,
+                        segment: LiveSegment {
                             block: instruction.block,
-                            instruction: instruction.instruction,
-                            registers,
-                        });
+                            start: clobber_slot,
+                            end: def_slot,
+                        },
+                    });
                 }
             }
         }
-        for points in clobbers_by_block.values_mut() {
-            points.sort_unstable_by_key(|point| (point.use_slot, point.instruction));
-        }
-        for interval in expanded.intervals.intervals.iter().flatten() {
-            apply_clobber_constraints(interval, &clobbers_by_block, &mut allowed)?;
-            if allowed[interval.value.0 as usize].is_empty() {
-                return Err(AllocationConstraintError::new(
-                    "ALLOCATION_CONSTRAINT.EMPTY_MASK",
-                    Some(interval.definition.block()),
-                    None,
-                    vec![interval.value],
-                    "machine value has no physical register satisfying every split-range constraint",
-                ));
-            }
-        }
+        canonicalize_reservations(&mut fixed_reservations)?;
 
         let mut affinity_weights = BTreeMap::<(VReg, VReg), u32>::new();
         for affinity in facts.affinities {
@@ -392,6 +363,7 @@ impl AllocationConstraintModel {
             value_count: expanded.ir.value_count(),
             allowed,
             affinities,
+            fixed_reservations,
         })
     }
 }
@@ -406,7 +378,7 @@ impl IncrementalConstraintModel {
         let model = AllocationConstraintModel::build(expanded, cfg, graph, registers)?;
         let block_ids = dense_block_ids(cfg)?;
         let mut block_facts = Vec::with_capacity(block_ids.len());
-        for block in block_ids {
+        for &block in &block_ids {
             block_facts.push(
                 expanded
                     .ir
@@ -417,12 +389,19 @@ impl IncrementalConstraintModel {
         let mut result = Self {
             registers: registers.to_vec(),
             block_facts,
+            reservations_by_block: vec![Vec::new(); cfg.successors.len()],
             fixed_by_value: vec![Vec::new(); expanded.ir.value_count() as usize],
             affinity_counts: BTreeMap::new(),
             model,
         };
-        for facts in result.block_facts.clone() {
+        for (block, facts) in result.block_facts.clone().into_iter().enumerate() {
             result.add_facts(&facts)?;
+            result.reservations_by_block[block] = reservations_for_block(
+                block_ids[block],
+                &facts,
+                expanded.intervals.block_slots[block],
+                &result.registers,
+            )?;
         }
         let rebuilt_affinities = weighted_affinities(&result.affinity_counts, &expanded.intervals)?;
         if result.model.affinities != rebuilt_affinities {
@@ -432,6 +411,16 @@ impl IncrementalConstraintModel {
                 None,
                 Vec::new(),
                 "block-indexed affinities differ from the complete machine-fact rebuild",
+            ));
+        }
+        let rebuilt_reservations = flatten_reservations(&result.reservations_by_block)?;
+        if result.model.fixed_reservations != rebuilt_reservations {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.BLOCK_RESERVATION_IDENTITY",
+                None,
+                None,
+                Vec::new(),
+                "block-indexed fixed reservations differ from the complete machine-fact rebuild",
             ));
         }
         Ok(result)
@@ -451,6 +440,7 @@ impl IncrementalConstraintModel {
     ) -> Result<Vec<VReg>, AllocationConstraintError> {
         if self.registers.is_empty()
             || self.block_facts.len() != cfg.successors.len()
+            || self.reservations_by_block.len() != cfg.successors.len()
             || expanded.ir.value_count() < self.model.value_count
         {
             return Err(AllocationConstraintError::new(
@@ -487,6 +477,12 @@ impl IncrementalConstraintModel {
                 .map_err(machine_fact_error)?;
             affected.extend(fact_values(&next));
             self.add_facts(&next)?;
+            self.reservations_by_block[row] = reservations_for_block(
+                *block,
+                &next,
+                expanded.intervals.block_slots[row],
+                &self.registers,
+            )?;
             self.block_facts[row] = next;
         }
 
@@ -502,13 +498,14 @@ impl IncrementalConstraintModel {
                     "changed target fact references a value outside the allocation session",
                 ));
             }
-            let next = self.allowed_for_value(expanded, cfg, value)?;
+            let next = self.allowed_for_value(value)?;
             if self.model.allowed[index] != next {
                 changed.push(value);
                 self.model.allowed[index] = next;
             }
         }
         self.model.affinities = weighted_affinities(&self.affinity_counts, &expanded.intervals)?;
+        self.model.fixed_reservations = flatten_reservations(&self.reservations_by_block)?;
         Ok(changed)
     }
 
@@ -608,12 +605,7 @@ impl IncrementalConstraintModel {
         Ok(())
     }
 
-    fn allowed_for_value(
-        &self,
-        expanded: &ExpandedAllocationProblem,
-        cfg: &NormalizedCfg,
-        value: VReg,
-    ) -> Result<RegisterMask, AllocationConstraintError> {
+    fn allowed_for_value(&self, value: VReg) -> Result<RegisterMask, AllocationConstraintError> {
         let mut allowed = RegisterMask::from_registers(&self.registers);
         for point in &self.fixed_by_value[value.0 as usize] {
             allowed.intersect(if self.registers.contains(&point.register) {
@@ -632,66 +624,6 @@ impl IncrementalConstraintModel {
                         point.register
                     ),
                 ));
-            }
-        }
-        let Some(interval) = expanded
-            .intervals
-            .intervals
-            .get(value.0 as usize)
-            .and_then(Option::as_ref)
-        else {
-            return Ok(allowed);
-        };
-        for segment in &interval.segments {
-            let block = cfg
-                .block_index
-                .get(&segment.block)
-                .copied()
-                .ok_or_else(|| {
-                    AllocationConstraintError::new(
-                        "ALLOCATION_CONSTRAINT.SEGMENT_BLOCK",
-                        Some(segment.block),
-                        None,
-                        vec![value],
-                        "live segment is outside the block constraint index",
-                    )
-                })?;
-            let slots = expanded.intervals.block_slots[block];
-            for point in self.block_facts[block]
-                .instructions
-                .iter()
-                .filter(|point| !point.clobbers.is_empty())
-            {
-                let use_slot = slots.instruction_use(point.instruction).ok_or_else(|| {
-                    AllocationConstraintError::new(
-                        "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
-                        Some(point.block),
-                        Some(point.instruction),
-                        vec![value],
-                        "incremental clobber has no allocation use slot",
-                    )
-                })?;
-                let def_slot = slots.instruction_def(point.instruction).ok_or_else(|| {
-                    AllocationConstraintError::new(
-                        "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
-                        Some(point.block),
-                        Some(point.instruction),
-                        vec![value],
-                        "incremental clobber has no allocation definition slot",
-                    )
-                })?;
-                if segment.contains(use_slot) && segment.contains(def_slot) {
-                    allowed.remove(&point.clobbers);
-                    if allowed.is_empty() {
-                        return Err(AllocationConstraintError::new(
-                            "ALLOCATION_CONSTRAINT.CLOBBER_MASK",
-                            Some(point.block),
-                            Some(point.instruction),
-                            vec![value],
-                            "value live through a target clobber has no remaining register",
-                        ));
-                    }
-                }
             }
         }
         Ok(allowed)
@@ -796,42 +728,93 @@ fn weighted_affinities(
         .collect())
 }
 
-fn apply_clobber_constraints(
-    interval: &LiveInterval,
-    clobbers_by_block: &BTreeMap<BlockId, Vec<ClobberPoint>>,
-    allowed: &mut [RegisterMask],
-) -> Result<(), AllocationConstraintError> {
-    let mask = allowed.get_mut(interval.value.0 as usize).ok_or_else(|| {
-        AllocationConstraintError::new(
-            "ALLOCATION_CONSTRAINT.VALUE_RANGE",
-            Some(interval.definition.block()),
-            None,
-            vec![interval.value],
-            "live interval is outside the target-constraint table",
-        )
-    })?;
-    for segment in &interval.segments {
-        let Some(points) = clobbers_by_block.get(&segment.block) else {
-            continue;
-        };
-        let first = points.partition_point(|point| point.use_slot < segment.start);
-        for point in &points[first..] {
-            if point.use_slot >= segment.end {
-                break;
-            }
-            if segment.contains(point.use_slot) && segment.contains(point.def_slot) {
-                mask.remove(&point.registers);
-                if mask.is_empty() {
-                    return Err(AllocationConstraintError::new(
-                        "ALLOCATION_CONSTRAINT.CLOBBER_MASK",
-                        Some(point.block),
-                        Some(point.instruction),
-                        vec![interval.value],
-                        "value live through a target clobber has no remaining register",
-                    ));
-                }
-            }
+fn reservations_for_block(
+    block: BlockId,
+    facts: &AllocationMachineFacts,
+    slots: super::live_interval::BlockSlots,
+    registers: &[PhysReg],
+) -> Result<Vec<FixedRegisterReservation>, AllocationConstraintError> {
+    let register_set = registers.iter().copied().collect::<BTreeSet<_>>();
+    let mut reservations = Vec::new();
+    for instruction in &facts.instructions {
+        if instruction.block != block {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.BLOCK_FACT_IDENTITY",
+                Some(block),
+                Some(instruction.instruction),
+                Vec::new(),
+                "machine-fact instruction belongs to another block",
+            ));
         }
+        let start = slots
+            .instruction_clobber(instruction.instruction)
+            .ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
+                    Some(instruction.block),
+                    Some(instruction.instruction),
+                    Vec::new(),
+                    "block-indexed clobber has no allocation barrier slot",
+                )
+            })?;
+        let end = slots
+            .instruction_def(instruction.instruction)
+            .ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
+                    Some(instruction.block),
+                    Some(instruction.instruction),
+                    Vec::new(),
+                    "block-indexed clobber has no allocation definition slot",
+                )
+            })?;
+        reservations.extend(
+            instruction
+                .clobbers
+                .iter()
+                .copied()
+                .filter(|register| register_set.contains(register))
+                .map(|register| FixedRegisterReservation {
+                    register,
+                    segment: LiveSegment {
+                        block: instruction.block,
+                        start,
+                        end,
+                    },
+                }),
+        );
+    }
+    canonicalize_reservations(&mut reservations)?;
+    Ok(reservations)
+}
+
+fn flatten_reservations(
+    blocks: &[Vec<FixedRegisterReservation>],
+) -> Result<Vec<FixedRegisterReservation>, AllocationConstraintError> {
+    let mut reservations = blocks.iter().flatten().copied().collect::<Vec<_>>();
+    canonicalize_reservations(&mut reservations)?;
+    Ok(reservations)
+}
+
+fn canonicalize_reservations(
+    reservations: &mut [FixedRegisterReservation],
+) -> Result<(), AllocationConstraintError> {
+    reservations.sort_unstable_by_key(|reservation| {
+        (
+            reservation.register,
+            reservation.segment.block,
+            reservation.segment.start,
+            reservation.segment.end,
+        )
+    });
+    if let Some(pair) = reservations.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(AllocationConstraintError::new(
+            "ALLOCATION_CONSTRAINT.RESERVATION_IDENTITY",
+            Some(pair[0].segment.block),
+            None,
+            Vec::new(),
+            "machine facts contain a duplicate fixed-register reservation",
+        ));
     }
     Ok(())
 }
@@ -854,7 +837,7 @@ mod tests {
     use super::super::assignment::ALLOCATABLE_REGS;
     use super::super::home_graph;
     use super::super::interval_allocator::allocate_roots;
-    use super::super::legalize::materialize_allocation_constraint_perms;
+    use super::super::legalize::materialize_allocation_fixed_use_fragments;
 
     fn expanded(
         mut function: MFunction,
@@ -864,8 +847,8 @@ mod tests {
         HomeGraph,
         ExpandedAllocationProblem,
     ) {
-        let initial = super::super::cfg::normalize(&mut function).unwrap();
-        let (cfg, _) = materialize_allocation_constraint_perms(&mut function, &initial).unwrap();
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        materialize_allocation_fixed_use_fragments(&mut function).unwrap();
         let graph = home_graph::build(&function, &cfg).unwrap();
         let plan = allocate_roots(&graph, &cfg, ALLOCATABLE_REGS).unwrap();
         let problem = expand(&function, &cfg, &graph, &plan, ALLOCATABLE_REGS).unwrap();
@@ -873,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_use_and_clobber_masks_apply_to_split_machine_ranges() {
+    fn fixed_use_mask_and_exact_clobber_reservations_are_separate() {
         let mut values = VRegAllocator::new();
         let lhs = values.alloc();
         let amount = values.alloc();
@@ -958,8 +941,36 @@ mod tests {
             _ => unreachable!(),
         };
         let mask = model.allowed(live_through).unwrap();
-        assert!(!mask.contains(PhysReg::RAX));
-        assert!(!mask.contains(PhysReg::RDX));
+        assert!(mask.contains(PhysReg::RAX));
+        assert!(mask.contains(PhysReg::RDX));
+        let division = division_block
+            .insts
+            .iter()
+            .position(|instruction| matches!(instruction, MInst::UDiv { .. }))
+            .unwrap();
+        let block = cfg.block_index[&division_block.id];
+        let slots = expanded.intervals.block_slots[block];
+        assert_eq!(
+            model.fixed_reservations,
+            vec![
+                FixedRegisterReservation {
+                    register: PhysReg::RAX,
+                    segment: LiveSegment {
+                        block: division_block.id,
+                        start: slots.instruction_clobber(division).unwrap(),
+                        end: slots.instruction_def(division).unwrap(),
+                    },
+                },
+                FixedRegisterReservation {
+                    register: PhysReg::RDX,
+                    segment: LiveSegment {
+                        block: division_block.id,
+                        start: slots.instruction_clobber(division).unwrap(),
+                        end: slots.instruction_def(division).unwrap(),
+                    },
+                },
+            ]
+        );
         let joint =
             JointAllocationProblem::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap();
         let JointAllocationOutcome::Complete(allocation) =

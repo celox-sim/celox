@@ -24,7 +24,8 @@ use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_union::{
-    AllocationBundleId, IntervalUnionError, LiveIntervalMatrix, SparseRange,
+    AllocationBundleId, ConflictCollector, FixedRegisterReservation, IntervalUnionError,
+    LiveIntervalMatrix, OccupancyCut, OccupancyOwner, SparseRange,
 };
 use super::live_interval::{DefinitionSite, LiveInterval, SlotIndex, UseSite};
 
@@ -62,6 +63,7 @@ pub(super) struct JointAllocationProblem {
     definition_order: BTreeSet<DefinitionOrderEntry>,
     target_registers: Vec<PhysReg>,
     affinities: Vec<WeightedAffinity>,
+    fixed_reservations: Vec<FixedRegisterReservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,6 +76,23 @@ struct DefinitionOrderEntry {
 pub(super) struct RegisterConflicts {
     pub register: PhysReg,
     pub values: Vec<VReg>,
+    pub cuts: Vec<OccupancyCut>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct AllocationPressurePoint {
+    pub block: BlockId,
+    pub slot: SlotIndex,
+}
+
+impl AllocationPressurePoint {
+    pub(super) fn block(self) -> BlockId {
+        self.block
+    }
+
+    pub(super) fn slot(self) -> SlotIndex {
+        self.slot
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +100,7 @@ pub(super) struct RegionSplitCandidate {
     pub value: VReg,
     pub root: LiveBundleId,
     pub uses: Vec<BundleUseId>,
+    pub pressure_points: Vec<AllocationPressurePoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +610,7 @@ impl JointAllocationProblem {
             definition_order,
             target_registers: registers.to_vec(),
             affinities: constraints.affinities.clone(),
+            fixed_reservations: constraints.fixed_reservations.clone(),
         })
     }
 
@@ -898,6 +919,9 @@ impl JointAllocationProblem {
         }
         let mut rebuilt =
             LiveIntervalMatrix::new(cfg, registers).map_err(JointAllocationError::union)?;
+        rebuilt
+            .replace_fixed_reservations(&self.fixed_reservations)
+            .map_err(JointAllocationError::union)?;
         for value in &self.values {
             let register = allocation.assignments[value.value.0 as usize].ok_or_else(|| {
                 JointAllocationError::new(
@@ -1083,8 +1107,11 @@ impl JointAllocationSession {
                 "allocation register order differs from the verified constraint model",
             ));
         }
-        let matrix =
+        let mut matrix =
             LiveIntervalMatrix::new(cfg, registers).map_err(JointAllocationError::union)?;
+        matrix
+            .replace_fixed_reservations(&problem.fixed_reservations)
+            .map_err(JointAllocationError::union)?;
         let mut ranges = (0..problem.value_count)
             .map(|_| None::<SparseRange>)
             .collect::<Vec<_>>();
@@ -1206,10 +1233,12 @@ impl JointAllocationSession {
             ));
         }
         let affinities = constraints.affinities.clone();
+        let fixed_reservations = constraints.fixed_reservations.clone();
         self.apply_value_delta(
             expanded.ir.value_count(),
             replacements,
             affinities,
+            fixed_reservations,
             cfg,
             registers,
         )
@@ -1220,6 +1249,7 @@ impl JointAllocationSession {
         value_count: u32,
         replacements: Vec<(VReg, Option<AllocationValue>)>,
         affinities: Vec<WeightedAffinity>,
+        fixed_reservations: Vec<FixedRegisterReservation>,
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<(), JointAllocationError> {
@@ -1304,6 +1334,10 @@ impl JointAllocationSession {
             changed.insert(value);
         }
         self.problem.affinities = affinities;
+        self.matrix
+            .replace_fixed_reservations(&fixed_reservations)
+            .map_err(JointAllocationError::union)?;
+        self.problem.fixed_reservations = fixed_reservations;
 
         let mut pending = self.pending.drain(..).collect::<Vec<_>>();
         pending.retain(|id| {
@@ -1404,6 +1438,10 @@ impl JointAllocationSession {
             );
         }
 
+        self.matrix
+            .replace_fixed_reservations(&next.fixed_reservations)
+            .map_err(JointAllocationError::union)?;
+
         self.pending.clear();
         self.pending.extend(
             next.definition_order
@@ -1491,21 +1529,27 @@ impl JointAllocationSession {
             }
 
             let mut conflicts = Vec::with_capacity(registers.len());
-            let mut split_values = BTreeSet::<VReg>::new();
-            if matches!(value.class, AllocationValueClass::Region { .. }) {
-                split_values.insert(value.value);
-            }
+            let mut split_points = BTreeMap::<VReg, BTreeSet<AllocationPressurePoint>>::new();
+            let mut collector = ConflictCollector::default();
             for &register in registers
                 .iter()
                 .filter(|register| value.allowed_registers.contains(**register))
             {
-                let residents = self
-                    .matrix
-                    .conflicts_validated(register, range.validated())
+                let mut residents = Vec::new();
+                let mut cuts = Vec::new();
+                self.matrix
+                    .collect_interference_validated(
+                        register,
+                        range.validated(),
+                        self.problem.value_count as usize,
+                        &mut collector,
+                        &mut residents,
+                        &mut cuts,
+                    )
                     .map_err(JointAllocationError::union)?;
                 let mut resident_values = Vec::with_capacity(residents.len());
-                for resident in residents {
-                    let resident = self.problem.bundle(resident).ok_or_else(|| {
+                for &resident_id in &residents {
+                    let resident = self.problem.bundle(resident_id).ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.CONFLICT_RANGE",
                             Some(value.interval.definition.block()),
@@ -1514,16 +1558,47 @@ impl JointAllocationSession {
                         )
                     })?;
                     resident_values.push(resident.value);
-                    if matches!(resident.class, AllocationValueClass::Region { .. }) {
-                        split_values.insert(resident.value);
+                }
+                for cut in &cuts {
+                    let segment = value.interval.segments.get(cut.segment).ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.OCCUPANCY_CUT_RANGE",
+                            Some(value.interval.definition.block()),
+                            Some(value.value),
+                            "interval union returned a cut outside the blocked sparse range",
+                        )
+                    })?;
+                    let point = AllocationPressurePoint {
+                        block: segment.block,
+                        slot: cut.start,
+                    };
+                    if matches!(value.class, AllocationValueClass::Region { .. }) {
+                        split_points.entry(value.value).or_default().insert(point);
+                    }
+                    if let OccupancyOwner::Bundle(resident_id) = cut.owner {
+                        let resident = self.problem.bundle(resident_id).ok_or_else(|| {
+                            JointAllocationError::new(
+                                "JOINT_ALLOC.CONFLICT_RANGE",
+                                Some(segment.block),
+                                Some(value.value),
+                                "occupancy cut references a missing resident value",
+                            )
+                        })?;
+                        if matches!(resident.class, AllocationValueClass::Region { .. }) {
+                            split_points
+                                .entry(resident.value)
+                                .or_default()
+                                .insert(point);
+                        }
                     }
                 }
                 conflicts.push(RegisterConflicts {
                     register,
                     values: resident_values,
+                    cuts,
                 });
             }
-            if split_values.is_empty() {
+            if split_points.is_empty() {
                 let resident_summary = conflicts
                     .iter()
                     .map(|conflict| {
@@ -1548,9 +1623,9 @@ impl JointAllocationSession {
                     ),
                 ));
             }
-            let candidates = split_values
+            let candidates = split_points
                 .into_iter()
-                .map(|candidate| {
+                .map(|(candidate, pressure_points)| {
                     let candidate = self.problem.value(candidate).ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.SPLIT_RANGE",
@@ -1571,6 +1646,7 @@ impl JointAllocationSession {
                         value: candidate.value,
                         root: *root,
                         uses: uses.clone(),
+                        pressure_points: pressure_points.into_iter().collect(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1911,7 +1987,82 @@ mod tests {
             definition_order,
             target_registers: registers.to_vec(),
             affinities: Vec::new(),
+            fixed_reservations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn fixed_reservation_requests_a_split_at_the_exact_barrier() {
+        let mut function = function(
+            1,
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 7,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+        );
+        let (cfg, _) = model(&mut function);
+        let intervals = live_interval::analyze(&function, &cfg).unwrap();
+        let slots = intervals.block_slots[0];
+        let reservation = FixedRegisterReservation {
+            register: PhysReg::RAX,
+            segment: super::super::live_interval::LiveSegment {
+                block: BlockId(0),
+                start: slots.instruction_clobber(1).unwrap(),
+                end: slots.instruction_def(1).unwrap(),
+            },
+        };
+        let mut problem = fixed_problem(&function, &cfg, &[PhysReg::RAX]);
+        let value = problem
+            .values
+            .iter_mut()
+            .find(|value| value.value == VReg(0))
+            .unwrap();
+        value.class = AllocationValueClass::Region {
+            root: LiveBundleId(0),
+            uses: vec![BundleUseId(0), BundleUseId(1)],
+        };
+        value.preferred_register = Some(PhysReg::RAX);
+        problem.fixed_reservations = vec![reservation];
+
+        let JointAllocationOutcome::NeedsSplit(request) =
+            problem.allocate(&cfg, &[PhysReg::RAX]).unwrap()
+        else {
+            panic!("the sole register is reserved inside the live range");
+        };
+        assert_ne!(request.definition.slot(), reservation.segment.start);
+        assert_eq!(request.conflicts.len(), 1);
+        assert!(request.conflicts[0].values.is_empty());
+        assert_eq!(
+            request.conflicts[0].cuts,
+            vec![OccupancyCut {
+                segment: 0,
+                start: reservation.segment.start,
+                end: reservation.segment.end,
+                owner: OccupancyOwner::Fixed(super::super::interval_union::FixedReservationId(0)),
+            }]
+        );
+        assert_eq!(
+            request.candidates[0].pressure_points,
+            vec![AllocationPressurePoint {
+                block: BlockId(0),
+                slot: reservation.segment.start,
+            }]
+        );
     }
 
     #[test]

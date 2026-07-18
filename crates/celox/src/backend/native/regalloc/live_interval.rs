@@ -40,7 +40,7 @@ impl BlockSlots {
             .then(|| {
                 u64::try_from(instruction)
                     .ok()?
-                    .checked_mul(2)?
+                    .checked_mul(3)?
                     .checked_add(2)?
                     .checked_add(self.entry.0)
                     .map(SlotIndex)
@@ -48,8 +48,14 @@ impl BlockSlots {
             .flatten()
     }
 
-    pub fn instruction_def(self, instruction: usize) -> Option<SlotIndex> {
+    /// Target resources clobbered after operands are consumed and before the
+    /// instruction result becomes available.
+    pub fn instruction_clobber(self, instruction: usize) -> Option<SlotIndex> {
         self.instruction_use(instruction)?.next()
+    }
+
+    pub fn instruction_def(self, instruction: usize) -> Option<SlotIndex> {
+        self.instruction_clobber(instruction)?.next()
     }
 }
 
@@ -1060,8 +1066,12 @@ fn assign_block_slots<P: LivenessProgram + ?Sized>(
     // renumber every interval in all later blocks.
     let entry = 0u64;
     let phi_def = 1u64;
+    // Each instruction has distinct use, clobber, and definition subslots.
+    // This lets a fixed target reservation overlap only values live through
+    // the instruction: a last use ends at the clobber slot, while a result
+    // begins at the later definition slot.
     let exit = instruction_count
-        .checked_mul(2)
+        .checked_mul(3)
         .and_then(|width| entry.checked_add(width))
         .and_then(|slot| slot.checked_add(2))
         .ok_or_else(|| {
@@ -1832,11 +1842,11 @@ mod tests {
         assert!(!source.interferes(destination));
         assert_eq!(
             source.segments[0].end,
-            intervals.block_slots[0]
-                .instruction_use(1)
-                .unwrap()
-                .next()
-                .unwrap()
+            intervals.block_slots[0].instruction_clobber(1).unwrap()
+        );
+        assert!(
+            intervals.block_slots[0].instruction_clobber(1).unwrap()
+                < intervals.block_slots[0].instruction_def(1).unwrap()
         );
         assert_eq!(
             destination.segments[0].start,

@@ -21,6 +21,32 @@ use super::live_interval::{LiveSegment, SlotIndex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct AllocationBundleId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct FixedReservationId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) enum OccupancyOwner {
+    Bundle(AllocationBundleId),
+    Fixed(FixedReservationId),
+}
+
+impl OccupancyOwner {
+    fn bundle(self) -> Option<AllocationBundleId> {
+        match self {
+            Self::Bundle(bundle) => Some(bundle),
+            Self::Fixed(_) => None,
+        }
+    }
+}
+
+/// Immutable target occupancy in one physical register. The segment uses the
+/// same sparse CFG coordinate space as movable live ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FixedRegisterReservation {
+    pub register: PhysReg,
+    pub segment: LiveSegment,
+}
+
 /// Reusable dense visitation epochs for conflict queries. Allocation bundle
 /// IDs are stable dense table indexes, so this replaces a freshly allocated
 /// ordered set on every physical-register probe.
@@ -125,7 +151,7 @@ impl ConflictCollector {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnionEntry {
     end: SlotIndex,
-    bundle: AllocationBundleId,
+    owner: OccupancyOwner,
 }
 
 /// Exact occupied subrange of one canonical candidate segment.  Conflict
@@ -136,6 +162,7 @@ pub(super) struct OccupancyCut {
     pub segment: usize,
     pub start: SlotIndex,
     pub end: SlotIndex,
+    pub owner: OccupancyOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,7 +392,9 @@ impl IntervalUnion {
                     break;
                 }
                 if start < segment.end {
-                    collector.record(entry.bundle, output)?;
+                    if let Some(bundle) = entry.owner.bundle() {
+                        collector.record(bundle, output)?;
+                    }
                 }
             }
         }
@@ -394,11 +423,14 @@ impl IntervalUnion {
                     break;
                 }
                 if start < segment.end {
-                    collector.record(entry.bundle, conflicts)?;
+                    if let Some(bundle) = entry.owner.bundle() {
+                        collector.record(bundle, conflicts)?;
+                    }
                     cuts.push(OccupancyCut {
                         segment: segment_index,
                         start: start.max(segment.start),
                         end: entry.end.min(segment.end),
+                        owner: entry.owner,
                     });
                 }
             }
@@ -416,7 +448,7 @@ impl IntervalUnion {
             conflicts.extend(
                 self.overlapping_entries_at(segment, block)
                     .into_iter()
-                    .map(|(_, entry)| entry.bundle),
+                    .filter_map(|(_, entry)| entry.owner.bundle()),
             );
         }
         conflicts.into_iter().collect()
@@ -424,14 +456,15 @@ impl IntervalUnion {
 
     fn insert_indexed(
         &mut self,
-        bundle: AllocationBundleId,
+        owner: OccupancyOwner,
         segments: ValidatedSegments<'_>,
     ) -> Result<(), IntervalUnionError> {
+        let bundles = owner.bundle();
         if segments.as_slice().is_empty() {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.EMPTY_ASSIGNMENT",
                 None,
-                [bundle],
+                bundles,
                 "a register assignment must own at least one live segment",
             ));
         }
@@ -444,21 +477,23 @@ impl IntervalUnion {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.INTERFERENCE",
                     Some(segment.block),
-                    [bundle],
+                    bundles,
                     "validated insertion would replace an existing register segment",
                 ));
             }
         }
-        let conflicts = self.conflicts_indexed(segments);
-        if !conflicts.is_empty() {
-            let block = segments.iter().find_map(|(segment, block)| {
-                (!self.overlapping_entries_at(segment, block).is_empty()).then_some(segment.block)
-            });
+        let conflict = segments.iter().find_map(|(segment, block)| {
+            self.overlapping_entries_at(segment, block)
+                .first()
+                .copied()
+                .map(|(_, entry)| (segment.block, entry.owner))
+        });
+        if let Some((block, conflict)) = conflict {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.INTERFERENCE",
-                block,
-                std::iter::once(bundle).chain(conflicts),
-                "cannot assign overlapping live bundles to one physical register",
+                Some(block),
+                bundles.into_iter().chain(conflict.bundle()),
+                "cannot overlap movable or fixed occupancy in one physical register",
             ));
         }
         for (segment, block) in segments.iter() {
@@ -466,7 +501,7 @@ impl IntervalUnion {
                 segment.start,
                 UnionEntry {
                     end: segment.end,
-                    bundle,
+                    owner,
                 },
             );
             debug_assert!(previous.is_none());
@@ -476,14 +511,15 @@ impl IntervalUnion {
 
     fn remove_indexed(
         &mut self,
-        bundle: AllocationBundleId,
+        owner: OccupancyOwner,
         segments: ValidatedSegments<'_>,
     ) -> Result<(), IntervalUnionError> {
+        let bundles = owner.bundle();
         if segments.as_slice().is_empty() {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.EMPTY_ASSIGNMENT",
                 None,
-                [bundle],
+                bundles,
                 "a register assignment must own at least one live segment",
             ));
         }
@@ -494,13 +530,13 @@ impl IntervalUnion {
                 .and_then(|entries| entries.get(&segment.start))
                 != Some(&UnionEntry {
                     end: segment.end,
-                    bundle,
+                    owner,
                 })
             {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.MEMBERSHIP",
                     Some(segment.block),
-                    [bundle],
+                    bundles,
                     "bundle membership and ordered segment table disagree",
                 ));
             }
@@ -511,20 +547,20 @@ impl IntervalUnion {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.MEMBERSHIP",
                         Some(segment.block),
-                        [bundle],
+                        bundles,
                         "validated bundle block disappeared during removal",
                     ));
                 };
                 if entries.remove(&segment.start)
                     != Some(UnionEntry {
                         end: segment.end,
-                        bundle,
+                        owner,
                     })
                 {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.MEMBERSHIP",
                         Some(segment.block),
-                        [bundle],
+                        bundles,
                         "validated bundle segment disappeared during removal",
                     ));
                 }
@@ -607,7 +643,7 @@ impl IntervalUnion {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.SEGMENT_RANGE",
                         Some(block_id),
-                        [entry.bundle],
+                        entry.owner.bundle(),
                         "union contains an empty or reversed segment",
                     ));
                 }
@@ -617,7 +653,11 @@ impl IntervalUnion {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.INTERFERENCE",
                         Some(block_id),
-                        [previous.bundle, entry.bundle],
+                        previous
+                            .owner
+                            .bundle()
+                            .into_iter()
+                            .chain(entry.owner.bundle()),
                         "ordered union contains overlapping assignments",
                     ));
                 }
@@ -635,6 +675,7 @@ pub(super) struct LiveIntervalMatrix {
     register_order: Vec<PhysReg>,
     unions: BTreeMap<PhysReg, IntervalUnion>,
     assignments: BTreeMap<AllocationBundleId, PhysReg>,
+    fixed_reservations: Vec<FixedRegisterReservation>,
 }
 
 impl LiveIntervalMatrix {
@@ -670,6 +711,7 @@ impl LiveIntervalMatrix {
             register_order: registers.to_vec(),
             unions,
             assignments: BTreeMap::new(),
+            fixed_reservations: Vec::new(),
         })
     }
 
@@ -701,6 +743,115 @@ impl LiveIntervalMatrix {
 
     pub(super) fn register(&self, bundle: AllocationBundleId) -> Option<PhysReg> {
         self.assignments.get(&bundle).copied()
+    }
+
+    /// Preflight and replace immutable target occupancy after all movable
+    /// ranges changed by the same machine-fact update have been removed.
+    /// Stable movable memberships remain in place.
+    pub(super) fn replace_fixed_reservations(
+        &mut self,
+        reservations: &[FixedRegisterReservation],
+    ) -> Result<(), IntervalUnionError> {
+        let mut canonical = reservations.to_vec();
+        canonical.sort_unstable_by_key(|reservation| {
+            (
+                reservation.register,
+                reservation.segment.block,
+                reservation.segment.start,
+                reservation.segment.end,
+            )
+        });
+        if canonical.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.FIXED_IDENTITY",
+                canonical
+                    .windows(2)
+                    .find(|pair| pair[0] == pair[1])
+                    .map(|pair| pair[0].segment.block),
+                [],
+                "fixed reservation set contains a duplicate interval",
+            ));
+        }
+
+        let mut fixed_unions = self
+            .register_order
+            .iter()
+            .copied()
+            .map(|register| (register, IntervalUnion::new(Arc::clone(&self.index))))
+            .collect::<BTreeMap<_, _>>();
+        let mut prepared = Vec::with_capacity(canonical.len());
+        for (row, &reservation) in canonical.iter().enumerate() {
+            let id = FixedReservationId(u32::try_from(row).map_err(|_| {
+                IntervalUnionError::new(
+                    "INTERVAL_UNION.FIXED_RANGE",
+                    Some(reservation.segment.block),
+                    [],
+                    "fixed reservation count exceeds the identity domain",
+                )
+            })?);
+            let range = self.make_range(vec![reservation.segment])?;
+            let fixed = fixed_unions.get_mut(&reservation.register).ok_or_else(|| {
+                IntervalUnionError::new(
+                    "INTERVAL_UNION.UNKNOWN_REGISTER",
+                    Some(reservation.segment.block),
+                    [],
+                    format!(
+                        "fixed reservation names physical register {} outside this matrix",
+                        reservation.register
+                    ),
+                )
+            })?;
+            fixed.insert_indexed(OccupancyOwner::Fixed(id), range.validated())?;
+
+            let block = range
+                .validated()
+                .iter()
+                .next()
+                .map(|(_, block)| block)
+                .ok_or_else(|| {
+                    IntervalUnionError::new(
+                        "INTERVAL_UNION.FIXED_RANGE",
+                        Some(reservation.segment.block),
+                        [],
+                        "validated fixed reservation unexpectedly has no sparse segment",
+                    )
+                })?;
+            if let Some((_, entry)) = self
+                .union(reservation.register)?
+                .overlapping_entries_at(reservation.segment, block)
+                .into_iter()
+                .find(|(_, entry)| matches!(entry.owner, OccupancyOwner::Bundle(_)))
+            {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.FIXED_INTERFERENCE",
+                    Some(reservation.segment.block),
+                    entry.owner.bundle(),
+                    "replacement fixed reservation overlaps a retained movable bundle",
+                ));
+            }
+            prepared.push((id, reservation, range));
+        }
+
+        let previous = self.fixed_reservations.clone();
+        for (row, reservation) in previous.into_iter().enumerate() {
+            let id = FixedReservationId(u32::try_from(row).map_err(|_| {
+                IntervalUnionError::new(
+                    "INTERVAL_UNION.FIXED_RANGE",
+                    Some(reservation.segment.block),
+                    [],
+                    "stored fixed reservation identity exceeds u32",
+                )
+            })?);
+            let range = self.make_range(vec![reservation.segment])?;
+            self.union_mut(reservation.register)?
+                .remove_indexed(OccupancyOwner::Fixed(id), range.validated())?;
+        }
+        for (id, reservation, range) in prepared {
+            self.union_mut(reservation.register)?
+                .insert_indexed(OccupancyOwner::Fixed(id), range.validated())?;
+        }
+        self.fixed_reservations = canonical;
+        Ok(())
     }
 
     pub(super) fn make_range(
@@ -851,7 +1002,8 @@ impl LiveIntervalMatrix {
                 format!("bundle is already assigned to {current}"),
             ));
         }
-        self.union_mut(register)?.insert_indexed(bundle, segments)?;
+        self.union_mut(register)?
+            .insert_indexed(OccupancyOwner::Bundle(bundle), segments)?;
         self.assignments.insert(bundle, register);
         Ok(())
     }
@@ -879,7 +1031,8 @@ impl LiveIntervalMatrix {
                 "bundle has no physical-register assignment",
             ));
         };
-        self.union_mut(register)?.remove_indexed(bundle, segments)?;
+        self.union_mut(register)?
+            .remove_indexed(OccupancyOwner::Bundle(bundle), segments)?;
         self.assignments.remove(&bundle);
         Ok(register)
     }
@@ -900,18 +1053,42 @@ impl LiveIntervalMatrix {
             union.verify()?;
         }
         let mut rebuilt = BTreeMap::new();
+        let mut fixed = BTreeMap::<FixedReservationId, FixedRegisterReservation>::new();
         for (&register, union) in &self.unions {
-            for entries in union.blocks.values() {
-                for entry in entries.values() {
-                    if let Some(other) = rebuilt.insert(entry.bundle, register)
-                        && other != register
-                    {
-                        return Err(IntervalUnionError::new(
-                            "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
-                            None,
-                            [entry.bundle],
-                            format!("bundle appears in both {other} and {register}"),
-                        ));
+            for (&block, entries) in &union.blocks {
+                let block_id = self.index.block_ids[block];
+                for (&start, entry) in entries {
+                    match entry.owner {
+                        OccupancyOwner::Bundle(bundle) => {
+                            if let Some(other) = rebuilt.insert(bundle, register)
+                                && other != register
+                            {
+                                return Err(IntervalUnionError::new(
+                                    "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
+                                    None,
+                                    [bundle],
+                                    format!("bundle appears in both {other} and {register}"),
+                                ));
+                            }
+                        }
+                        OccupancyOwner::Fixed(id) => {
+                            let reservation = FixedRegisterReservation {
+                                register,
+                                segment: LiveSegment {
+                                    block: block_id,
+                                    start,
+                                    end: entry.end,
+                                },
+                            };
+                            if fixed.insert(id, reservation).is_some() {
+                                return Err(IntervalUnionError::new(
+                                    "INTERVAL_UNION.FIXED_IDENTITY",
+                                    Some(block_id),
+                                    [],
+                                    "one fixed reservation identity owns multiple intervals",
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -922,6 +1099,33 @@ impl LiveIntervalMatrix {
                 None,
                 [],
                 "register memberships differ from the bidirectional assignment map",
+            ));
+        }
+        let expected_fixed = self
+            .fixed_reservations
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(row, reservation)| {
+                u32::try_from(row)
+                    .map(FixedReservationId)
+                    .map(|id| (id, reservation))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|_| {
+                IntervalUnionError::new(
+                    "INTERVAL_UNION.FIXED_RANGE",
+                    None,
+                    [],
+                    "stored fixed reservation identity exceeds u32",
+                )
+            })?;
+        if fixed != expected_fixed {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.FIXED_MAP",
+                None,
+                [],
+                "fixed union memberships differ from the immutable reservation table",
             ));
         }
         Ok(())
@@ -1004,10 +1208,10 @@ impl DynamicIntervalMatrix {
         }
         if slot == self.unions.len() {
             let mut union = IntervalUnion::new(Arc::clone(&self.index));
-            union.insert_indexed(bundle, segments)?;
+            union.insert_indexed(OccupancyOwner::Bundle(bundle), segments)?;
             self.unions.push(union);
         } else {
-            self.unions[slot].insert_indexed(bundle, segments)?;
+            self.unions[slot].insert_indexed(OccupancyOwner::Bundle(bundle), segments)?;
         }
         self.assignments.insert(bundle, slot);
         Ok(())
@@ -1035,13 +1239,21 @@ impl DynamicIntervalMatrix {
             }
             for entries in union.blocks.values() {
                 for entry in entries.values() {
-                    if let Some(other) = rebuilt.insert(entry.bundle, slot)
+                    let OccupancyOwner::Bundle(bundle) = entry.owner else {
+                        return Err(IntervalUnionError::new(
+                            "INTERVAL_UNION.DYNAMIC_FIXED",
+                            None,
+                            [],
+                            "dynamic stack-color union contains a fixed register reservation",
+                        ));
+                    };
+                    if let Some(other) = rebuilt.insert(bundle, slot)
                         && other != slot
                     {
                         return Err(IntervalUnionError::new(
                             "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
                             None,
-                            [entry.bundle],
+                            [bundle],
                             format!("bundle appears in both dynamic slots {other} and {slot}"),
                         ));
                     }
@@ -1295,6 +1507,7 @@ mod tests {
                 segment: 0,
                 start: inner.segments[0].start,
                 end: inner.segments[0].end,
+                owner: OccupancyOwner::Bundle(AllocationBundleId(1)),
             }]
         );
         assert_eq!(
@@ -1312,6 +1525,85 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn fixed_clobber_interval_excludes_only_live_through_ranges() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 8,
+        });
+        block.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 2,
+        });
+        block.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 3,
+        });
+        block.push(MInst::UDiv {
+            dst: VReg(3),
+            lhs: VReg(0),
+            rhs: VReg(1),
+        });
+        block.push(MInst::Add {
+            dst: VReg(4),
+            lhs: VReg(3),
+            rhs: VReg(2),
+        });
+        block.push(MInst::Return);
+        let mut function = function(5, vec![block]);
+        let cfg = normalize(&mut function);
+        let intervals = live_interval::analyze(&function, &cfg).unwrap();
+        let slots = intervals.block_slots[0];
+        let reservation = FixedRegisterReservation {
+            register: PhysReg::RAX,
+            segment: LiveSegment {
+                block: BlockId(0),
+                start: slots.instruction_clobber(3).unwrap(),
+                end: slots.instruction_def(3).unwrap(),
+            },
+        };
+        let mut matrix = LiveIntervalMatrix::new(&cfg, &[PhysReg::RAX]).unwrap();
+        matrix.replace_fixed_reservations(&[reservation]).unwrap();
+
+        let lhs = intervals.intervals[0].as_ref().unwrap();
+        let live_through = intervals.intervals[2].as_ref().unwrap();
+        let result = intervals.intervals[3].as_ref().unwrap();
+        assert!(!matrix.interferes(PhysReg::RAX, &lhs.segments).unwrap());
+        assert!(
+            matrix
+                .interferes(PhysReg::RAX, &live_through.segments)
+                .unwrap()
+        );
+        assert!(!matrix.interferes(PhysReg::RAX, &result.segments).unwrap());
+
+        let range = matrix.make_range(live_through.segments.clone()).unwrap();
+        let mut collector = ConflictCollector::default();
+        let mut conflicts = Vec::new();
+        let mut cuts = Vec::new();
+        matrix
+            .collect_interference_validated(
+                PhysReg::RAX,
+                range.validated(),
+                5,
+                &mut collector,
+                &mut conflicts,
+                &mut cuts,
+            )
+            .unwrap();
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            cuts,
+            vec![OccupancyCut {
+                segment: 0,
+                start: reservation.segment.start,
+                end: reservation.segment.end,
+                owner: OccupancyOwner::Fixed(FixedReservationId(0)),
+            }]
+        );
+        matrix.verify().unwrap();
     }
 
     #[test]

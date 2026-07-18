@@ -3228,6 +3228,82 @@ transition only when adjacent fragment locations differ. This is the remaining
 modern fixed-interval boundary; restoring whole-live-set permutations or
 tuning the global mask is not an acceptable implementation.
 
+Step 28b uses three ordered subslots for every machine instruction: operand
+use, clobber barrier, and result definition. A last-use range ends at the
+barrier, a result range starts at the definition, and only a range live through
+the instruction spans `[clobber, definition)`. Every target clobber therefore
+becomes an immutable physical-register reservation over exactly that interval.
+Trying to approximate this with either `[use, definition)` or
+`[definition, next)` is incorrect: the former rejects legal last uses and the
+latter rejects legal result definitions.
+
+The physical interval union owns both movable bundle entries and immutable
+fixed entries, with an explicit owner tag. Interference queries return
+owner-qualified occupancy cuts. Recoloring and eviction may operate only on
+movable owners; fixed owners can only cause a candidate range to be split at
+the reported cut or assigned another color. The constraint model retains a
+VReg-wide mask only for true fixed operands (whose producer is already a local
+SSA fragment); clobbers no longer mutate a VReg mask at all.
+
+Persistent allocation updates replace fixed entries from changed machine-fact
+rows only after changed movable ranges have been removed. Publication verifies
+the stored reservations against an independent `AllocationIr::machine_facts`
+rebuild and verifies that no retained movable interval overlaps a replacement
+reservation. A split request carries the exact pressure point derived from the
+occupancy cut, rather than reusing the blocked value's definition. Split
+planning then considers each `(region, pressure point)` pair and moves only
+owned uses reachable after that point.
+
+Step 28b implements that boundary. `LiveIntervalMatrix` stores explicitly
+tagged movable and fixed owners in the same ordered unions. Conflict collection
+returns the movable residents needed for recoloring plus owner-qualified cuts;
+an immutable owner never enters the eviction set. Focused fixtures prove the
+three-subslot last-use/result distinction, exact fixed cuts with no fake bundle,
+separation of fixed-use masks from clobbers, incremental reservation identity
+after a local slot shift, and a split request whose pressure point is the
+clobber barrier rather than the blocked definition.
+
+This architectural replacement deliberately produced no Linux code change for
+the current workload. The Step 28a trace at
+`target/heliodor/analysis/step28a-local-fragments-1ed9f872-20260718` and Step
+28b final-source trace at
+`target/heliodor/analysis/step28b-fixed-intervals-final-20260718` have identical
+complete artifacts: pre-optimized SIR
+`336d6b7bd66ea0c824293dd69c25fe2c7aa9f862b7a070ab73949db0bf3771d4`,
+post-optimized SIR
+`babcca2ac53a003eaf77dab35ae45faf052802de614b9a660b4d024eeddf5900`,
+native SIR
+`60b82bc32d0a021dd07f68512b6cb1f874775e34b5945a0927834465f7d97fe4`,
+and all pre-/post-allocation MIR, assignments, and disassembly
+`504d46eb9ea3d5a5f876b0afcdbd4d9ba664b63dddfa63b34f21cfa4cb028106`.
+The adjacent non-LTO compile-only measurements were 53.619 s for Step 28a and
+52.540 s for Step 28b, so the earlier 384.401 s sample is not attributed to
+this change.
+
+Three trace-free full Step 28b runs powered down at
+`cy=9ae070 x3=aa pass=1`. Their execute times were 141.988 s at
+`target/heliodor/results/20260718T222850Z_celox_test_soc_linux_boot.log` and
+118.501 s at
+`target/heliodor/results/20260718T223544Z_celox_test_soc_linux_boot.log`. The
+run rebuilt from the final source is
+`target/heliodor/results/20260718T224819Z_celox_test_soc_linux_boot.log`, with
+`compile_ns=56281979403` and `execute_ns=122963481056`.
+Because the complete emitted code is byte-identical and host timing varied by
+19.8%, Step 28b makes neither an execution-speedup nor a regression claim.
+
+The next allocator slice must change the generated code at its primary spill
+boundary. Today `allocate_roots` chooses persistent homes, `expand` commits
+stores/reloads, and only then does joint physical allocation discover the
+actual interference. That two-stage decision is unlike an integrated modern
+allocator: it cannot compare keeping a value in a register, splitting it at a
+specific pressure interval, and spilling only that fragment in one cost
+problem. Step 29 therefore replaces eager home expansion with allocation-owned
+fragments and SSA spill placement. A stack home is created only for a fragment
+selected by the final matrix; reload placement uses the fragment's exact use
+frontier, and adjacent register fragments receive a move only when their final
+colors differ. Local spill-weight or copy-order tuning is not an acceptable
+substitute.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3304,6 +3380,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9f unified split mutation journal | `a8b8d2cb` | cross-block register-region differential/full identity; regalloc 224/224; split 6/6 | candidate lib 843/843; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: two functions published, then fixed-only joint pressure stopped compilation | 266.162 s; execute unavailable | all operand rewrites update liveness and constraints from one transaction journal; fixed transition production/coloring remained open |
 | 27d9g semantic-only phi identities and canonical edge locations | `fa0ed954` | unused-phi physical liveness; semantic-only assignment/SSA-destruction boundaries; regalloc 228/228; SSA destruction 21/21 | candidate lib 848/848; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 456.876 s; full compile 442.109 s; execute 267.183 s | fixed-only false pressure removed and all units publish; runtime is 2.33x Step 26a, exposing whole-live-set constraint permutations as the next rejected design |
 | 28a local fixed-use fragments without whole-live-set permutations | this step | fixed-operand isolation and clobber non-mutation; legalize 10/10; regalloc 230/230 | candidate lib 850/850; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 384.401 s; full compile 382.284 s; execute 124.495 s | effective comb edge copies fall 98,037→1,334 and execute improves 53.4%; exact fixed-register interval reservations remain next |
+| 28b immutable fixed intervals and exact pressure cuts | this step | live interval 9/9; interval union 7/7; constraints 4/4; joint allocation 7/7; split 6/6; regalloc 232/232 | candidate lib 852/852; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | three CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; complete Step 28a/final-28b SIR, MIR, assignments, and disassembly are byte-identical | adjacent compile-only 53.619 s (28a) / 52.540 s (28b); final-source compile 56.282 s; execute 141.988 / 118.501 / final 122.963 s | clobbers are exact immutable `[barrier, def)` occupancy and split requests carry owner-qualified cuts; no generated-code or speed claim; integrated fragment allocation/spill placement remains next |
 
 ## Related design records
 
