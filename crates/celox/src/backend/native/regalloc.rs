@@ -487,19 +487,18 @@ fn run_regalloc_in_place(
         let interval_start = timing.then(crate::timing::now);
         let constraint_perm_start = timing.then(crate::timing::now);
         let mut interval_func = func.clone();
-        let (interval_cfg, _constraint_perms) =
-            legalize::materialize_allocation_constraint_perms(&mut interval_func, &normalized_cfg)
-                .map_err(|error| {
-                    allocation_perm_error("interval constraint permutation construction", error)
-                })?;
+        legalize::materialize_allocation_fixed_use_fragments(&mut interval_func).map_err(
+            |error| allocation_perm_error("interval fixed-use fragment construction", error),
+        )?;
+        let interval_cfg = &normalized_cfg;
         if let Some(start) = constraint_perm_start {
             eprintln!(
-                "[regalloc-timing] label={label} interval_constraint_perms elapsed={:?}",
+                "[regalloc-timing] label={label} interval_constraint_fragments elapsed={:?}",
                 start.elapsed()
             );
         }
         let home_start = timing.then(crate::timing::now);
-        let homes = home_graph::build(&interval_func, &interval_cfg)
+        let homes = home_graph::build(&interval_func, interval_cfg)
             .map_err(|error| home_graph_error("interval HomeGraph construction", error))?;
         if let Some(start) = home_start {
             eprintln!(
@@ -509,7 +508,7 @@ fn run_regalloc_in_place(
         }
         let allocation_start = timing.then(crate::timing::now);
         let plan =
-            interval_allocator::allocate_roots(&homes, &interval_cfg, assignment::ALLOCATABLE_REGS)
+            interval_allocator::allocate_roots(&homes, interval_cfg, assignment::ALLOCATABLE_REGS)
                 .map_err(|error| {
                     interval_allocation_error("interval allocation diagnostics", error)
                 })?;
@@ -522,7 +521,7 @@ fn run_regalloc_in_place(
         let expand_start = timing.then(crate::timing::now);
         let mut expanded = allocation_expand::expand(
             &interval_func,
-            &interval_cfg,
+            interval_cfg,
             &homes,
             &plan,
             assignment::ALLOCATABLE_REGS,
@@ -538,7 +537,7 @@ fn run_regalloc_in_place(
         let allocation = allocation_split::allocate_with_splitting(
             &mut expanded,
             &homes,
-            &interval_cfg,
+            interval_cfg,
             assignment::ALLOCATABLE_REGS,
         )
         .map_err(|error| allocation_split_error("interval joint reallocation", error))?;
@@ -551,7 +550,7 @@ fn run_regalloc_in_place(
         let lowering_start = timing.then(crate::timing::now);
         let lowered = allocation_lower::lower(
             &interval_func,
-            &interval_cfg,
+            interval_cfg,
             &homes,
             &expanded,
             &allocation,

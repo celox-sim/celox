@@ -3183,6 +3183,51 @@ fragment when its adjacent colors differ. Tuning coalescing order, spill
 weights, or copy peepholes around the existing permutation graph is not an
 acceptable substitute.
 
+### Step 28: Replace whole-live-set constraint permutations with fixed intervals
+
+Step 28a removes `materialize_allocation_constraint_perms` from the production
+interval path. A fixed operand now receives one ordinary SSA copy immediately
+before its constrained instruction. Its short destination interval carries
+the target-register requirement, and copy affinity allows allocation to elide
+the move when the source already has that color. Clobbers remain exact
+instruction facts; they no longer split unrelated live values, create CFG
+blocks, or add one-input phi rows. The former allocation-permutation path is
+retained only as a test fixture for the rejected representation.
+
+The fixed-use producer has an independent coverage verifier. It requires every
+rewritten fixed operand to have exactly one local copy definition and rejects
+an arity mismatch, incompatible requirements for one source, stale block or
+instruction identities, and missing or duplicate fragments. Focused tests
+prove that a legacy-CL shift copies only its count operand while an unrelated
+value remains unchanged, and that an `UDiv` clobber creates no block, phi, or
+VReg at all.
+
+The CPU-0 non-LTO compile-only gate at
+`target/heliodor/results/20260718T215403Z_celox_test_soc_linux_boot.log`
+completed with `compile_ns=384401433198` and `execute_ns=0`. Relative to Step
+27d9g, `eval_comb` shrank from 2,560,474 to 650,640 emitted bytes and its
+effective edge copies fell from 98,037 to 1,334. The fused unit fell from
+98,027 to 1,349 effective copies. Total compile time improved from 456.876 s
+to 384.401 s.
+
+The identical trace-free full run at
+`target/heliodor/results/20260718T220049Z_celox_test_soc_linux_boot.log`
+powered down at `cy=9ae070 x3=aa pass=1`, with
+`compile_ns=382284373094` and `execute_ns=124495325614`. Removing the graph,
+not cleaning it up after allocation, reduced execution time by 53.4% from
+267.183 s. This recovers the pre-replacement allocator's broad performance
+level, but it does not close the Veryl gap.
+
+Step 28a is intentionally not the final fixed-constraint model. A value live
+through a clobber currently loses the clobbered register from its complete
+VReg-wide mask. The next slice must put immutable use-to-def reservations in
+each physical-register interval union, report the exact reservation cut in an
+allocation failure, and split only the intersecting live-range fragment when
+using that register is otherwise profitable. Resolution then inserts one
+transition only when adjacent fragment locations differ. This is the remaining
+modern fixed-interval boundary; restoring whole-live-set permutations or
+tuning the global mask is not an acceptable implementation.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3257,7 +3302,8 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9d differential target constraints | this step | incremental clobber/phi-affinity constraints 2/2; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global joint region/value rebuilding and full transactional clones remain | n/a | fixed/clobber/copy/phi facts are block indexed and masks update only changed VRegs; complete constraints are independently rebuilt at publication |
 | 27d9e persistent semantic rows and in-place split session | `ae170fbc` | differential/full joint identity in partial-stack split; differential/full DCE identity; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: actual-scale compile stopped on stale cross-block region liveness | 217.609 s; execute unavailable | stable ownership/definition/region indexes update changed rows only; actual scale exposed an incomplete split mutation set |
 | 27d9f unified split mutation journal | `a8b8d2cb` | cross-block register-region differential/full identity; regalloc 224/224; split 6/6 | candidate lib 843/843; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: two functions published, then fixed-only joint pressure stopped compilation | 266.162 s; execute unavailable | all operand rewrites update liveness and constraints from one transaction journal; fixed transition production/coloring remained open |
-| 27d9g semantic-only phi identities and canonical edge locations | this step | unused-phi physical liveness; semantic-only assignment/SSA-destruction boundaries; regalloc 228/228; SSA destruction 21/21 | candidate lib 848/848; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 456.876 s; full compile 442.109 s; execute 267.183 s | fixed-only false pressure removed and all units publish; runtime is 2.33x Step 26a, exposing whole-live-set constraint permutations as the next rejected design |
+| 27d9g semantic-only phi identities and canonical edge locations | `fa0ed954` | unused-phi physical liveness; semantic-only assignment/SSA-destruction boundaries; regalloc 228/228; SSA destruction 21/21 | candidate lib 848/848; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 456.876 s; full compile 442.109 s; execute 267.183 s | fixed-only false pressure removed and all units publish; runtime is 2.33x Step 26a, exposing whole-live-set constraint permutations as the next rejected design |
+| 28a local fixed-use fragments without whole-live-set permutations | this step | fixed-operand isolation and clobber non-mutation; legalize 10/10; regalloc 230/230 | candidate lib 850/850; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 384.401 s; full compile 382.284 s; execute 124.495 s | effective comb edge copies fall 98,037→1,334 and execute improves 53.4%; exact fixed-register interval reservations remain next |
 
 ## Related design records
 

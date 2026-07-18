@@ -1,6 +1,6 @@
 //! Machine constraints expressed as SSA Perm boundaries.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::backend::native::mir::{BlockId, MBlock, MFunction, MInst, PhiNode, SpillDesc, VReg};
 
@@ -25,6 +25,16 @@ pub(super) struct PermBoundary {
 #[derive(Debug, Clone, Default)]
 pub(super) struct PermModel {
     pub boundaries: Vec<PermBoundary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedUseFragment {
+    block: BlockId,
+    definition_instruction: usize,
+    use_instruction: usize,
+    source: VReg,
+    destination: VReg,
+    required: PhysReg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +81,7 @@ pub(super) fn materialize_constraint_perms(
 /// accepts more than K live rows: stack/home selection and joint allocation
 /// are responsible for reducing that pressure. Structural and target-mask
 /// invariants are still verified immediately.
+#[cfg(test)]
 pub(super) fn materialize_allocation_constraint_perms(
     func: &mut MFunction,
     initial_cfg: &NormalizedCfg,
@@ -78,6 +89,181 @@ pub(super) fn materialize_allocation_constraint_perms(
     let (cfg, model) = materialize_constraint_perms_unchecked(func, initial_cfg)?;
     model.verify_allocation_input(func, &cfg)?;
     Ok((cfg, model))
+}
+
+/// Give only fixed operands a local SSA fragment before interval allocation.
+///
+/// Clobbers remain exact instruction points in the allocation constraint
+/// model. They must not split every unrelated live value into a one-input phi
+/// permutation. A fixed operand receives one ordinary copy immediately before
+/// its instruction; allocation may coalesce that copy when the source already
+/// occupies the required register.
+pub(super) fn materialize_allocation_fixed_use_fragments(
+    func: &mut MFunction,
+) -> Result<(), PermError> {
+    let shift_encoding = func.target_features.variable_shift_encoding();
+    let original_blocks = std::mem::take(&mut func.blocks);
+    let mut rewritten_blocks = Vec::with_capacity(original_blocks.len());
+    let mut fragments = Vec::<FixedUseFragment>::new();
+
+    for mut block in original_blocks {
+        let instructions = std::mem::take(&mut block.insts);
+        block.insts = Vec::with_capacity(instructions.len());
+        for mut instruction in instructions {
+            let uses = instruction.uses();
+            let constraints = use_constraints(&instruction, shift_encoding);
+            if constraints.len() != uses.len() {
+                return Err(PermError::new(
+                    "CONSTRAINT_FRAGMENT.OPERAND_ARITY",
+                    Some(block.id),
+                    Some(block.insts.len()),
+                    uses.to_vec(),
+                    "target constraints do not match MIR operand arity",
+                ));
+            }
+            let mut fixed = BTreeMap::<VReg, PhysReg>::new();
+            for (source, constraint) in uses.into_iter().zip(constraints) {
+                let RegConstraint::Fixed(required) = constraint else {
+                    continue;
+                };
+                if let Some(previous) = fixed.insert(source, required)
+                    && previous != required
+                {
+                    return Err(PermError::new(
+                        "CONSTRAINT_FRAGMENT.INCOMPATIBLE_FIXED_USE",
+                        Some(block.id),
+                        Some(block.insts.len()),
+                        vec![source],
+                        format!("one operand value requires both {previous} and {required}"),
+                    ));
+                }
+            }
+
+            let first_fragment = fragments.len();
+            for (source, required) in fixed {
+                let destination = alloc_copy(&mut func.vregs, &mut func.spill_descs, source)?;
+                let definition_instruction = block.insts.len();
+                block.push(MInst::Mov {
+                    dst: destination,
+                    src: source,
+                });
+                instruction.rewrite_use(source, destination);
+                fragments.push(FixedUseFragment {
+                    block: block.id,
+                    definition_instruction,
+                    use_instruction: usize::MAX,
+                    source,
+                    destination,
+                    required,
+                });
+            }
+            let use_instruction = block.insts.len();
+            for fragment in &mut fragments[first_fragment..] {
+                fragment.use_instruction = use_instruction;
+            }
+            block.push(instruction);
+        }
+        rewritten_blocks.push(block);
+    }
+    func.blocks = rewritten_blocks;
+    verify_fixed_use_fragments(func, &fragments)
+}
+
+fn verify_fixed_use_fragments(
+    func: &MFunction,
+    fragments: &[FixedUseFragment],
+) -> Result<(), PermError> {
+    let shift_encoding = func.target_features.variable_shift_encoding();
+    let block_index = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect::<HashMap<_, _>>();
+    let mut expected = BTreeSet::<(BlockId, usize, VReg, PhysReg)>::new();
+    for fragment in fragments {
+        let block = block_index
+            .get(&fragment.block)
+            .and_then(|index| func.blocks.get(*index))
+            .ok_or_else(|| {
+                PermError::new(
+                    "CONSTRAINT_FRAGMENT.BLOCK",
+                    Some(fragment.block),
+                    None,
+                    vec![fragment.destination],
+                    "fixed-use fragment references a missing block",
+                )
+            })?;
+        if block.insts.get(fragment.definition_instruction)
+            != Some(&MInst::Mov {
+                dst: fragment.destination,
+                src: fragment.source,
+            })
+            || fragment.definition_instruction >= fragment.use_instruction
+        {
+            return Err(PermError::new(
+                "CONSTRAINT_FRAGMENT.DEFINITION",
+                Some(fragment.block),
+                Some(fragment.definition_instruction),
+                vec![fragment.source, fragment.destination],
+                "fixed-use fragment is not defined by its local copy",
+            ));
+        }
+        if !expected.insert((
+            fragment.block,
+            fragment.use_instruction,
+            fragment.destination,
+            fragment.required,
+        )) {
+            return Err(PermError::new(
+                "CONSTRAINT_FRAGMENT.IDENTITY",
+                Some(fragment.block),
+                Some(fragment.use_instruction),
+                vec![fragment.destination],
+                "fixed-use fragment appears more than once",
+            ));
+        }
+    }
+
+    let mut actual = BTreeSet::<(BlockId, usize, VReg, PhysReg)>::new();
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            let uses = inst.uses();
+            let constraints = use_constraints(inst, shift_encoding);
+            if uses.len() != constraints.len() {
+                return Err(PermError::new(
+                    "CONSTRAINT_FRAGMENT.OPERAND_ARITY",
+                    Some(block.id),
+                    Some(instruction),
+                    uses.to_vec(),
+                    "rewritten target constraints do not match MIR operand arity",
+                ));
+            }
+            actual.extend(
+                uses.into_iter().zip(constraints).filter_map(
+                    |(value, constraint)| match constraint {
+                        RegConstraint::Any => None,
+                        RegConstraint::Fixed(required) => {
+                            Some((block.id, instruction, value, required))
+                        }
+                    },
+                ),
+            );
+        }
+    }
+    if actual != expected {
+        return Err(PermError::new(
+            "CONSTRAINT_FRAGMENT.COVERAGE",
+            None,
+            None,
+            actual
+                .symmetric_difference(&expected)
+                .map(|row| row.2)
+                .collect(),
+            "fixed-use fragments do not cover the rewritten target operands exactly",
+        ));
+    }
+    Ok(())
 }
 
 fn materialize_constraint_perms_unchecked(
@@ -309,6 +495,7 @@ impl PermModel {
         self.verify_impl(func, cfg, Some(registers))
     }
 
+    #[cfg(test)]
     fn verify_allocation_input(
         &self,
         func: &MFunction,
@@ -1015,6 +1202,110 @@ mod tests {
         assert!(model.boundaries.is_empty());
         assert_eq!(func.blocks.len(), 1);
         assert_eq!(func.vregs.count(), original_vregs);
+        assert!(func.blocks[0].phis.is_empty());
+    }
+
+    #[test]
+    fn allocation_fixed_use_fragment_copies_only_the_constrained_operand() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let amount = vregs.alloc();
+        let unrelated = vregs.alloc();
+        let shifted = vregs.alloc();
+        let observed = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        select_legacy_shifts(&mut func);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm {
+            dst: amount,
+            value: 1,
+        });
+        block.push(MInst::LoadImm {
+            dst: unrelated,
+            value: 3,
+        });
+        block.push(MInst::Shl {
+            dst: shifted,
+            lhs,
+            rhs: amount,
+        });
+        block.push(MInst::Add {
+            dst: observed,
+            lhs: shifted,
+            rhs: unrelated,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        materialize_allocation_fixed_use_fragments(&mut func).unwrap();
+        func.verify();
+
+        assert_eq!(func.blocks.len(), 1);
+        assert!(func.blocks[0].phis.is_empty());
+        assert_eq!(func.vregs.count(), 6);
+        assert_eq!(func.blocks[0].insts.len(), 7);
+        let shift = func.blocks[0]
+            .insts
+            .iter()
+            .position(|instruction| matches!(instruction, MInst::Shl { .. }))
+            .unwrap();
+        let fixed = match func.blocks[0].insts[shift - 1] {
+            MInst::Mov { dst, src } if src == amount => dst,
+            ref other => panic!("expected local amount copy, got {other:?}"),
+        };
+        assert!(matches!(
+            func.blocks[0].insts[shift],
+            MInst::Shl {
+                lhs: actual_lhs,
+                rhs,
+                ..
+            } if actual_lhs == lhs && rhs == fixed
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[shift + 1],
+            MInst::Add { lhs: actual_lhs, rhs, .. }
+                if actual_lhs == shifted && rhs == unrelated
+        ));
+    }
+
+    #[test]
+    fn allocation_clobber_does_not_split_the_complete_live_set() {
+        let mut vregs = VRegAllocator::new();
+        let lhs = vregs.alloc();
+        let rhs = vregs.alloc();
+        let unrelated = vregs.alloc();
+        let quotient = vregs.alloc();
+        let observed = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm { dst: rhs, value: 2 });
+        block.push(MInst::LoadImm {
+            dst: unrelated,
+            value: 3,
+        });
+        block.push(MInst::UDiv {
+            dst: quotient,
+            lhs,
+            rhs,
+        });
+        block.push(MInst::Add {
+            dst: observed,
+            lhs: quotient,
+            rhs: unrelated,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let before = func.to_string();
+        let value_count = func.vregs.count();
+
+        materialize_allocation_fixed_use_fragments(&mut func).unwrap();
+        func.verify();
+
+        assert_eq!(func.to_string(), before);
+        assert_eq!(func.vregs.count(), value_count);
+        assert_eq!(func.blocks.len(), 1);
         assert!(func.blocks[0].phis.is_empty());
     }
 
