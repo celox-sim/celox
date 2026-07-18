@@ -3085,6 +3085,29 @@ pass. The split loop no longer rebuilds machine facts or target masks globally,
 but joint region/value rows and the transactional expanded-problem clone remain
 all-world operations, so this step again makes no Linux timing claim.
 
+Step 27d9e completes the persistent semantic-row update. Register ownership is
+indexed by stable VReg and immutable root-use identity. A changed root removes
+only its previous ownership rows and installs only its new register regions;
+changed/dead/new VRegs replace their compact semantic row, sparse matrix range,
+assignment, and dominator-order entry independently. The pending worklist
+retains unassigned unaffected values. A focused split requires this complete
+differential session problem to equal an independently rebuilt joint problem.
+
+The split fixed point now mutates a private allocation session in place. A
+post-mutation invariant failure discards that unpublished session and returns a
+compiler error; it cannot alter source MIR. This removes the complete
+`ExpandedAllocationProblem` clone from every iteration while preserving atomic
+MIR publication. Synthetic-definition IDs index a local reference-count DCE:
+after rewritten liveness is known, only the newly dead value and recursively
+dead synthetic operands are removed. Root progress is recomputed only for the
+changed root. Register-region IDs are monotonic, metadata has a stable ID-to-
+row index, and replacing one region no longer scans or renumbers every root.
+
+Candidate common gates pass. The former all-world liveness, constraints,
+semantic rows, matrix restart, expanded clone, DCE, progress scan, and region
+renumbering are now absent from the split loop. The next action is therefore an
+actual-scale non-LTO compile/run gate, not another local container tweak.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3157,6 +3180,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9b persistent physical interval allocation | this step | stable bundle-hole 1/1; retained matrix-membership 1/1; joint allocation 6/6; split 5/5 | candidate lib 838/838; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | no result: compile-only candidate timed out with three joint-allocation workers active | 600.292 s timeout; HomeGraph/root/expand phases complete | unchanged values retain matrix membership, but repeated whole-IR liveness remains dominant and is the next architectural boundary |
 | 27d9c differential allocation liveness | this step | incremental instruction/phi-edge liveness 2/2; regalloc 221/221; split 5/5 | candidate lib 840/840; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global constraint/region/joint-row rebuilding remains in the split loop | n/a | changed block facts rebuild only affected sparse SSA ranges; independent whole-program proofs remain at publication; session-owned constraints and semantic rows are next |
 | 27d9d differential target constraints | this step | incremental clobber/phi-affinity constraints 2/2; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global joint region/value rebuilding and full transactional clones remain | n/a | fixed/clobber/copy/phi facts are block indexed and masks update only changed VRegs; complete constraints are independently rebuilt at publication |
+| 27d9e persistent semantic rows and in-place split session | this step | differential/full joint identity in partial-stack split; differential/full DCE identity; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | pending actual-scale gate after commit | n/a | stable ownership/definition/region indexes update changed rows only; full expanded clones, global DCE/progress scans, and region renumbering are removed |
 
 ## Related design records
 

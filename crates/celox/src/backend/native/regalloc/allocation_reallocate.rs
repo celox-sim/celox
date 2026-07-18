@@ -26,7 +26,7 @@ use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_union::{
     AllocationBundleId, IntervalUnionError, LiveIntervalMatrix, SparseRange,
 };
-use super::live_interval::{DefinitionSite, LiveInterval, UseSite};
+use super::live_interval::{DefinitionSite, LiveInterval, SlotIndex, UseSite};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum AllocationValueClass {
@@ -59,9 +59,15 @@ pub(super) struct JointAllocationProblem {
     /// Physical interval-union bundle IDs are the VReg identity itself; they
     /// never shift when another synthetic value becomes dead.
     value_rows: Vec<Option<usize>>,
-    definition_order: Vec<AllocationBundleId>,
+    definition_order: BTreeSet<DefinitionOrderEntry>,
     target_registers: Vec<PhysReg>,
     affinities: Vec<WeightedAffinity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DefinitionOrderEntry {
+    key: (usize, SlotIndex, VReg),
+    id: AllocationBundleId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +104,8 @@ pub(super) struct JointAllocation {
 pub(super) struct JointAllocationSession {
     problem: JointAllocationProblem,
     constraints: Option<IncrementalConstraintModel>,
+    ownership: Option<RegionOwnershipIndex>,
+    definition_rank: Vec<usize>,
     matrix: LiveIntervalMatrix,
     ranges: Vec<Option<SparseRange>>,
     assignments: Vec<Option<PhysReg>>,
@@ -177,6 +185,19 @@ struct RegionBuilder {
     uses: Vec<BundleUseId>,
     sites: Vec<UseSite>,
     preferred_register: PhysReg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexedRegion {
+    root: LiveBundleId,
+    uses: Vec<BundleUseId>,
+    preferred_register: PhysReg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegionOwnershipIndex {
+    owners: Vec<Option<IndexedRegion>>,
+    values_by_root: Vec<Vec<VReg>>,
 }
 
 impl JointAllocationProblem {
@@ -393,6 +414,23 @@ impl JointAllocationProblem {
                 "two expanded register regions share one identity",
             ));
         }
+        if expanded.region_rows.len() != expanded.register_regions.len()
+            || expanded
+                .register_regions
+                .iter()
+                .enumerate()
+                .any(|(row, region)| {
+                    expanded.region_rows.get(&region.id) != Some(&row)
+                        || region.id.0 >= expanded.next_register_region
+                })
+        {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.REGION_INDEX",
+                None,
+                None,
+                "stable register-region index differs from active metadata",
+            ));
+        }
 
         let mut regions = BTreeMap::<VReg, RegionBuilder>::new();
         let mut referenced_regions = BTreeSet::new();
@@ -558,6 +596,56 @@ impl JointAllocationProblem {
     pub(super) fn value(&self, value: VReg) -> Option<&AllocationValue> {
         let row = self.value_rows.get(value.0 as usize).copied().flatten()?;
         self.values.get(row)
+    }
+
+    fn replace_value(
+        &mut self,
+        value: VReg,
+        replacement: Option<AllocationValue>,
+    ) -> Result<(), JointAllocationError> {
+        let index = value.0 as usize;
+        if index >= self.value_count as usize || index >= self.value_rows.len() {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_VALUE_RANGE",
+                None,
+                Some(value),
+                "session value replacement is outside the stable VReg table",
+            ));
+        }
+        match (self.value_rows[index], replacement) {
+            (Some(row), Some(replacement)) => {
+                if replacement.value != value || replacement.id != AllocationBundleId(value.0) {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_VALUE_IDENTITY",
+                        Some(replacement.interval.definition.block()),
+                        Some(value),
+                        "replacement allocation row has a different stable identity",
+                    ));
+                }
+                self.values[row] = replacement;
+            }
+            (Some(row), None) => {
+                self.value_rows[index] = None;
+                self.values.swap_remove(row);
+                if let Some(moved) = self.values.get(row) {
+                    self.value_rows[moved.value.0 as usize] = Some(row);
+                }
+            }
+            (None, Some(replacement)) => {
+                if replacement.value != value || replacement.id != AllocationBundleId(value.0) {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_VALUE_IDENTITY",
+                        Some(replacement.interval.definition.block()),
+                        Some(value),
+                        "new allocation row has a different stable identity",
+                    ));
+                }
+                self.value_rows[index] = Some(self.values.len());
+                self.values.push(replacement);
+            }
+            (None, None) => {}
+        }
+        Ok(())
     }
 
     fn bundle(&self, bundle: AllocationBundleId) -> Option<&AllocationValue> {
@@ -845,6 +933,142 @@ impl JointAllocationProblem {
     }
 }
 
+impl RegionOwnershipIndex {
+    fn build(expanded: &ExpandedAllocationProblem) -> Result<Self, JointAllocationError> {
+        let mut result = Self {
+            owners: vec![None; expanded.ir.value_count() as usize],
+            values_by_root: vec![Vec::new(); expanded.roots.len()],
+        };
+        for root in &expanded.roots {
+            result.update_root(expanded, root.id)?;
+        }
+        Ok(result)
+    }
+
+    fn owner(&self, value: VReg) -> Option<&IndexedRegion> {
+        self.owners.get(value.0 as usize).and_then(Option::as_ref)
+    }
+
+    fn update_root(
+        &mut self,
+        expanded: &ExpandedAllocationProblem,
+        root_id: LiveBundleId,
+    ) -> Result<Vec<VReg>, JointAllocationError> {
+        let root = expanded.roots.get(root_id.0 as usize).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_ROOT_RANGE",
+                None,
+                None,
+                "changed root is outside the expanded allocation problem",
+            )
+        })?;
+        if root.id != root_id || root.id.0 as usize >= self.values_by_root.len() {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_ROOT_IDENTITY",
+                None,
+                Some(root.origin),
+                "changed root differs from the stable root index",
+            ));
+        }
+        self.owners
+            .resize_with(expanded.ir.value_count() as usize, || None);
+        let mut affected = BTreeSet::new();
+        for value in std::mem::take(&mut self.values_by_root[root_id.0 as usize]) {
+            let row = self.owners.get_mut(value.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_RANGE",
+                    None,
+                    Some(value),
+                    "previous root region is outside the stable VReg table",
+                )
+            })?;
+            if row.as_ref().is_none_or(|owner| owner.root != root_id) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_IDENTITY",
+                    None,
+                    Some(value),
+                    "previous region owner differs from its root index",
+                ));
+            }
+            *row = None;
+            affected.insert(value);
+        }
+
+        let mut grouped = BTreeMap::<VReg, (PhysReg, Vec<BundleUseId>)>::new();
+        for (use_index, use_) in root.uses.iter().enumerate() {
+            if use_.id.0 as usize != use_index {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_USE_IDENTITY",
+                    Some(use_.site.block()),
+                    Some(use_.value),
+                    "root use differs from its stable use row",
+                ));
+            }
+            let preferred_register = match use_.source {
+                ExpandedUseSource::OriginalRegister { preferred_register } => {
+                    if use_.value != root.origin {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.SESSION_ORIGINAL_REGION",
+                            Some(use_.site.block()),
+                            Some(use_.value),
+                            "original register use is not owned by its root value",
+                        ));
+                    }
+                    preferred_register
+                }
+                ExpandedUseSource::RegisterRegion {
+                    preferred_register, ..
+                } => preferred_register,
+                ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => continue,
+            };
+            let entry = grouped
+                .entry(use_.value)
+                .or_insert_with(|| (preferred_register, Vec::new()));
+            if entry.0 != preferred_register {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_PREFERENCE",
+                    Some(use_.site.block()),
+                    Some(use_.value),
+                    "one session region has incompatible register preferences",
+                ));
+            }
+            entry.1.push(use_.id);
+        }
+        for (value, (preferred_register, mut uses)) in grouped {
+            uses.sort_unstable();
+            uses.dedup();
+            let row = self.owners.get_mut(value.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_RANGE",
+                    None,
+                    Some(value),
+                    "new root region is outside the stable VReg table",
+                )
+            })?;
+            if let Some(existing) = row {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_OWNERSHIP",
+                    None,
+                    Some(value),
+                    format!(
+                        "machine value is owned by roots {:?} and {:?}",
+                        existing.root, root_id
+                    ),
+                ));
+            }
+            *row = Some(IndexedRegion {
+                root: root_id,
+                uses,
+                preferred_register,
+            });
+            self.values_by_root[root_id.0 as usize].push(value);
+            affected.insert(value);
+        }
+        self.values_by_root[root_id.0 as usize].sort_unstable();
+        Ok(affected.into_iter().collect())
+    }
+}
+
 impl JointAllocationSession {
     pub(super) fn new(
         problem: JointAllocationProblem,
@@ -873,10 +1097,17 @@ impl JointAllocationSession {
             );
         }
         let assignments = vec![None; problem.value_count as usize];
-        let pending = problem.definition_order.iter().copied().collect();
+        let pending = problem
+            .definition_order
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        let definition_rank = dominator_rank(cfg)?;
         Ok(Self {
             problem,
             constraints: None,
+            ownership: None,
+            definition_rank,
             matrix,
             ranges,
             assignments,
@@ -897,6 +1128,7 @@ impl JointAllocationSession {
     ) -> Result<Self, JointAllocationError> {
         let constraints = IncrementalConstraintModel::build(expanded, cfg, graph, registers)
             .map_err(JointAllocationError::constraints)?;
+        let ownership = RegionOwnershipIndex::build(expanded)?;
         let rebuilt = JointAllocationProblem::build_session_with_constraints(
             expanded,
             cfg,
@@ -913,6 +1145,7 @@ impl JointAllocationSession {
         }
         let mut result = Self::new(problem, cfg, registers)?;
         result.constraints = Some(constraints);
+        result.ownership = Some(ownership);
         Ok(result)
     }
 
@@ -924,27 +1157,181 @@ impl JointAllocationSession {
         registers: &[PhysReg],
         changed_blocks: &BTreeSet<BlockId>,
         changed_values: &[VReg],
+        changed_root: LiveBundleId,
     ) -> Result<(), JointAllocationError> {
-        let next = {
-            let constraints = self.constraints.as_mut().ok_or_else(|| {
+        if registers != self.problem.target_registers {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.TARGET_REGISTER_SET",
+                None,
+                None,
+                "incremental joint update uses a different physical register set",
+            ));
+        }
+        let constraint_changes = self
+            .constraints
+            .as_mut()
+            .ok_or_else(|| {
                 JointAllocationError::new(
                     "JOINT_ALLOC.SESSION_CONSTRAINT_STATE",
                     None,
                     None,
                     "persistent joint update has no block-indexed constraint state",
                 )
-            })?;
-            constraints
-                .update(expanded, cfg, graph, changed_blocks, changed_values)
-                .map_err(JointAllocationError::constraints)?;
-            JointAllocationProblem::build_session_with_constraints(
-                expanded,
-                cfg,
-                registers,
-                constraints.model(),
-            )?
-        };
-        self.update(next, registers)
+            })?
+            .update(expanded, cfg, graph, changed_blocks, changed_values)
+            .map_err(JointAllocationError::constraints)?;
+        let ownership_changes = self
+            .ownership
+            .as_mut()
+            .ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_STATE",
+                    None,
+                    None,
+                    "persistent joint update has no region-ownership index",
+                )
+            })?
+            .update_root(expanded, changed_root)?;
+        let mut affected = changed_values.iter().copied().collect::<BTreeSet<_>>();
+        affected.extend(constraint_changes);
+        affected.extend(ownership_changes);
+
+        let constraints = self.constraints.as_ref().unwrap().model();
+        let ownership = self.ownership.as_ref().unwrap();
+        let mut replacements = Vec::with_capacity(affected.len());
+        for &value in &affected {
+            replacements.push((
+                value,
+                session_allocation_value(expanded, constraints, ownership, value, registers)?,
+            ));
+        }
+        let affinities = constraints.affinities.clone();
+        self.apply_value_delta(
+            expanded.ir.value_count(),
+            replacements,
+            affinities,
+            cfg,
+            registers,
+        )
+    }
+
+    fn apply_value_delta(
+        &mut self,
+        value_count: u32,
+        replacements: Vec<(VReg, Option<AllocationValue>)>,
+        affinities: Vec<WeightedAffinity>,
+        cfg: &NormalizedCfg,
+        registers: &[PhysReg],
+    ) -> Result<(), JointAllocationError> {
+        if value_count < self.problem.value_count {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_ID_RANGE",
+                None,
+                None,
+                "allocation-session VReg bound decreased after a split",
+            ));
+        }
+        self.problem.value_count = value_count;
+        self.problem.value_rows.resize(value_count as usize, None);
+        self.assignments.resize(value_count as usize, None);
+        self.ranges.resize_with(value_count as usize, || None);
+
+        let mut changed = BTreeSet::new();
+        for (value, replacement) in replacements {
+            let previous = self.problem.value(value).cloned();
+            if previous == replacement {
+                continue;
+            }
+            let index = value.0 as usize;
+            if self.assignments[index].is_some() {
+                let previous = previous.as_ref().ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_ASSIGNMENT",
+                        None,
+                        Some(value),
+                        "assigned value has no previous semantic allocation row",
+                    )
+                })?;
+                let range = self.ranges[index].as_ref().ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_RANGE",
+                        Some(previous.interval.definition.block()),
+                        Some(value),
+                        "assigned changed value has no retained sparse range",
+                    )
+                })?;
+                self.matrix
+                    .unassign_validated(previous.id, range.validated())
+                    .map_err(JointAllocationError::union)?;
+            }
+            self.assignments[index] = None;
+            self.ranges[index] = None;
+            if let Some(previous) = &previous {
+                let entry = DefinitionOrderEntry {
+                    key: definition_key(previous, cfg, &self.definition_rank)?,
+                    id: previous.id,
+                };
+                if !self.problem.definition_order.remove(&entry) {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_DEFINITION_ORDER",
+                        Some(previous.interval.definition.block()),
+                        Some(value),
+                        "changed value is absent from the persistent definition order",
+                    ));
+                }
+            }
+            self.problem.replace_value(value, replacement.clone())?;
+            if let Some(replacement) = replacement {
+                validate_allocatable_value(&replacement, registers)?;
+                let entry = DefinitionOrderEntry {
+                    key: definition_key(&replacement, cfg, &self.definition_rank)?,
+                    id: replacement.id,
+                };
+                if !self.problem.definition_order.insert(entry) {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_DEFINITION_ORDER",
+                        Some(replacement.interval.definition.block()),
+                        Some(value),
+                        "changed value duplicates a persistent definition-order entry",
+                    ));
+                }
+                self.ranges[index] = Some(
+                    self.matrix
+                        .make_range(replacement.interval.segments.clone())
+                        .map_err(JointAllocationError::union)?,
+                );
+            }
+            changed.insert(value);
+        }
+        self.problem.affinities = affinities;
+
+        let mut pending = self.pending.drain(..).collect::<Vec<_>>();
+        pending.retain(|id| {
+            self.problem.value(VReg(id.0)).is_some() && self.assignments[id.0 as usize].is_none()
+        });
+        pending.extend(changed.into_iter().filter_map(|value| {
+            (self.problem.value(value).is_some() && self.assignments[value.0 as usize].is_none())
+                .then_some(AllocationBundleId(value.0))
+        }));
+        pending.sort_unstable();
+        pending.dedup();
+        let mut ordered = pending
+            .into_iter()
+            .map(|id| {
+                let value = self.problem.bundle(id).ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_PENDING_VALUE",
+                        None,
+                        Some(VReg(id.0)),
+                        "pending session value has no semantic allocation row",
+                    )
+                })?;
+                Ok((definition_key(value, cfg, &self.definition_rank)?, id))
+            })
+            .collect::<Result<Vec<_>, JointAllocationError>>()?;
+        ordered.sort_unstable_by_key(|(key, _)| *key);
+        self.pending = ordered.into_iter().map(|(_, id)| id).collect();
+        Ok(())
     }
 
     /// Replace the semantic problem while retaining every byte-identical
@@ -1021,7 +1408,7 @@ impl JointAllocationSession {
         self.pending.extend(
             next.definition_order
                 .iter()
-                .copied()
+                .map(|entry| entry.id)
                 .filter(|id| self.assignments[id.0 as usize].is_none()),
         );
         self.problem = next;
@@ -1170,6 +1557,7 @@ impl JointAllocationSession {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            self.pending.push_front(value.id);
             return Ok(JointAllocationOutcome::NeedsSplit(RegionSplitRequest {
                 blocked_value: value.value,
                 definition: value.interval.definition,
@@ -1187,6 +1575,110 @@ impl JointAllocationSession {
         self.matrix.verify().map_err(JointAllocationError::union)?;
         Ok(JointAllocationOutcome::Complete(result))
     }
+}
+
+fn session_allocation_value(
+    expanded: &ExpandedAllocationProblem,
+    constraints: &AllocationConstraintModel,
+    ownership: &RegionOwnershipIndex,
+    value: VReg,
+    registers: &[PhysReg],
+) -> Result<Option<AllocationValue>, JointAllocationError> {
+    let Some(interval) = expanded
+        .intervals
+        .intervals
+        .get(value.0 as usize)
+        .and_then(Option::as_ref)
+    else {
+        return Ok(None);
+    };
+    if interval.value != value || interval.segments.is_empty() {
+        return Err(JointAllocationError::new(
+            "JOINT_ALLOC.SESSION_INTERVAL_IDENTITY",
+            Some(interval.definition.block()),
+            Some(value),
+            "changed sparse interval has a malformed stable identity",
+        ));
+    }
+    let (class, preferred_register) = if let Some(owner) = ownership.owner(value) {
+        if owner.uses.is_empty() || owner.uses.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_REGION_USES",
+                Some(interval.definition.block()),
+                Some(value),
+                "changed register region has no strictly ordered root uses",
+            ));
+        }
+        let root = expanded.roots.get(owner.root.0 as usize).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_ROOT_RANGE",
+                Some(interval.definition.block()),
+                Some(value),
+                "changed register region references a missing root",
+            )
+        })?;
+        for &use_id in &owner.uses {
+            let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_USE_RANGE",
+                    Some(interval.definition.block()),
+                    Some(value),
+                    "changed register region references a missing root use",
+                )
+            })?;
+            let preference = match use_.source {
+                ExpandedUseSource::OriginalRegister { preferred_register }
+                | ExpandedUseSource::RegisterRegion {
+                    preferred_register, ..
+                } => preferred_register,
+                ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SESSION_REGION_SOURCE",
+                        Some(use_.site.block()),
+                        Some(value),
+                        "indexed register region now references a non-register source",
+                    ));
+                }
+            };
+            if use_.value != value
+                || preference != owner.preferred_register
+                || !interval.uses.contains(&use_.site)
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_IDENTITY",
+                    Some(use_.site.block()),
+                    Some(value),
+                    "changed register region and exact live interval disagree",
+                ));
+            }
+        }
+        (
+            AllocationValueClass::Region {
+                root: owner.root,
+                uses: owner.uses.clone(),
+            },
+            Some(owner.preferred_register),
+        )
+    } else {
+        (AllocationValueClass::Fixed, None)
+    };
+    let result = AllocationValue {
+        id: AllocationBundleId(value.0),
+        value,
+        interval: interval.clone(),
+        class,
+        preferred_register,
+        allowed_registers: constraints.allowed(value).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_CONSTRAINT_VALUE",
+                Some(interval.definition.block()),
+                Some(value),
+                "changed machine value has no target-register constraint row",
+            )
+        })?,
+    };
+    validate_allocatable_value(&result, registers)?;
+    Ok(Some(result))
 }
 
 fn validate_allocatable_value(
@@ -1222,7 +1714,20 @@ fn validate_allocatable_value(
 fn definition_order(
     values: &[AllocationValue],
     cfg: &NormalizedCfg,
-) -> Result<Vec<AllocationBundleId>, JointAllocationError> {
+) -> Result<BTreeSet<DefinitionOrderEntry>, JointAllocationError> {
+    let rank = dominator_rank(cfg)?;
+    values
+        .iter()
+        .map(|value| {
+            Ok(DefinitionOrderEntry {
+                key: definition_key(value, cfg, &rank)?,
+                id: value.id,
+            })
+        })
+        .collect()
+}
+
+fn dominator_rank(cfg: &NormalizedCfg) -> Result<Vec<usize>, JointAllocationError> {
     let block_count = cfg.idom.len();
     if block_count == 0 || cfg.block_index.len() != block_count {
         return Err(JointAllocationError::new(
@@ -1283,28 +1788,35 @@ fn definition_order(
             "dominator tree does not reach every CFG block",
         ));
     }
+    Ok(rank)
+}
 
-    let mut ordered = Vec::with_capacity(values.len());
-    for value in values {
-        let block = cfg
-            .block_index
-            .get(&value.interval.definition.block())
-            .copied()
-            .ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.DEFINITION_BLOCK",
-                    Some(value.interval.definition.block()),
-                    Some(value.value),
-                    "allocation definition is outside the normalized CFG",
-                )
-            })?;
-        ordered.push((
-            (rank[block], value.interval.definition.slot(), value.value),
-            value.id,
-        ));
-    }
-    ordered.sort_unstable_by_key(|(key, _)| *key);
-    Ok(ordered.into_iter().map(|(_, id)| id).collect())
+fn definition_key(
+    value: &AllocationValue,
+    cfg: &NormalizedCfg,
+    rank: &[usize],
+) -> Result<(usize, SlotIndex, VReg), JointAllocationError> {
+    let block = cfg
+        .block_index
+        .get(&value.interval.definition.block())
+        .copied()
+        .ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.DEFINITION_BLOCK",
+                Some(value.interval.definition.block()),
+                Some(value.value),
+                "allocation definition is outside the normalized CFG",
+            )
+        })?;
+    let block_rank = rank.get(block).copied().ok_or_else(|| {
+        JointAllocationError::new(
+            "JOINT_ALLOC.DOMINATOR_RANK",
+            Some(value.interval.definition.block()),
+            Some(value.value),
+            "allocation definition has no dominator preorder rank",
+        )
+    })?;
+    Ok((block_rank, value.interval.definition.slot(), value.value))
 }
 
 #[cfg(test)]

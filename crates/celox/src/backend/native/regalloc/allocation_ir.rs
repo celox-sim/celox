@@ -115,11 +115,18 @@ pub(super) struct InsertedSynthetic {
     pub definition: Option<VReg>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyntheticDefinitionRef {
+    instruction: SyntheticInstructionId,
+    block: BlockId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AllocationIr {
     original_value_count: u32,
     next_value: u32,
     next_synthetic_instruction: u32,
+    synthetic_definitions: Vec<Option<SyntheticDefinitionRef>>,
     block_index: HashMap<BlockId, usize>,
     blocks: Vec<AllocationBlock>,
 }
@@ -298,6 +305,7 @@ impl AllocationIr {
             original_value_count: func.vregs.count(),
             next_value: func.vregs.count(),
             next_synthetic_instruction: 0,
+            synthetic_definitions: vec![None; func.vregs.count() as usize],
             block_index,
             blocks,
         };
@@ -1199,6 +1207,9 @@ impl AllocationIr {
                 if let AllocationInstructionOrigin::Synthetic { id, .. } = instruction.origin
                     && !retained_instructions[id.0 as usize]
                 {
+                    if let Some(definition) = instruction.definition {
+                        self.synthetic_definitions[definition.0 as usize] = None;
+                    }
                     changed_blocks.insert(block.id);
                     continue;
                 }
@@ -1207,6 +1218,131 @@ impl AllocationIr {
             block.instructions = instructions;
         }
         self.verify_structure()?;
+        Ok(changed_blocks)
+    }
+
+    /// Remove a newly dead synthetic value and its now-dead operand cone.
+    /// The caller provides exact post-rewrite liveness, so no global root scan
+    /// is required. Remaining use counts are decremented as definitions are
+    /// removed; original values and effectful stack stores are never indexed
+    /// as removable definitions.
+    pub(super) fn prune_dead_materializations_from(
+        &mut self,
+        intervals: &LiveIntervals,
+        candidates: impl IntoIterator<Item = VReg>,
+    ) -> Result<BTreeSet<BlockId>, AllocationIrError> {
+        if intervals.intervals.len() != self.next_value as usize
+            || self.synthetic_definitions.len() != self.next_value as usize
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.DCE_INDEX_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                "incremental DCE indexes do not cover the stable VReg domain",
+            ));
+        }
+        let mut queue = candidates.into_iter().collect::<VecDeque<_>>();
+        let mut visited = BTreeSet::new();
+        let mut remaining_uses = BTreeMap::<VReg, usize>::new();
+        let mut changed_blocks = BTreeSet::new();
+        while let Some(value) = queue.pop_front() {
+            if value.0 < self.original_value_count || !visited.insert(value) {
+                continue;
+            }
+            let use_count = *remaining_uses.entry(value).or_insert_with(|| {
+                intervals
+                    .intervals
+                    .get(value.0 as usize)
+                    .and_then(Option::as_ref)
+                    .map_or(0, |interval| interval.uses.len())
+            });
+            if use_count != 0 {
+                continue;
+            }
+            let Some(definition) = self
+                .synthetic_definitions
+                .get(value.0 as usize)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            let block = self.block(definition.block)?;
+            let position = self.blocks[block]
+                .instructions
+                .iter()
+                .position(|instruction| {
+                    matches!(
+                        instruction.origin,
+                        AllocationInstructionOrigin::Synthetic { id, .. }
+                            if id == definition.instruction
+                    )
+                })
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.DCE_INSTRUCTION_INDEX",
+                        Some(definition.block),
+                        None,
+                        vec![value],
+                        "synthetic-definition index references a missing instruction",
+                    )
+                })?;
+            let instruction = &self.blocks[block].instructions[position];
+            let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
+            else {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_INSTRUCTION_INDEX",
+                    Some(definition.block),
+                    Some(position),
+                    vec![value],
+                    "synthetic-definition index resolved to an original instruction",
+                ));
+            };
+            if instruction.definition != Some(value)
+                || !matches!(
+                    operation,
+                    SyntheticOperation::StackReload { .. } | SyntheticOperation::RecipeNode { .. }
+                )
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_DEFINITION_INDEX",
+                    Some(definition.block),
+                    Some(position),
+                    vec![value],
+                    "synthetic-definition index references an incompatible instruction",
+                ));
+            }
+            let mut operands = instruction.uses.to_vec();
+            operands.sort_unstable();
+            operands.dedup();
+            self.blocks[block].instructions.remove(position);
+            self.synthetic_definitions[value.0 as usize] = None;
+            changed_blocks.insert(definition.block);
+
+            for operand in operands {
+                let count = remaining_uses.entry(operand).or_insert_with(|| {
+                    intervals
+                        .intervals
+                        .get(operand.0 as usize)
+                        .and_then(Option::as_ref)
+                        .map_or(0, |interval| interval.uses.len())
+                });
+                if *count == 0 {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.DCE_USE_COUNT",
+                        Some(definition.block),
+                        Some(position),
+                        vec![operand],
+                        "removed synthetic operand has no indexed live use",
+                    ));
+                }
+                *count -= 1;
+                if *count == 0 {
+                    queue.push_back(operand);
+                }
+            }
+        }
         Ok(changed_blocks)
     }
 
@@ -1244,6 +1380,15 @@ impl AllocationIr {
         } else {
             (None, self.next_value)
         };
+        if definition.is_some() && self.synthetic_definitions.len() != self.next_value as usize {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SYNTHETIC_INDEX_SHAPE",
+                Some(anchor.block()),
+                None,
+                definition.into_iter().collect(),
+                "synthetic-definition index is outside the monotonic VReg domain",
+            ));
+        }
         self.blocks[block].instructions.insert(
             position,
             AllocationInstruction {
@@ -1257,6 +1402,13 @@ impl AllocationIr {
                 definition,
             },
         );
+        if definition.is_some() {
+            self.synthetic_definitions
+                .push(Some(SyntheticDefinitionRef {
+                    instruction,
+                    block: anchor.block(),
+                }));
+        }
         self.next_synthetic_instruction = next_instruction;
         self.next_value = next_value;
         Ok(InsertedSynthetic {
@@ -1443,6 +1595,7 @@ impl AllocationIr {
         if self.blocks.is_empty()
             || self.block_index.len() != self.blocks.len()
             || self.next_value < self.original_value_count
+            || self.synthetic_definitions.len() != self.next_value as usize
         {
             return Err(AllocationIrError::new(
                 "ALLOCATION_IR.MODEL_SHAPE",
@@ -1602,8 +1755,39 @@ impl AllocationIr {
                             "synthetic value aliases input MIR or has multiple definitions",
                         ));
                     }
+                    if let Some(definition) = instruction.definition
+                        && self.synthetic_definitions[definition.0 as usize]
+                            != Some(SyntheticDefinitionRef {
+                                instruction: id,
+                                block: block.id,
+                            })
+                    {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.SYNTHETIC_INDEX_IDENTITY",
+                            Some(block.id),
+                            None,
+                            vec![definition],
+                            "synthetic-definition index differs from its instruction",
+                        ));
+                    }
                 }
             }
+        }
+        if self
+            .synthetic_definitions
+            .iter()
+            .enumerate()
+            .any(|(value, definition)| {
+                definition.is_some() && !synthetic_definitions.contains(&VReg(value as u32))
+            })
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SYNTHETIC_INDEX_COVERAGE",
+                None,
+                None,
+                Vec::new(),
+                "synthetic-definition index references a removed value",
+            ));
         }
         Ok(())
     }
@@ -2542,6 +2726,19 @@ mod tests {
             .unwrap()
             .definition
             .unwrap();
+        let dead_root = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::RecipeNode {
+                    root: LiveBundleId(0),
+                    node: RecipeId(0),
+                },
+                Uses::one(dead),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
         let live = allocation_ir
             .insert_before_use(
                 use_site,
@@ -2557,10 +2754,17 @@ mod tests {
         allocation_ir.rewrite_use(use_site, VReg(0), live).unwrap();
         let identity_bound = allocation_ir.value_count();
 
-        allocation_ir.prune_dead_materializations().unwrap();
+        let post_rewrite = allocation_ir.analyze(&cfg).unwrap();
+        let mut complete = allocation_ir.clone();
+        complete.prune_dead_materializations().unwrap();
+        allocation_ir
+            .prune_dead_materializations_from(&post_rewrite, [dead_root])
+            .unwrap();
+        assert_eq!(allocation_ir, complete);
         let intervals = allocation_ir.analyze(&cfg).unwrap();
         assert_eq!(allocation_ir.value_count(), identity_bound);
         assert!(intervals.intervals[dead.0 as usize].is_none());
+        assert!(intervals.intervals[dead_root.0 as usize].is_none());
         assert!(intervals.intervals[live.0 as usize].is_some());
 
         let later = allocation_ir

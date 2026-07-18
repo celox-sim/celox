@@ -178,6 +178,8 @@ pub(super) struct ExpandedAllocationProblem {
     pub shift_encoding: VariableShiftEncoding,
     pub roots: Vec<ExpandedRoot>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
+    pub region_rows: BTreeMap<RegisterRegionId, usize>,
+    pub next_register_region: u32,
     pub stack_homes: Vec<ExpandedStackHome>,
 }
 
@@ -532,6 +534,29 @@ pub(super) fn expand(
     let incremental_liveness =
         IncrementalLiveness::build(&ir, cfg, &intervals).map_err(AllocationExpandError::live)?;
     let use_index = ExpandedUseIndex::build(&roots, cfg)?;
+    let region_rows = register_regions
+        .iter()
+        .enumerate()
+        .map(|(row, region)| (region.id, row))
+        .collect::<BTreeMap<_, _>>();
+    if region_rows.len() != register_regions.len() {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.REGION_IDENTITY",
+            None,
+            None,
+            None,
+            "initial register regions do not have unique identities",
+        ));
+    }
+    let next_register_region = u32::try_from(register_regions.len()).map_err(|_| {
+        AllocationExpandError::new(
+            "ALLOCATION_EXPAND.REGION_ID_RANGE",
+            None,
+            None,
+            None,
+            "initial register-region count exceeds u32",
+        )
+    })?;
     Ok(ExpandedAllocationProblem {
         ir,
         intervals,
@@ -540,6 +565,8 @@ pub(super) fn expand(
         shift_encoding: func.target_features.variable_shift_encoding(),
         roots,
         register_regions,
+        region_rows,
+        next_register_region,
         stack_homes,
     })
 }

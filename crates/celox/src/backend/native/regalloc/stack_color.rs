@@ -877,6 +877,8 @@ mod tests {
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots: Vec::new(),
             register_regions: Vec::new(),
+            region_rows: BTreeMap::new(),
+            next_register_region: 0,
             stack_homes,
         }
     }
@@ -1060,6 +1062,8 @@ mod tests {
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots,
             register_regions: Vec::new(),
+            region_rows: BTreeMap::new(),
+            next_register_region: 0,
             stack_homes: homes,
         };
 

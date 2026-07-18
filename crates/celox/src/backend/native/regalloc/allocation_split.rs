@@ -52,6 +52,7 @@ pub(super) struct RegionSplitPlan {
     pub cut: DefinitionSite,
     pub value: VReg,
     pub root: LiveBundleId,
+    pub source_region: Option<RegisterRegionId>,
     pub preferred_register: PhysReg,
     pub retained: Vec<BundleUseId>,
     pub moved: Vec<BundleUseId>,
@@ -266,6 +267,7 @@ impl Dominance {
 #[derive(Debug, Clone, Copy)]
 struct RegionSource {
     preferred_register: PhysReg,
+    region: Option<RegisterRegionId>,
     entry_use: Option<BundleUseId>,
 }
 
@@ -285,6 +287,7 @@ struct SplitProgress {
 
 #[derive(Debug)]
 struct AppliedSplit {
+    root: LiveBundleId,
     constraint_blocks: BTreeSet<BlockId>,
     changed_values: Vec<VReg>,
 }
@@ -391,6 +394,7 @@ pub(super) fn plan_split(
             cut: request.definition,
             value: candidate.value,
             root: candidate.root,
+            source_region: source.region,
             preferred_register: source.preferred_register,
             retained,
             moved,
@@ -417,10 +421,10 @@ pub(super) fn plan_split(
     })
 }
 
-/// Apply a verified split to a clone and publish it only after producer-local
-/// IR checks, differential liveness, region ownership, and monotonic progress
-/// all pass. Independent whole-program stack and liveness proofs run once at
-/// the atomic lowering boundary.
+/// Apply a verified split inside the private allocation session. Every
+/// fallible planning and dominance check runs before mutation; an invariant
+/// failure after mutation aborts and discards the session without publishing
+/// MIR. Independent whole-program proofs run once at atomic lowering.
 fn apply_split(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
@@ -431,8 +435,7 @@ fn apply_split(
     let candidate = candidate_from_plan(joint, plan)?;
     let dominance = Dominance::build(cfg)?;
     verify_plan(expanded, graph, joint, &candidate, plan, cfg, &dominance)?;
-    let before = split_progress(expanded);
-    let mut next = expanded.clone();
+    let before = root_split_progress(expanded_root(expanded, plan.root)?);
     let graph_root = graph_root(graph, plan.root)?;
     let mut changed_blocks = BTreeSet::new();
     let mut constraint_blocks = BTreeSet::new();
@@ -441,26 +444,26 @@ fn apply_split(
         .entries
         .iter()
         .any(|entry| entry.home.kind == HomeKind::Stack);
-    let existing_stack_home = stack_home(&next, plan.root)?;
+    let existing_stack_home = stack_home(expanded, plan.root)?;
     let stack_home = if needs_stack {
         if existing_stack_home.is_none() {
             changed_blocks.insert(graph_root.definition.block());
             constraint_blocks.insert(graph_root.definition.block());
         }
-        Some(ensure_stack_home(&mut next, graph_root)?)
+        Some(ensure_stack_home(expanded, graph_root)?)
     } else {
         existing_stack_home
     };
 
     for entry in &plan.entries {
-        let entry_use = expanded_use(&next, plan.root, entry.entry)?.clone();
+        let entry_use = expanded_use(expanded, plan.root, entry.entry)?.clone();
         changed_blocks.insert(entry_use.original_site.block());
         constraint_blocks.insert(entry_use.original_site.block());
         if let UseSite::PhiEdge { successor, .. } = entry_use.original_site {
             constraint_blocks.insert(successor);
         }
         let lowered = allocation_expand::lower_use_materialization(
-            &mut next.ir,
+            &mut expanded.ir,
             graph,
             graph_root,
             plan.value,
@@ -468,7 +471,7 @@ fn apply_split(
             entry_use.original_site,
             &entry.home,
             stack_home,
-            &mut next.stack_homes,
+            &mut expanded.stack_homes,
         )
         .map_err(AllocationSplitError::expand)?;
         match entry.kind {
@@ -485,7 +488,7 @@ fn apply_split(
                 match lowered {
                     allocation_expand::LoweredUseMaterialization::Register(lowered) => {
                         rewrite_expanded_use(
-                            &mut next,
+                            expanded,
                             plan.root,
                             entry.entry,
                             plan.value,
@@ -494,7 +497,7 @@ fn apply_split(
                         )?;
                     }
                     allocation_expand::LoweredUseMaterialization::Edge(location) => {
-                        let target = next
+                        let target = expanded
                             .roots
                             .get_mut(plan.root.0 as usize)
                             .and_then(|root| root.uses.get_mut(entry.entry.0 as usize))
@@ -532,8 +535,18 @@ fn apply_split(
                         "multi-use register region cannot start from a non-register phi-edge location",
                     ));
                 };
-                let region = fresh_region_id(&next)?;
-                next.register_regions.push(ExpandedRegisterRegion {
+                let region = fresh_region_id(expanded)?;
+                let region_row = expanded.register_regions.len();
+                if expanded.region_rows.insert(region, region_row).is_some() {
+                    return Err(AllocationSplitError::new(
+                        "ALLOCATION_SPLIT.REGION_IDENTITY",
+                        Some(entry_use.site.block()),
+                        Some(lowered.value),
+                        Some(plan.root),
+                        "new register region duplicates an existing stable identity",
+                    ));
+                }
+                expanded.register_regions.push(ExpandedRegisterRegion {
                     id: region,
                     root: plan.root,
                     value: lowered.value,
@@ -543,7 +556,7 @@ fn apply_split(
                 });
                 for &use_id in &entry.uses {
                     rewrite_expanded_use(
-                        &mut next,
+                        expanded,
                         plan.root,
                         use_id,
                         plan.value,
@@ -558,13 +571,32 @@ fn apply_split(
         }
     }
 
-    normalize_register_regions(&mut next)?;
-    let pruned_blocks = prune_dead_materializations(&mut next)?;
-    changed_blocks.extend(pruned_blocks.iter().copied());
-    constraint_blocks.extend(pruned_blocks);
-    let changed_values = allocation_expand::refresh(&mut next, cfg, &changed_blocks)
-        .map_err(AllocationSplitError::expand)?;
-    let after = split_progress(&next);
+    prune_replaced_register_region(expanded, plan.root, plan.value, plan.source_region)?;
+    let mut changed_values = allocation_expand::refresh(expanded, cfg, &changed_blocks)
+        .map_err(AllocationSplitError::expand)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let pruned_blocks = expanded
+        .ir
+        .prune_dead_materializations_from(&expanded.intervals, [plan.value])
+        .map_err(|error| {
+            AllocationSplitError::new(
+                error.rule,
+                error.block,
+                error.values.first().copied(),
+                Some(plan.root),
+                error.message,
+            )
+        })?;
+    if !pruned_blocks.is_empty() {
+        changed_blocks.extend(pruned_blocks.iter().copied());
+        constraint_blocks.extend(pruned_blocks.iter().copied());
+        changed_values.extend(
+            allocation_expand::refresh(expanded, cfg, &pruned_blocks)
+                .map_err(AllocationSplitError::expand)?,
+        );
+    }
+    let after = root_split_progress(expanded_root(expanded, plan.root)?);
     if after >= before {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.NON_MONOTONIC",
@@ -574,10 +606,10 @@ fn apply_split(
             format!("split progress {before:?} did not decrease: {after:?}"),
         ));
     }
-    *expanded = next;
     Ok(AppliedSplit {
+        root: plan.root,
         constraint_blocks,
-        changed_values,
+        changed_values: changed_values.into_iter().collect(),
     })
 }
 
@@ -645,6 +677,7 @@ pub(super) fn allocate_with_splitting(
                         registers,
                         &update.constraint_blocks,
                         &update.changed_values,
+                        update.root,
                     )
                     .map_err(AllocationSplitError::joint)?;
                 steps += 1;
@@ -889,9 +922,9 @@ fn region_source(
     }
     let entry_use = if let Some(region) = source_region {
         let metadata = expanded
-            .register_regions
-            .iter()
-            .find(|metadata| metadata.id == region)
+            .region_rows
+            .get(&region)
+            .and_then(|row| expanded.register_regions.get(*row))
             .ok_or_else(|| {
                 AllocationSplitError::new(
                     "ALLOCATION_SPLIT.REGION_METADATA",
@@ -920,6 +953,7 @@ fn region_source(
     };
     Ok(RegionSource {
         preferred_register,
+        region: source_region,
         entry_use,
     })
 }
@@ -1279,7 +1313,7 @@ fn verify_plan(
     let value = verify_candidate(joint, candidate, plan.cut)?;
     let root = expanded_root(expanded, plan.root)?;
     let source = region_source(expanded, root, candidate, value)?;
-    if source.preferred_register != plan.preferred_register {
+    if source.preferred_register != plan.preferred_register || source.region != plan.source_region {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.PLAN_PREFERENCE",
             Some(plan.cut.block()),
@@ -1506,24 +1540,23 @@ fn ensure_stack_home(
 }
 
 fn fresh_region_id(
-    expanded: &ExpandedAllocationProblem,
+    expanded: &mut ExpandedAllocationProblem,
 ) -> Result<RegisterRegionId, AllocationSplitError> {
-    let next = expanded
-        .register_regions
-        .iter()
-        .map(|region| region.id.0)
-        .max()
-        .map_or(Some(0), |id| id.checked_add(1))
-        .ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.REGION_ID_RANGE",
-                None,
-                None,
-                None,
-                "expanded register-region identity exceeds u32",
-            )
-        })?;
-    Ok(RegisterRegionId(next))
+    let id = RegisterRegionId(expanded.next_register_region);
+    expanded.next_register_region =
+        expanded
+            .next_register_region
+            .checked_add(1)
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.REGION_ID_RANGE",
+                    None,
+                    None,
+                    None,
+                    "expanded register-region identity exceeds u32",
+                )
+            })?;
+    Ok(id)
 }
 
 fn rewrite_expanded_use(
@@ -1577,115 +1610,79 @@ fn rewrite_expanded_use(
     Ok(())
 }
 
-fn normalize_register_regions(
+fn prune_replaced_register_region(
     expanded: &mut ExpandedAllocationProblem,
+    root: LiveBundleId,
+    value: VReg,
+    region: Option<RegisterRegionId>,
 ) -> Result<(), AllocationSplitError> {
-    let referenced = expanded
-        .roots
-        .iter()
-        .flat_map(|root| &root.uses)
-        .filter_map(|use_| match use_.source {
-            ExpandedUseSource::RegisterRegion { region, .. } => Some(region),
-            ExpandedUseSource::OriginalRegister { .. }
-            | ExpandedUseSource::Materialized(_)
-            | ExpandedUseSource::Edge(_) => None,
-        })
-        .collect::<BTreeSet<_>>();
-    let mut metadata = BTreeMap::new();
-    for region in &expanded.register_regions {
-        if metadata.insert(region.id, region.clone()).is_some() {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.REGION_IDENTITY",
-                None,
-                Some(region.value),
-                Some(region.root),
-                "two expanded regions share one identity",
-            ));
-        }
+    let Some(region) = region else {
+        return Ok(());
+    };
+    let root_row = expanded_root(expanded, root)?;
+    if root_row.uses.iter().any(|use_| {
+        matches!(
+            use_.source,
+            ExpandedUseSource::RegisterRegion {
+                region: use_region,
+                ..
+            } if use_region == region
+        )
+    }) {
+        return Ok(());
     }
-    if referenced.iter().any(|id| !metadata.contains_key(id)) {
+    let row = expanded.region_rows.remove(&region).ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "replaced register region is absent from the stable metadata index",
+        )
+    })?;
+    let removed = expanded.register_regions.swap_remove(row);
+    if removed.id != region || removed.root != root || removed.value != value {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.REGION_IDENTITY",
             None,
-            None,
-            None,
-            "register use references missing expanded-region metadata",
+            Some(value),
+            Some(root),
+            "removed register-region metadata differs from the split source",
         ));
     }
-
-    let mut identities = BTreeMap::new();
-    let mut regions = Vec::with_capacity(referenced.len());
-    for old in referenced {
-        let mut region = metadata.remove(&old).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.REGION_IDENTITY",
-                None,
-                None,
-                None,
-                "referenced register region disappeared during normalization",
-            )
-        })?;
-        let new = RegisterRegionId(u32::try_from(regions.len()).map_err(|_| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.REGION_ID_RANGE",
-                None,
-                Some(region.value),
-                Some(region.root),
-                "expanded register-region count exceeds u32",
-            )
-        })?);
-        identities.insert(old, new);
-        region.id = new;
-        regions.push(region);
+    if let Some(moved) = expanded.register_regions.get(row) {
+        expanded.region_rows.insert(moved.id, row);
     }
-    for root in &mut expanded.roots {
-        for use_ in &mut root.uses {
-            if let ExpandedUseSource::RegisterRegion { region, .. } = &mut use_.source {
-                *region = identities.get(region).copied().ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.REGION_IDENTITY",
-                        Some(use_.site.block()),
-                        Some(use_.value),
-                        Some(root.id),
-                        "register use has no normalized region identity",
-                    )
-                })?;
-            }
-        }
-    }
-    expanded.register_regions = regions;
     Ok(())
 }
 
-fn prune_dead_materializations(
-    expanded: &mut ExpandedAllocationProblem,
-) -> Result<BTreeSet<BlockId>, AllocationSplitError> {
-    expanded.ir.prune_dead_materializations().map_err(|error| {
-        AllocationSplitError::new(
-            error.rule,
-            error.block,
-            error.values.first().copied(),
-            None,
-            error.message,
-        )
-    })
+fn split_progress(expanded: &ExpandedAllocationProblem) -> SplitProgress {
+    expanded.roots.iter().map(root_split_progress).fold(
+        SplitProgress {
+            paired_uses: 0,
+            original_uses: 0,
+            register_uses: 0,
+        },
+        |mut total, root| {
+            total.paired_uses = total.paired_uses.saturating_add(root.paired_uses);
+            total.original_uses = total.original_uses.saturating_add(root.original_uses);
+            total.register_uses = total.register_uses.saturating_add(root.register_uses);
+            total
+        },
+    )
 }
 
-fn split_progress(expanded: &ExpandedAllocationProblem) -> SplitProgress {
-    let mut regions = BTreeMap::<(LiveBundleId, VReg), (u128, bool)>::new();
-    for root in &expanded.roots {
-        for use_ in &root.uses {
-            let original = match use_.source {
-                ExpandedUseSource::OriginalRegister { .. } => true,
-                ExpandedUseSource::RegisterRegion { .. } => false,
-                ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => continue,
-            };
-            let region = regions
-                .entry((root.id, use_.value))
-                .or_insert((0, original));
-            region.0 += 1;
-            region.1 |= original;
-        }
+fn root_split_progress(root: &super::allocation_expand::ExpandedRoot) -> SplitProgress {
+    let mut regions = BTreeMap::<VReg, (u128, bool)>::new();
+    for use_ in &root.uses {
+        let original = match use_.source {
+            ExpandedUseSource::OriginalRegister { .. } => true,
+            ExpandedUseSource::RegisterRegion { .. } => false,
+            ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => continue,
+        };
+        let region = regions.entry(use_.value).or_insert((0, original));
+        region.0 += 1;
+        region.1 |= original;
     }
     let mut progress = SplitProgress {
         paired_uses: 0,
@@ -2055,7 +2052,26 @@ mod tests {
                 .all(|entry| entry.home.kind == HomeKind::Stack)
         );
 
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        let mut session = JointAllocationSession::new_persistent(
+            joint.clone(),
+            &expanded,
+            &cfg,
+            &graph,
+            &registers,
+        )
+        .unwrap();
+        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        session
+            .update_from_expanded(
+                &expanded,
+                &cfg,
+                &graph,
+                &registers,
+                &update.constraint_blocks,
+                &update.changed_values,
+                update.root,
+            )
+            .unwrap();
         let root = root_for(&expanded, VReg(2));
         assert!(matches!(
             root.uses[plan.retained[0].0 as usize].source,
@@ -2068,6 +2084,7 @@ mod tests {
                 .any(|home| home.root == plan.root)
         );
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert_eq!(session.problem(), &rebuilt);
         assert!(matches!(
             rebuilt.value(VReg(2)).unwrap().class,
             AllocationValueClass::Region { .. }
