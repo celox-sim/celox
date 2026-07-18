@@ -77,6 +77,31 @@ pub(crate) struct RegallocTrace {
     pub mir_after_scheduling: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegallocImplementation {
+    Ssa,
+    /// Build and verify the replacement, then publish the established
+    /// production allocator's result from the same scheduled/CSSA input.
+    IntervalDiagnostic,
+    /// Publish the replacement allocator's atomically lowered result.
+    Interval,
+}
+
+impl RegallocImplementation {
+    fn parse(requested: &str) -> Option<Self> {
+        match requested {
+            "auto" | "ssa" => Some(Self::Ssa),
+            "interval-diagnostic" => Some(Self::IntervalDiagnostic),
+            "interval" => Some(Self::Interval),
+            _ => None,
+        }
+    }
+
+    fn runs_interval(self) -> bool {
+        matches!(self, Self::IntervalDiagnostic | Self::Interval)
+    }
+}
+
 /// Structured failure from a verified register-allocation phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegallocError {
@@ -139,10 +164,10 @@ impl std::error::Error for RegallocError {}
 
 fn verify_assignment(
     func: &MFunction,
-    analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) -> Result<(), RegallocError> {
-    verify::verify(func, analysis, assignment).map_err(|error| {
+    let analysis = analysis::analyze_for_assignment(func, assignment);
+    verify::verify(func, &analysis, assignment).map_err(|error| {
         RegallocError::new(
             "completed-assignment verification",
             "ASSIGNMENT.INVALID",
@@ -343,7 +368,7 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
     let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
-    if !matches!(requested.as_str(), "auto" | "ssa" | "interval-diagnostic") {
+    let Some(implementation) = RegallocImplementation::parse(&requested) else {
         return Err(RegallocError::new(
             "configuration",
             "CONFIG.IMPLEMENTATION",
@@ -351,20 +376,15 @@ pub(crate) fn run_regalloc_with_label_and_trace(
             None,
             Vec::new(),
             format!(
-                "unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, or interval-diagnostic"
+                "unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, interval-diagnostic, or interval"
             ),
         ));
-    }
+    };
 
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(
-        &mut working,
-        label,
-        trace,
-        requested == "interval-diagnostic",
-    )?;
+    let allocation = run_regalloc_in_place(&mut working, label, trace, implementation)?;
     *func = working;
     Ok(allocation)
 }
@@ -373,7 +393,7 @@ fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
     trace: Option<&mut RegallocTrace>,
-    interval_diagnostic: bool,
+    implementation: RegallocImplementation,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -463,7 +483,7 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
-    if interval_diagnostic {
+    if implementation.runs_interval() {
         let interval_start = timing.then(crate::timing::now);
         let constraint_perm_start = timing.then(crate::timing::now);
         let mut interval_func = func.clone();
@@ -529,7 +549,7 @@ fn run_regalloc_in_place(
             );
         }
         let lowering_start = timing.then(crate::timing::now);
-        let _lowered = allocation_lower::lower(
+        let lowered = allocation_lower::lower(
             &interval_func,
             &interval_cfg,
             &homes,
@@ -549,6 +569,50 @@ fn run_regalloc_in_place(
                 "[regalloc-timing] label={label} interval_diagnostic elapsed={:?}",
                 start.elapsed()
             );
+        }
+        if implementation == RegallocImplementation::Interval {
+            let allocation_lower::LoweredAllocation {
+                function,
+                assignment,
+                spill_frame_size,
+                ssa_destruction,
+                ..
+            } = lowered;
+            *func = function;
+            let verify_start = timing.then(crate::timing::now);
+            verify_assignment(func, &assignment)?;
+            ssa_destruction
+                .verify(func, &assignment, spill_frame_size)
+                .map_err(|error| {
+                    ssa_destruction_error("interval SSA destruction verification", error)
+                })?;
+            if let Some(start) = verify_start {
+                eprintln!(
+                    "[regalloc-timing] label={label} interval_publish_verify elapsed={:?}",
+                    start.elapsed()
+                );
+            }
+            if let Some(before) = &before_stats {
+                let stats_start = timing.then(crate::timing::now);
+                log_regalloc_stats(label, func, before, spill_frame_size);
+                if let Some(start) = stats_start {
+                    eprintln!(
+                        "[regalloc-timing] label={label} log_stats elapsed={:?}",
+                        start.elapsed()
+                    );
+                }
+            }
+            if let Some(start) = total_start {
+                eprintln!(
+                    "[regalloc-timing] label={label} implementation=interval total elapsed={:?}",
+                    start.elapsed()
+                );
+            }
+            return Ok(RegallocResult {
+                assignment,
+                spill_frame_size,
+                ssa_destruction,
+            });
         }
     }
     let constraint_start = timing.then(crate::timing::now);
@@ -610,8 +674,7 @@ fn run_regalloc_in_place(
     }
 
     let verify_start = timing.then(crate::timing::now);
-    let analysis = analysis::analyze(func);
-    verify_assignment(func, &analysis, &assignment)?;
+    verify_assignment(func, &assignment)?;
     let ssa_destruction = super::ssa_destroy::SsaDestructionPlan::build(func, &assignment)
         .map_err(|error| ssa_destruction_error("SSA destruction planning", error))?;
     ssa_destruction

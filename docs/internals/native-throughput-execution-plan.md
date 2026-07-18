@@ -2972,6 +2972,37 @@ phi-edge test exercises stack destinations and direct edge locations through
 atomic lowering. Production MIR is still unchanged; this structural step makes
 no Linux or throughput claim.
 
+Step 27d8 exposes the completed replacement result through the explicit
+`CELOX_REGALLOC_IMPL=interval` execution mode without changing the default.
+The first executable 32-phi regression found that the final verifier still
+treated every semantic MIR phi source as a physical-register edge use even
+when the destination-qualified allocation row was Stack or Immediate. Final
+physical liveness is now reconstructed from the exact assignment locations;
+filtering one row never filters another row which happens to share its source
+VReg. The candidate passes that JIT regression and the complete common suites.
+
+The first full non-LTO Heliodor attempt did not reach execution. It timed out
+after 900.256 seconds with no `CELOX_TEST_RESULT`; the log contains only the
+test configuration, and three of four compilation workers were still
+continuously active. Consequently this is neither a Linux failure nor a
+generated-code timing result. It rejects the current joint fixed-point driver
+at actual scale. Every accepted split currently clones the complete
+`ExpandedAllocationProblem`, compacts all synthetic identities, recomputes
+whole-function allocation-IR liveness, independently recomputes it again while
+building a new `JointAllocationProblem`, and then restarts physical coloring
+from an empty interval matrix. The following loop iteration rebuilds the same
+joint problem once more. This directly violates Step 27's requirement to
+rebuild only affected intervals.
+
+The next boundary is therefore a persistent allocation session, not another
+search-order or threshold change. Synthetic instruction, machine-value, and
+region identities remain stable while splitting; a split transaction updates
+only changed def/use rows and their sparse intervals, removes/reinserts those
+ranges in the existing physical interval matrix, and queues only displaced or
+new values. Dead synthetic identities are compacted once at the final atomic
+lowering boundary. Complete liveness, constraints, interference, stack SSA,
+and out-of-SSA plans are still rebuilt independently once before publication.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3039,6 +3070,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d6 atomic MIR and out-of-SSA location lowering | this step | allocation lowering 3/3 including exact stack/recipe lowering, stale-input rejection, and more-than-K phi rows | lib 827/827 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | the closed joint result lowers atomically; exact stack/immediate phi locations avoid fictitious source and destination pressure; constraints, coalescing, and stack coloring remain next |
 | 27d7a split target constraints and weighted coalescing | this step | allocation constraints 2/2; pre-spill Perm pressure regression 1/1; joint allocation 4/4; split 5/5; lowering 3/3 | lib 830/830 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | fixed/clobber boundaries split SSA ranges before allocation; rewritten operands own mandatory masks; sparse transactional coalescing preserves correctness; stack-home lifetime coloring remains next |
 | 27d7b exact stack-home liveness and sparse slot coloring | this step | stack coloring 3/3 for exact reuse/interference/direct phi edges; allocation lowering 3/3; more-than-K phi-edge regression 1/1 | lib 833/833 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | stores/stack phis define location SSA; reload/direct-edge uses share the CFG-sparse verifier; a dynamic interval matrix colors and independently rebuilds final frame slots |
+| 27d8 explicit replacement publication and actual-scale rejection | this step | destination-qualified final-liveness regression 1/1; candidate regalloc 12/12 including 32-phi JIT execution | candidate/default lib 834/834; candidate native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: non-LTO candidate remained in code generation and timed out before Linux execution | 900.256 s timeout; compile/execute record unavailable | explicit publication is verified on common workloads, but the all-world split/reanalyse/recolor fixed point is rejected; persistent incremental allocation is next |
 
 ## Related design records
 

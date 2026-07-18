@@ -70,8 +70,7 @@ fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> Assignm
     let result = run_regalloc(&mut func).unwrap();
 
     // Re-verify on final instructions
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
 
     result.assignment
 }
@@ -313,8 +312,7 @@ fn test_shift_with_pressure() {
     }
 
     // Verify
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &assignment).unwrap();
+    super::verify_assignment(&func, &assignment).unwrap();
 }
 
 #[test]
@@ -462,8 +460,7 @@ fn test_phi_dst_gets_register_under_entry_pressure() {
 
     let result = run_regalloc(&mut func).unwrap();
     assert!(result.assignment.get(VReg(13)).is_some());
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
 }
 
 #[test]
@@ -555,8 +552,7 @@ fn test_many_phi_edge_sources_are_materialized_without_pin_overflow() {
 
     let result = run_regalloc(&mut func).unwrap();
     assert_eq!(func.verify_result(), Ok(()));
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
     let emitted = emit::emit(&func, &result.assignment, result.spill_frame_size).unwrap();
     let jit = jit_mem::JitCode::new(&emitted.code).unwrap();
 

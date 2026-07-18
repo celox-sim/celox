@@ -4,12 +4,13 @@
 > allocator.  The interval-based replacement described in the next section is
 > implemented through explicit home expansion, joint original/synthetic
 > allocation, pressure-driven live-region splitting, and atomic strict-SSA plus
-> out-of-SSA lowering in the diagnostic path, but does not yet rewrite
-> production MIR. Fixed-register/clobber constraints, weighted coalescing, and
-> exact stack-home slot coloring are also integrated there; differential
-> execution and the production switch remain. A replacement is accepted only by
-> correctness tests and the executable Heliodor gate; speculative phase designs
-> are not normative.
+> out-of-SSA lowering.  The explicit `interval` implementation publishes that
+> closed result for differential execution, while the default still publishes
+> the established allocator's result. Fixed-register/clobber constraints,
+> weighted coalescing, and exact stack-home slot coloring are integrated in the
+> replacement; qualification and the default switch remain. A replacement is
+> accepted only by correctness tests and the executable Heliodor gate;
+> speculative phase designs are not normative.
 
 The native backend treats register allocation as a verified sequence of IR
 transformations.  It is not permitted to recover from an invalid MIR graph,
@@ -832,8 +833,11 @@ contains:
 - explicit, independently verified SSA-destruction plans plus a final
   MIR/assignment/frame proof immediately before x86 encoding.
 
-`auto` and `ssa` both use this allocator.  `unified` is deliberately rejected
-by `CELOX_REGALLOC_IMPL`, and a failure never selects another implementation.
+`auto` and `ssa` both use this allocator. `interval-diagnostic` builds and
+verifies the complete replacement result but deliberately discards it;
+`interval` publishes the atomically lowered replacement result. `unified` is
+deliberately rejected by `CELOX_REGALLOC_IMPL`, and a failure never selects
+another implementation.
 
 The previously rejected iterative splitter expanded Heliodor `eval_comb` from
 roughly 146,000 MIR instructions through 480,000, 1.1 million, 2.3 million, 4.7
