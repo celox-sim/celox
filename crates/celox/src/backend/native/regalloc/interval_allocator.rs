@@ -6,7 +6,7 @@
 //! Later slices split bundles and lower the selected transitions into SSA.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 
 use crate::backend::native::mir::{BlockId, VReg};
@@ -49,6 +49,7 @@ pub(super) enum BundleAssignment {
     Unassigned,
     Register(PhysReg),
     Home(HomeSelection),
+    Split { children: Vec<AllocationBundleId> },
     Dead,
 }
 
@@ -70,6 +71,18 @@ pub(super) struct AllocatedBundle {
 pub(super) struct AllocationPlan {
     pub bundles: Vec<AllocatedBundle>,
     matrix: LiveIntervalMatrix,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomePiece {
+    uses: Vec<BundleUseId>,
+    selection: HomeSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomePartition {
+    pieces: Vec<HomePiece>,
+    total_cost: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,11 +142,11 @@ fn home_rank(kind: HomeKind) -> u8 {
     }
 }
 
-fn select_home(
+fn partition_homes(
     graph: &HomeGraph,
     root: LiveBundleId,
     uses: &[BundleUseId],
-) -> Result<HomeSelection, IntervalAllocationError> {
+) -> Result<HomePartition, IntervalAllocationError> {
     let Some(candidates) = graph.candidates.get(root.0 as usize) else {
         return Err(IntervalAllocationError::new(
             "INTERVAL_ALLOC.HOME_ROOT",
@@ -142,55 +155,98 @@ fn select_home(
             format!("root bundle {root:?} has no home-candidate row"),
         ));
     };
-    let mut best = None::<HomeSelection>;
-    for candidate in candidates {
-        if candidate.kind == HomeKind::Register
-            || !uses
-                .iter()
-                .all(|use_id| candidate.uses.binary_search(use_id).is_ok())
-        {
-            continue;
-        }
-        let materializations = candidate
-            .materializations
-            .iter()
-            .copied()
-            .filter(|item| uses.binary_search(&item.use_id).is_ok())
-            .collect::<Vec<_>>();
-        let materialization_cost = match candidate.kind {
-            HomeKind::Stack => u32::try_from(uses.len()).unwrap_or(u32::MAX),
-            HomeKind::Rematerialize(_) | HomeKind::State(_) => {
-                if materializations.len() != uses.len() {
+    let build = |stack_available: bool| -> Option<HomePartition> {
+        let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
+        for &use_id in uses {
+            let mut best = None::<(u32, u8, HomeKind, Option<UseMaterialization>)>;
+            if stack_available {
+                best = Some((1, home_rank(HomeKind::Stack), HomeKind::Stack, None));
+            }
+            for candidate in candidates {
+                if !matches!(
+                    candidate.kind,
+                    HomeKind::Rematerialize(_) | HomeKind::State(_)
+                ) || candidate.creation_cost != 0
+                {
                     continue;
                 }
-                materializations
+                let materialization = candidate
+                    .materializations
                     .iter()
-                    .fold(0_u32, |cost, item| cost.saturating_add(item.cost))
+                    .find(|item| item.use_id == use_id)
+                    .copied();
+                let Some(materialization) = materialization else {
+                    continue;
+                };
+                let choice = (
+                    materialization.cost,
+                    home_rank(candidate.kind),
+                    candidate.kind,
+                    Some(materialization),
+                );
+                if best.as_ref().is_none_or(|current| choice < *current) {
+                    best = Some(choice);
+                }
             }
-            HomeKind::Register => unreachable!(),
-        };
-        let selection = HomeSelection {
-            kind: candidate.kind,
-            materializations,
-            creation_cost: candidate.creation_cost,
-            materialization_cost,
-        };
-        let key = (selection.total_cost(), home_rank(selection.kind));
-        if best
-            .as_ref()
-            .is_none_or(|current| key < (current.total_cost(), home_rank(current.kind)))
-        {
-            best = Some(selection);
+            let (_, _, kind, materialization) = best?;
+            let group = grouped.entry(kind).or_default();
+            group.0.push(use_id);
+            if let Some(materialization) = materialization {
+                group.1.push(materialization);
+            }
         }
-    }
-    best.ok_or_else(|| {
+
+        let stack_creation = if grouped.contains_key(&HomeKind::Stack) {
+            Some(
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.kind == HomeKind::Stack)
+                    .map(|candidate| candidate.creation_cost)?,
+            )
+        } else {
+            None
+        };
+        let mut total_cost = u64::from(stack_creation.unwrap_or(0));
+        let mut pieces = Vec::with_capacity(grouped.len());
+        for (kind, (piece_uses, materializations)) in grouped {
+            let materialization_cost = match kind {
+                HomeKind::Stack => u32::try_from(piece_uses.len()).unwrap_or(u32::MAX),
+                HomeKind::Rematerialize(_) | HomeKind::State(_) => materializations
+                    .iter()
+                    .fold(0_u32, |cost, item| cost.saturating_add(item.cost)),
+                HomeKind::Register => return None,
+            };
+            let creation_cost = if kind == HomeKind::Stack {
+                stack_creation.unwrap_or(0)
+            } else {
+                0
+            };
+            total_cost = total_cost.saturating_add(u64::from(materialization_cost));
+            pieces.push(HomePiece {
+                uses: piece_uses,
+                selection: HomeSelection {
+                    kind,
+                    materializations,
+                    creation_cost,
+                    materialization_cost,
+                },
+            });
+        }
+        Some(HomePartition { pieces, total_cost })
+    };
+
+    let without_stack = build(false);
+    let with_stack = build(true).ok_or_else(|| {
         IntervalAllocationError::new(
-            "INTERVAL_ALLOC.NO_HOME",
+            "INTERVAL_ALLOC.NO_STACK_HOME",
             None,
             None,
-            format!("root bundle {root:?} has no home covering uses {uses:?}"),
+            format!("root bundle {root:?} lacks its mandatory stack candidate"),
         )
-    })
+    })?;
+    Ok(without_stack
+        .filter(|partition| partition.total_cost <= with_stack.total_cost)
+        .unwrap_or(with_stack))
 }
 
 fn candidate_covers(
@@ -295,7 +351,7 @@ impl<'a> Allocator<'a> {
                 (0, BundleAssignment::Dead)
             } else {
                 (
-                    select_home(graph, root.id, &uses)?.total_cost(),
+                    partition_homes(graph, root.id, &uses)?.total_cost,
                     BundleAssignment::Unassigned,
                 )
             };
@@ -490,8 +546,44 @@ impl<'a> Allocator<'a> {
 
     fn send_home(&mut self, id: AllocationBundleId) -> Result<(), IntervalAllocationError> {
         let bundle = self.bundle(id)?;
-        let home = select_home(self.graph, bundle.root, &bundle.uses)?;
-        self.bundles[id.0 as usize].assignment = BundleAssignment::Home(home);
+        let root = bundle.root;
+        let origin = bundle.origin;
+        let definition = bundle.definition;
+        let stage = bundle.stage;
+        let uses = bundle.uses.clone();
+        let partition = partition_homes(self.graph, root, &uses)?;
+        if let [piece] = partition.pieces.as_slice() {
+            self.bundles[id.0 as usize].assignment =
+                BundleAssignment::Home(piece.selection.clone());
+            return Ok(());
+        }
+
+        let mut children = Vec::with_capacity(partition.pieces.len());
+        for piece in partition.pieces {
+            let child = AllocationBundleId(u32::try_from(self.bundles.len()).map_err(|_| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.BUNDLE_ID_RANGE",
+                    Some(definition.block()),
+                    Some(id),
+                    "split bundle count exceeds u32",
+                )
+            })?);
+            let spill_cost = piece.selection.total_cost();
+            self.bundles.push(AllocatedBundle {
+                id: child,
+                root,
+                parent: Some(id),
+                origin,
+                definition,
+                segments: Vec::new(),
+                uses: piece.uses,
+                stage,
+                spill_cost,
+                assignment: BundleAssignment::Home(piece.selection),
+            });
+            children.push(child);
+        }
+        self.bundles[id.0 as usize].assignment = BundleAssignment::Split { children };
         Ok(())
     }
 
@@ -692,7 +784,7 @@ impl AllocationPlan {
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<(), IntervalAllocationError> {
-        if self.bundles.len() != graph.bundles.len() {
+        if self.bundles.len() < graph.bundles.len() {
             return Err(IntervalAllocationError::new(
                 "INTERVAL_ALLOC.ROOT_COVERAGE",
                 None,
@@ -722,12 +814,58 @@ impl AllocationPlan {
                     "allocation bundle references a missing HomeGraph root",
                 ));
             };
-            let expected_uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
             if bundle.id != expected_id
-                || bundle.root.0 as usize != index
-                || bundle.parent.is_some()
                 || bundle.origin != root.origin
                 || bundle.definition != root.definition
+            {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.BUNDLE_IDENTITY",
+                    Some(root.definition.block()),
+                    Some(bundle.id),
+                    "allocation bundle identity or machine-value metadata is inconsistent",
+                ));
+            }
+
+            if let Some(parent) = bundle.parent {
+                if index < graph.bundles.len()
+                    || parent.0 as usize >= index
+                    || self.bundles[parent.0 as usize].root != bundle.root
+                    || !bundle.segments.is_empty()
+                {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.CHILD_SHAPE",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        "home child has an invalid parent, root, or live segment",
+                    ));
+                }
+                let BundleAssignment::Home(selection) = &bundle.assignment else {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.CHILD_ASSIGNMENT",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        "current split child must carry one materialization home",
+                    ));
+                };
+                if bundle.uses.is_empty()
+                    || bundle.spill_cost != selection.total_cost()
+                    || !graph.candidates[bundle.root.0 as usize]
+                        .iter()
+                        .any(|candidate| candidate_covers(candidate, &bundle.uses, selection))
+                {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_SELECTION",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        "split child home does not exactly cover its use subset",
+                    ));
+                }
+                continue;
+            }
+
+            let expected_uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
+            if index >= graph.bundles.len()
+                || bundle.root.0 as usize != index
                 || bundle.segments != root.segments
                 || bundle.uses != expected_uses
             {
@@ -735,15 +873,17 @@ impl AllocationPlan {
                     "INTERVAL_ALLOC.ROOT_MATCH",
                     Some(root.definition.block()),
                     Some(bundle.id),
-                    "unsplit allocation bundle differs from its HomeGraph root",
+                    "root allocation bundle differs from its HomeGraph root",
                 ));
             }
-
-            let expected_cost = if bundle.uses.is_empty() {
-                0
+            let partition = if bundle.uses.is_empty() {
+                None
             } else {
-                select_home(graph, bundle.root, &bundle.uses)?.total_cost()
+                Some(partition_homes(graph, bundle.root, &bundle.uses)?)
             };
+            let expected_cost = partition
+                .as_ref()
+                .map_or(0, |partition| partition.total_cost);
             if bundle.spill_cost != expected_cost {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.SPILL_COST",
@@ -759,17 +899,76 @@ impl AllocationPlan {
                         .map_err(IntervalAllocationError::union)?;
                 }
                 BundleAssignment::Home(selection) => {
-                    if bundle.uses.is_empty()
-                        || !graph.candidates[bundle.root.0 as usize]
-                            .iter()
-                            .any(|candidate| candidate_covers(candidate, &bundle.uses, selection))
-                        || selection != &select_home(graph, bundle.root, &bundle.uses)?
+                    let Some(partition) = &partition else {
+                        return Err(IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_SELECTION",
+                            Some(bundle.definition.block()),
+                            Some(bundle.id),
+                            "dead root unexpectedly has a materialization home",
+                        ));
+                    };
+                    if partition.pieces.as_slice()
+                        != [HomePiece {
+                            uses: bundle.uses.clone(),
+                            selection: selection.clone(),
+                        }]
                     {
                         return Err(IntervalAllocationError::new(
                             "INTERVAL_ALLOC.HOME_SELECTION",
                             Some(bundle.definition.block()),
                             Some(bundle.id),
-                            "selected home is not the cheapest candidate covering every use",
+                            "unsplit home is not the exact minimum-cost home partition",
+                        ));
+                    }
+                }
+                BundleAssignment::Split { children } => {
+                    let Some(partition) = &partition else {
+                        return Err(IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.SPLIT_COVERAGE",
+                            Some(bundle.definition.block()),
+                            Some(bundle.id),
+                            "dead root unexpectedly has split children",
+                        ));
+                    };
+                    if partition.pieces.len() <= 1 || children.len() != partition.pieces.len() {
+                        return Err(IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.SPLIT_COVERAGE",
+                            Some(bundle.definition.block()),
+                            Some(bundle.id),
+                            "home split does not have one child per partition piece",
+                        ));
+                    }
+                    let mut seen_uses = BTreeSet::new();
+                    for (&child_id, piece) in children.iter().zip(&partition.pieces) {
+                        let Some(child) = self.bundles.get(child_id.0 as usize) else {
+                            return Err(IntervalAllocationError::new(
+                                "INTERVAL_ALLOC.CHILD_RANGE",
+                                Some(bundle.definition.block()),
+                                Some(child_id),
+                                "split references a missing child bundle",
+                            ));
+                        };
+                        if child.parent != Some(bundle.id)
+                            || child.root != bundle.root
+                            || child.uses != piece.uses
+                            || child.assignment != BundleAssignment::Home(piece.selection.clone())
+                            || child.stage != bundle.stage
+                            || child.uses.iter().any(|use_id| !seen_uses.insert(*use_id))
+                        {
+                            return Err(IntervalAllocationError::new(
+                                "INTERVAL_ALLOC.SPLIT_COVERAGE",
+                                Some(bundle.definition.block()),
+                                Some(child_id),
+                                "split child differs from its exact home partition",
+                            ));
+                        }
+                    }
+                    if seen_uses != bundle.uses.iter().copied().collect() {
+                        return Err(IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.SPLIT_COVERAGE",
+                            Some(bundle.definition.block()),
+                            Some(bundle.id),
+                            "split children do not partition every root use exactly once",
                         ));
                     }
                 }
@@ -1001,5 +1200,59 @@ mod tests {
         assert_eq!(allocator.matrix.register(early), Some(PhysReg::RDX));
         assert_eq!(allocator.matrix.register(late), Some(PhysReg::RDX));
         allocator.matrix.verify().unwrap();
+    }
+
+    #[test]
+    fn path_specific_state_recipe_and_stack_fallback_form_separate_home_children() {
+        let insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 0,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, insts);
+        let (_, graph) = model(&mut function);
+        let root = graph
+            .bundles
+            .iter()
+            .find(|bundle| bundle.origin == VReg(0))
+            .unwrap();
+        let uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
+        let partition = partition_homes(&graph, root.id, &uses).unwrap();
+        assert_eq!(partition.pieces.len(), 2);
+        let stack = partition
+            .pieces
+            .iter()
+            .find(|piece| piece.selection.kind == HomeKind::Stack)
+            .unwrap();
+        let state = partition
+            .pieces
+            .iter()
+            .find(|piece| matches!(piece.selection.kind, HomeKind::State(_)))
+            .unwrap();
+        assert_eq!(state.uses, vec![BundleUseId(0)]);
+        assert_eq!(stack.uses, vec![BundleUseId(1)]);
+        assert_eq!(partition.total_cost, 3);
     }
 }

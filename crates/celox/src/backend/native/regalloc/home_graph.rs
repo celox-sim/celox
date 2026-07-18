@@ -102,7 +102,7 @@ pub(super) enum HomeKind {
     State(RecipeShapeId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct UseMaterialization {
     pub use_id: BundleUseId,
     /// Exact, versioned recipe proved at this use.

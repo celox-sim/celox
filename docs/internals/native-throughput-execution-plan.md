@@ -2552,6 +2552,17 @@ the interval matrix and every selected home from the HomeGraph.  Region
 splitting and transition placement remain the next 27c slice, so this
 diagnostic policy is still disconnected from production allocation.
 
+Step 27c3 removes the remaining VReg-wide fallback from home choice.  For a
+given use subset, the solver evaluates both no-stack residency and creation of
+one shared stack home.  Within either case it selects the cheapest exact
+state/rematerialization recipe or stack reload independently at every use,
+then groups equal home shapes into allocation children.  Because non-stack
+homes have zero creation cost and stack has one shared creation cost, this is
+an exact solution for the current HomeGraph rather than a greedy set-cover
+threshold.  A regression in which a state load is valid before an overlapping
+write but not after it produces a state child for the first use and a stack
+child only for the second.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2602,6 +2613,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27b live bundles and HomeGraph | this step | HomeGraph 6/6; legacy reload 32/32 | lib 787/787; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | parent/candidate complete pre/post/native SIR and MIR byte-identical; parent exact Linux marker remains applicable | trace-only compile: parent 74.106 s, candidate 72.213 s; no timing claim | version-independent home shapes plus exact per-use MemorySSA recipes represented; production allocator unchanged |
 | 27c1 sparse physical interval unions | this step | interval-union insertion/removal/interference/free-region 4/4 | lib 791/791; check, strict clippy, and format pass | diagnostic allocator structure is not connected to production MIR | n/a | per-register sparse interference matrix and independent rebuild verifier complete |
 | 27c2 complete-bundle allocation policy | this step | allocation queue/eviction/recolor/home selection 4/4 | lib 795/795; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | terminating work queue, transactional recolor, monotonic eviction, and independent plan verification complete |
+| 27c3 per-use home partition | this step | allocator 5/5 including path-specific state/stack partition | lib 796/796; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact shared-stack versus per-use recipe partition replaces VReg-wide fallback |
 
 ## Related design records
 
