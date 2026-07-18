@@ -109,6 +109,15 @@ impl JointAllocationError {
     fn union(error: IntervalUnionError) -> Self {
         Self::new(error.rule, error.block, None, error.message)
     }
+
+    fn ir(error: super::allocation_ir::AllocationIrError) -> Self {
+        Self::new(
+            error.rule,
+            error.block,
+            error.values.first().copied(),
+            error.message,
+        )
+    }
 }
 
 impl fmt::Display for JointAllocationError {
@@ -158,10 +167,44 @@ impl JointAllocationProblem {
             ));
         }
 
+        let mut fixed_region_uses = BTreeMap::<VReg, Vec<UseSite>>::new();
+        let mut stack_roots = BTreeSet::new();
+        for home in &expanded.stack_homes {
+            if !stack_roots.insert(home.root) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.STACK_HOME_IDENTITY",
+                    None,
+                    None,
+                    "one expanded root owns more than one stack home",
+                ));
+            }
+            let root = expanded.roots.get(home.root.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.STACK_HOME_ROOT",
+                    None,
+                    None,
+                    "expanded stack home references a missing root",
+                )
+            })?;
+            if root.id != home.root {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.STACK_HOME_ROOT",
+                    None,
+                    Some(root.origin),
+                    "expanded stack-home root differs from its dense row",
+                ));
+            }
+            let site = expanded
+                .ir
+                .resolve_stack_store_use_site(home.store, home.id, root.origin, &expanded.intervals)
+                .map_err(JointAllocationError::ir)?;
+            fixed_region_uses.entry(root.origin).or_default().push(site);
+        }
+
         let region_metadata = expanded
             .register_regions
             .iter()
-            .map(|region| (region.bundle, region))
+            .map(|region| (region.id, region))
             .collect::<BTreeMap<_, _>>();
         if region_metadata.len() != expanded.register_regions.len() {
             return Err(JointAllocationError::new(
@@ -269,15 +312,19 @@ impl JointAllocationProblem {
                 region.uses.sort_unstable();
                 region.sites.sort_unstable();
                 region.sites.dedup();
+                let mut owned_sites = region.sites.clone();
+                owned_sites.extend(fixed_region_uses.get(&value).into_iter().flatten().copied());
+                owned_sites.sort_unstable();
+                owned_sites.dedup();
                 if region.uses.is_empty()
                     || region.uses.windows(2).any(|pair| pair[0] >= pair[1])
-                    || interval.uses != region.sites
+                    || interval.uses != owned_sites
                 {
                     return Err(JointAllocationError::new(
                         "JOINT_ALLOC.REGION_USES",
                         Some(interval.definition.block()),
                         Some(value),
-                        "register region does not own its exact expanded interval uses",
+                        "register region plus its identified fixed stack-store use do not own the exact expanded interval uses",
                     ));
                 }
                 (
@@ -323,6 +370,11 @@ impl JointAllocationProblem {
             value_ids,
             definition_order,
         })
+    }
+
+    pub(super) fn value(&self, value: VReg) -> Option<&AllocationValue> {
+        let id = self.value_ids.get(value.0 as usize).copied().flatten()?;
+        self.values.get(id.0 as usize)
     }
 
     pub(super) fn allocate(

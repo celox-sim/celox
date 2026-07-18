@@ -27,6 +27,9 @@ use super::interval_allocator::{
 use super::interval_union::AllocationBundleId;
 use super::live_interval::{LiveIntervals, UseSite};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct RegisterRegionId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ExpandedMaterialization {
     Stack {
@@ -46,7 +49,7 @@ pub(super) enum ExpandedUseSource {
         preferred_register: PhysReg,
     },
     RegisterRegion {
-        region: AllocationBundleId,
+        region: RegisterRegionId,
         preferred_register: PhysReg,
     },
     Materialized(ExpandedMaterialization),
@@ -74,10 +77,14 @@ pub(super) struct ExpandedRoot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExpandedRegisterRegion {
-    pub bundle: AllocationBundleId,
+    pub id: RegisterRegionId,
     pub root: LiveBundleId,
     pub value: VReg,
     pub preferred_register: PhysReg,
+    /// Exact immutable root use before which this region is materialized.
+    /// Keeping the boundary identity separate from shifted allocation-IR slots
+    /// makes repeated splitting provably monotonic.
+    pub entry_use: BundleUseId,
     pub entry: ExpandedMaterialization,
 }
 
@@ -154,9 +161,9 @@ impl fmt::Display for AllocationExpandError {
 
 impl std::error::Error for AllocationExpandError {}
 
-struct LoweredMaterialization {
-    value: VReg,
-    source: ExpandedMaterialization,
+pub(super) struct LoweredMaterialization {
+    pub value: VReg,
+    pub source: ExpandedMaterialization,
 }
 
 pub(super) fn expand(
@@ -293,11 +300,22 @@ pub(super) fn expand(
                         stack_home,
                     )?;
                     let region_value = lowered.value;
+                    let region_id =
+                        RegisterRegionId(u32::try_from(register_regions.len()).map_err(|_| {
+                            AllocationExpandError::new(
+                                "ALLOCATION_EXPAND.REGION_ID_RANGE",
+                                Some(root.definition.block()),
+                                Some(root.id),
+                                None,
+                                "expanded register-region count exceeds u32",
+                            )
+                        })?);
                     register_regions.push(ExpandedRegisterRegion {
-                        bundle: leaf.id,
+                        id: region_id,
                         root: root.id,
                         value: region_value,
                         preferred_register: *register,
+                        entry_use: entry_use.id,
                         entry: lowered.source,
                     });
                     for &use_id in &leaf.uses {
@@ -313,7 +331,7 @@ pub(super) fn expand(
                                 site: use_.site,
                                 value: region_value,
                                 source: ExpandedUseSource::RegisterRegion {
-                                    region: leaf.id,
+                                    region: region_id,
                                     preferred_register: *register,
                                 },
                             },
@@ -378,17 +396,7 @@ pub(super) fn expand(
         });
     }
 
-    ir.verify_stack_homes(cfg)
-        .map_err(AllocationExpandError::ir)?;
-    let intervals = ir.analyze(cfg).map_err(AllocationExpandError::ir)?;
-    for root in &mut roots {
-        for use_ in &mut root.uses {
-            use_.site = ir
-                .resolve_original_use_site(use_.original_site, &intervals)
-                .map_err(AllocationExpandError::ir)?;
-        }
-    }
-    verify_expanded_uses(&roots, &intervals)?;
+    let intervals = analyze_and_resolve(&ir, &mut roots, cfg)?;
     Ok(ExpandedAllocationProblem {
         ir,
         intervals,
@@ -396,6 +404,33 @@ pub(super) fn expand(
         register_regions,
         stack_homes,
     })
+}
+
+pub(super) fn refresh(
+    problem: &mut ExpandedAllocationProblem,
+    cfg: &NormalizedCfg,
+) -> Result<(), AllocationExpandError> {
+    problem.intervals = analyze_and_resolve(&problem.ir, &mut problem.roots, cfg)?;
+    Ok(())
+}
+
+fn analyze_and_resolve(
+    ir: &AllocationIr,
+    roots: &mut [ExpandedRoot],
+    cfg: &NormalizedCfg,
+) -> Result<LiveIntervals, AllocationExpandError> {
+    ir.verify_stack_homes(cfg)
+        .map_err(AllocationExpandError::ir)?;
+    let intervals = ir.analyze(cfg).map_err(AllocationExpandError::ir)?;
+    for root in &mut *roots {
+        for use_ in &mut root.uses {
+            use_.site = ir
+                .resolve_original_use_site(use_.original_site, &intervals)
+                .map_err(AllocationExpandError::ir)?;
+        }
+    }
+    verify_expanded_uses(roots, &intervals)?;
+    Ok(intervals)
 }
 
 fn collect_final_leaves(
@@ -498,7 +533,7 @@ fn assign_expanded_use(
     Ok(())
 }
 
-fn lower_materialization(
+pub(super) fn lower_materialization(
     ir: &mut AllocationIr,
     graph: &HomeGraph,
     root: &LiveBundle,
@@ -999,7 +1034,7 @@ mod tests {
             .filter(|use_| {
                 matches!(
                     use_.source,
-                    ExpandedUseSource::RegisterRegion { region: id, .. } if id == region.bundle
+                    ExpandedUseSource::RegisterRegion { region: id, .. } if id == region.id
                 )
             })
             .collect::<Vec<_>>();

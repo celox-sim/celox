@@ -2868,6 +2868,41 @@ unchanged.  Step 27d5 must cost the returned alternatives, split a selected
 root into strictly smaller CFG-connected use regions, materialize new homes,
 and rerun this same joint allocation to a finite fixed point.
 
+Step 27d5 closes that fixed-point loop without restoring the diagnostic
+one-register-child fallback.  The blocked definition is the exact cut: every
+earlier SSA range which conflicts with the newly processed range must cover
+that definition.  For each returned root region, the splitter traverses only
+candidate segments which are live across real CFG exit/entry edges.  It moves
+uses reachable from the cut, retains the prefix, and partitions the moved set
+among earliest dominating instruction uses.  A sibling arm is never reached
+from a cut inside the other arm.  If a backedge returns to the cut block,
+next-iteration uses before the cut are included but forced to exact
+materializations because their static sites dominate the cut.  Phi-edge entry
+uses are likewise singletons until atomic lowering can create synthetic phis.
+
+The immutable `RootHomePlan` prices only the resulting region entries and
+accounts for an already-created root stack home.  A selected stack transition
+creates one identified definition-to-store operation; joint allocation treats
+that store as a fixed use while retaining ordinary root uses as the splittable
+region.  Every new reload/state/rematerialization output and every retained
+multi-use region returns to the same joint allocation problem.  Applying a
+split occurs on a clone, recomputes the stack proof and exact liveness, and
+publishes only after independent region ownership and joint-problem rebuilding
+pass.
+
+Termination is structural.  Existing synthetic regions record their immutable
+entry use and may not recreate the same use set at that boundary.  Every
+accepted iteration lexicographically decreases pairwise co-resident region
+uses, original-register uses, or total register uses.  Replaced pure synthetic
+reload/recipe DAGs are eliminated and their value/instruction identities are
+compacted before reallocation, preventing dead transitions from becoming
+fixed-only pressure.  Focused tests cover synthetic pressure through complete
+joint reallocation, one-arm reachability, loop reentry, a retained register
+prefix plus fixed stack store, and repeated-entry termination.  Production MIR
+is still unchanged, so this slice makes no Linux or timing claim.  Step 27d6
+must normalize the exact per-use result and lower it atomically into strict-SSA
+MIR.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2931,6 +2966,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d2 sparse all-path stack-home verification | this step | allocation IR 8/8 including both-arm, one-arm, and same-block-order home proofs | lib 812/812; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; strict clippy | stack verifier is not yet connected to `AllocationPlan` or production MIR | n/a | explicit synthetic stack operations now have a sparse reaching-store proof; home expansion remains next |
 | 27d3 allocation-home expansion into machine values | this step | allocation expansion 3/3; allocation IR 8/8 including shifted instruction and phi-edge anchors | lib 815/815; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | expanded problem remains disconnected from production MIR | n/a | stack/state/remat/register transitions now have exact synthetic ranges; joint reallocation remains next |
 | 27d4 joint original/synthetic allocation boundary | this step | joint allocation 4/4 including affinity override, sibling-arm sharing, split requests, and fixed-pressure rejection | lib 819/819; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | split requests are not yet resolved and production MIR is unchanged | n/a | old assignments are affinities only; every machine range is jointly colored or returned in an exact split obligation |
+| 27d5 exact pressure-region splitting and joint fixed point | this step | allocation split 5/5 including complete synthetic-pressure allocation, sibling-arm isolation, loop reentry, partial stack residency, and repeated-entry termination | lib 824/824; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | exact result is not yet lowered to production MIR; no Linux semantic claim | n/a | reachable suffixes become multiple dominance regions or exact homes; dead synthetic DAGs are compacted and every value re-enters joint allocation |
 
 ## Related design records
 

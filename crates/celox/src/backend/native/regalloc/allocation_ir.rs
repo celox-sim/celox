@@ -104,6 +104,25 @@ pub(super) struct InsertedSynthetic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AllocationIrCompaction {
+    values: Vec<Option<VReg>>,
+    instructions: Vec<Option<SyntheticInstructionId>>,
+}
+
+impl AllocationIrCompaction {
+    pub(super) fn value(&self, old: VReg) -> Option<VReg> {
+        self.values.get(old.0 as usize).copied().flatten()
+    }
+
+    pub(super) fn instruction(
+        &self,
+        old: SyntheticInstructionId,
+    ) -> Option<SyntheticInstructionId> {
+        self.instructions.get(old.0 as usize).copied().flatten()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AllocationIr {
     original_value_count: u32,
     next_value: u32,
@@ -439,6 +458,94 @@ impl AllocationIr {
         }
     }
 
+    /// Resolve and verify the fixed use introduced by one explicit stack-home
+    /// store. Register-region ownership may cover only a subset of an origin
+    /// value's uses; this method lets joint allocation distinguish that exact
+    /// allocator-owned use from movable RTL uses without weakening ownership
+    /// checks for any other instruction.
+    pub(super) fn resolve_stack_store_use_site(
+        &self,
+        instruction: SyntheticInstructionId,
+        home: StackHomeId,
+        value: VReg,
+        intervals: &LiveIntervals,
+    ) -> Result<UseSite, AllocationIrError> {
+        if intervals.block_slots.len() != self.blocks.len() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.INTERVAL_SHAPE",
+                None,
+                None,
+                vec![value],
+                "live-interval block slots do not cover the allocation IR",
+            ));
+        }
+        let mut found = None;
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            for (position, candidate) in block.instructions.iter().enumerate() {
+                let AllocationInstructionOrigin::Synthetic {
+                    id,
+                    operation:
+                        SyntheticOperation::StackStore {
+                            home: candidate_home,
+                        },
+                    ..
+                } = candidate.origin
+                else {
+                    continue;
+                };
+                if id != instruction {
+                    continue;
+                }
+                if candidate_home != home
+                    || candidate.definition.is_some()
+                    || candidate.uses.to_vec() != [value]
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_STORE_IDENTITY",
+                        Some(block.id),
+                        None,
+                        vec![value],
+                        "stack-home metadata does not identify the expected fixed store use",
+                    ));
+                }
+                let slot = intervals.block_slots[block_index]
+                    .instruction_use(position)
+                    .ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.STACK_STORE_POSITION",
+                            Some(block.id),
+                            None,
+                            vec![value],
+                            "stack-home store is outside allocation-IR slots",
+                        )
+                    })?;
+                let site = UseSite::Instruction {
+                    block: block.id,
+                    instruction: position,
+                    slot,
+                };
+                if found.replace(site).is_some() {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_STORE_IDENTITY",
+                        Some(block.id),
+                        None,
+                        vec![value],
+                        "synthetic stack-store identity occurs more than once",
+                    ));
+                }
+            }
+        }
+        found.ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.STACK_STORE_IDENTITY",
+                None,
+                None,
+                vec![value],
+                "expanded stack home references a missing synthetic store",
+            )
+        })
+    }
+
     /// Independently prove that every synthetic stack reload observes a
     /// same-home store on every path. The proof constructs sparse Boolean SSA
     /// only for homes which are actually reloaded; it never creates a dense
@@ -446,6 +553,223 @@ impl AllocationIr {
     pub(super) fn verify_stack_homes(&self, cfg: &NormalizedCfg) -> Result<(), AllocationIrError> {
         self.verify_structure()?;
         verify_stack_home_reaching_definitions(self, cfg)
+    }
+
+    /// Remove pure synthetic materialization DAGs which no longer reach an
+    /// original instruction, phi edge, or explicit stack store. Repeated
+    /// pressure splitting can replace a whole register region; keeping its old
+    /// reload/recipe definitions would turn dead code into artificial fixed
+    /// register pressure. Original MIR and stack stores are never removed.
+    /// Surviving synthetic values and instruction identities are compacted in
+    /// old-identity order and returned for metadata repair.
+    pub(super) fn prune_dead_materializations(
+        &mut self,
+    ) -> Result<AllocationIrCompaction, AllocationIrError> {
+        self.verify_structure()?;
+        let mut synthetic_definitions =
+            vec![None::<(SyntheticInstructionId, Uses)>; self.next_value as usize];
+        let mut retained_instructions = vec![false; self.next_synthetic_instruction as usize];
+        let mut needed_values = vec![false; self.next_value as usize];
+        let mut queue = VecDeque::<VReg>::new();
+
+        for block in &self.blocks {
+            for phi in &block.phis {
+                queue.extend(phi.sources.iter().map(|(_, value)| *value));
+            }
+            for instruction in &block.instructions {
+                match instruction.origin {
+                    AllocationInstructionOrigin::Original { .. } => {
+                        queue.extend(instruction.uses.iter().copied());
+                    }
+                    AllocationInstructionOrigin::Synthetic {
+                        id,
+                        operation: SyntheticOperation::StackStore { .. },
+                        ..
+                    } => {
+                        retained_instructions[id.0 as usize] = true;
+                        queue.extend(instruction.uses.iter().copied());
+                    }
+                    AllocationInstructionOrigin::Synthetic { id, operation, .. } => {
+                        if !matches!(
+                            operation,
+                            SyntheticOperation::StackReload { .. }
+                                | SyntheticOperation::RecipeNode { .. }
+                        ) {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.DCE_OPERATION",
+                                Some(block.id),
+                                None,
+                                instruction.uses.to_vec(),
+                                "synthetic definition has an unknown effect class",
+                            ));
+                        }
+                        let definition = instruction.definition.ok_or_else(|| {
+                            AllocationIrError::new(
+                                "ALLOCATION_IR.DCE_DEFINITION",
+                                Some(block.id),
+                                None,
+                                Vec::new(),
+                                "pure synthetic materialization has no definition",
+                            )
+                        })?;
+                        if synthetic_definitions[definition.0 as usize]
+                            .replace((id, instruction.uses))
+                            .is_some()
+                        {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.DCE_DEFINITION",
+                                Some(block.id),
+                                None,
+                                vec![definition],
+                                "synthetic value has more than one defining instruction",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Some(value) = queue.pop_front() {
+            let needed = needed_values.get_mut(value.0 as usize).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_VALUE_RANGE",
+                    None,
+                    None,
+                    vec![value],
+                    "semantic use references a value outside the allocation IR",
+                )
+            })?;
+            if *needed || value.0 < self.original_value_count {
+                *needed = true;
+                continue;
+            }
+            *needed = true;
+            let (instruction, uses) = synthetic_definitions
+                .get(value.0 as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.DCE_DEFINITION",
+                        None,
+                        None,
+                        vec![value],
+                        "reachable synthetic value has no pure defining instruction",
+                    )
+                })?;
+            retained_instructions[instruction.0 as usize] = true;
+            queue.extend(uses.iter().copied());
+        }
+
+        let mut instruction_map = vec![None; self.next_synthetic_instruction as usize];
+        let mut retained_instruction_count = 0usize;
+        for (old, retained) in retained_instructions.iter().copied().enumerate() {
+            if !retained {
+                continue;
+            }
+            let next = retained_instruction_count;
+            retained_instruction_count += 1;
+            let next = u32::try_from(next).map_err(|_| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
+                    None,
+                    None,
+                    Vec::new(),
+                    "retained synthetic instruction count exceeds u32",
+                )
+            })?;
+            instruction_map[old] = Some(SyntheticInstructionId(next));
+        }
+
+        let mut value_map = vec![None; self.next_value as usize];
+        for original in 0..self.original_value_count {
+            value_map[original as usize] = Some(VReg(original));
+        }
+        let mut next_value = self.original_value_count;
+        for old in self.original_value_count..self.next_value {
+            let old_value = VReg(old);
+            let Some((instruction, _)) = synthetic_definitions[old as usize] else {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_DEFINITION",
+                    None,
+                    None,
+                    vec![old_value],
+                    "synthetic value domain contains no defining materialization",
+                ));
+            };
+            if !retained_instructions[instruction.0 as usize] {
+                continue;
+            }
+            value_map[old as usize] = Some(VReg(next_value));
+            next_value = next_value.checked_add(1).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_VALUE_RANGE",
+                    None,
+                    None,
+                    vec![old_value],
+                    "compacted synthetic value identity exceeds u32",
+                )
+            })?;
+        }
+
+        for block in &mut self.blocks {
+            for phi in &mut block.phis {
+                for (_, value) in &mut phi.sources {
+                    *value = compact_value(&value_map, *value, block.id)?;
+                }
+            }
+            let mut instructions = Vec::with_capacity(block.instructions.len());
+            for mut instruction in std::mem::take(&mut block.instructions) {
+                if let AllocationInstructionOrigin::Synthetic { id, .. } = instruction.origin
+                    && !retained_instructions[id.0 as usize]
+                {
+                    continue;
+                }
+                instruction.uses = compact_uses(&value_map, instruction.uses, block.id)?;
+                if let Some(definition) = instruction.definition {
+                    instruction.definition = Some(compact_value(&value_map, definition, block.id)?);
+                }
+                if let AllocationInstructionOrigin::Synthetic {
+                    id,
+                    anchor,
+                    operation,
+                } = instruction.origin
+                {
+                    let id = instruction_map[id.0 as usize].ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
+                            Some(block.id),
+                            None,
+                            Vec::new(),
+                            "retained synthetic instruction has no compact identity",
+                        )
+                    })?;
+                    instruction.origin = AllocationInstructionOrigin::Synthetic {
+                        id,
+                        anchor,
+                        operation,
+                    };
+                }
+                instructions.push(instruction);
+            }
+            block.instructions = instructions;
+        }
+        self.next_value = next_value;
+        self.next_synthetic_instruction =
+            u32::try_from(retained_instruction_count).map_err(|_| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.DCE_INSTRUCTION_RANGE",
+                    None,
+                    None,
+                    Vec::new(),
+                    "retained synthetic instruction count exceeds u32",
+                )
+            })?;
+        self.verify_structure()?;
+        Ok(AllocationIrCompaction {
+            values: value_map,
+            instructions: instruction_map,
+        })
     }
 
     fn insert_synthetic(
@@ -808,6 +1132,50 @@ impl AllocationIr {
         }
         Ok(())
     }
+}
+
+fn compact_value(
+    map: &[Option<VReg>],
+    value: VReg,
+    block: BlockId,
+) -> Result<VReg, AllocationIrError> {
+    map.get(value.0 as usize).copied().flatten().ok_or_else(|| {
+        AllocationIrError::new(
+            "ALLOCATION_IR.DCE_LIVE_REFERENCE",
+            Some(block),
+            None,
+            vec![value],
+            "retained instruction references a removed synthetic value",
+        )
+    })
+}
+
+fn compact_uses(
+    map: &[Option<VReg>],
+    uses: Uses,
+    block: BlockId,
+) -> Result<Uses, AllocationIrError> {
+    let values = uses
+        .iter()
+        .map(|value| compact_value(map, *value, block))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(match values.as_slice() {
+        [] => Uses::none(),
+        [a] => Uses::one(*a),
+        [a, b] => Uses::two(*a, *b),
+        [a, b, c] => Uses::three(*a, *b, *c),
+        [a, b, c, d] => Uses::four(*a, *b, *c, *d),
+        [a, b, c, d, e] => Uses::five(*a, *b, *c, *d, *e),
+        _ => {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.DCE_USE_ARITY",
+                Some(block),
+                None,
+                values,
+                "allocation instruction exceeds the fixed MIR use arity",
+            ));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,8 @@
 
 > **Status:** the Braun--Hack W/S pipeline below is the current production
 > allocator.  The interval-based replacement described in the next section is
-> implemented through analysis and diagnostic allocation, but does not yet
+> implemented through explicit home expansion, joint original/synthetic
+> allocation, and pressure-driven live-region splitting, but does not yet
 > rewrite production MIR.  A replacement is accepted only by correctness tests
 > and the executable Heliodor gate; speculative phase designs are not normative.
 
@@ -133,17 +134,18 @@ without mutating MIR:
 1. Build exact block liveness, sparse root intervals, loop/SCC nesting, use
    positions, constraint masks, and home recipes once.  Frequency and cost are
    annotations; they never alter semantic liveness.
-2. Form connected allocation units at dominance, loop, constraint, and
-   home-validity boundaries.  This partition is independent of physical
-   register occupancy.  It avoids rebuilding a root-sized CFG graph once per
-   physical register while still allowing branch-exclusive units to share a
-   register.
-3. Process units by weighted avoided-home cost.  Try a free register, then a
-   bounded recolor or eviction against sparse interval unions.  Failure splits
-   the unit into strictly smaller connected use sets and returns every
-   non-final child to the queue.  A value may consequently own any finite
-   number of disjoint register regions; the one-register-child diagnostic
-   restriction is removed.
+2. Build each root's canonical live-range topology independently of physical
+   occupancy.  Joint coloring then places every original and synthetic range
+   against CFG-sparse interval unions, so branch-exclusive ranges can share a
+   register without becoming adjacent in one layout-linear interval.
+3. A coloring failure names the blocked definition and every resident region
+   covering it.  For each candidate, traverse only the exact live-range edges
+   reachable from that definition, retain the prefix, and partition the moved
+   uses among earliest dominating instruction uses.  Sibling arms become
+   separate regions; phi-edge entries and loop-reentry uses which dominate the
+   cut become exact materializations.  Select the minimum proved home cost and
+   return every resulting machine value to the same joint allocator.  A value
+   may consequently own any finite number of disjoint register regions.
 4. Solve stack availability as sparse SSA dataflow over the selected home
    demands.  Place explicit stores at the latest legal dominating points or
    predecessor edges while the source location is available.  Materialize
@@ -161,15 +163,19 @@ without mutating MIR:
    edge parallel copies.  Failure is a producer bug, not a request to retry
    with another allocator or a more conservative global spill.
 
-Termination follows from the allocation-unit partition.  Every failed split
-must partition one unit into children whose use sets are non-empty, disjoint,
-and strictly smaller; children never merge during allocation.  A synthetic
-range is born already bounded by one transition DAG and one use cluster.  If it
-cannot be assigned, it may be split only at its finite instruction boundaries;
-it cannot recreate the wider parent which produced it.  Recolor depth is
-bounded by the target register file.  Stack-home placement is a monotone sparse
-dataflow problem.  MIR is materialized once after this finite process; there is
-no unbounded rewrite/reanalyse loop over successively larger functions.
+Termination follows from exact use ownership, not an iteration cutoff.  Define
+the progress tuple as the sum of pairwise co-resident root uses in every
+register region, then the number of original-register uses, then the total
+number of register uses.  Every accepted split decreases this tuple
+lexicographically.  A root may move all uses once from its original definition
+to a later explicit transition; an existing synthetic region may not recreate
+the same use set at the same immutable entry use.  Otherwise a split creates
+strictly smaller disjoint regions or exact materialized uses, and regions never
+merge.  Dead replaced reload/recipe DAGs are removed and identities compacted
+before liveness is rebuilt, so they cannot accumulate as artificial fixed
+pressure.  Stack-home placement is a monotone sparse dataflow problem.  MIR is
+materialized once after this finite process; there is no unbounded production-
+MIR rewrite/reanalyse loop.
 
 ### Machine-independent and HDL-specific responsibilities
 
@@ -199,18 +205,21 @@ Each retained slice ends at a verified representation boundary:
 2. Replace Boolean stack-home accounting with explicit stack definitions,
    reload demands, and an independent all-path reaching-definition verifier;
    enqueue every resulting synthetic range.
-3. Normalize the completed solver state into exact per-use locations and
-   explicit register-region entries.  Reject any implicit register, implicit
-   transition, or multiply owned use.
-4. Materialize one allocation result into strict SSA off to the side; verify
-   definition dominance, phi-edge ownership, recipes, and unchanged MIR
-   semantics before swapping it into the function.
-5. Remove the one-register-child restriction and requeue strictly smaller
-   connected children.  Test diamonds, loops, irreducible SCCs, multiple hot
-   regions, and termination.
-6. Integrate fixed constraints, copy/phi coalescing, and final stack-slot
+3. Expand every proposed home and register entry into explicit machine values,
+   then recompute exact liveness; old physical assignments become affinities.
+4. Jointly allocate every original and synthetic range.  Return an exact split
+   obligation rather than finalizing a hidden scratch register.
+5. Resolve split obligations into reachable CFG/dominance regions and homes,
+   eliminate replaced synthetic DAGs, and rerun joint allocation to its proved
+   fixed point.  Test diamonds, loops, stack-backed prefixes, multiple regions,
+   and termination.
+6. Normalize the completed solver state into exact per-use locations and lower
+   one strict-SSA result atomically.  Verify definition dominance, phi-edge
+   ownership, recipes, and unchanged MIR semantics before swapping it into the
+   function.
+7. Integrate fixed constraints, copy/phi coalescing, and final stack-slot
    coloring, then run the complete native and counter suites.
-7. Replace production W/S only after differential MIR execution and the exact
+8. Replace production W/S only after differential MIR execution and the exact
    Heliodor Linux marker pass.  Measure code generation and generated-code
    execution separately; use non-LTO builds during iteration and a final
    release/LTO gate only at acceptance.
@@ -260,9 +269,28 @@ assignment is independently rebuilt in a fresh matrix.  If no register is
 available, the result contains every per-register resident conflict and all
 root regions which may legally be split.  Pressure involving only fixed
 transition ranges is rejected as a producer error rather than hidden behind a
-scratch register.  Resolving a split request into smaller connected regions
-and new exact homes remains the next slice; this joint problem is still
-disconnected from production MIR.
+scratch register.
+
+Split obligations now close that joint-allocation loop.  A candidate must
+cover the blocked definition.  Its exact sparse segments supply only live
+exit-to-entry CFG edges, so traversal moves the reachable suffix without
+claiming a sibling arm.  Dominance partitions the suffix into independently
+entered regions; a backedge which revisits the cut includes next-iteration
+pre-cut uses, but those uses are materialized singly because their static site
+dominates the cut.  Phi-edge entry uses are also singletons until synthetic
+phis are part of atomic lowering.  Stack selection creates one identified
+definition-to-store use, which remains fixed while ordinary root uses remain
+splittable.
+
+Applying a plan mutates a clone of the allocation IR, rewrites immutable exact
+use anchors, removes unreferenced region metadata and dead pure synthetic
+DAGs, compacts their value/instruction identities, reruns the all-path stack
+proof and exact liveness, and rebuilds the joint problem.  Publication requires
+the ownership progress tuple to decrease.  The resulting fixed-point allocator
+passes focused synthetic-pressure, sibling-arm, loop-reentry, partial-stack,
+and repeated-entry tests.  Exact per-use result normalization and atomic
+strict-SSA MIR lowering remain next; production code generation is therefore
+still the interim allocator below.
 
 ## Interim allocator architecture
 

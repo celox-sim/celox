@@ -42,7 +42,7 @@ pub(super) struct HomeSelection {
 }
 
 impl HomeSelection {
-    fn total_cost(&self) -> u64 {
+    pub(super) fn total_cost(&self) -> u64 {
         u64::from(self.creation_cost) + u64::from(self.materialization_cost)
     }
 }
@@ -89,15 +89,15 @@ pub(super) struct AllocationPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HomePiece {
-    uses: Vec<BundleUseId>,
-    selection: HomeSelection,
+pub(super) struct HomePiece {
+    pub uses: Vec<BundleUseId>,
+    pub selection: HomeSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HomePartition {
-    pieces: Vec<HomePiece>,
-    total_cost: u64,
+pub(super) struct HomePartition {
+    pub pieces: Vec<HomePiece>,
+    pub total_cost: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,7 +343,15 @@ impl HomeCostTotals {
     }
 
     fn finish(self, root: LiveBundleId) -> Result<PartitionCost, IntervalAllocationError> {
-        let stack_creation_cost = if self.with_stack_use_count != 0 {
+        self.finish_with_existing_stack(root, false)
+    }
+
+    fn finish_with_existing_stack(
+        self,
+        root: LiveBundleId,
+        stack_exists: bool,
+    ) -> Result<PartitionCost, IntervalAllocationError> {
+        let stack_creation_cost = if self.with_stack_use_count != 0 && !stack_exists {
             u64::from(STACK_HOME_CREATION_COST)
         } else {
             0
@@ -377,14 +385,17 @@ impl HomeCostTotals {
 /// additive totals are computed once; allocation asks only subset/complement
 /// cost questions and materializes grouped homes after a decision wins.
 #[derive(Debug)]
-struct RootHomePlan {
+pub(super) struct RootHomePlan {
     root: LiveBundleId,
     rows: Vec<PlannedUseHomes>,
     totals: HomeCostTotals,
 }
 
 impl RootHomePlan {
-    fn build(graph: &HomeGraph, root: &LiveBundle) -> Result<Self, IntervalAllocationError> {
+    pub(super) fn build(
+        graph: &HomeGraph,
+        root: &LiveBundle,
+    ) -> Result<Self, IntervalAllocationError> {
         let Some(homes) = graph.homes.get(root.id.0 as usize) else {
             return Err(IntervalAllocationError::new(
                 "INTERVAL_ALLOC.HOME_ROOT",
@@ -582,8 +593,29 @@ impl RootHomePlan {
         Ok(selection)
     }
 
-    fn partition(&self, uses: &[BundleUseId]) -> Result<HomePartition, IntervalAllocationError> {
-        let cost = self.cost_for(uses)?;
+    fn cost_for_with_existing_stack(
+        &self,
+        uses: &[BundleUseId],
+        stack_exists: bool,
+    ) -> Result<PartitionCost, IntervalAllocationError> {
+        let mut totals = HomeCostTotals::default();
+        self.visit_uses(uses, |row| totals.add(self.root, row))?;
+        totals.finish_with_existing_stack(self.root, stack_exists)
+    }
+
+    pub(super) fn partition(
+        &self,
+        uses: &[BundleUseId],
+    ) -> Result<HomePartition, IntervalAllocationError> {
+        self.partition_with_existing_stack(uses, false)
+    }
+
+    pub(super) fn partition_with_existing_stack(
+        &self,
+        uses: &[BundleUseId],
+        stack_exists: bool,
+    ) -> Result<HomePartition, IntervalAllocationError> {
+        let cost = self.cost_for_with_existing_stack(uses, stack_exists)?;
         let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
         let mut previous = None;
         for &use_id in uses {
@@ -663,7 +695,7 @@ impl RootHomePlan {
                     ));
                 }
             };
-            let creation_cost = if kind == HomeKind::Stack {
+            let creation_cost = if kind == HomeKind::Stack && !stack_exists {
                 STACK_HOME_CREATION_COST
             } else {
                 0
