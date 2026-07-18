@@ -2844,6 +2844,30 @@ still does not change production MIR or claim a Linux/timing result.  Step
 27d4 must build one allocation queue from all recomputed intervals and remove
 the one-register-child finalization rule.
 
+Step 27d4 builds that joint allocation boundary.  Every original or synthetic
+machine definition with a live interval enters one stable value table.  Exact
+register-region use subsets are reconstructed from the expanded per-use map;
+all definition-to-store, reload-to-use, recipe-intermediate, and dead-result
+machine ranges remain fixed transition values.  Old physical assignments are
+checked target-register affinities only.  A stale interval snapshot, orphaned
+region, mismatched exact use set, or non-bijective value index is rejected
+before coloring.
+
+The allocation walk follows dominator-tree definition order and queries the
+same CFG-sparse physical interval unions used by the diagnostic allocator.
+Thus sibling-arm ranges can share one register without a layout-linear live
+interval.  Success produces a total assignment which is independently rebuilt
+in a fresh sparse matrix.  Failure returns the blocked definition, every
+conflicting resident on each physical register, and the exact root regions
+eligible for splitting.  If all conflicts are already fixed transition
+ranges, allocation reports a producer error instead of inventing an
+unallocated scratch.  Focused tests cover affinity conflicts, complete
+original-plus-synthetic enrollment, sibling-arm sharing, a synthetic-pressure
+split request, and unsplittable local pressure.  Production MIR is still
+unchanged.  Step 27d5 must cost the returned alternatives, split a selected
+root into strictly smaller CFG-connected use regions, materialize new homes,
+and rerun this same joint allocation to a finite fixed point.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2906,6 +2930,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d1 allocation IR and shared synthetic-value liveness | this step | allocation IR 5/5; live interval 5/5 | lib 809/809; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | analysis/rewrite infrastructure is disconnected from production MIR | n/a | original and synthetic machine values now share exact CFG/phi-edge liveness; explicit home placement remains next |
 | 27d2 sparse all-path stack-home verification | this step | allocation IR 8/8 including both-arm, one-arm, and same-block-order home proofs | lib 812/812; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; strict clippy | stack verifier is not yet connected to `AllocationPlan` or production MIR | n/a | explicit synthetic stack operations now have a sparse reaching-store proof; home expansion remains next |
 | 27d3 allocation-home expansion into machine values | this step | allocation expansion 3/3; allocation IR 8/8 including shifted instruction and phi-edge anchors | lib 815/815; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | expanded problem remains disconnected from production MIR | n/a | stack/state/remat/register transitions now have exact synthetic ranges; joint reallocation remains next |
+| 27d4 joint original/synthetic allocation boundary | this step | joint allocation 4/4 including affinity override, sibling-arm sharing, split requests, and fixed-pressure rejection | lib 819/819; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | split requests are not yet resolved and production MIR is unchanged | n/a | old assignments are affinities only; every machine range is jointly colored or returned in an exact split obligation |
 
 ## Related design records
 

@@ -8,6 +8,8 @@
 mod allocation_expand;
 #[allow(dead_code)]
 mod allocation_ir;
+#[allow(dead_code)]
+mod allocation_reallocate;
 mod analysis;
 pub mod assignment;
 mod cfg;

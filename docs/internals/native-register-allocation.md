@@ -249,6 +249,21 @@ slice must enqueue those recomputed intervals together and permit any finite
 number of register regions; the old diagnostic assignments are not yet a
 complete physical allocation.
 
+The recomputed intervals now feed one joint allocation problem.  Every
+machine definition, including original values, stack/reload ranges, and every
+recipe intermediate, receives a stable allocation identity.  Retained root
+ranges carry their exact root-use subset and an optional old-register
+affinity; all other ranges are fixed transition values.  Coloring walks
+definitions in dominator-tree order against the sparse physical interval
+unions, so mutually exclusive CFG arms remain non-interfering.  A completed
+assignment is independently rebuilt in a fresh matrix.  If no register is
+available, the result contains every per-register resident conflict and all
+root regions which may legally be split.  Pressure involving only fixed
+transition ranges is rejected as a producer error rather than hidden behind a
+scratch register.  Resolving a split request into smaller connected regions
+and new exact homes remains the next slice; this joint problem is still
+disconnected from production MIR.
+
 ## Interim allocator architecture
 
 The techniques below describe the current implementation and solve different
