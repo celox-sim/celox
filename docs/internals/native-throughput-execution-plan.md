@@ -2241,15 +2241,32 @@ only about 5% of the complete retired-instruction gap.  Bounded allocation
 regions may still improve the 37,768-byte frame, but regional register
 allocation is not the first dominant fix.
 
-The exact hot SIR and MIR instead expose a state-representation problem.  For
-example, fused block `b9` loads an 839-bit packed state value, extracts
-508-, 82-, and 32-bit fragments, and updates many 1--5-bit fields in other
-packed values.  Native lowering implements narrow reads as containing-word
-loads followed by shift/mask operations, and narrow writes as
-load/and/or/store read-modify-write sequences.  The corresponding Veryl C uses
-independent `uint32_t`/`uint64_t` host slots for most small values, allowing
-GCC's scalar replacement, DSE, and vectorization to remove or combine that
-work.
+The exact hot SIR and MIR instead expose lost aggregate value information.
+For example, the comb prefix writes many disjoint ranges of the 839-bit
+`inst51,var6` state object, including `0+:65`, `65+:64`, `742+:32`,
+`774+:64`, and `838+:1`.  The FF suffix then reads many of those ranges and
+also contains a source-level 839-bit load.  The existing StateSSA identifies a
+slot by one exact `(address, offset, width)` access shape.  Every differently
+shaped overlapping access is therefore a `Kill`/escape instead of a use or
+definition of the same aggregate value.
+
+A read-side scalar-replacement trial proved that the source-level wide load is
+not itself the missing optimization.  The existing ISel wide-chunk liveness
+and MIR DCE already reduce that 839-bit load to the six containing machine-word
+loads needed by its surviving projections.  Replacing the SIR load with three
+contiguous projection loads produced the same six loads and the same
+shift/or/mask operations in the complete pre-allocation MIR; only virtual
+register numbering changed.  The trial was fully reverted without a runtime
+measurement because it did not change the retained generated work.
+
+The corresponding Veryl C leaves these accesses visible to a general O2
+pipeline long enough for aggregate scalar replacement, store-to-load
+forwarding, and DSE.  It can keep selected range values in SSA while retaining
+the packed object as a memory home.  Celox instead lowers overlapping access
+shapes back to ordered state-memory effects before it has represented their
+common range versions.  The problem is therefore not the external packed ABI
+or the mere existence of a packed home; it is failure to preserve and use the
+optimization freedom available before that home must be observed.
 
 This representation difference agrees with the complete dynamic instruction
 comparison.  Celox executes approximately 4.4x as many `and` instructions,
@@ -2261,45 +2278,61 @@ control flow.  Veryl SIMD instructions are only about 6.6% of its generated
 instruction stream, so SIMD alone cannot explain the threefold retired-work
 difference either.
 
-Status: **complete; the dominant gap is excess packed-state scalar work caused
-by missing aggregate SROA/mem2reg, while spill/reload is a secondary target**.
+Status: **complete; the dominant gap is failure to preserve aggregate range
+values across state memory.  Read-side wide-load lowering is already sparse;
+range-aware MemorySSA, write-side promotion, placement, and allocator homes
+remain missing**.
 
-### Step 26: Promote packed state through atomized MemorySSA
+### Step 26: Preserve aggregate ranges through StateSSA and allocation
 
-Implement the missing scalar-replacement layer without changing RTL storage
-semantics at observable boundaries.
+Implement the missing aggregate value layer without changing the external
+packed layout or RTL storage semantics at observable boundaries.  Logical
+ranges are SSA values; native words are only a lowering and memory-home choice,
+not the identity or declared width of those values.
 
-1. Canonicalize eligible static packed-state accesses into non-overlapping
-   native-word atoms.  Reject dynamic/indexed accesses, address aliases,
-   commits, four-state storage initially, and stores with trigger or capture
-   effects.  Preserve the original packed memory as the externally visible
-   home.
-2. Build pruned SSA names for those atoms over the complete SIR CFG.  A narrow
-   store updates the affected atom values, a wide load composes the reaching
-   atoms, and joins/loops receive block parameters from dominance-frontier
-   placement.  This extends rather than weakens the existing exact-fragment
-   StateSSA.
-3. Remove intermediate memory stores only after the atom SSA proof succeeds.
-   Materialize dirty atoms before an observable barrier and on every normal or
-   error exit.  An unchanged incoming memory value must not be written back.
-4. Verify the rewritten EU independently: every replaced load has one reaching
-   atom version, every removed store reaches the required writeback, and no
-   dynamic/effectful access was admitted.  Add diamond, loop, partial-overlap,
-   mixed-width, unchanged-edge, and rejection tests before enabling the pass
-   in native fused emission.
-5. For each retained slice, run its focused tests and the common non-LTO gates,
+1. For each eligible static object, collect the endpoints of every static load
+   and store over the complete fused CFG.  Partition only at those semantic
+   access boundaries.  Reject an object initially if it has a dynamic/indexed
+   access, address alias, commit with unresolved phase semantics, four-state
+   storage, trigger, or capture effect.  Do not partition at arbitrary 32- or
+   64-bit machine boundaries.
+2. Build pruned SSA names for the resulting non-overlapping logical ranges.
+   Each access is a use or definition of all ranges it covers; it is no longer
+   a kill merely because its width differs from another access.  A partial
+   store defines its covered ranges, a load composes only its requested
+   ranges, and joins/loops receive range parameters from dominance-frontier
+   placement.
+3. Preserve the packed state object as a lazy memory home.  Keep an unchanged
+   range in memory, materialize an SSA range near a consumer when carrying it
+   would create a long live range, and write dirty ranges only where an
+   observer, aliasing barrier, phase boundary, or function exit requires the
+   packed state.  Coalescing adjacent writebacks into native stores is a late
+   lowering decision, not StateSSA identity.
+4. Connect range versions to allocation recipes before removing broad sets of
+   loads or stores.  The allocator may carry, rematerialize, reload from a
+   still-valid state home, or spill a range according to its actual use
+   clusters.  It must not turn aggregate promotion into one whole-function
+   live range, as the rejected exact-slot cross-phase trial did.
+5. Verify the rewritten EU independently: every replaced load is composed from
+   dominating range versions, every state-home reload observes the same
+   MemorySSA version, every removed dirty store reaches all required
+   writebacks, and no dynamic/effectful access was admitted.  Add straight-line
+   overlap, diamond, loop, mixed-width, unchanged-edge, phase-boundary, and
+   rejection tests before enabling the rewrite in native fused emission.
+6. For each retained slice, run its focused tests and the common non-LTO gates,
    regenerate the complete optimized SIR/MIR/assignment/disassembly trace,
    and run the same-process CPU-0 Linux test.  Retain the implementation only
    if the exact tick/result is unchanged and generated execution improves
    substantially.  Use final release/LTO qualification only after the complete
    step wins.
-6. Re-profile the retained form.  If packed-state normalization removes the
-   dominant shift/mask/RMW excess, proceed to bounded regional allocation and
-   explicit MemorySSA homes for the remaining spill/reload work.  Do not tune
-   allocator heuristics against the pre-SROA instruction stream.
+7. Inspect the retained complete MIR and machine code.  If range promotion
+   removes the repeated load/extract and partial-write dataflow, proceed to
+   allocation-region and use-cluster work for the remaining reloads.  Do not
+   tune allocator heuristics against an IR which has already discarded the
+   aggregate versions they need.
 
-Status: **planned; atomization and CFG writeback correctness are the first
-implementation slice**.
+Status: **planned; access-boundary range analysis and its independent verifier
+are the first implementation slice**.
 
 ## Execution record
 
