@@ -1978,6 +1978,44 @@ the operations the complete local plan would actually emit.
 Status: **rejected and fully reverted; regression cause identified in the
 original CFG; block-transition join solver remains open**.
 
+### Step 21a: Extract the exact spill-planner block transition
+
+The rejected first-use trial showed that a join-entry score cannot stand in
+for the operations produced by the rest of the block.  Before attempting a
+new join solver, the existing per-block spill walk was therefore extracted as
+`plan_block_transition`.  Given an entry resident set and the already-known
+entry spill state, it runs the unchanged phi, use reload, pressure-limit,
+clobber, definition, re-eviction, and dead-value transfers and returns only
+the point operations plus the block's final resident and spilled sets.  The
+main planner calls this transition once and commits its result exactly as it
+did before the extraction.
+
+This is analysis infrastructure, not a throughput optimization and not an
+explanation of the remaining Celox/Veryl execution gap.  The complete pinned
+Heliodor trace was regenerated from the same source and working directory.
+All four outputs are byte-for-byte identical to the isolated Step 18 baseline:
+
+- `pre_optimized.sir`: `336d6b7bd66ea0c824293dd69c25fe2c7aa9f862b7a070ab73949db0bf3771d4`;
+- `post_optimized.sir`: `54886e73f2879a75bf7158351dc39f6a1980cf18916b86518d0780b13cdc27a8`;
+- `native_optimized.sir`: `cf909d3946bb1b70bfa084417414caf4406392b3959f7bf7953eba4e716eeddc`;
+  and
+- `mir.txt`: `5d7b357232819bd2aad35782eca32859ee23407f4f2bf32d50a23d9ca029df35`.
+
+The complete native register-allocation unit set passes 155/155 and the exact
+native-MIR integration set passes 6/6.  A trace-free CPU-0 non-LTO Linux run
+also reached normal `reboot: Power down` at exactly
+`cy=9ae070 x3=aa pass=1`; its separately reported intervals were 74.179 s for
+code generation and 144.439 s for generated-code execution.  Because the
+complete generated MIR is identical, this single timing is a correctness gate
+and not a performance claim.  No solver is added in this step.  The next step
+first has to identify the extra generated work behind the remaining
+same-workload execution gap and trace it back to the responsible SIR or MIR
+decision; only then can this transition be used to evaluate a proved
+allocator cause.
+
+Status: **complete as a behavior-preserving analysis refactor; remaining
+throughput cause is not yet established**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -2013,6 +2051,7 @@ original CFG; block-transition join solver remains open**.
 | 19 pre-RA reload-schedule trial | rejected (no commit) | focused reload scheduling 2/2; allocator 157/157; native MIR exposed the intended placement delta | trial reverted before retained common gate | CPU-0 non-LTO A--B--A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical | candidate compile 66.116 / 64.152 / 66.008 s vs baseline 63.882 / 65.501 s; candidate execute mean 137.665 s vs baseline 131.124 s | execute +4.99%; fully reverted; post-RA scheduling remains open |
 | 19 post-color reload-schedule trial | rejected (no commit) | focused physical-use/MemorySSA barriers 3/3; allocator 158/158; native MIR 6/6 | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; assignments and non-load instruction order byte-identical | candidate compile 69.308 / 67.862 s vs baseline 65.766 s; candidate execute mean 134.911 s vs baseline 129.176 s | execute +4.44%; fully reverted; fixed-distance scheduling closed |
 | 20 first-use join-cost trial | rejected (no commit) | focused first-use regression 1/1; allocator 155/155; non-LTO runner build | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical; original `bb1767` path has two extra loads and one extra store | candidate compile 69.352 / 66.218 s vs baseline 66.532 s; candidate execute mean 133.411 s vs baseline 128.487 s | execute +3.83%; fully reverted; complete block-transition pricing required |
+| 21a exact block-transition extraction | pending | allocator 155/155; native MIR 6/6 | format, docs, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR and MIR byte-identical to isolated Step 18 baseline | compile 74.179 s; execute 144.439 s; no timing claim | analysis infrastructure only; remaining throughput cause not established |
 
 ## Related design records
 

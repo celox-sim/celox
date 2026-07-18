@@ -62,6 +62,14 @@ pub(super) struct SpillPlan {
     pub s_exit: Vec<BTreeSet<LogicalValue>>,
 }
 
+#[derive(Debug)]
+struct BlockTransition {
+    point_ops: Vec<(ProgramPoint, PlannedOp)>,
+    recipe_reloads: BTreeSet<(BlockId, usize, LogicalValue)>,
+    w_exit: BTreeSet<LogicalValue>,
+    s_exit: BTreeSet<LogicalValue>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SpillPlanError {
     pub rule: &'static str,
@@ -459,174 +467,21 @@ pub(super) fn plan_with_recipe_costs(
             }));
         }
         result.s_entry[block] = spilled.clone();
-        let mut resident = result.w_entry[block].clone();
-        let mut deferred_recipe_reloads = BTreeMap::<LogicalValue, PointUse>::new();
-
-        for phi in &func.blocks[block].phis {
-            let value = result
-                .logical
-                .checked_of(phi.dst, Some(func.blocks[block].id), Some(0))?;
-            if !resident.contains(&value) {
-                result.point_ops.push((
-                    ProgramPoint {
-                        block: func.blocks[block].id,
-                        instruction: 0,
-                        side: PointSide::Before,
-                    },
-                    PlannedOp::SpillPhi {
-                        value,
-                        home: result.homes.of_logical(value),
-                    },
-                ));
-                spilled.insert(value);
-            }
-        }
-
-        for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
-            let uses = inst
-                .uses()
-                .into_iter()
-                .map(|value| {
-                    result
-                        .logical
-                        .checked_of(value, Some(func.blocks[block].id), Some(instruction))
-                })
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            for &value in &uses {
-                if resident.insert(value) {
-                    if let Some(expected) = deferred_recipe_reloads.remove(&value) {
-                        let actual = PointUse {
-                            block: func.blocks[block].id,
-                            instruction,
-                            value: VReg(value.0),
-                        };
-                        if expected != actual {
-                            return Err(SpillPlanError::new(
-                                "SPILL_PLAN.RECIPE_RELOAD_POINT",
-                                Some(func.blocks[block].id),
-                                Some(instruction),
-                                vec![VReg(value.0)],
-                                format!(
-                                    "deferred recipe reload expected {expected:?} but reached {actual:?}"
-                                ),
-                            ));
-                        }
-                        result
-                            .recipe_reloads
-                            .insert((func.blocks[block].id, instruction, value));
-                    }
-                    result.point_ops.push((
-                        ProgramPoint {
-                            block: func.blocks[block].id,
-                            instruction,
-                            side: PointSide::Before,
-                        },
-                        PlannedOp::Reload {
-                            value,
-                            home: result.homes.of_logical(value),
-                        },
-                    ));
-                }
-            }
-            limit(
-                func,
-                next_use,
-                planning_recipes,
-                &mut result,
-                block,
-                instruction,
-                instruction,
-                registers,
-                &uses,
-                &mut resident,
-                &mut spilled,
-                &mut deferred_recipe_reloads,
-            )?;
-            let clobbered = clobbers(inst).len();
-            if clobbered > registers {
-                return Err(SpillPlanError::new(
-                    "SPILL_PLAN.CLOBBER_CAPACITY",
-                    Some(func.blocks[block].id),
-                    Some(instruction),
-                    inst.uses().to_vec(),
-                    format!(
-                        "instruction clobbers {clobbered} registers but the allocator has only {registers}"
-                    ),
-                ));
-            }
-            if clobbered != 0 {
-                limit_live_through_clobber(
-                    func,
-                    next_use,
-                    planning_recipes,
-                    &mut result,
-                    block,
-                    instruction,
-                    registers.saturating_sub(clobbered),
-                    &mut resident,
-                    &mut spilled,
-                    &mut deferred_recipe_reloads,
-                )?;
-            }
-            if let Some(definition) = inst.def() {
-                let definition = result.logical.checked_of(
-                    definition,
-                    Some(func.blocks[block].id),
-                    Some(instruction),
-                )?;
-                if !resident.contains(&definition) && resident.len() == registers {
-                    let Some(maximum) = registers.checked_sub(1) else {
-                        return Err(SpillPlanError::new(
-                            "SPILL_PLAN.OPERAND_PRESSURE",
-                            Some(func.blocks[block].id),
-                            Some(instruction),
-                            vec![VReg(definition.0)],
-                            "an instruction result requires a register but no registers are available",
-                        ));
-                    };
-                    limit(
-                        func,
-                        next_use,
-                        planning_recipes,
-                        &mut result,
-                        block,
-                        instruction,
-                        instruction + 1,
-                        maximum,
-                        &uses,
-                        &mut resident,
-                        &mut spilled,
-                        &mut deferred_recipe_reloads,
-                    )?;
-                }
-                resident.insert(definition);
-            }
-            resident.retain(|value| {
-                !logical_distance_at(
-                    func,
-                    next_use,
-                    &result.logical,
-                    block,
-                    instruction + 1,
-                    *value,
-                )
-                .is_dead()
-            });
-        }
-        if !deferred_recipe_reloads.is_empty() {
-            return Err(SpillPlanError::new(
-                "SPILL_PLAN.RECIPE_RELOAD_POINT",
-                Some(func.blocks[block].id),
-                None,
-                deferred_recipe_reloads
-                    .keys()
-                    .map(|value| VReg(value.0))
-                    .collect(),
-                "deferred recipe reload did not reach its final local use",
-            ));
-        }
-        result.w_exit[block] = resident;
-        result.s_exit[block] = spilled;
+        let transition = plan_block_transition(
+            func,
+            next_use,
+            planning_recipes,
+            &result.logical,
+            &result.homes,
+            block,
+            registers,
+            &result.w_entry[block],
+            spilled,
+        )?;
+        result.point_ops.extend(transition.point_ops);
+        result.recipe_reloads.extend(transition.recipe_reloads);
+        result.w_exit[block] = transition.w_exit;
+        result.s_exit[block] = transition.s_exit;
     }
 
     // Section 4.3.  Delaying this until every W/S exit is known is equivalent
@@ -665,11 +520,191 @@ pub(super) fn plan_with_recipe_costs(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn plan_block_transition(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    logical: &LogicalValues,
+    homes: &PhiCongruenceClasses,
+    block: usize,
+    registers: usize,
+    w_entry: &BTreeSet<LogicalValue>,
+    mut spilled: BTreeSet<LogicalValue>,
+) -> Result<BlockTransition, SpillPlanError> {
+    let mut transition = BlockTransition {
+        point_ops: Vec::new(),
+        recipe_reloads: BTreeSet::new(),
+        w_exit: BTreeSet::new(),
+        s_exit: BTreeSet::new(),
+    };
+    let mut resident = w_entry.clone();
+    let mut deferred_recipe_reloads = BTreeMap::<LogicalValue, PointUse>::new();
+
+    for phi in &func.blocks[block].phis {
+        let value = logical.checked_of(phi.dst, Some(func.blocks[block].id), Some(0))?;
+        if !resident.contains(&value) {
+            transition.point_ops.push((
+                ProgramPoint {
+                    block: func.blocks[block].id,
+                    instruction: 0,
+                    side: PointSide::Before,
+                },
+                PlannedOp::SpillPhi {
+                    value,
+                    home: homes.of_logical(value),
+                },
+            ));
+            spilled.insert(value);
+        }
+    }
+
+    for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+        let uses = inst
+            .uses()
+            .into_iter()
+            .map(|value| logical.checked_of(value, Some(func.blocks[block].id), Some(instruction)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        for &value in &uses {
+            if resident.insert(value) {
+                if let Some(expected) = deferred_recipe_reloads.remove(&value) {
+                    let actual = PointUse {
+                        block: func.blocks[block].id,
+                        instruction,
+                        value: VReg(value.0),
+                    };
+                    if expected != actual {
+                        return Err(SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_RELOAD_POINT",
+                            Some(func.blocks[block].id),
+                            Some(instruction),
+                            vec![VReg(value.0)],
+                            format!(
+                                "deferred recipe reload expected {expected:?} but reached {actual:?}"
+                            ),
+                        ));
+                    }
+                    transition
+                        .recipe_reloads
+                        .insert((func.blocks[block].id, instruction, value));
+                }
+                transition.point_ops.push((
+                    ProgramPoint {
+                        block: func.blocks[block].id,
+                        instruction,
+                        side: PointSide::Before,
+                    },
+                    PlannedOp::Reload {
+                        value,
+                        home: homes.of_logical(value),
+                    },
+                ));
+            }
+        }
+        limit(
+            func,
+            next_use,
+            planning_recipes,
+            logical,
+            homes,
+            &mut transition.point_ops,
+            block,
+            instruction,
+            instruction,
+            registers,
+            &uses,
+            &mut resident,
+            &mut spilled,
+            &mut deferred_recipe_reloads,
+        )?;
+        let clobbered = clobbers(inst).len();
+        if clobbered > registers {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.CLOBBER_CAPACITY",
+                Some(func.blocks[block].id),
+                Some(instruction),
+                inst.uses().to_vec(),
+                format!(
+                    "instruction clobbers {clobbered} registers but the allocator has only {registers}"
+                ),
+            ));
+        }
+        if clobbered != 0 {
+            limit_live_through_clobber(
+                func,
+                next_use,
+                planning_recipes,
+                logical,
+                homes,
+                &mut transition.point_ops,
+                block,
+                instruction,
+                registers.saturating_sub(clobbered),
+                &mut resident,
+                &mut spilled,
+                &mut deferred_recipe_reloads,
+            )?;
+        }
+        if let Some(definition) = inst.def() {
+            let definition =
+                logical.checked_of(definition, Some(func.blocks[block].id), Some(instruction))?;
+            if !resident.contains(&definition) && resident.len() == registers {
+                let Some(maximum) = registers.checked_sub(1) else {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.OPERAND_PRESSURE",
+                        Some(func.blocks[block].id),
+                        Some(instruction),
+                        vec![VReg(definition.0)],
+                        "an instruction result requires a register but no registers are available",
+                    ));
+                };
+                limit(
+                    func,
+                    next_use,
+                    planning_recipes,
+                    logical,
+                    homes,
+                    &mut transition.point_ops,
+                    block,
+                    instruction,
+                    instruction + 1,
+                    maximum,
+                    &uses,
+                    &mut resident,
+                    &mut spilled,
+                    &mut deferred_recipe_reloads,
+                )?;
+            }
+            resident.insert(definition);
+        }
+        resident.retain(|value| {
+            !logical_distance_at(func, next_use, logical, block, instruction + 1, *value).is_dead()
+        });
+    }
+    if !deferred_recipe_reloads.is_empty() {
+        return Err(SpillPlanError::new(
+            "SPILL_PLAN.RECIPE_RELOAD_POINT",
+            Some(func.blocks[block].id),
+            None,
+            deferred_recipe_reloads
+                .keys()
+                .map(|value| VReg(value.0))
+                .collect(),
+            "deferred recipe reload did not reach its final local use",
+        ));
+    }
+    transition.w_exit = resident;
+    transition.s_exit = spilled;
+    Ok(transition)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn limit_live_through_clobber(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    plan: &mut SpillPlan,
+    logical: &LogicalValues,
+    homes: &PhiCongruenceClasses,
+    point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     instruction: usize,
     capacity: usize,
@@ -681,15 +716,7 @@ fn limit_live_through_clobber(
         .iter()
         .copied()
         .filter(|value| {
-            !logical_distance_at(
-                func,
-                next_use,
-                &plan.logical,
-                block,
-                instruction + 1,
-                *value,
-            )
-            .is_dead()
+            !logical_distance_at(func, next_use, logical, block, instruction + 1, *value).is_dead()
         })
         .collect::<BTreeSet<_>>();
     while live_through.len() > capacity {
@@ -703,25 +730,11 @@ fn limit_live_through_clobber(
                 instruction + 1,
                 (
                     *left,
-                    logical_distance_at(
-                        func,
-                        next_use,
-                        &plan.logical,
-                        block,
-                        instruction + 1,
-                        *left,
-                    ),
+                    logical_distance_at(func, next_use, logical, block, instruction + 1, *left),
                 ),
                 (
                     *right,
-                    logical_distance_at(
-                        func,
-                        next_use,
-                        &plan.logical,
-                        block,
-                        instruction + 1,
-                        *right,
-                    ),
+                    logical_distance_at(func, next_use, logical, block, instruction + 1, *right),
                 ),
             )
         }) else {
@@ -737,7 +750,8 @@ fn limit_live_through_clobber(
             func,
             next_use,
             planning_recipes,
-            plan,
+            homes,
+            point_ops,
             block,
             instruction,
             instruction + 1,
@@ -917,7 +931,9 @@ fn limit(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    plan: &mut SpillPlan,
+    logical: &LogicalValues,
+    homes: &PhiCongruenceClasses,
+    point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
     distance_instruction: usize,
@@ -945,7 +961,7 @@ fn limit(
                         logical_distance_at(
                             func,
                             next_use,
-                            &plan.logical,
+                            logical,
                             block,
                             distance_instruction,
                             *left,
@@ -956,7 +972,7 @@ fn limit(
                         logical_distance_at(
                             func,
                             next_use,
-                            &plan.logical,
+                            logical,
                             block,
                             distance_instruction,
                             *right,
@@ -980,7 +996,8 @@ fn limit(
             func,
             next_use,
             planning_recipes,
-            plan,
+            homes,
+            point_ops,
             block,
             point_instruction,
             distance_instruction,
@@ -998,7 +1015,8 @@ fn evict_value(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    plan: &mut SpillPlan,
+    homes: &PhiCongruenceClasses,
+    point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
     distance_instruction: usize,
@@ -1033,7 +1051,7 @@ fn evict_value(
         }
     }
     spilled.insert(value);
-    plan.point_ops.push((
+    point_ops.push((
         ProgramPoint {
             block: func.blocks[block].id,
             instruction: point_instruction,
@@ -1041,7 +1059,7 @@ fn evict_value(
         },
         PlannedOp::Spill {
             value,
-            home: plan.homes.of_logical(value),
+            home: homes.of_logical(value),
         },
     ));
     Ok(())
