@@ -8,20 +8,21 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
+use std::sync::Arc;
 
 use crate::backend::native::mir::{BlockId, VReg};
 
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{
-    BundleUseId, HomeGraph, HomeKind, LiveBundleId, STACK_HOME_CREATION_COST,
+    BundleUseId, HomeGraph, HomeKind, LiveBundle, LiveBundleId, STACK_HOME_CREATION_COST,
     STACK_HOME_MATERIALIZATION_COST, UseHome, UseMaterialization,
 };
 use super::interval_union::{
     AllocationBundleId, ConflictCollector, IntervalUnionError, LiveIntervalMatrix, SparseRange,
     live_length,
 };
-use super::live_interval::{DefinitionSite, LiveSegment, UseSite};
+use super::live_interval::{DefinitionSite, LiveSegment, SlotIndex, UseSite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AllocationStage {
@@ -724,6 +725,20 @@ struct RegionSeed {
     block: usize,
 }
 
+/// CFG/use topology of one immutable root live range. Physical-register
+/// occupancy cuts its nodes into free fragments later; it never rebuilds the
+/// root's block map, boundary edges, or exact use ownership.
+#[derive(Debug)]
+struct SplitTopology {
+    node_blocks: Vec<usize>,
+    block_nodes: BTreeMap<usize, Vec<usize>>,
+    node_entries: Vec<SlotIndex>,
+    node_exits: Vec<SlotIndex>,
+    use_nodes: Vec<Option<usize>>,
+    seeds: Vec<RegionSeed>,
+    edges: Vec<(usize, usize)>,
+}
+
 fn segment_node_at(
     nodes: &[usize],
     segments: &[LiveSegment],
@@ -735,6 +750,157 @@ fn segment_node_at(
         .filter(|&node| segments[node].contains(slot))
 }
 
+fn projected_node_at(
+    free: &[LiveSegment],
+    start: usize,
+    end: usize,
+    slot: SlotIndex,
+) -> Option<usize> {
+    if start >= end || end > free.len() {
+        return None;
+    }
+    if end - start == 1 {
+        return free[start].contains(slot).then_some(start);
+    }
+    let fragments = &free[start..end];
+    let position = fragments.partition_point(|segment| segment.start <= slot);
+    (position != 0)
+        .then(|| start + position - 1)
+        .filter(|&node| free[node].contains(slot))
+}
+
+impl SplitTopology {
+    fn build(
+        graph: &HomeGraph,
+        cfg: &NormalizedCfg,
+        dominance: &Dominance,
+        bundle: &AllocatedBundle,
+        root: &LiveBundle,
+    ) -> Result<Self, IntervalAllocationError> {
+        let segments = bundle.segments.as_slice();
+        let mut node_blocks = Vec::with_capacity(segments.len());
+        let mut block_nodes = BTreeMap::<usize, Vec<usize>>::new();
+        let mut node_entries = Vec::with_capacity(segments.len());
+        let mut node_exits = Vec::with_capacity(segments.len());
+        for (node, segment) in segments.iter().enumerate() {
+            let Some(&block) = cfg.block_index.get(&segment.block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_BLOCK",
+                    Some(segment.block),
+                    Some(bundle.id),
+                    "root split segment references a block outside the CFG",
+                ));
+            };
+            let Some(slots) = graph.intervals.block_slots.get(block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_BLOCK",
+                    Some(segment.block),
+                    Some(bundle.id),
+                    "root split segment has no slot-index row",
+                ));
+            };
+            node_blocks.push(block);
+            block_nodes.entry(block).or_default().push(node);
+            node_entries.push(slots.entry);
+            node_exits.push(slots.exit);
+        }
+
+        let mut use_nodes = vec![None; root.uses.len()];
+        let mut seeds = Vec::new();
+        for &use_id in &bundle.uses {
+            let Some(use_) = root.uses.get(use_id.0 as usize) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_RANGE",
+                    Some(bundle.definition.block()),
+                    Some(bundle.id),
+                    format!("bundle use {use_id:?} is outside its HomeGraph root"),
+                ));
+            };
+            let Some(&block) = cfg.block_index.get(&use_.site.block()) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_BLOCK",
+                    Some(use_.site.block()),
+                    Some(bundle.id),
+                    "bundle use references a block outside the CFG",
+                ));
+            };
+            let Some(nodes) = block_nodes.get(&block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_USE_RANGE",
+                    Some(use_.site.block()),
+                    Some(bundle.id),
+                    "bundle use has no live-range node in its CFG block",
+                ));
+            };
+            let Some(node) = segment_node_at(nodes, segments, use_.site.slot()) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_USE_RANGE",
+                    Some(use_.site.block()),
+                    Some(bundle.id),
+                    "bundle use is outside its canonical live-range segment",
+                ));
+            };
+            use_nodes[use_id.0 as usize] = Some(node);
+            if matches!(use_.site, UseSite::Instruction { .. }) {
+                seeds.push(RegionSeed {
+                    use_id,
+                    node,
+                    site: use_.site,
+                    block,
+                });
+            }
+        }
+        seeds.sort_unstable_by_key(|seed| {
+            (dominance.enter[seed.block], seed.site.slot(), seed.use_id)
+        });
+
+        let mut edges = Vec::new();
+        for (&block, nodes) in &block_nodes {
+            let Some(source) =
+                segment_node_at(nodes, segments, graph.intervals.block_slots[block].exit)
+            else {
+                continue;
+            };
+            let Some(successors) = cfg.successors.get(block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_BLOCK",
+                    None,
+                    Some(bundle.id),
+                    "root split block has no CFG successor row",
+                ));
+            };
+            for &successor in successors {
+                let Some(target_nodes) = block_nodes.get(&successor) else {
+                    continue;
+                };
+                let Some(target_slots) = graph.intervals.block_slots.get(successor) else {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.SPLIT_BLOCK",
+                        None,
+                        Some(bundle.id),
+                        "root split successor has no slot-index row",
+                    ));
+                };
+                if let Some(target) = segment_node_at(target_nodes, segments, target_slots.entry) {
+                    edges.push((source, target));
+                }
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+
+        Ok(Self {
+            node_blocks,
+            block_nodes,
+            node_entries,
+            node_exits,
+            use_nodes,
+            seeds,
+            edges,
+        })
+    }
+}
+
 struct Allocator<'a> {
     graph: &'a HomeGraph,
     cfg: &'a NormalizedCfg,
@@ -743,6 +909,7 @@ struct Allocator<'a> {
     matrix: LiveIntervalMatrix,
     conflict_collector: ConflictCollector,
     bundles: Vec<AllocatedBundle>,
+    split_topologies: Vec<Option<Arc<SplitTopology>>>,
     queue: BinaryHeap<QueueItem>,
 }
 
@@ -831,6 +998,7 @@ impl<'a> Allocator<'a> {
             matrix,
             conflict_collector: ConflictCollector::default(),
             bundles,
+            split_topologies: vec![None; graph.bundles.len()],
             queue,
         })
     }
@@ -862,6 +1030,53 @@ impl<'a> Allocator<'a> {
                 "allocation bundle is outside the stable bundle table",
             )
         })
+    }
+
+    fn split_topology(
+        &mut self,
+        id: AllocationBundleId,
+    ) -> Result<Arc<SplitTopology>, IntervalAllocationError> {
+        let slot = self.split_topologies.get(id.0 as usize).ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.SPLIT_ROOT",
+                None,
+                Some(id),
+                "only immutable root bundles may own split topology",
+            )
+        })?;
+        if let Some(topology) = slot {
+            return Ok(Arc::clone(topology));
+        }
+        let bundle = self.bundle(id)?;
+        if bundle.parent.is_some() {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.SPLIT_ROOT",
+                Some(bundle.definition.block()),
+                Some(id),
+                "split child cannot be analyzed as a new root topology",
+            ));
+        }
+        let root = self
+            .graph
+            .bundles
+            .get(bundle.root.0 as usize)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.ROOT_RANGE",
+                    Some(bundle.definition.block()),
+                    Some(id),
+                    "allocation bundle references a missing HomeGraph root",
+                )
+            })?;
+        let topology = Arc::new(SplitTopology::build(
+            self.graph,
+            self.cfg,
+            &self.dominance,
+            bundle,
+            root,
+        )?);
+        self.split_topologies[id.0 as usize] = Some(Arc::clone(&topology));
+        Ok(topology)
     }
 
     fn assign_register(
@@ -1093,6 +1308,7 @@ impl<'a> Allocator<'a> {
         id: AllocationBundleId,
         register: PhysReg,
         register_order: usize,
+        topology: &SplitTopology,
         home_costs: &HomeCostIndex,
     ) -> Result<Vec<RegionCandidate>, IntervalAllocationError> {
         let bundle = self.bundle(id)?;
@@ -1116,7 +1332,19 @@ impl<'a> Allocator<'a> {
             return Ok(Vec::new());
         }
 
-        let mut block_nodes = BTreeMap::<usize, Vec<usize>>::new();
+        if topology.node_blocks.len() != bundle.segments.len()
+            || topology.node_entries.len() != bundle.segments.len()
+            || topology.node_exits.len() != bundle.segments.len()
+        {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
+                Some(bundle.definition.block()),
+                Some(id),
+                "split topology shape differs from its canonical live range",
+            ));
+        }
+        let mut fragment_starts = vec![usize::MAX; bundle.segments.len()];
+        let mut fragment_ends = vec![0; bundle.segments.len()];
         let mut node_blocks = Vec::with_capacity(free.len());
         for (node, segment) in free.iter().enumerate() {
             let Some(&block) = self.cfg.block_index.get(&segment.block) else {
@@ -1127,8 +1355,45 @@ impl<'a> Allocator<'a> {
                     "free segment references a block outside the CFG",
                 ));
             };
-            block_nodes.entry(block).or_default().push(node);
-            node_blocks.push(block);
+            let Some(canonical_nodes) = topology.block_nodes.get(&block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
+                    Some(segment.block),
+                    Some(id),
+                    "free segment has no canonical topology node in its block",
+                ));
+            };
+            let Some(parent) =
+                segment_node_at(canonical_nodes, bundle.segments.as_slice(), segment.start)
+            else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
+                    Some(segment.block),
+                    Some(id),
+                    "free segment starts outside the canonical live range",
+                ));
+            };
+            let canonical = bundle.segments[parent];
+            if canonical.start > segment.start || segment.end > canonical.end {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
+                    Some(segment.block),
+                    Some(id),
+                    "free segment is not contained by its canonical topology node",
+                ));
+            }
+            if fragment_starts[parent] == usize::MAX {
+                fragment_starts[parent] = node;
+            } else if fragment_ends[parent] != node {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
+                    Some(segment.block),
+                    Some(id),
+                    "one canonical node has non-contiguous projected fragments",
+                ));
+            }
+            fragment_ends[parent] = node + 1;
+            node_blocks.push(topology.node_blocks[parent]);
         }
 
         let mut use_nodes = vec![None; root.uses.len()];
@@ -1143,18 +1408,20 @@ impl<'a> Allocator<'a> {
                     format!("bundle use {use_id:?} is outside its HomeGraph root"),
                 ));
             };
-            let Some(&block) = self.cfg.block_index.get(&use_.site.block()) else {
+            let Some(parent) = topology.use_nodes.get(use_id.0 as usize).copied().flatten() else {
                 return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.USE_BLOCK",
+                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
                     Some(use_.site.block()),
                     Some(id),
-                    "bundle use references a block outside the CFG",
+                    "bundle use has no canonical topology owner",
                 ));
             };
-            let Some(nodes) = block_nodes.get(&block) else {
-                continue;
-            };
-            if let Some(node) = segment_node_at(nodes, &free, use_.site.slot()) {
+            if let Some(node) = projected_node_at(
+                &free,
+                fragment_starts[parent],
+                fragment_ends[parent],
+                use_.site.slot(),
+            ) {
                 use_nodes[use_id.0 as usize] = Some(node);
                 free_use_count = free_use_count.checked_add(1).ok_or_else(|| {
                     IntervalAllocationError::new(
@@ -1164,75 +1431,52 @@ impl<'a> Allocator<'a> {
                         "free-region use count exceeds usize",
                     )
                 })?;
-                if matches!(use_.site, UseSite::Instruction { .. }) {
-                    entries.push(RegionSeed {
-                        use_id,
-                        node,
-                        site: use_.site,
-                        block,
-                    });
-                }
+            }
+        }
+        for seed in &topology.seeds {
+            if let Some(node) = projected_node_at(
+                &free,
+                fragment_starts[seed.node],
+                fragment_ends[seed.node],
+                seed.site.slot(),
+            ) {
+                entries.push(RegionSeed { node, ..*seed });
             }
         }
         if free_use_count < 2 || entries.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Cross-block connectivity is needed only for blocks in this bundle's
-        // free sparse range.  Walking every CFG row for every bundle/register
-        // is quadratic on large branchified RTL functions.
+        // The canonical CFG edges were built once. A register contributes only
+        // occupancy cuts: an edge survives when both boundary slots remain in
+        // a projected free fragment.
         let mut forward = vec![Vec::new(); free.len()];
         let mut reverse = vec![Vec::new(); free.len()];
-        for (&block, nodes) in &block_nodes {
-            let Some(block_slots) = self.graph.intervals.block_slots.get(block) else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_BLOCK",
-                    None,
-                    Some(id),
-                    "free-region block has no slot-index row",
-                ));
-            };
-            let Some(source) = segment_node_at(nodes, &free, block_slots.exit) else {
+        for &(source_parent, target_parent) in &topology.edges {
+            let Some(source) = projected_node_at(
+                &free,
+                fragment_starts[source_parent],
+                fragment_ends[source_parent],
+                topology.node_exits[source_parent],
+            ) else {
                 continue;
             };
-            let Some(successors) = self.cfg.successors.get(block) else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_BLOCK",
-                    None,
-                    Some(id),
-                    "free-region block has no CFG successor row",
-                ));
+            let Some(target) = projected_node_at(
+                &free,
+                fragment_starts[target_parent],
+                fragment_ends[target_parent],
+                topology.node_entries[target_parent],
+            ) else {
+                continue;
             };
-            for &successor in successors {
-                let Some(target_nodes) = block_nodes.get(&successor) else {
-                    continue;
-                };
-                let Some(target_slots) = self.graph.intervals.block_slots.get(successor) else {
-                    return Err(IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.SPLIT_BLOCK",
-                        None,
-                        Some(id),
-                        "free-region successor has no slot-index row",
-                    ));
-                };
-                if let Some(target) = segment_node_at(target_nodes, &free, target_slots.entry) {
-                    forward[source].push(target);
-                    reverse[target].push(source);
-                }
-            }
+            forward[source].push(target);
+            reverse[target].push(source);
         }
 
         // Partition the free graph among earliest dominating instruction uses.
         // A node is claimed once, so sibling paths form separate clusters while
         // a head use carries one cluster through all dominated successors.
         // This replaces one whole-graph forward search per use.
-        entries.sort_unstable_by_key(|entry| {
-            (
-                self.dominance.enter[entry.block],
-                entry.site.slot(),
-                entry.use_id,
-            )
-        });
         let mut owners = vec![None::<usize>; free.len()];
         let mut seeds = Vec::<RegionSeed>::new();
         let mut owner_nodes = Vec::<Vec<usize>>::new();
@@ -1401,10 +1645,13 @@ impl<'a> Allocator<'a> {
         let baseline = bundle.spill_cost;
         let root = bundle.root;
         let uses = bundle.uses.clone();
+        let topology = self.split_topology(id)?;
         let home_costs = HomeCostIndex::new(self.graph, root, &uses)?;
         let mut best = None::<RegionCandidate>;
         for probe in probes {
-            for candidate in self.region_candidates(id, probe.register, probe.order, &home_costs)? {
+            for candidate in
+                self.region_candidates(id, probe.register, probe.order, &topology, &home_costs)?
+            {
                 if candidate.total_cost >= baseline {
                     continue;
                 }
@@ -2626,6 +2873,39 @@ mod tests {
         assert_eq!(state.uses, vec![BundleUseId(0)]);
         assert_eq!(stack.uses, vec![BundleUseId(1)]);
         assert_eq!(partition.total_cost, 3);
+    }
+
+    #[test]
+    fn split_topology_is_built_once_per_immutable_root() {
+        let insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            },
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(3, insts);
+        let (cfg, graph) = model(&mut function);
+        let mut allocator = Allocator::new(&graph, &cfg, &[PhysReg::RAX]).unwrap();
+        let root = bundle_id(&graph, VReg(0));
+
+        let first = allocator.split_topology(root).unwrap();
+        let second = allocator.split_topology(root).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.node_blocks.len(),
+            graph.bundles[root.0 as usize].segments.len()
+        );
+        assert_eq!(first.use_nodes.iter().flatten().count(), 2);
     }
 
     #[test]
