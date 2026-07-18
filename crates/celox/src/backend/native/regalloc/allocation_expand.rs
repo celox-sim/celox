@@ -4,8 +4,8 @@
 //! selected: stack stores/reloads and recipe nodes define additional machine
 //! values which can interfere with those assignments. This phase materializes
 //! every selected transition in [`AllocationIr`], rewrites exact original uses,
-//! recomputes liveness for all values, and returns physical registers only as
-//! preferences for the next allocation round.
+//! updates exact liveness for affected values, and returns physical registers
+//! only as preferences for the next allocation round.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -26,7 +26,7 @@ use super::interval_allocator::{
     AllocatedBundle, AllocationPlan, BundleAssignment, HomeSelection, IntervalAllocationError,
 };
 use super::interval_union::AllocationBundleId;
-use super::live_interval::{LiveIntervals, UseSite};
+use super::live_interval::{IncrementalLiveness, LiveIntervalError, LiveIntervals, UseSite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct RegisterRegionId(pub u32);
@@ -128,10 +128,53 @@ pub(super) enum ExpandedStackHomeKind {
     EdgeRecipe { use_id: BundleUseId },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpandedUseRef {
+    root: usize,
+    use_: usize,
+}
+
+/// Immutable index from a physical original-use block to expanded metadata.
+/// Synthetic insertion shifts slots, but never changes this ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExpandedUseIndex {
+    by_block: Vec<Vec<ExpandedUseRef>>,
+}
+
+impl ExpandedUseIndex {
+    pub(super) fn build(
+        roots: &[ExpandedRoot],
+        cfg: &NormalizedCfg,
+    ) -> Result<Self, AllocationExpandError> {
+        let mut by_block = vec![Vec::new(); cfg.successors.len()];
+        for (root_index, root) in roots.iter().enumerate() {
+            for (use_index, use_) in root.uses.iter().enumerate() {
+                let block = use_.original_site.block();
+                let row = cfg.block_index.get(&block).copied().ok_or_else(|| {
+                    AllocationExpandError::new(
+                        "ALLOCATION_EXPAND.USE_INDEX_BLOCK",
+                        Some(block),
+                        Some(root.id),
+                        Some(use_.id),
+                        "original expanded use is outside the normalized CFG",
+                    )
+                })?;
+                by_block[row].push(ExpandedUseRef {
+                    root: root_index,
+                    use_: use_index,
+                });
+            }
+        }
+        Ok(Self { by_block })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExpandedAllocationProblem {
     pub ir: AllocationIr,
     pub intervals: LiveIntervals,
+    pub incremental_liveness: IncrementalLiveness,
+    pub use_index: ExpandedUseIndex,
     pub shift_encoding: VariableShiftEncoding,
     pub roots: Vec<ExpandedRoot>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
@@ -173,6 +216,10 @@ impl AllocationExpandError {
     }
 
     fn ir(error: AllocationIrError) -> Self {
+        Self::new(error.rule, error.block, None, None, error.message)
+    }
+
+    fn live(error: LiveIntervalError) -> Self {
         Self::new(error.rule, error.block, None, None, error.message)
     }
 }
@@ -482,9 +529,14 @@ pub(super) fn expand(
     }
 
     let intervals = analyze_and_resolve(&ir, &mut roots, cfg)?;
+    let incremental_liveness =
+        IncrementalLiveness::build(&ir, cfg, &intervals).map_err(AllocationExpandError::live)?;
+    let use_index = ExpandedUseIndex::build(&roots, cfg)?;
     Ok(ExpandedAllocationProblem {
         ir,
         intervals,
+        incremental_liveness,
+        use_index,
         shift_encoding: func.target_features.variable_shift_encoding(),
         roots,
         register_regions,
@@ -495,9 +547,57 @@ pub(super) fn expand(
 pub(super) fn refresh(
     problem: &mut ExpandedAllocationProblem,
     cfg: &NormalizedCfg,
-) -> Result<(), AllocationExpandError> {
-    problem.intervals = analyze_and_resolve(&problem.ir, &mut problem.roots, cfg)?;
-    Ok(())
+    changed_blocks: &BTreeSet<BlockId>,
+) -> Result<Vec<VReg>, AllocationExpandError> {
+    let changed_values = problem
+        .incremental_liveness
+        .update(&problem.ir, cfg, &mut problem.intervals, changed_blocks)
+        .map_err(AllocationExpandError::live)?;
+    for block in changed_blocks {
+        let row = cfg.block_index.get(block).copied().ok_or_else(|| {
+            AllocationExpandError::new(
+                "ALLOCATION_EXPAND.USE_INDEX_BLOCK",
+                Some(*block),
+                None,
+                None,
+                "changed block is outside the expanded-use index",
+            )
+        })?;
+        for reference in &problem.use_index.by_block[row] {
+            let root = problem.roots.get_mut(reference.root).ok_or_else(|| {
+                AllocationExpandError::new(
+                    "ALLOCATION_EXPAND.USE_INDEX_ROOT",
+                    Some(*block),
+                    None,
+                    None,
+                    "expanded-use index references a missing root",
+                )
+            })?;
+            let root_id = root.id;
+            let root_origin = root.origin;
+            let use_ = root.uses.get_mut(reference.use_).ok_or_else(|| {
+                AllocationExpandError::new(
+                    "ALLOCATION_EXPAND.USE_INDEX_ROW",
+                    Some(*block),
+                    Some(root_id),
+                    None,
+                    "expanded-use index references a missing use row",
+                )
+            })?;
+            use_.site = problem
+                .ir
+                .resolve_original_use_site(use_.original_site, &problem.intervals)
+                .map_err(AllocationExpandError::ir)?;
+            verify_expanded_use(
+                root_id,
+                root_origin,
+                reference.use_,
+                use_,
+                &problem.intervals,
+            )?;
+        }
+    }
+    Ok(changed_values)
 }
 
 fn analyze_and_resolve(
@@ -974,64 +1074,75 @@ fn verify_expanded_uses(
 ) -> Result<(), AllocationExpandError> {
     for root in roots {
         for (index, use_) in root.uses.iter().enumerate() {
-            if use_.id.0 as usize != index {
-                return Err(AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.USE_ORDER",
-                    Some(use_.site.block()),
-                    Some(root.id),
-                    Some(use_.id),
-                    "expanded root uses are not in dense HomeGraph order",
-                ));
-            }
-            if matches!(use_.source, ExpandedUseSource::Edge(_)) {
-                if !matches!(use_.site, UseSite::PhiEdge { .. }) || use_.value != root.origin {
-                    return Err(AllocationExpandError::new(
-                        "ALLOCATION_EXPAND.EDGE_USE_IDENTITY",
-                        Some(use_.site.block()),
-                        Some(root.id),
-                        Some(use_.id),
-                        "non-register edge location does not retain its source root phi identity",
-                    ));
-                }
-                if intervals
-                    .intervals
-                    .get(use_.value.0 as usize)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|interval| interval.uses.contains(&use_.site))
-                {
-                    return Err(AllocationExpandError::new(
-                        "ALLOCATION_EXPAND.EDGE_REGISTER_PRESSURE",
-                        Some(use_.site.block()),
-                        Some(root.id),
-                        Some(use_.id),
-                        "non-register phi location still contributes a register live-range use",
-                    ));
-                }
-                continue;
-            }
-            let interval = intervals
-                .intervals
-                .get(use_.value.0 as usize)
-                .and_then(Option::as_ref)
-                .ok_or_else(|| {
-                    AllocationExpandError::new(
-                        "ALLOCATION_EXPAND.VALUE_INTERVAL",
-                        Some(use_.site.block()),
-                        Some(root.id),
-                        Some(use_.id),
-                        "expanded use value has no exact live interval",
-                    )
-                })?;
-            if !interval.uses.contains(&use_.site) {
-                return Err(AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.USE_REWRITE",
-                    Some(use_.site.block()),
-                    Some(root.id),
-                    Some(use_.id),
-                    "expanded value does not own the rewritten exact MIR use",
-                ));
-            }
+            verify_expanded_use(root.id, root.origin, index, use_, intervals)?;
         }
+    }
+    Ok(())
+}
+
+fn verify_expanded_use(
+    root: LiveBundleId,
+    root_origin: VReg,
+    index: usize,
+    use_: &ExpandedUse,
+    intervals: &LiveIntervals,
+) -> Result<(), AllocationExpandError> {
+    if use_.id.0 as usize != index {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.USE_ORDER",
+            Some(use_.site.block()),
+            Some(root),
+            Some(use_.id),
+            "expanded root uses are not in dense HomeGraph order",
+        ));
+    }
+    if matches!(use_.source, ExpandedUseSource::Edge(_)) {
+        if !matches!(use_.site, UseSite::PhiEdge { .. }) || use_.value != root_origin {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.EDGE_USE_IDENTITY",
+                Some(use_.site.block()),
+                Some(root),
+                Some(use_.id),
+                "non-register edge location does not retain its source root phi identity",
+            ));
+        }
+        if intervals
+            .intervals
+            .get(use_.value.0 as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|interval| interval.uses.contains(&use_.site))
+        {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.EDGE_REGISTER_PRESSURE",
+                Some(use_.site.block()),
+                Some(root),
+                Some(use_.id),
+                "non-register phi location still contributes a register live-range use",
+            ));
+        }
+        return Ok(());
+    }
+    let interval = intervals
+        .intervals
+        .get(use_.value.0 as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            AllocationExpandError::new(
+                "ALLOCATION_EXPAND.VALUE_INTERVAL",
+                Some(use_.site.block()),
+                Some(root),
+                Some(use_.id),
+                "expanded use value has no exact live interval",
+            )
+        })?;
+    if !interval.uses.contains(&use_.site) {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.USE_REWRITE",
+            Some(use_.site.block()),
+            Some(root),
+            Some(use_.id),
+            "expanded value does not own the rewritten exact MIR use",
+        ));
     }
     Ok(())
 }

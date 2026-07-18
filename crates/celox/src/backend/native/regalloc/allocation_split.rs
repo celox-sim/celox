@@ -411,8 +411,10 @@ pub(super) fn plan_split(
     })
 }
 
-/// Apply a verified split to a clone and publish it only after stack-home,
-/// liveness, region ownership, and monotonic-progress verification all pass.
+/// Apply a verified split to a clone and publish it only after producer-local
+/// IR checks, differential liveness, region ownership, and monotonic progress
+/// all pass. Independent whole-program stack and liveness proofs run once at
+/// the atomic lowering boundary.
 pub(super) fn apply_split(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
@@ -427,19 +429,25 @@ pub(super) fn apply_split(
     let before = split_progress(expanded);
     let mut next = expanded.clone();
     let graph_root = graph_root(graph, plan.root)?;
+    let mut changed_blocks = BTreeSet::new();
 
     let needs_stack = plan
         .entries
         .iter()
         .any(|entry| entry.home.kind == HomeKind::Stack);
+    let existing_stack_home = stack_home(&next, plan.root)?;
     let stack_home = if needs_stack {
+        if existing_stack_home.is_none() {
+            changed_blocks.insert(graph_root.definition.block());
+        }
         Some(ensure_stack_home(&mut next, graph_root)?)
     } else {
-        stack_home(&next, plan.root)?
+        existing_stack_home
     };
 
     for entry in &plan.entries {
         let entry_use = expanded_use(&next, plan.root, entry.entry)?.clone();
+        changed_blocks.insert(entry_use.original_site.block());
         let lowered = allocation_expand::lower_use_materialization(
             &mut next.ir,
             graph,
@@ -540,9 +548,10 @@ pub(super) fn apply_split(
     }
 
     normalize_register_regions(&mut next)?;
-    prune_dead_materializations(&mut next)?;
-    allocation_expand::refresh(&mut next, cfg).map_err(AllocationSplitError::expand)?;
-    let next_joint = JointAllocationProblem::build(&next, cfg, graph, registers)
+    changed_blocks.extend(prune_dead_materializations(&mut next)?);
+    allocation_expand::refresh(&mut next, cfg, &changed_blocks)
+        .map_err(AllocationSplitError::expand)?;
+    let next_joint = JointAllocationProblem::build_session(&next, cfg, graph, registers)
         .map_err(AllocationSplitError::joint)?;
     let after = split_progress(&next);
     if after >= before {
@@ -1628,7 +1637,7 @@ fn normalize_register_regions(
 
 fn prune_dead_materializations(
     expanded: &mut ExpandedAllocationProblem,
-) -> Result<(), AllocationSplitError> {
+) -> Result<BTreeSet<BlockId>, AllocationSplitError> {
     expanded.ir.prune_dead_materializations().map_err(|error| {
         AllocationSplitError::new(
             error.rule,

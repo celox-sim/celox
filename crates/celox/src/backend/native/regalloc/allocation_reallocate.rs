@@ -178,31 +178,62 @@ struct RegionBuilder {
 }
 
 impl JointAllocationProblem {
+    /// Build at an external verification boundary. This deliberately performs
+    /// an independent liveness and target-constraint reconstruction.
     pub(super) fn build(
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
         graph: &HomeGraph,
         registers: &[PhysReg],
     ) -> Result<Self, JointAllocationError> {
-        let constraints = AllocationConstraintModel::build(expanded, cfg, graph, registers)
-            .map_err(JointAllocationError::constraints)?;
-        let recomputed = expanded.ir.analyze(cfg).map_err(|error| {
-            JointAllocationError::new(
-                error.rule,
-                error.block,
-                error.values.first().copied(),
-                error.message,
-            )
-        })?;
-        if recomputed != expanded.intervals
-            || expanded.ir.value_count() as usize != expanded.intervals.intervals.len()
-        {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.STALE_INTERVALS",
-                None,
-                None,
-                "expanded intervals do not exactly describe the current allocation IR",
-            ));
+        Self::build_internal(expanded, cfg, graph, registers, true)
+    }
+
+    /// Rebuild semantic allocation rows inside one persistent allocation
+    /// session. Liveness was already updated transactionally by the producer;
+    /// the independent whole-program proof remains in [`Self::build`] and the
+    /// atomic lowering boundary.
+    pub(super) fn build_session(
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+    ) -> Result<Self, JointAllocationError> {
+        Self::build_internal(expanded, cfg, graph, registers, false)
+    }
+
+    fn build_internal(
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+        verify_independently: bool,
+    ) -> Result<Self, JointAllocationError> {
+        let constraints = if verify_independently {
+            AllocationConstraintModel::build_verified(expanded, cfg, graph, registers)
+        } else {
+            AllocationConstraintModel::build(expanded, cfg, graph, registers)
+        }
+        .map_err(JointAllocationError::constraints)?;
+        if verify_independently {
+            let recomputed = expanded.ir.analyze(cfg).map_err(|error| {
+                JointAllocationError::new(
+                    error.rule,
+                    error.block,
+                    error.values.first().copied(),
+                    error.message,
+                )
+            })?;
+            if recomputed != expanded.intervals
+                || expanded.ir.value_count() as usize != expanded.intervals.intervals.len()
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.STALE_INTERVALS",
+                    None,
+                    None,
+                    "expanded intervals do not exactly describe the current allocation IR",
+                ));
+            }
         }
 
         let mut fixed_region_uses = BTreeMap::<VReg, Vec<UseSite>>::new();

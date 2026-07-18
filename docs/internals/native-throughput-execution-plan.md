@@ -3041,6 +3041,32 @@ its independent verifier), and `JointAllocationProblem::build` recomputes the
 same liveness again. The next retained boundary is a block fact index plus
 per-value sparse liveness update; no container or threshold tuning is implied.
 
+Step 27d9c replaces that whole-program liveness boundary with an allocation-
+session fact index. Definition and use facts are indexed by the physical block
+which owns them; in particular, a phi source belongs to its predecessor edge.
+One split rescans only blocks whose allocation-IR rows changed, takes the union
+of their previous and new resident values, and reconstructs each affected SSA
+range by an exact reverse CFG walk from its uses to its single dominating
+definition. Block-local slot coordinates and monotonic VReg identities make
+unchanged rows directly reusable. Focused regressions independently compare
+instruction rewrites and phi-edge rewrites against complete liveness.
+
+Expanded root uses now have an immutable original-block index, so shifted use
+sites in changed blocks are refreshed without scanning every HomeGraph root.
+The session builder consumes these producer-owned intervals and does not run a
+second whole-function liveness proof after every split. Complete allocation-IR
+liveness, stack reaching definitions, target constraints, lowered MIR
+liveness, and the final physical matrix are still reconstructed independently
+at the atomic lowering boundary. Thus verification was moved to the correct
+boundary, not removed.
+
+The candidate common gates pass, but this is not yet the complete persistent
+allocator design. `ExpandedAllocationProblem` is still cloned transactionally,
+target constraints and region ownership are rebuilt globally, and a new joint
+problem still walks every active value before the persistent matrix accepts
+its delta. Those all-world operations are the next session-owned indexes; this
+step makes no Linux execution or throughput claim.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3111,6 +3137,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d8 explicit replacement publication and actual-scale rejection | this step | destination-qualified final-liveness regression 1/1; candidate regalloc 12/12 including 32-phi JIT execution | candidate/default lib 834/834; candidate native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: non-LTO candidate remained in code generation and timed out before Linux execution | 900.256 s timeout; compile/execute record unavailable | explicit publication is verified on common workloads, but the all-world split/reanalyse/recolor fixed point is rejected; persistent incremental allocation is next |
 | 27d9a stable block slots and allocation-session identities | this step | stable cross-block slot 1/1; stable dead-materialization identity 1/1; split 5/5; lowering 3/3 | candidate lib 836/836; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | not rerun; this prerequisite does not yet replace whole-problem liveness/recoloring | n/a | block-local coordinates and monotonic synthetic IDs remove global renumbering; persistent region/matrix state remains next |
 | 27d9b persistent physical interval allocation | this step | stable bundle-hole 1/1; retained matrix-membership 1/1; joint allocation 6/6; split 5/5 | candidate lib 838/838; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | no result: compile-only candidate timed out with three joint-allocation workers active | 600.292 s timeout; HomeGraph/root/expand phases complete | unchanged values retain matrix membership, but repeated whole-IR liveness remains dominant and is the next architectural boundary |
+| 27d9c differential allocation liveness | this step | incremental instruction/phi-edge liveness 2/2; regalloc 221/221; split 5/5 | candidate lib 840/840; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global constraint/region/joint-row rebuilding remains in the split loop | n/a | changed block facts rebuild only affected sparse SSA ranges; independent whole-program proofs remain at publication; session-owned constraints and semantic rows are next |
 
 ## Related design records
 

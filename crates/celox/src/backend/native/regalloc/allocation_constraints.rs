@@ -133,7 +133,19 @@ impl AllocationConstraintModel {
         graph: &HomeGraph,
         registers: &[PhysReg],
     ) -> Result<Self, AllocationConstraintError> {
-        let result = Self::compute(expanded, cfg, graph, registers)?;
+        Self::compute(expanded, cfg, graph, registers)
+    }
+
+    /// Independently rebuild the target model twice at a publication boundary.
+    /// Allocation-session updates use [`Self::build`] once; they must not turn
+    /// an independent verifier into work repeated after every range split.
+    pub(super) fn build_verified(
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+    ) -> Result<Self, AllocationConstraintError> {
+        let result = Self::build(expanded, cfg, graph, registers)?;
         result.verify(expanded, cfg, graph, registers)?;
         Ok(result)
     }

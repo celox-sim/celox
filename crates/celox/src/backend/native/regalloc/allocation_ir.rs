@@ -1161,7 +1161,9 @@ impl AllocationIr {
     /// after one split makes differential interval and matrix updates
     /// impossible. Removed identities remain unused holes in the dense ID
     /// bounds and are ignored by liveness.
-    pub(super) fn prune_dead_materializations(&mut self) -> Result<(), AllocationIrError> {
+    pub(super) fn prune_dead_materializations(
+        &mut self,
+    ) -> Result<BTreeSet<BlockId>, AllocationIrError> {
         self.verify_structure()?;
         let mut synthetic_definitions =
             vec![None::<(SyntheticInstructionId, Uses)>; self.next_value as usize];
@@ -1263,12 +1265,14 @@ impl AllocationIr {
             queue.extend(uses.iter().copied());
         }
 
+        let mut changed_blocks = BTreeSet::new();
         for block in &mut self.blocks {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for instruction in std::mem::take(&mut block.instructions) {
                 if let AllocationInstructionOrigin::Synthetic { id, .. } = instruction.origin
                     && !retained_instructions[id.0 as usize]
                 {
+                    changed_blocks.insert(block.id);
                     continue;
                 }
                 instructions.push(instruction);
@@ -1276,7 +1280,7 @@ impl AllocationIr {
             block.instructions = instructions;
         }
         self.verify_structure()?;
-        Ok(())
+        Ok(changed_blocks)
     }
 
     fn insert_synthetic(

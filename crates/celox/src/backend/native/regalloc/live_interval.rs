@@ -6,7 +6,7 @@
 //! A value may have one segment per block; mutually exclusive CFG arms do not
 //! interfere merely because their blocks are adjacent in layout.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
@@ -226,6 +226,28 @@ struct ModelFacts {
     blocks: Vec<BlockFacts>,
     phi_definitions: Vec<HashSet<VReg>>,
     edge_uses: HashMap<(usize, usize), HashSet<VReg>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct IndexedBlockFacts {
+    definitions: Vec<(VReg, DefinitionSite)>,
+    uses: Vec<(VReg, UseSite)>,
+}
+
+/// Mutable strict-SSA fact index used by allocation-owned splitting.
+///
+/// Facts are owned by the block in which the machine value is physically
+/// live: instruction rows by their block and phi sources by their predecessor.
+/// Rebuilding one changed block therefore updates exact def/use rows without
+/// solving a function-wide set equation. Values whose old interval crossed
+/// the changed block are recomputed independently by sparse reverse CFG walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IncrementalLiveness {
+    block_facts: Vec<IndexedBlockFacts>,
+    definitions: Vec<Option<DefinitionSite>>,
+    uses: Vec<Vec<UseSite>>,
+    block_members: Vec<BTreeSet<VReg>>,
+    dominators: DominatorIntervals,
 }
 
 /// Minimal strict-SSA program view required by exact live-interval analysis.
@@ -492,6 +514,489 @@ pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
     Ok(result)
 }
 
+impl IncrementalLiveness {
+    pub(super) fn build<P: LivenessProgram + ?Sized>(
+        program: &P,
+        cfg: &NormalizedCfg,
+        intervals: &LiveIntervals,
+    ) -> Result<Self, LiveIntervalError> {
+        check_model_shape(program, cfg)?;
+        intervals.verify_program(program, cfg)?;
+        let expected_slots = assign_slots(program)?;
+        if intervals.block_slots != expected_slots
+            || intervals.intervals.len() != program.value_count() as usize
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.INCREMENTAL_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                "initial intervals do not cover the indexed liveness program",
+            ));
+        }
+
+        let value_count = program.value_count() as usize;
+        let mut definitions = vec![None; value_count];
+        let mut uses = vec![Vec::new(); value_count];
+        let mut block_facts = Vec::with_capacity(program.block_count());
+        for block in 0..program.block_count() {
+            let facts = scan_indexed_block(program, cfg, &expected_slots, block)?;
+            add_indexed_facts(&mut definitions, &mut uses, &facts)?;
+            block_facts.push(facts);
+        }
+        for value_uses in &mut uses {
+            value_uses.sort_unstable();
+            value_uses.dedup();
+        }
+        for (value, interval) in intervals.intervals.iter().enumerate() {
+            match (definitions[value], interval) {
+                (None, None) if uses[value].is_empty() => {}
+                (Some(definition), Some(interval))
+                    if interval.value == VReg(value as u32)
+                        && interval.definition == definition
+                        && interval.uses == uses[value] => {}
+                _ => {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.INCREMENTAL_FACT_IDENTITY",
+                        interval
+                            .as_ref()
+                            .map(|interval| interval.definition.block()),
+                        None,
+                        vec![VReg(value as u32)],
+                        "indexed def/use facts differ from independently built intervals",
+                    ));
+                }
+            }
+        }
+
+        let mut block_members = (0..program.block_count())
+            .map(|_| BTreeSet::new())
+            .collect::<Vec<_>>();
+        for interval in intervals.intervals.iter().flatten() {
+            for segment in &interval.segments {
+                let block = cfg.block_index[&segment.block];
+                block_members[block].insert(interval.value);
+            }
+        }
+        Ok(Self {
+            block_facts,
+            definitions,
+            uses,
+            block_members,
+            dominators: DominatorIntervals::build(program, cfg)?,
+        })
+    }
+
+    /// Update exact intervals for blocks whose allocation-IR rows changed.
+    /// The caller supplies physical fact-owner blocks: a rewritten phi source
+    /// is owned by its predecessor edge, not by the successor containing the
+    /// semantic phi row.
+    pub(super) fn update<P: LivenessProgram + ?Sized>(
+        &mut self,
+        program: &P,
+        cfg: &NormalizedCfg,
+        intervals: &mut LiveIntervals,
+        changed_blocks: &BTreeSet<BlockId>,
+    ) -> Result<Vec<VReg>, LiveIntervalError> {
+        check_model_shape(program, cfg)?;
+        if self.block_facts.len() != program.block_count()
+            || self.block_members.len() != program.block_count()
+            || intervals.block_slots.len() != program.block_count()
+            || program.value_count() < self.definitions.len() as u32
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.INCREMENTAL_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                "incremental liveness shape changed outside the stable session domain",
+            ));
+        }
+        if changed_blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let next_value_count = program.value_count() as usize;
+        self.definitions.resize(next_value_count, None);
+        self.uses.resize_with(next_value_count, Vec::new);
+        intervals.intervals.resize(next_value_count, None);
+
+        let mut changed_rows = Vec::with_capacity(changed_blocks.len());
+        for block in changed_blocks {
+            let row = cfg.block_index.get(block).copied().ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.INCREMENTAL_BLOCK",
+                    Some(*block),
+                    None,
+                    Vec::new(),
+                    "changed block is outside the normalized CFG",
+                )
+            })?;
+            changed_rows.push(row);
+        }
+        changed_rows.sort_unstable();
+        changed_rows.dedup();
+
+        let mut affected = BTreeSet::<VReg>::new();
+        let mut replacements = Vec::with_capacity(changed_rows.len());
+        for &block in &changed_rows {
+            affected.extend(self.block_members[block].iter().copied());
+            for &(value, definition) in &self.block_facts[block].definitions {
+                affected.insert(value);
+                let slot = self
+                    .definitions
+                    .get_mut(value.0 as usize)
+                    .ok_or_else(|| value_range_error(definition.block(), value, "definition"))?;
+                if *slot != Some(definition) {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.INCREMENTAL_DEFINITION",
+                        Some(definition.block()),
+                        None,
+                        vec![value],
+                        "cached block definition differs from the global fact index",
+                    ));
+                }
+                *slot = None;
+            }
+            for &(value, site) in &self.block_facts[block].uses {
+                affected.insert(value);
+                let value_uses = self
+                    .uses
+                    .get_mut(value.0 as usize)
+                    .ok_or_else(|| value_range_error(site.block(), value, "use"))?;
+                let before = value_uses.len();
+                value_uses.retain(|candidate| *candidate != site);
+                if value_uses.len() == before {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.INCREMENTAL_USE",
+                        Some(site.block()),
+                        None,
+                        vec![value],
+                        "cached block use is absent from the global fact index",
+                    ));
+                }
+            }
+            let slots = assign_block_slots(program, block)?;
+            intervals.block_slots[block] = slots;
+            let facts = scan_indexed_block(program, cfg, &intervals.block_slots, block)?;
+            affected.extend(facts.definitions.iter().map(|(value, _)| *value));
+            affected.extend(facts.uses.iter().map(|(value, _)| *value));
+            replacements.push((block, facts));
+        }
+
+        for (block, facts) in replacements {
+            add_indexed_facts(&mut self.definitions, &mut self.uses, &facts)?;
+            self.block_facts[block] = facts;
+        }
+        for value in &affected {
+            self.uses[value.0 as usize].sort_unstable();
+            self.uses[value.0 as usize].dedup();
+        }
+
+        for value in &affected {
+            if let Some(previous) = intervals.intervals[value.0 as usize].as_ref() {
+                for segment in &previous.segments {
+                    self.block_members[cfg.block_index[&segment.block]].remove(value);
+                }
+            }
+        }
+        let mut changed_values = Vec::new();
+        for value in affected {
+            let next = build_sparse_value_interval(
+                program,
+                cfg,
+                &intervals.block_slots,
+                &self.definitions,
+                &self.uses,
+                &self.dominators,
+                value,
+            )?;
+            if intervals.intervals[value.0 as usize] != next {
+                changed_values.push(value);
+            }
+            intervals.intervals[value.0 as usize] = next;
+            if let Some(interval) = intervals.intervals[value.0 as usize].as_ref() {
+                for segment in &interval.segments {
+                    self.block_members[cfg.block_index[&segment.block]].insert(value);
+                }
+            }
+        }
+        Ok(changed_values)
+    }
+}
+
+fn value_range_error(block: BlockId, value: VReg, kind: &str) -> LiveIntervalError {
+    LiveIntervalError::new(
+        "LIVE_INTERVAL.VALUE_RANGE",
+        Some(block),
+        None,
+        vec![value],
+        format!("incremental {kind} is outside the allocation VReg table"),
+    )
+}
+
+fn add_indexed_facts(
+    definitions: &mut [Option<DefinitionSite>],
+    uses: &mut [Vec<UseSite>],
+    facts: &IndexedBlockFacts,
+) -> Result<(), LiveIntervalError> {
+    for &(value, definition) in &facts.definitions {
+        record_definition(definitions, value, definition)?;
+    }
+    for &(value, site) in &facts.uses {
+        record_use(uses, value, site)?;
+    }
+    Ok(())
+}
+
+fn scan_indexed_block<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    slots: &[BlockSlots],
+    block: usize,
+) -> Result<IndexedBlockFacts, LiveIntervalError> {
+    let block_id = program.block_id(block);
+    let block_slots = slots.get(block).copied().ok_or_else(|| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.INCREMENTAL_BLOCK",
+            Some(block_id),
+            None,
+            Vec::new(),
+            "indexed block has no slot row",
+        )
+    })?;
+    let mut facts = IndexedBlockFacts::default();
+    for phi in 0..program.phi_count(block) {
+        if program.phi_definition_in_register(block, phi) {
+            let value = program.phi_definition(block, phi);
+            facts.definitions.push((
+                value,
+                DefinitionSite::Phi {
+                    block: block_id,
+                    phi,
+                    slot: block_slots.phi_def,
+                },
+            ));
+        }
+    }
+    for instruction in 0..program.instruction_count(block) {
+        let use_slot = block_slots.instruction_use(instruction).ok_or_else(|| {
+            LiveIntervalError::new(
+                "LIVE_INTERVAL.SLOT_RANGE",
+                Some(block_id),
+                Some(instruction),
+                Vec::new(),
+                "incremental instruction-use slot is outside the block",
+            )
+        })?;
+        let mut instruction_uses = program.instruction_uses(block, instruction).to_vec();
+        instruction_uses.sort_unstable();
+        instruction_uses.dedup();
+        facts.uses.extend(instruction_uses.into_iter().map(|value| {
+            (
+                value,
+                UseSite::Instruction {
+                    block: block_id,
+                    instruction,
+                    slot: use_slot,
+                },
+            )
+        }));
+        if let Some(value) = program.instruction_definition(block, instruction) {
+            facts.definitions.push((
+                value,
+                DefinitionSite::Instruction {
+                    block: block_id,
+                    instruction,
+                    slot: block_slots.instruction_def(instruction).unwrap(),
+                },
+            ));
+        }
+    }
+
+    for &successor in &cfg.successors[block] {
+        let successor_id = program.block_id(successor);
+        for phi in 0..program.phi_count(successor) {
+            let mut matched = None;
+            for (source, &(predecessor, value)) in
+                program.phi_sources(successor, phi).iter().enumerate()
+            {
+                if predecessor != block_id {
+                    continue;
+                }
+                if matched.replace((source, value)).is_some() {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.PHI_PREDECESSOR",
+                        Some(successor_id),
+                        None,
+                        vec![value],
+                        "phi has duplicate sources for one predecessor",
+                    ));
+                }
+            }
+            let Some((source, value)) = matched else {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.PHI_PREDECESSOR",
+                    Some(successor_id),
+                    None,
+                    vec![program.phi_definition(successor, phi)],
+                    "phi has no source for a normalized predecessor",
+                ));
+            };
+            if program.phi_source_in_register(successor, phi, source) {
+                facts.uses.push((
+                    value,
+                    UseSite::PhiEdge {
+                        predecessor: block_id,
+                        successor: successor_id,
+                        phi,
+                        slot: block_slots.exit,
+                    },
+                ));
+            }
+        }
+        for edge_use in 0..program.extra_phi_edge_use_count(successor) {
+            let (predecessor, value, phi) = program.extra_phi_edge_use(successor, edge_use);
+            if predecessor == block_id {
+                facts.uses.push((
+                    value,
+                    UseSite::PhiEdge {
+                        predecessor: block_id,
+                        successor: successor_id,
+                        phi,
+                        slot: block_slots.exit,
+                    },
+                ));
+            }
+        }
+    }
+    facts
+        .definitions
+        .sort_unstable_by_key(|(value, site)| (*value, site.block(), site.slot()));
+    facts.uses.sort_unstable();
+    facts.uses.dedup();
+    Ok(facts)
+}
+
+fn build_sparse_value_interval<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    slots: &[BlockSlots],
+    definitions: &[Option<DefinitionSite>],
+    uses: &[Vec<UseSite>],
+    dominators: &DominatorIntervals,
+    value: VReg,
+) -> Result<Option<LiveInterval>, LiveIntervalError> {
+    let definition = definitions.get(value.0 as usize).copied().flatten();
+    let value_uses = uses
+        .get(value.0 as usize)
+        .ok_or_else(|| value_range_error(program.block_id(0), value, "use list"))?;
+    let Some(definition) = definition else {
+        if value_uses.is_empty() {
+            return Ok(None);
+        }
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.MISSING_DEFINITION",
+            value_uses.first().map(|site| site.block()),
+            None,
+            vec![value],
+            "incrementally used value has no machine definition",
+        ));
+    };
+    for &use_site in value_uses {
+        verify_definition_dominates_use(cfg, dominators, definition, use_site, value)?;
+    }
+
+    let definition_block = cfg.block_index[&definition.block()];
+    let mut live_in = BTreeSet::<usize>::new();
+    let mut live_out = BTreeSet::<usize>::new();
+    let mut last_use = BTreeMap::<usize, SlotIndex>::new();
+    let mut queue = VecDeque::new();
+    for &site in value_uses {
+        let block = cfg.block_index[&site.block()];
+        last_use
+            .entry(block)
+            .and_modify(|current| *current = (*current).max(site.slot()))
+            .or_insert(site.slot());
+        match site {
+            UseSite::Instruction { .. } if block == definition_block => {}
+            UseSite::Instruction { .. } => {
+                if live_in.insert(block) {
+                    queue.push_back(block);
+                }
+            }
+            UseSite::PhiEdge { .. } => {
+                live_out.insert(block);
+                if block != definition_block && live_in.insert(block) {
+                    queue.push_back(block);
+                }
+            }
+        }
+    }
+    while let Some(block) = queue.pop_front() {
+        for &predecessor in &cfg.predecessors[block] {
+            live_out.insert(predecessor);
+            if predecessor != definition_block && live_in.insert(predecessor) {
+                queue.push_back(predecessor);
+            }
+        }
+    }
+
+    let mut live_blocks = BTreeSet::new();
+    live_blocks.insert(definition_block);
+    live_blocks.extend(live_in.iter().copied());
+    live_blocks.extend(live_out.iter().copied());
+    live_blocks.extend(last_use.keys().copied());
+    let mut segments = Vec::with_capacity(live_blocks.len());
+    for block in live_blocks {
+        let block_slots = slots[block];
+        let start = if block == definition_block {
+            definition.slot()
+        } else {
+            block_slots.entry
+        };
+        let end = if live_out.contains(&block) {
+            block_slots.exit.next()
+        } else if let Some(&last_use) = last_use.get(&block) {
+            last_use.next()
+        } else if block == definition_block {
+            definition.slot().next()
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            LiveIntervalError::new(
+                "LIVE_INTERVAL.SLOT_RANGE",
+                Some(program.block_id(block)),
+                None,
+                vec![value],
+                "incremental live segment has no finite end",
+            )
+        })?;
+        if start >= end {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.EMPTY_SEGMENT",
+                Some(program.block_id(block)),
+                None,
+                vec![value],
+                "incremental live segment is empty or reversed",
+            ));
+        }
+        segments.push(LiveSegment {
+            block: program.block_id(block),
+            start,
+            end,
+        });
+    }
+    segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+    Ok(Some(LiveInterval {
+        value,
+        definition,
+        segments,
+        uses: value_uses.clone(),
+    }))
+}
+
 fn check_model_shape<P: LivenessProgram + ?Sized>(
     program: &P,
     cfg: &NormalizedCfg,
@@ -521,43 +1026,50 @@ fn assign_slots<P: LivenessProgram + ?Sized>(
 ) -> Result<Vec<BlockSlots>, LiveIntervalError> {
     let mut result = Vec::with_capacity(program.block_count());
     for block in 0..program.block_count() {
-        let block_id = program.block_id(block);
-        let block_instruction_count = program.instruction_count(block);
-        let instruction_count = u64::try_from(block_instruction_count).map_err(|_| {
+        result.push(assign_block_slots(program, block)?);
+    }
+    Ok(result)
+}
+
+fn assign_block_slots<P: LivenessProgram + ?Sized>(
+    program: &P,
+    block: usize,
+) -> Result<BlockSlots, LiveIntervalError> {
+    let block_id = program.block_id(block);
+    let block_instruction_count = program.instruction_count(block);
+    let instruction_count = u64::try_from(block_instruction_count).map_err(|_| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.SLOT_RANGE",
+            Some(block_id),
+            None,
+            Vec::new(),
+            "instruction count exceeds the slot-index domain",
+        )
+    })?;
+    // Slot coordinates are block-local. LiveSegment already carries its
+    // BlockId, so adding instructions to one allocation-IR block must not
+    // renumber every interval in all later blocks.
+    let entry = 0u64;
+    let phi_def = 1u64;
+    let exit = instruction_count
+        .checked_mul(2)
+        .and_then(|width| entry.checked_add(width))
+        .and_then(|slot| slot.checked_add(2))
+        .ok_or_else(|| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
                 Some(block_id),
                 None,
                 Vec::new(),
-                "instruction count exceeds the slot-index domain",
+                "block slot range overflows u64",
             )
         })?;
-        // Slot coordinates are block-local. LiveSegment already carries its
-        // BlockId, so adding instructions to one allocation-IR block must not
-        // renumber every interval in all later blocks.
-        let entry = 0u64;
-        let phi_def = 1u64;
-        let exit = instruction_count
-            .checked_mul(2)
-            .and_then(|width| entry.checked_add(width))
-            .and_then(|slot| slot.checked_add(2))
-            .ok_or_else(|| {
-                LiveIntervalError::new(
-                    "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block_id),
-                    None,
-                    Vec::new(),
-                    "block slot range overflows u64",
-                )
-            })?;
-        result.push(BlockSlots {
-            entry: SlotIndex(entry),
-            phi_def: SlotIndex(phi_def),
-            exit: SlotIndex(exit),
-            instruction_count: block_instruction_count,
-        });
-    }
-    Ok(result)
+    Ok(BlockSlots {
+        entry: SlotIndex(entry),
+        phi_def: SlotIndex(phi_def),
+        exit: SlotIndex(exit),
+        instruction_count: block_instruction_count,
+    })
 }
 
 fn record_definition(
@@ -1188,6 +1700,7 @@ fn verify_definition_dominates_use(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DominatorIntervals {
     enter: Vec<usize>,
     exit: Vec<usize>,
@@ -1350,6 +1863,119 @@ mod tests {
             before_intervals.block_slots[1],
             after_intervals.block_slots[1]
         );
+    }
+
+    #[test]
+    fn incremental_liveness_rebuilds_only_values_crossing_a_changed_block() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        exit.push(MInst::Return);
+        let mut function = function(3, vec![entry, exit]);
+        let cfg = normalize(&mut function);
+        let mut intervals = analyze(&function, &cfg).unwrap();
+        let mut incremental = IncrementalLiveness::build(&function, &cfg, &intervals).unwrap();
+        let unchanged_successor_slots = intervals.block_slots[1];
+
+        function.blocks[0].insts.insert(
+            1,
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 11,
+            },
+        );
+        let changed = incremental
+            .update(
+                &function,
+                &cfg,
+                &mut intervals,
+                &BTreeSet::from([BlockId(0)]),
+            )
+            .unwrap();
+        let rebuilt = analyze(&function, &cfg).unwrap();
+
+        assert_eq!(intervals, rebuilt);
+        assert_eq!(intervals.block_slots[1], unchanged_successor_slots);
+        assert_eq!(changed, vec![VReg(0), VReg(2)]);
+    }
+
+    #[test]
+    fn incremental_liveness_rebuilds_a_rewritten_phi_predecessor_row() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 11,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 13,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.phis.push(PhiNode {
+            dst: VReg(3),
+            sources: vec![(BlockId(1), VReg(1)), (BlockId(2), VReg(2))],
+        });
+        merge.push(MInst::Return);
+        let mut function = function(5, vec![entry, left, right, merge]);
+        let cfg = normalize(&mut function);
+        let mut intervals = analyze(&function, &cfg).unwrap();
+        let mut incremental = IncrementalLiveness::build(&function, &cfg, &intervals).unwrap();
+
+        let left_index = cfg.block_index[&BlockId(1)];
+        let merge_index = cfg.block_index[&BlockId(3)];
+        function.blocks[left_index].insts.insert(
+            1,
+            MInst::Mov {
+                dst: VReg(4),
+                src: VReg(1),
+            },
+        );
+        function.blocks[merge_index].phis[0]
+            .sources
+            .iter_mut()
+            .find(|(predecessor, _)| *predecessor == BlockId(1))
+            .unwrap()
+            .1 = VReg(4);
+        let changed = incremental
+            .update(
+                &function,
+                &cfg,
+                &mut intervals,
+                &BTreeSet::from([BlockId(1)]),
+            )
+            .unwrap();
+
+        assert_eq!(intervals, analyze(&function, &cfg).unwrap());
+        assert_eq!(changed, vec![VReg(1), VReg(4)]);
+        assert!(matches!(
+            intervals.intervals[4].as_ref().unwrap().uses.as_slice(),
+            [UseSite::PhiEdge {
+                predecessor: BlockId(1),
+                successor: BlockId(3),
+                ..
+            }]
+        ));
     }
 
     #[test]

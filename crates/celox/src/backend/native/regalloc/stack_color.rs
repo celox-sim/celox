@@ -800,7 +800,7 @@ mod tests {
     };
 
     use super::super::allocation_expand::{
-        ExpandedRoot, ExpandedStackHome, ExpandedStackHomeKind, ExpandedUse,
+        ExpandedRoot, ExpandedStackHome, ExpandedStackHomeKind, ExpandedUse, ExpandedUseIndex,
     };
     use super::super::allocation_ir::{AllocationIr, SyntheticOperation};
     use super::super::cfg;
@@ -867,9 +867,13 @@ mod tests {
             });
         }
         let intervals = ir.analyze(cfg).unwrap();
+        let incremental_liveness =
+            live_interval::IncrementalLiveness::build(&ir, cfg, &intervals).unwrap();
         ExpandedAllocationProblem {
             ir,
             intervals,
+            incremental_liveness,
+            use_index: ExpandedUseIndex::build(&[], cfg).unwrap(),
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots: Vec::new(),
             register_regions: Vec::new(),
@@ -1045,10 +1049,14 @@ mod tests {
                     }],
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let use_index = ExpandedUseIndex::build(&roots, &cfg).unwrap();
         let expanded = ExpandedAllocationProblem {
+            incremental_liveness: live_interval::IncrementalLiveness::build(&ir, &cfg, &intervals)
+                .unwrap(),
             ir,
             intervals,
+            use_index,
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots,
             register_regions: Vec::new(),
