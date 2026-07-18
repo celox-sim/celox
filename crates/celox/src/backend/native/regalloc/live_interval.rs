@@ -248,6 +248,15 @@ pub(super) trait LivenessProgram {
     fn phi_source_in_register(&self, _block: usize, _phi: usize, _source: usize) -> bool {
         true
     }
+    /// Additional edge uses which do not define an ordinary MIR phi result.
+    /// Allocation-owned location liveness uses this for direct stack sources
+    /// consumed by out-of-SSA copies.
+    fn extra_phi_edge_use_count(&self, _successor: usize) -> usize {
+        0
+    }
+    fn extra_phi_edge_use(&self, _successor: usize, _edge_use: usize) -> (BlockId, VReg, usize) {
+        unreachable!("program reports no additional phi-edge uses")
+    }
     fn instruction_count(&self, block: usize) -> usize;
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses;
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg>;
@@ -763,6 +772,43 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
                     "phi does not provide exactly one source for every predecessor",
                 ));
             }
+        }
+        for edge_use in 0..program.extra_phi_edge_use_count(successor) {
+            let (predecessor_id, value, phi) = program.extra_phi_edge_use(successor, edge_use);
+            let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.EXTRA_EDGE_PREDECESSOR",
+                    Some(successor_id),
+                    None,
+                    vec![value],
+                    format!("additional edge use references missing predecessor {predecessor_id}"),
+                ));
+            };
+            if !cfg.predecessors[successor].contains(&predecessor) {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.EXTRA_EDGE_PREDECESSOR",
+                    Some(successor_id),
+                    None,
+                    vec![value],
+                    "additional edge use is not on a normalized CFG edge",
+                ));
+            }
+            let site = UseSite::PhiEdge {
+                predecessor: predecessor_id,
+                successor: successor_id,
+                phi,
+                slot: slots[predecessor].exit,
+            };
+            record_use(&mut uses, value, site)?;
+            edge_uses
+                .entry((predecessor, successor))
+                .or_default()
+                .insert(value);
+            blocks[predecessor]
+                .last_use
+                .entry(value)
+                .and_modify(|current| *current = (*current).max(slots[predecessor].exit))
+                .or_insert(slots[predecessor].exit);
         }
     }
     for value_uses in &mut uses {

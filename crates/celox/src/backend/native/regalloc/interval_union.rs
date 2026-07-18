@@ -928,6 +928,138 @@ impl LiveIntervalMatrix {
     }
 }
 
+/// Sparse interference matrix with an allocation-owned, dynamically growing
+/// color domain. Physical-register allocation has a fixed target register
+/// set; stack-slot coloring instead creates a new color only when every
+/// existing slot interferes with a home's exact CFG range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DynamicIntervalMatrix {
+    index: Arc<IntervalIndex>,
+    unions: Vec<IntervalUnion>,
+    assignments: BTreeMap<AllocationBundleId, usize>,
+}
+
+impl DynamicIntervalMatrix {
+    pub(super) fn new(cfg: &NormalizedCfg) -> Result<Self, IntervalUnionError> {
+        Ok(Self {
+            index: Arc::new(IntervalIndex::new(cfg)?),
+            unions: Vec::new(),
+            assignments: BTreeMap::new(),
+        })
+    }
+
+    pub(super) fn make_range(
+        &self,
+        segments: Vec<LiveSegment>,
+    ) -> Result<SparseRange, IntervalUnionError> {
+        self.index.make_range(segments)
+    }
+
+    fn validate_token(&self, segments: ValidatedSegments<'_>) -> Result<(), IntervalUnionError> {
+        if !Arc::ptr_eq(&self.index, segments.index) {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.RANGE_CFG",
+                None,
+                [],
+                "sparse range belongs to a different normalized CFG",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn first_available_validated(
+        &self,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<usize, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self
+            .unions
+            .iter()
+            .position(|union| !union.interferes_indexed(segments))
+            .unwrap_or(self.unions.len()))
+    }
+
+    pub(super) fn assign_validated(
+        &mut self,
+        bundle: AllocationBundleId,
+        slot: usize,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<(), IntervalUnionError> {
+        self.validate_token(segments)?;
+        if let Some(current) = self.assignments.get(&bundle) {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
+                None,
+                [bundle],
+                format!("bundle is already assigned to dynamic slot {current}"),
+            ));
+        }
+        if slot > self.unions.len() {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.DYNAMIC_SLOT_RANGE",
+                None,
+                [bundle],
+                format!("dynamic slot {slot} skips the current color domain"),
+            ));
+        }
+        if slot == self.unions.len() {
+            let mut union = IntervalUnion::new(Arc::clone(&self.index));
+            union.insert_indexed(bundle, segments)?;
+            self.unions.push(union);
+        } else {
+            self.unions[slot].insert_indexed(bundle, segments)?;
+        }
+        self.assignments.insert(bundle, slot);
+        Ok(())
+    }
+
+    pub(super) fn slot(&self, bundle: AllocationBundleId) -> Option<usize> {
+        self.assignments.get(&bundle).copied()
+    }
+
+    pub(super) fn slot_count(&self) -> usize {
+        self.unions.len()
+    }
+
+    pub(super) fn verify(&self) -> Result<(), IntervalUnionError> {
+        let mut rebuilt = BTreeMap::new();
+        for (slot, union) in self.unions.iter().enumerate() {
+            union.verify()?;
+            if union.blocks.is_empty() {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.EMPTY_DYNAMIC_SLOT",
+                    None,
+                    [],
+                    format!("dynamic slot {slot} has no assigned sparse range"),
+                ));
+            }
+            for entries in union.blocks.values() {
+                for entry in entries.values() {
+                    if let Some(other) = rebuilt.insert(entry.bundle, slot)
+                        && other != slot
+                    {
+                        return Err(IntervalUnionError::new(
+                            "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
+                            None,
+                            [entry.bundle],
+                            format!("bundle appears in both dynamic slots {other} and {slot}"),
+                        ));
+                    }
+                }
+            }
+        }
+        if rebuilt != self.assignments {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.ASSIGNMENT_MAP",
+                None,
+                [],
+                "dynamic slot memberships differ from the bidirectional assignment map",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn live_length(segments: &[LiveSegment]) -> Option<u64> {
     segments.iter().try_fold(0_u64, |total, segment| {
         total.checked_add(segment.start.distance_to(segment.end)?)

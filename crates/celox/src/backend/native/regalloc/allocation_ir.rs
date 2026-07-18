@@ -170,6 +170,41 @@ pub(super) struct AllocationMachineFacts {
     pub affinities: Vec<AllocationAffinity>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AllocationStackOperationKind {
+    Store,
+    Reload,
+}
+
+/// Exact location-level stack operation in the current allocation IR.
+///
+/// Stack-slot coloring intentionally does not infer these positions from the
+/// immutable source MIR: synthetic insertion and compaction change the slot
+/// domain used by allocation liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AllocationStackOperation {
+    pub instruction: SyntheticInstructionId,
+    pub block: BlockId,
+    pub position: usize,
+    pub home: StackHomeId,
+    pub kind: AllocationStackOperationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AllocationStackPhiDefinition {
+    pub block: BlockId,
+    pub phi: usize,
+    pub destination: VReg,
+    pub home: StackHomeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AllocationStackFacts {
+    pub blocks: Vec<(BlockId, usize)>,
+    pub operations: Vec<AllocationStackOperation>,
+    pub phi_definitions: Vec<AllocationStackPhiDefinition>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AllocationIrError {
     pub rule: &'static str,
@@ -897,6 +932,62 @@ impl AllocationIr {
         Ok(AllocationMachineFacts {
             instructions,
             affinities: affinities.into_iter().collect(),
+        })
+    }
+
+    /// Export the exact location-level def/use facts needed for stack-home
+    /// liveness. The returned instruction positions are in the same current
+    /// allocation-IR layout consumed by [`Self::analyze`].
+    pub(super) fn stack_facts(&self) -> Result<AllocationStackFacts, AllocationIrError> {
+        self.verify_structure()?;
+        let mut operations = Vec::new();
+        let mut phi_definitions = Vec::new();
+        for block in &self.blocks {
+            for phi in &block.phis {
+                if let Some(home) = phi.stack_home {
+                    phi_definitions.push(AllocationStackPhiDefinition {
+                        block: block.id,
+                        phi: phi.original_phi,
+                        destination: phi.destination,
+                        home,
+                    });
+                }
+            }
+            for (position, row) in block.instructions.iter().enumerate() {
+                let AllocationInstructionOrigin::Synthetic {
+                    id: instruction,
+                    operation,
+                    ..
+                } = row.origin
+                else {
+                    continue;
+                };
+                let (home, kind) = match operation {
+                    SyntheticOperation::StackStore { home } => {
+                        (home, AllocationStackOperationKind::Store)
+                    }
+                    SyntheticOperation::StackReload { home } => {
+                        (home, AllocationStackOperationKind::Reload)
+                    }
+                    SyntheticOperation::RecipeNode { .. } => continue,
+                };
+                operations.push(AllocationStackOperation {
+                    instruction,
+                    block: block.id,
+                    position,
+                    home,
+                    kind,
+                });
+            }
+        }
+        Ok(AllocationStackFacts {
+            blocks: self
+                .blocks
+                .iter()
+                .map(|block| (block.id, block.instructions.len()))
+                .collect(),
+            operations,
+            phi_definitions,
         })
     }
 

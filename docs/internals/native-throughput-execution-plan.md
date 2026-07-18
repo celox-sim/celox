@@ -2932,8 +2932,8 @@ planning, explicit expansion, splitting to the joint fixed point, atomic MIR
 lowering, filtered physical-liveness reconstruction, and SSA-destruction
 verification as one gate. Production MIR remains on the interim allocator, so
 this step makes no Linux or throughput claim. Step 27d7 integrates target
-constraints and copy/phi coalescing first, then final stack-slot interference
-coloring into the same closed result before any production switch.
+constraints, copy/phi coalescing, and final stack-slot interference coloring
+into the same closed result before any production switch.
 
 Step 27d7a integrates target constraints without globally pinning a long live
 range. A private diagnostic clone is split at every fixed-operand or clobber
@@ -2952,8 +2952,25 @@ interference-free, and satisfied incident affinity weight strictly increases.
 The constraint model and final assignment are independently rebuilt and
 verified. The complete diagnostic library, native-testbench, and counter
 gates pass. Production MIR is unchanged, so there is no Linux or throughput
-claim. Step 27d7b must derive exact stack-home live ranges and color frame-slot
-interference before the production switch can be considered.
+claim.
+
+Step 27d7b models stack homes as location-level strict SSA rather than assigning
+one frame row per logical home. `AllocationIr` exports exact current positions
+for every stack store/reload and stack-resident phi. Stores and stack phis are
+definitions; reloads and direct phi-edge stack locations are uses. The latter
+enter the shared liveness engine as location-only edge uses, so CFG equations,
+definition dominance, loop coverage, and mutually exclusive arms are handled
+by the same sparse verifier as machine VRegs. Stack and machine liveness must
+produce identical block-slot layouts.
+
+Definition/dominator-order coloring uses a dynamically growing sparse interval
+matrix: an existing 64-bit slot is reused only when its complete per-block
+union does not interfere, otherwise one new slot is added. The completed map is
+rebuilt independently before byte offsets and frame size are published.
+Focused tests prove both reuse and separation, while the existing more-than-K
+phi-edge test exercises stack destinations and direct edge locations through
+atomic lowering. Production MIR is still unchanged; this structural step makes
+no Linux or throughput claim.
 
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
@@ -3021,6 +3038,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d5 exact pressure-region splitting and joint fixed point | this step | allocation split 5/5 including complete synthetic-pressure allocation, sibling-arm isolation, loop reentry, partial stack residency, and repeated-entry termination | lib 824/824; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | exact result is not yet lowered to production MIR; no Linux semantic claim | n/a | reachable suffixes become multiple dominance regions or exact homes; dead synthetic DAGs are compacted and every value re-enters joint allocation |
 | 27d6 atomic MIR and out-of-SSA location lowering | this step | allocation lowering 3/3 including exact stack/recipe lowering, stale-input rejection, and more-than-K phi rows | lib 827/827 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | the closed joint result lowers atomically; exact stack/immediate phi locations avoid fictitious source and destination pressure; constraints, coalescing, and stack coloring remain next |
 | 27d7a split target constraints and weighted coalescing | this step | allocation constraints 2/2; pre-spill Perm pressure regression 1/1; joint allocation 4/4; split 5/5; lowering 3/3 | lib 830/830 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | fixed/clobber boundaries split SSA ranges before allocation; rewritten operands own mandatory masks; sparse transactional coalescing preserves correctness; stack-home lifetime coloring remains next |
+| 27d7b exact stack-home liveness and sparse slot coloring | this step | stack coloring 3/3 for exact reuse/interference/direct phi edges; allocation lowering 3/3; more-than-K phi-edge regression 1/1 | lib 833/833 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | stores/stack phis define location SSA; reload/direct-edge uses share the CFG-sparse verifier; a dynamic interval matrix colors and independently rebuilds final frame slots |
 
 ## Related design records
 

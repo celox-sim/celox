@@ -23,6 +23,7 @@ use super::home_graph::{HomeGraph, HomeGraphError, RecipeNode};
 use super::live_interval::{
     self, LiveIntervalError, NonRegisterPhiDefinition, NonRegisterPhiSource, UseSite,
 };
+use super::stack_color::{self, StackColorError};
 
 #[derive(Debug)]
 pub(super) struct LoweredAllocation {
@@ -30,6 +31,7 @@ pub(super) struct LoweredAllocation {
     pub assignment: AssignmentMap,
     pub spill_frame_size: u32,
     pub stack_offsets: Vec<i32>,
+    pub stack_slot_count: usize,
     pub ssa_destruction: crate::backend::native::ssa_destroy::SsaDestructionPlan,
 }
 
@@ -99,6 +101,21 @@ impl AllocationLowerError {
         )
     }
 
+    fn stack(error: StackColorError) -> Self {
+        let message = if error.homes.is_empty() {
+            error.message
+        } else {
+            format!("stack homes {:?}: {}", error.homes, error.message)
+        };
+        Self::new(
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            message,
+        )
+    }
+
     fn ssa(error: crate::backend::native::ssa_destroy::SsaDestructionError) -> Self {
         let mut values = Vec::with_capacity(2);
         if let Some(destination) = error.phi_destination {
@@ -151,7 +168,10 @@ pub(super) fn lower(
         .verify(cfg, registers, allocation)
         .map_err(AllocationLowerError::joint)?;
 
-    let (stack_offsets, spill_frame_size) = stack_layout(expanded)?;
+    let stack_coloring = stack_color::color(expanded, cfg).map_err(AllocationLowerError::stack)?;
+    let stack_offsets = stack_coloring.offsets;
+    let spill_frame_size = stack_coloring.frame_size;
+    let stack_slot_count = stack_coloring.slot_count;
     let function = expanded
         .ir
         .materialize(original, graph, &stack_offsets)
@@ -251,6 +271,7 @@ pub(super) fn lower(
         assignment,
         spill_frame_size,
         stack_offsets,
+        stack_slot_count,
         ssa_destruction,
     })
 }
@@ -368,59 +389,6 @@ fn edge_locations(
         }
     }
     Ok(output)
-}
-
-/// Correctness-first stack layout. Every logical stack home receives one
-/// stable 64-bit slot; interference-based slot coloring is a later allocation
-/// stage and must not be hidden inside lowering.
-fn stack_layout(
-    expanded: &ExpandedAllocationProblem,
-) -> Result<(Vec<i32>, u32), AllocationLowerError> {
-    let mut offsets = Vec::with_capacity(expanded.stack_homes.len());
-    for (index, home) in expanded.stack_homes.iter().enumerate() {
-        if home.id.0 as usize != index {
-            return Err(AllocationLowerError::new(
-                "ALLOCATION_LOWER.STACK_HOME_IDENTITY",
-                None,
-                None,
-                Vec::new(),
-                "expanded stack homes are not a dense identity-ordered domain",
-            ));
-        }
-        let byte_offset = index.checked_mul(8).ok_or_else(|| {
-            AllocationLowerError::new(
-                "ALLOCATION_LOWER.STACK_FRAME_RANGE",
-                None,
-                None,
-                Vec::new(),
-                "stack-home byte offset exceeds usize",
-            )
-        })?;
-        offsets.push(i32::try_from(byte_offset).map_err(|_| {
-            AllocationLowerError::new(
-                "ALLOCATION_LOWER.STACK_FRAME_RANGE",
-                None,
-                None,
-                Vec::new(),
-                "stack-home byte offset exceeds MIR's signed frame-offset domain",
-            )
-        })?);
-    }
-    let frame_size = expanded
-        .stack_homes
-        .len()
-        .checked_mul(8)
-        .and_then(|size| u32::try_from(size).ok())
-        .ok_or_else(|| {
-            AllocationLowerError::new(
-                "ALLOCATION_LOWER.STACK_FRAME_RANGE",
-                None,
-                None,
-                Vec::new(),
-                "stack frame size exceeds u32",
-            )
-        })?;
-    Ok((offsets, frame_size))
 }
 
 #[cfg(test)]
@@ -548,16 +516,17 @@ mod tests {
 
         assert_eq!(format!("{source:?}"), source_before);
         assert_eq!(lowered.function.vregs.count(), expanded.ir.value_count());
+        assert_eq!(lowered.stack_offsets.len(), expanded.stack_homes.len());
         assert_eq!(
             lowered.spill_frame_size,
-            u32::try_from(expanded.stack_homes.len() * 8).unwrap()
+            u32::try_from(lowered.stack_slot_count * 8).unwrap()
         );
-        assert_eq!(
-            lowered.stack_offsets,
-            (0..expanded.stack_homes.len())
-                .map(|home| i32::try_from(home * 8).unwrap())
-                .collect::<Vec<_>>()
-        );
+        assert!(lowered.stack_slot_count <= expanded.stack_homes.len());
+        assert!(lowered.stack_offsets.iter().all(|offset| {
+            *offset >= 0
+                && offset % 8 == 0
+                && u32::try_from(*offset).unwrap() < lowered.spill_frame_size
+        }));
         let rebuilt = live_interval::analyze(&lowered.function, &cfg).unwrap();
         assert_eq!(rebuilt, expanded.intervals);
         assert_eq!(

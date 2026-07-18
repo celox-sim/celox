@@ -5,8 +5,9 @@
 > implemented through explicit home expansion, joint original/synthetic
 > allocation, pressure-driven live-region splitting, and atomic strict-SSA plus
 > out-of-SSA lowering in the diagnostic path, but does not yet rewrite
-> production MIR. Fixed-register/clobber constraints, coalescing, and stack-slot
-> coloring remain before that switch. A replacement is accepted only by
+> production MIR. Fixed-register/clobber constraints, weighted coalescing, and
+> exact stack-home slot coloring are also integrated there; differential
+> execution and the production switch remain. A replacement is accepted only by
 > correctness tests and the executable Heliodor gate; speculative phase designs
 > are not normative.
 
@@ -80,9 +81,9 @@ removed before it could rewrite MIR:
 The retained 27d pipeline now removes all three defects: stack definitions are
 explicit, every executable transition re-enters joint allocation, one root may
 own multiple register regions, and the closed result lowers atomically into a
-private MIR function. Production still uses the interim allocator until target
-constraints, coalescing, and final frame coloring are integrated into that
-closed result.
+private MIR function. Target constraints, coalescing, and final frame coloring
+are part of that closed diagnostic result. Production still uses the interim
+allocator until differential execution and the Linux acceptance gate pass.
 
 The production boundary is therefore not `AllocationPlan`.  That type remains
 solver-internal and may contain queue stages, rejected parents, cached costs,
@@ -235,8 +236,8 @@ Each retained slice ends at a verified representation boundary:
    diagnostic path.**
 7. Split live ranges at fixed/clobber boundaries, rebuild mandatory masks from
    rewritten machine operands, coalesce copy/phi affinities transactionally,
-   and color exact stack-home interference. The first three parts are complete
-   in the diagnostic path; stack-slot coloring remains.
+   and color exact stack-home interference. **Complete in the diagnostic
+   path.**
 8. Replace production W/S only after differential MIR execution and the exact
    Heliodor Linux marker pass.  Measure code generation and generated-code
    execution separately; use non-LTO builds during iteration and a final
@@ -325,9 +326,9 @@ register definition followed by a store. Nontrivial edge recipes materialize
 to an explicit edge-local stack home; all recipe intermediates still enter
 joint allocation. This is required for functions with more phi rows on one
 edge than physical registers. The resulting `AssignmentMap` and complete SSA
-destruction plan are independently verified. Production code generation is
-still the interim allocator below until stack-slot coloring completes the
-same closed result.
+destruction plan are independently verified. Production code generation
+remains on the interim allocator until the completed diagnostic result passes
+differential execution and the Linux acceptance gate.
 
 Target constraints no longer pin an unsplit long-lived VReg. Before home
 selection, every fixed-operand or clobbering instruction receives an explicit
@@ -348,8 +349,24 @@ Mov and register-resident phi edges form a weighted affinity graph. Greedy
 color choice consults already assigned neighbors, then a conservative
 post-color pass removes both endpoints from the sparse interval matrix and
 publishes a common color only if allowed masks, exact interference, and total
-incident affinity weight all improve. Production remains unchanged until
-stack-home lifetimes and frame-slot coloring close the remaining boundary.
+incident affinity weight all improve.
+
+Stack homes are then analyzed as a separate location-level strict-SSA program,
+not approximated from home counts or final reload positions. An explicit stack
+store or stack-resident phi defines one home; stack reloads and direct
+phi-edge stack locations use it. These facts retain current allocation-IR
+instruction positions, so their block slots are required to match the machine-
+value liveness layout exactly. Location-only phi-edge uses enter the same sparse
+CFG equations and dominance verifier without inventing register phi results.
+
+The resulting stack intervals are colored in definition/dominator order by a
+dynamically growing sparse interval matrix. A new 64-bit frame color is created
+only when every existing color interferes on an exact CFG segment. The final
+home-to-slot map is rebuilt from scratch in a second matrix before concrete
+offsets are assigned once. Thus mutually exclusive homes may share an offset,
+while overlapping homes and simultaneous stack phi destinations cannot.
+Production remains unchanged until the completed allocator passes its semantic
+and execution gates.
 
 ## Interim allocator architecture
 

@@ -43,6 +43,8 @@ mod spill_plan;
 #[cfg(test)]
 mod spilling;
 mod ssa;
+#[allow(dead_code)]
+mod stack_color;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
