@@ -146,6 +146,13 @@ never renumbers a surviving one; its liveness row becomes empty. This is what
 allows a later session to update affected sparse ranges without invalidating
 unrelated blocks or allocation units.
 
+Physical interval-union bundle identity is the same stable VReg identity, not
+the compact row of currently active values. The joint allocator retains its
+matrix and assignments across split transactions; unchanged ranges stay
+resident while dead, rewritten, displaced, and new values re-enter the work
+queue. Whole-program liveness replacement is still required before this
+persistent session satisfies the actual-scale complexity contract.
+
 ### Allocation algorithm
 
 The allocator operates on immutable root liveness and creates allocation units

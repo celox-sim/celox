@@ -3020,6 +3020,27 @@ Independent final liveness continues to reject any live reference to such a
 hole. Region identity and the persistent physical matrix remain the next
 session slice; this step alone does not rerun the 900-second Heliodor gate.
 
+Step 27d9b makes physical bundle identity equal to the stable session VReg and
+separates it from the compact active-value row. A `JointAllocationSession` now
+owns one sparse interval matrix, range-token table, assignment table, and
+definition-order work queue across region splits. On update it removes only a
+dead or byte-different value's old range, creates ranges for changed/new
+values, and leaves every unchanged register membership in place. A focused
+regression extends a completed problem by one definition and proves that both
+existing matrix memberships survive while only the new VReg enters the queue.
+
+This removes restart-from-empty coloring, but the actual-scale compile-only
+gate still timed out after 600.292 seconds. Initial HomeGraph construction,
+root allocation, and expansion all completed: the largest reported intervals
+were 4.695, 15.278, and 19.775 seconds respectively. None of the three
+high-pressure functions reported completion of joint reallocation, and all
+three workers remained continuously active at timeout. Thus matrix restart was
+a real design defect but not the dominant remaining one. `apply_split` still
+clones the complete expanded problem, recomputes whole-program liveness (with
+its independent verifier), and `JointAllocationProblem::build` recomputes the
+same liveness again. The next retained boundary is a block fact index plus
+per-value sparse liveness update; no container or threshold tuning is implied.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3089,6 +3110,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d7b exact stack-home liveness and sparse slot coloring | this step | stack coloring 3/3 for exact reuse/interference/direct phi edges; allocation lowering 3/3; more-than-K phi-edge regression 1/1 | lib 833/833 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | stores/stack phis define location SSA; reload/direct-edge uses share the CFG-sparse verifier; a dynamic interval matrix colors and independently rebuilds final frame slots |
 | 27d8 explicit replacement publication and actual-scale rejection | this step | destination-qualified final-liveness regression 1/1; candidate regalloc 12/12 including 32-phi JIT execution | candidate/default lib 834/834; candidate native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | no result: non-LTO candidate remained in code generation and timed out before Linux execution | 900.256 s timeout; compile/execute record unavailable | explicit publication is verified on common workloads, but the all-world split/reanalyse/recolor fixed point is rejected; persistent incremental allocation is next |
 | 27d9a stable block slots and allocation-session identities | this step | stable cross-block slot 1/1; stable dead-materialization identity 1/1; split 5/5; lowering 3/3 | candidate lib 836/836; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | not rerun; this prerequisite does not yet replace whole-problem liveness/recoloring | n/a | block-local coordinates and monotonic synthetic IDs remove global renumbering; persistent region/matrix state remains next |
+| 27d9b persistent physical interval allocation | this step | stable bundle-hole 1/1; retained matrix-membership 1/1; joint allocation 6/6; split 5/5 | candidate lib 838/838; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | no result: compile-only candidate timed out with three joint-allocation workers active | 600.292 s timeout; HomeGraph/root/expand phases complete | unchanged values retain matrix membership, but repeated whole-IR liveness remains dominant and is the next architectural boundary |
 
 ## Related design records
 

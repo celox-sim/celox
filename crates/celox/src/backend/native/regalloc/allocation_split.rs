@@ -20,7 +20,8 @@ use super::allocation_expand::{
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
     AllocationValue, AllocationValueClass, JointAllocation, JointAllocationError,
-    JointAllocationOutcome, JointAllocationProblem, RegionSplitCandidate, RegionSplitRequest,
+    JointAllocationOutcome, JointAllocationProblem, JointAllocationSession, RegionSplitCandidate,
+    RegionSplitRequest,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -419,7 +420,7 @@ pub(super) fn apply_split(
     plan: &RegionSplitPlan,
     cfg: &NormalizedCfg,
     registers: &[PhysReg],
-) -> Result<(), AllocationSplitError> {
+) -> Result<JointAllocationProblem, AllocationSplitError> {
     let candidate = candidate_from_plan(joint, plan)?;
     let dominance = Dominance::build(cfg)?;
     verify_plan(expanded, graph, joint, &candidate, plan, cfg, &dominance)?;
@@ -541,7 +542,7 @@ pub(super) fn apply_split(
     normalize_register_regions(&mut next)?;
     prune_dead_materializations(&mut next)?;
     allocation_expand::refresh(&mut next, cfg).map_err(AllocationSplitError::expand)?;
-    JointAllocationProblem::build(&next, cfg, graph, registers)
+    let next_joint = JointAllocationProblem::build(&next, cfg, graph, registers)
         .map_err(AllocationSplitError::joint)?;
     let after = split_progress(&next);
     if after >= before {
@@ -554,7 +555,7 @@ pub(super) fn apply_split(
         ));
     }
     *expanded = next;
-    Ok(())
+    Ok(next_joint)
 }
 
 /// Iterate exact splitting and joint coloring to a fixed point.  The bound is
@@ -589,11 +590,13 @@ pub(super) fn allocate_with_splitting(
                 "split iteration bound exceeds u128",
             )
         })?;
+    let joint = JointAllocationProblem::build(expanded, cfg, graph, registers)
+        .map_err(AllocationSplitError::joint)?;
+    let mut session =
+        JointAllocationSession::new(joint, cfg, registers).map_err(AllocationSplitError::joint)?;
     let mut steps = 0u128;
     loop {
-        let joint = JointAllocationProblem::build(expanded, cfg, graph, registers)
-            .map_err(AllocationSplitError::joint)?;
-        match joint
+        match session
             .allocate(cfg, registers)
             .map_err(AllocationSplitError::joint)?
         {
@@ -608,8 +611,11 @@ pub(super) fn allocate_with_splitting(
                         "monotonic split sequence exceeded its ownership-derived bound",
                     ));
                 }
-                let plan = plan_split(expanded, graph, &joint, &request, cfg)?;
-                apply_split(expanded, graph, &joint, &plan, cfg, registers)?;
+                let plan = plan_split(expanded, graph, session.problem(), &request, cfg)?;
+                let next = apply_split(expanded, graph, session.problem(), &plan, cfg, registers)?;
+                session
+                    .update(next, registers)
+                    .map_err(AllocationSplitError::joint)?;
                 steps += 1;
             }
         }
