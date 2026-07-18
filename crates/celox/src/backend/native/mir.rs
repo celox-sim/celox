@@ -15,6 +15,7 @@ use crate::ir::RegionedAbsoluteAddr;
 
 /// Stack-allocated list of up to 5 VReg uses. Avoids Vec heap allocation
 /// in the regalloc inner loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Uses {
     buf: [VReg; 5],
     len: u8,
@@ -78,6 +79,17 @@ impl Uses {
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &VReg> {
         self.buf[..self.len as usize].iter()
+    }
+
+    pub(crate) fn replace(&mut self, old: VReg, new: VReg) -> bool {
+        let mut changed = false;
+        for value in &mut self.buf[..self.len as usize] {
+            if *value == old {
+                *value = new;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 

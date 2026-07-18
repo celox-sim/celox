@@ -2761,6 +2761,48 @@ critical compile interval improves by 14.862 s.  This is the first retained
 allocator design change.  Production MIR remains on the legacy allocator, so
 the result is still compile-only and makes no Linux semantic claim.
 
+A final container-order trial after Step 27c5f removed the conflict-ID sort
+and made recolor/eviction consume first-interference order.  The complete
+CPU-0 non-LTO compile-only run is
+`target/heliodor/results/20260718T154524Z_celox_test_soc_linux_boot.log`.
+It regressed from 111.349 s to 135.893 s even though one function improved;
+other functions incurred substantially worse sparse resident/home access.
+The complete code change was removed.  This closes conflict-container order,
+map thresholds, and similar local query tuning as the continuation of Step
+27c.  No commit or production-MIR change resulted from the trial.
+
+Step 27d1 starts the production boundary instead.  Inspection of the complete
+diagnostic plan exposed two correctness obligations which cannot be delegated
+to a later rewriter.  `stack_home_created` does not identify any store which
+reaches the selected reloads.  More fundamentally, a home child has an empty
+live range even though an executable definition-to-store, reload-to-use, or
+state/rematerialization recipe needs one or more physical registers.  Those
+synthetic values may interfere with retained root ranges; assigning an
+unmodelled scratch register after allocation would make the allocation
+incomplete.
+
+The retained slice introduces an off-to-the-side allocation IR.  It copies
+only original machine def/use and phi-edge identities, keeps stable anchors to
+the immutable input MIR, and can insert stack stores, stack reloads, and exact
+recipe nodes without mutating `MFunction`.  Every synthetic instruction and
+machine value has a checked dense identity and exactly one definition.
+Original instruction order remains independently verified, malformed
+synthetic def/use signatures are rejected before mutation, and a failed build
+cannot expose partial MIR.
+
+Exact liveness is shared rather than reimplemented.  The existing Step 27a
+analyzer now consumes a minimal strict-SSA program interface implemented by
+both `MFunction` and the allocation IR.  Slot construction, block fixed point,
+phi-edge uses, sparse segments, definition dominance, and the independent
+equation verifier are therefore identical for original and synthetic values.
+Focused tests prove unchanged MIR has exactly identical intervals, a
+definition-to-stack-store forms a real short range, reload and multi-step
+recipe results re-enter liveness, one phi-edge reload is confined to its
+normalized edge, malformed insertion is atomic, and the source `MFunction`
+remains unchanged.  This slice does not yet connect home selection to the
+allocation IR or change production MIR, so it makes no Linux or execution-time
+claim.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2819,6 +2861,8 @@ new allocator produces a substantial non-LTO execution win.
 | 27c5d bundle-owned split topology and occupancy cuts | this step | allocator 11/11 including topology reuse, same-block, cross-block, and sibling-arm splits; interval union 6/6 | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 129.858 s; allocation 26.500 / 31.208 / 53.007 / 25.172 s | repeated CFG/use topology construction removed; 2.005 s total improvement is insufficient, so remaining allocation-wide work stays open |
 | 27c5e root-owned home choice and additive cost plan | this step | allocator 11/11 including shared-stack partition, subset/complement equality, single-use materialization, and root-plan reuse | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 126.211 s; allocation 24.600 / 28.062 / 51.346 / 23.031 s | repeated home partition and losing-candidate materialization removed; free-range/candidate search remains the dominant open allocator design |
 | 27c5f staged conflict/cut queries and streaming region selection | this step | interval union 6/6 including exact canonical cuts; allocator 11/11 including same-block, cross-block, and sibling-arm split semantics | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 111.349 s; allocation 21.190 / 23.277 / 30.433 / 11.727 s | second interval-union search and fully materialized losing candidates removed; compile-only improves 14.862 s |
+| post-27c conflict discovery-order trial | rejected (no commit) | interval union 6/6; allocator 11/11 | focused check/clippy passed before measurement; full candidate reverted | CPU-0 diagnostic compile-only completed; production MIR unchanged | 135.893 s vs 111.349 s retained baseline | 22.0% compile regression; fully reverted; local container-order tuning closed |
+| 27d1 allocation IR and shared synthetic-value liveness | this step | allocation IR 5/5; live interval 5/5 | lib 809/809; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | analysis/rewrite infrastructure is disconnected from production MIR | n/a | original and synthetic machine values now share exact CFG/phi-edge liveness; explicit home placement remains next |
 
 ## Related design records
 

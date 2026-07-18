@@ -4,6 +4,8 @@
 //! reconstructs strict SSA, materializes late full-live Perm boundaries, and
 //! colors chordal SSA live ranges without an explicit interference graph.
 
+#[allow(dead_code)]
+mod allocation_ir;
 mod analysis;
 pub mod assignment;
 mod cfg;

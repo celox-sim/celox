@@ -145,6 +145,10 @@ export default defineConfig({
               text: "Native Throughput Plan",
               link: "/internals/native-throughput-execution-plan",
             },
+            {
+              text: "Native Register Allocation",
+              link: "/internals/native-register-allocation",
+            },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",

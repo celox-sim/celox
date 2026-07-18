@@ -1,8 +1,10 @@
 # Native register allocation
 
-> **Status:** this document records the currently implemented SSA allocator and
-> its known failures. A replacement is accepted only by correctness tests and
-> the executable Heliodor gate; speculative phase designs are not normative.
+> **Status:** the Braun--Hack W/S pipeline below is the current production
+> allocator.  The interval-based replacement described in the next section is
+> implemented through analysis and diagnostic allocation, but does not yet
+> rewrite production MIR.  A replacement is accepted only by correctness tests
+> and the executable Heliodor gate; speculative phase designs are not normative.
 
 The native backend treats register allocation as a verified sequence of IR
 transformations.  It is not permitted to recover from an invalid MIR graph,
@@ -34,6 +36,198 @@ machine constraints and edge shuffles, not as a source of compact identifiers:
 
 `regalloc2` is not a dependency or design target.  Its large-function behavior
 and compact internal index constraints do not meet Celox's requirements.
+
+## Interval replacement: one allocation result, one rewrite
+
+The replacement must solve live-range splitting, register assignment, and
+home placement as one allocation problem.  It must not reproduce the current
+pipeline by choosing stack residency first, substituting MemorySSA reloads
+later, and coloring a graph which can no longer request a different split.
+
+Steps 27a through 27c of the throughput plan already provide useful pieces:
+
+- stable instruction-use, definition, block-boundary, and phi-edge slots;
+- exact CFG-sparse live segments and an independently recomputed liveness
+  verifier;
+- versioned state/rematerialization recipe DAGs at every exact use;
+- physical-register interval unions, allocation-owned recoloring, eviction,
+  and a first dominance-aware region splitter.
+
+Those pieces are prerequisites, not a complete allocator.  The diagnostic
+plan still has three structural defects which must be removed before it can
+rewrite MIR:
+
+1. A split currently finalizes at most one register child and sends every
+   remaining use directly to a home.  It cannot discover two disjoint hot
+   register regions of one machine value, and a home child cannot re-enter the
+   allocation queue.
+2. `stack_home_created` is only a Boolean cost/accounting fact.  It does not
+   name the definition or edge which stores the value, and therefore cannot
+   prove that a stack value reaches every selected reload.  Adding a store
+   later in reconstruction would repeat the old error of changing liveness
+   after allocation.
+3. A home child currently has an empty live range and is treated as final.
+   Real code still needs a register for the original definition-to-store,
+   every reload-to-use, and every intermediate result in a state/remat recipe.
+   Those synthetic machine values can interfere with already assigned roots.
+   Inventing scratch registers in the rewriter would make the physical
+   allocation incomplete.
+
+The production boundary is therefore not `AllocationPlan`.  That type remains
+solver-internal and may contain queue stages, rejected parents, cached costs,
+and interval-matrix identities.  Home selection first extends an off-to-the-
+side allocation IR with explicit synthetic instructions and machine values.
+Those values go through the same liveness and allocation queue as original
+MIR values.  The solver may finish only when it can produce a closed
+`AllocationResult` with machine-semantic decisions for both original and
+synthetic values:
+
+```text
+AllocationResult
+  allocation_ir: original plus synthetic machine definitions/uses
+  roots: [AllocatedRoot]
+  register_regions: [RegisterRegion]
+  stack_homes: [StackHome]
+
+AllocatedRoot
+  original VReg and definition
+  exact UseSite -> Location mapping
+
+RegisterRegion
+  physical register
+  exact sparse live segments
+  entry definition:
+    original MIR definition
+    or explicit Home -> Register transition at a point/edge
+
+StackHome
+  logical root identity and colored frame class
+  explicit Register/Recipe -> Stack definitions at points/edges
+  exact Stack -> Register reload demands
+
+Location
+  RegisterRegion
+  StackHome reload
+  exact versioned state/rematerialization Recipe
+```
+
+Every original instruction use and phi-edge use has exactly one location.  A
+register region has exactly one SSA definition and contains only uses dominated
+by that definition.  A stack reload has an explicit reaching stack definition
+on every path.  Recipe transitions retain their exact MemorySSA versions.
+There is no implicit store, reload, edge copy, or register assignment left for
+the rewriter to invent.
+
+The allocation IR is not partially valid MIR and is never visible to another
+optimizer.  It records insert-before/insert-after/edge anchors against the
+immutable input function, synthetic opcode DAGs, and exact def/use identities.
+Its liveness index accepts original and synthetic machine values uniformly.
+Successful completion lowers it into a new strict-SSA `MFunction` atomically;
+failure leaves the input untouched.
+
+### Allocation algorithm
+
+The allocator operates on immutable root liveness and creates allocation units
+without mutating MIR:
+
+1. Build exact block liveness, sparse root intervals, loop/SCC nesting, use
+   positions, constraint masks, and home recipes once.  Frequency and cost are
+   annotations; they never alter semantic liveness.
+2. Form connected allocation units at dominance, loop, constraint, and
+   home-validity boundaries.  This partition is independent of physical
+   register occupancy.  It avoids rebuilding a root-sized CFG graph once per
+   physical register while still allowing branch-exclusive units to share a
+   register.
+3. Process units by weighted avoided-home cost.  Try a free register, then a
+   bounded recolor or eviction against sparse interval unions.  Failure splits
+   the unit into strictly smaller connected use sets and returns every
+   non-final child to the queue.  A value may consequently own any finite
+   number of disjoint register regions; the one-register-child diagnostic
+   restriction is removed.
+4. Solve stack availability as sparse SSA dataflow over the selected home
+   demands.  Place explicit stores at the latest legal dominating points or
+   predecessor edges while the source location is available.  Materialize
+   store, reload, state, and pure-recipe operations in the allocation IR.  All
+   resulting def-to-store, reload-to-use, and recipe-intermediate ranges return
+   to the ordinary allocation queue; none receives an invented scratch
+   register after allocation.
+5. Freeze `AllocationResult` only after every original and synthetic machine
+   value has a physical assignment.  Then lower the allocation IR, rename
+   exact instruction and phi-edge uses, insert required phis, and lower
+   physical constraints.  Rewrite never consults spill weights, rejected
+   candidates, or allocator caches.
+6. Independently rebuild MIR liveness, physical interference, stack reaching
+   definitions, MemorySSA recipe versions, fixed-register constraints, and
+   edge parallel copies.  Failure is a producer bug, not a request to retry
+   with another allocator or a more conservative global spill.
+
+Termination follows from the allocation-unit partition.  Every failed split
+must partition one unit into children whose use sets are non-empty, disjoint,
+and strictly smaller; children never merge during allocation.  A synthetic
+range is born already bounded by one transition DAG and one use cluster.  If it
+cannot be assigned, it may be split only at its finite instruction boundaries;
+it cannot recreate the wider parent which produced it.  Recolor depth is
+bounded by the target register file.  Stack-home placement is a monotone sparse
+dataflow problem.  MIR is materialized once after this finite process; there is
+no unbounded rewrite/reanalyse loop over successively larger functions.
+
+### Machine-independent and HDL-specific responsibilities
+
+The ordinary compiler responsibilities stay ordinary: exact CFG liveness,
+SSA dominance, interval interference, register constraints, splitting,
+recoloring, stack-slot coloring, and out-of-SSA parallel copies.  Celox does
+not replace them with HDL-width tags or a branchless linear live range.
+
+The HDL-specific input is limited to home choice and scale:
+
+- a machine VReg has only target-relevant 32- or 64-bit semantics; arbitrary
+  RTL widths remain in SIR/StateSSA metadata;
+- a SimState home is a versioned MemorySSA recipe, possibly a multi-load
+  shift/mask/merge DAG, proved separately at every selected transition;
+- very large mutually exclusive RTL paths require CFG-sparse segments and
+  near-linear storage rather than a layout-linear interval or all-pairs graph;
+- fused comb/FF functions may expose a register value across a phase boundary,
+  but that is an ordinary live region, not an implicit memory home.
+
+### Implementation and test slices
+
+Each retained slice ends at a verified representation boundary:
+
+1. Introduce the immutable-anchor allocation IR and exact liveness for its
+   original plus synthetic machine values.  Test def-to-store, reload-to-use,
+   multi-step recipe DAGs, phi edges, and stable input-MIR identity.
+2. Replace Boolean stack-home accounting with explicit stack definitions,
+   reload demands, and an independent all-path reaching-definition verifier;
+   enqueue every resulting synthetic range.
+3. Normalize the completed solver state into exact per-use locations and
+   explicit register-region entries.  Reject any implicit register, implicit
+   transition, or multiply owned use.
+4. Materialize one allocation result into strict SSA off to the side; verify
+   definition dominance, phi-edge ownership, recipes, and unchanged MIR
+   semantics before swapping it into the function.
+5. Remove the one-register-child restriction and requeue strictly smaller
+   connected children.  Test diamonds, loops, irreducible SCCs, multiple hot
+   regions, and termination.
+6. Integrate fixed constraints, copy/phi coalescing, and final stack-slot
+   coloring, then run the complete native and counter suites.
+7. Replace production W/S only after differential MIR execution and the exact
+   Heliodor Linux marker pass.  Measure code generation and generated-code
+   execution separately; use non-LTO builds during iteration and a final
+   release/LTO gate only at acceptance.
+
+Compile-time tuning inside the diagnostic allocator is not a substitute for
+these slices.  In particular, changing conflict-container order, map
+thresholds, or per-register projection caches is out of scope unless a
+completed architectural slice still fails its complexity contract.
+
+The first retained implementation slice now provides the allocation IR and
+shared liveness boundary.  Original MIR instructions and phis are represented
+by immutable anchors; synthetic stack stores, reloads, and recipe nodes receive
+checked machine-value definitions.  Both representations use the exact same
+CFG-sparse live-interval construction and independent equation verifier.  Home
+selection, explicit stack reaching definitions, recursive child allocation,
+and MIR lowering remain disconnected, so production code generation is still
+the interim allocator below.
 
 ## Interim allocator architecture
 

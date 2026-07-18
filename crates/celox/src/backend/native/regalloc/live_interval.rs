@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -228,50 +228,119 @@ struct ModelFacts {
     edge_uses: HashMap<(usize, usize), HashSet<VReg>>,
 }
 
+/// Minimal strict-SSA program view required by exact live-interval analysis.
+/// Production MIR and the off-to-the-side allocation IR share this interface,
+/// so synthetic values cannot bypass CFG, phi-edge, or dominance liveness.
+pub(super) trait LivenessProgram {
+    fn value_count(&self) -> u32;
+    fn block_count(&self) -> usize;
+    fn block_id(&self, block: usize) -> BlockId;
+    fn phi_count(&self, block: usize) -> usize;
+    fn phi_definition(&self, block: usize, phi: usize) -> VReg;
+    fn phi_sources(&self, block: usize, phi: usize) -> &[(BlockId, VReg)];
+    fn instruction_count(&self, block: usize) -> usize;
+    fn instruction_uses(&self, block: usize, instruction: usize) -> Uses;
+    fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg>;
+}
+
+impl LivenessProgram for MFunction {
+    fn value_count(&self) -> u32 {
+        self.vregs.count()
+    }
+
+    fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    fn block_id(&self, block: usize) -> BlockId {
+        self.blocks[block].id
+    }
+
+    fn phi_count(&self, block: usize) -> usize {
+        self.blocks[block].phis.len()
+    }
+
+    fn phi_definition(&self, block: usize, phi: usize) -> VReg {
+        self.blocks[block].phis[phi].dst
+    }
+
+    fn phi_sources(&self, block: usize, phi: usize) -> &[(BlockId, VReg)] {
+        &self.blocks[block].phis[phi].sources
+    }
+
+    fn instruction_count(&self, block: usize) -> usize {
+        self.blocks[block].insts.len()
+    }
+
+    fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
+        self.blocks[block].insts[instruction].uses()
+    }
+
+    fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {
+        self.blocks[block].insts[instruction].def()
+    }
+}
+
 pub(super) fn analyze(
     func: &MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<LiveIntervals, LiveIntervalError> {
-    check_model_shape(func, cfg)?;
-    let block_slots = assign_slots(func)?;
-    let facts = collect_facts(func, cfg, &block_slots)?;
-    let (live_in, live_out) = solve_liveness(func, cfg, &facts);
-    let intervals = build_intervals(func, cfg, &block_slots, &facts, &live_in, &live_out)?;
+    analyze_program(func, cfg)
+}
+
+pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+) -> Result<LiveIntervals, LiveIntervalError> {
+    check_model_shape(program, cfg)?;
+    let block_slots = assign_slots(program)?;
+    let facts = collect_facts(program, cfg, &block_slots)?;
+    let (live_in, live_out) = solve_liveness(program.block_count(), cfg, &facts);
+    let intervals = build_intervals(program, cfg, &block_slots, &facts, &live_in, &live_out)?;
     let result = LiveIntervals {
         block_slots,
         intervals,
     };
-    result.verify(func, cfg)?;
+    result.verify_program(program, cfg)?;
     Ok(result)
 }
 
-fn check_model_shape(func: &MFunction, cfg: &NormalizedCfg) -> Result<(), LiveIntervalError> {
-    let blocks = func.blocks.len();
+fn check_model_shape<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+) -> Result<(), LiveIntervalError> {
+    let blocks = program.block_count();
     if blocks == 0
         || cfg.predecessors.len() != blocks
         || cfg.successors.len() != blocks
         || cfg.idom.len() != blocks
         || cfg.block_index.len() != blocks
+        || (0..blocks)
+            .any(|block| cfg.block_index.get(&program.block_id(block)).copied() != Some(block))
     {
         return Err(LiveIntervalError::new(
             "LIVE_INTERVAL.MODEL_SHAPE",
-            func.blocks.first().map(|block| block.id),
+            (blocks != 0).then(|| program.block_id(0)),
             None,
             Vec::new(),
-            "normalized CFG tables do not cover a non-empty MIR function",
+            "normalized CFG tables do not exactly cover the liveness program",
         ));
     }
     Ok(())
 }
 
-fn assign_slots(func: &MFunction) -> Result<Vec<BlockSlots>, LiveIntervalError> {
+fn assign_slots<P: LivenessProgram + ?Sized>(
+    program: &P,
+) -> Result<Vec<BlockSlots>, LiveIntervalError> {
     let mut next = 0u64;
-    let mut result = Vec::with_capacity(func.blocks.len());
-    for block in &func.blocks {
-        let instruction_count = u64::try_from(block.insts.len()).map_err(|_| {
+    let mut result = Vec::with_capacity(program.block_count());
+    for block in 0..program.block_count() {
+        let block_id = program.block_id(block);
+        let block_instruction_count = program.instruction_count(block);
+        let instruction_count = u64::try_from(block_instruction_count).map_err(|_| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block.id),
+                Some(block_id),
                 None,
                 Vec::new(),
                 "instruction count exceeds the slot-index domain",
@@ -280,7 +349,7 @@ fn assign_slots(func: &MFunction) -> Result<Vec<BlockSlots>, LiveIntervalError> 
         let phi_def = next.checked_add(1).ok_or_else(|| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block.id),
+                Some(block_id),
                 None,
                 Vec::new(),
                 "phi-definition slot overflows u64",
@@ -293,7 +362,7 @@ fn assign_slots(func: &MFunction) -> Result<Vec<BlockSlots>, LiveIntervalError> 
             .ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block.id),
+                    Some(block_id),
                     None,
                     Vec::new(),
                     "block slot range overflows u64",
@@ -303,12 +372,12 @@ fn assign_slots(func: &MFunction) -> Result<Vec<BlockSlots>, LiveIntervalError> 
             entry: SlotIndex(next),
             phi_def: SlotIndex(phi_def),
             exit: SlotIndex(exit),
-            instruction_count: block.insts.len(),
+            instruction_count: block_instruction_count,
         });
         next = exit.checked_add(2).ok_or_else(|| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block.id),
+                Some(block_id),
                 None,
                 Vec::new(),
                 "function slot range overflows u64",
@@ -374,51 +443,53 @@ fn record_use(
     Ok(())
 }
 
-fn collect_facts(
-    func: &MFunction,
+fn collect_facts<P: LivenessProgram + ?Sized>(
+    program: &P,
     cfg: &NormalizedCfg,
     slots: &[BlockSlots],
 ) -> Result<ModelFacts, LiveIntervalError> {
-    let value_count = func.vregs.count() as usize;
+    let value_count = program.value_count() as usize;
     let mut definitions = vec![None; value_count];
     let mut uses = vec![Vec::new(); value_count];
-    let mut blocks = (0..func.blocks.len())
+    let mut blocks = (0..program.block_count())
         .map(|_| BlockFacts::default())
         .collect::<Vec<_>>();
-    let mut phi_definitions = (0..func.blocks.len())
+    let mut phi_definitions = (0..program.block_count())
         .map(|_| HashSet::new())
         .collect::<Vec<_>>();
 
-    for (block_index, block) in func.blocks.iter().enumerate() {
+    for block_index in 0..program.block_count() {
+        let block_id = program.block_id(block_index);
         let block_slots = slots[block_index];
-        for (phi_index, phi) in block.phis.iter().enumerate() {
+        for phi_index in 0..program.phi_count(block_index) {
+            let destination = program.phi_definition(block_index, phi_index);
             let site = DefinitionSite::Phi {
-                block: block.id,
+                block: block_id,
                 phi: phi_index,
                 slot: block_slots.phi_def,
             };
-            record_definition(&mut definitions, phi.dst, site)?;
-            blocks[block_index].definitions.insert(phi.dst);
-            phi_definitions[block_index].insert(phi.dst);
+            record_definition(&mut definitions, destination, site)?;
+            blocks[block_index].definitions.insert(destination);
+            phi_definitions[block_index].insert(destination);
         }
 
         let mut seen_definitions = blocks[block_index].definitions.clone();
-        for (instruction, inst) in block.insts.iter().enumerate() {
+        for instruction in 0..program.instruction_count(block_index) {
             let use_slot = block_slots.instruction_use(instruction).ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block.id),
+                    Some(block_id),
                     Some(instruction),
                     Vec::new(),
                     "instruction-use slot is outside the block",
                 )
             })?;
-            let mut instruction_uses = inst.uses().to_vec();
+            let mut instruction_uses = program.instruction_uses(block_index, instruction).to_vec();
             instruction_uses.sort_unstable();
             instruction_uses.dedup();
             for value in instruction_uses {
                 let site = UseSite::Instruction {
-                    block: block.id,
+                    block: block_id,
                     instruction,
                     slot: use_slot,
                 };
@@ -432,14 +503,14 @@ fn collect_facts(
                     .and_modify(|current| *current = (*current).max(use_slot))
                     .or_insert(use_slot);
             }
-            if let Some(value) = inst.def() {
+            if let Some(value) = program.instruction_definition(block_index, instruction) {
                 let site = DefinitionSite::Instruction {
-                    block: block.id,
+                    block: block_id,
                     instruction,
                     slot: block_slots.instruction_def(instruction).ok_or_else(|| {
                         LiveIntervalError::new(
                             "LIVE_INTERVAL.SLOT_RANGE",
-                            Some(block.id),
+                            Some(block_id),
                             Some(instruction),
                             vec![value],
                             "instruction-definition slot is outside the block",
@@ -454,14 +525,16 @@ fn collect_facts(
     }
 
     let mut edge_uses = HashMap::<(usize, usize), HashSet<VReg>>::new();
-    for (successor, block) in func.blocks.iter().enumerate() {
-        for (phi_index, phi) in block.phis.iter().enumerate() {
+    for successor in 0..program.block_count() {
+        let successor_id = program.block_id(successor);
+        for phi_index in 0..program.phi_count(successor) {
+            let destination = program.phi_definition(successor, phi_index);
             let mut seen_predecessors = BTreeSet::new();
-            for &(predecessor_id, value) in &phi.sources {
+            for &(predecessor_id, value) in program.phi_sources(successor, phi_index) {
                 let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
                     return Err(LiveIntervalError::new(
                         "LIVE_INTERVAL.PHI_PREDECESSOR",
-                        Some(block.id),
+                        Some(successor_id),
                         None,
                         vec![value],
                         format!("phi references missing predecessor {predecessor_id}"),
@@ -472,7 +545,7 @@ fn collect_facts(
                 {
                     return Err(LiveIntervalError::new(
                         "LIVE_INTERVAL.PHI_PREDECESSOR",
-                        Some(block.id),
+                        Some(successor_id),
                         None,
                         vec![value],
                         "phi predecessor is absent from the CFG or appears more than once",
@@ -480,7 +553,7 @@ fn collect_facts(
                 }
                 let site = UseSite::PhiEdge {
                     predecessor: predecessor_id,
-                    successor: block.id,
+                    successor: successor_id,
                     phi: phi_index,
                     slot: slots[predecessor].exit,
                 };
@@ -498,9 +571,9 @@ fn collect_facts(
             if seen_predecessors.len() != cfg.predecessors[successor].len() {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.PHI_PREDECESSOR",
-                    Some(block.id),
+                    Some(successor_id),
                     None,
-                    vec![phi.dst],
+                    vec![destination],
                     "phi does not provide exactly one source for every predecessor",
                 ));
             }
@@ -521,16 +594,14 @@ fn collect_facts(
 }
 
 fn solve_liveness(
-    func: &MFunction,
+    block_count: usize,
     cfg: &NormalizedCfg,
     facts: &ModelFacts,
 ) -> (Vec<HashSet<VReg>>, Vec<HashSet<VReg>>) {
-    let mut live_in = (0..func.blocks.len())
-        .map(|_| HashSet::new())
-        .collect::<Vec<_>>();
+    let mut live_in = (0..block_count).map(|_| HashSet::new()).collect::<Vec<_>>();
     let mut live_out = live_in.clone();
-    let mut queue = (0..func.blocks.len()).rev().collect::<VecDeque<_>>();
-    let mut queued = vec![true; func.blocks.len()];
+    let mut queue = (0..block_count).rev().collect::<VecDeque<_>>();
+    let mut queued = vec![true; block_count];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
         let mut next_out = HashSet::new();
@@ -561,8 +632,8 @@ fn solve_liveness(
     (live_in, live_out)
 }
 
-fn build_intervals(
-    func: &MFunction,
+fn build_intervals<P: LivenessProgram + ?Sized>(
+    program: &P,
     cfg: &NormalizedCfg,
     slots: &[BlockSlots],
     facts: &ModelFacts,
@@ -570,7 +641,8 @@ fn build_intervals(
     live_out: &[HashSet<VReg>],
 ) -> Result<Vec<Option<LiveInterval>>, LiveIntervalError> {
     let mut segments = vec![Vec::<LiveSegment>::new(); facts.definitions.len()];
-    for (block_index, block) in func.blocks.iter().enumerate() {
+    for block_index in 0..program.block_count() {
+        let block_id = program.block_id(block_index);
         let mut values = HashSet::new();
         values.extend(live_in[block_index].iter().copied());
         values.extend(live_out[block_index].iter().copied());
@@ -582,7 +654,7 @@ fn build_intervals(
             else {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.MISSING_DEFINITION",
-                    Some(block.id),
+                    Some(block_id),
                     None,
                     vec![value],
                     "live or used value has no MIR definition",
@@ -593,7 +665,7 @@ fn build_intervals(
             if starts_live && definition_block == block_index {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.USE_BEFORE_DEFINITION",
-                    Some(block.id),
+                    Some(block_id),
                     None,
                     vec![value],
                     "value is live at entry of its defining block",
@@ -616,7 +688,7 @@ fn build_intervals(
             .ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block.id),
+                    Some(block_id),
                     None,
                     vec![value],
                     "live segment end overflows or has no local reason to exist",
@@ -625,14 +697,14 @@ fn build_intervals(
             if start >= end {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.EMPTY_SEGMENT",
-                    Some(block.id),
+                    Some(block_id),
                     None,
                     vec![value],
                     format!("segment {start:?}..{end:?} is empty or reversed"),
                 ));
             }
             segments[value.0 as usize].push(LiveSegment {
-                block: block.id,
+                block: block_id,
                 start,
                 end,
             });
@@ -679,9 +751,17 @@ impl LiveIntervals {
         func: &MFunction,
         cfg: &NormalizedCfg,
     ) -> Result<(), LiveIntervalError> {
-        check_model_shape(func, cfg)?;
-        if self.block_slots.len() != func.blocks.len()
-            || self.intervals.len() != func.vregs.count() as usize
+        self.verify_program(func, cfg)
+    }
+
+    pub(super) fn verify_program<P: LivenessProgram + ?Sized>(
+        &self,
+        program: &P,
+        cfg: &NormalizedCfg,
+    ) -> Result<(), LiveIntervalError> {
+        check_model_shape(program, cfg)?;
+        if self.block_slots.len() != program.block_count()
+            || self.intervals.len() != program.value_count() as usize
         {
             return Err(LiveIntervalError::new(
                 "LIVE_INTERVAL.CACHED_SHAPE",
@@ -691,7 +771,7 @@ impl LiveIntervals {
                 "cached slots or intervals do not cover the MIR function",
             ));
         }
-        let expected_slots = assign_slots(func)?;
+        let expected_slots = assign_slots(program)?;
         if self.block_slots != expected_slots {
             return Err(LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_IDENTITY",
@@ -701,9 +781,9 @@ impl LiveIntervals {
                 "cached slot indexes differ from an independent MIR layout",
             ));
         }
-        let facts = collect_facts(func, cfg, &expected_slots)?;
-        let dominators = DominatorIntervals::build(func, cfg)?;
-        let mut cached_in = (0..func.blocks.len())
+        let facts = collect_facts(program, cfg, &expected_slots)?;
+        let dominators = DominatorIntervals::build(program, cfg)?;
+        let mut cached_in = (0..program.block_count())
             .map(|_| HashSet::new())
             .collect::<Vec<_>>();
         let mut cached_out = cached_in.clone();
@@ -809,7 +889,7 @@ impl LiveIntervals {
             }
         }
 
-        for block in 0..func.blocks.len() {
+        for block in 0..program.block_count() {
             let mut expected_out = HashSet::new();
             for &successor in &cfg.successors[block] {
                 expected_out.extend(cached_in[successor].iter().copied());
@@ -834,7 +914,7 @@ impl LiveIntervals {
                 values.dedup();
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.DATAFLOW_EQUATION",
-                    Some(func.blocks[block].id),
+                    Some(program.block_id(block)),
                     None,
                     values,
                     "cached entry/exit coverage does not satisfy CFG liveness equations",
@@ -846,7 +926,7 @@ impl LiveIntervals {
             {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.PHI_LIVE_IN",
-                    Some(func.blocks[block].id),
+                    Some(program.block_id(block)),
                     None,
                     Vec::new(),
                     "phi result is live before its simultaneous block-entry definition",
@@ -896,22 +976,25 @@ struct DominatorIntervals {
 }
 
 impl DominatorIntervals {
-    fn build(func: &MFunction, cfg: &NormalizedCfg) -> Result<Self, LiveIntervalError> {
-        let mut children = vec![Vec::new(); func.blocks.len()];
-        for block in 1..func.blocks.len() {
+    fn build<P: LivenessProgram + ?Sized>(
+        program: &P,
+        cfg: &NormalizedCfg,
+    ) -> Result<Self, LiveIntervalError> {
+        let mut children = vec![Vec::new(); program.block_count()];
+        for block in 1..program.block_count() {
             let Some(parent) = cfg.idom[block] else {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.DOMINATOR_TREE",
-                    Some(func.blocks[block].id),
+                    Some(program.block_id(block)),
                     None,
                     Vec::new(),
                     "reachable non-entry block has no immediate dominator",
                 ));
             };
-            if parent >= func.blocks.len() {
+            if parent >= program.block_count() {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.DOMINATOR_TREE",
-                    Some(func.blocks[block].id),
+                    Some(program.block_id(block)),
                     None,
                     Vec::new(),
                     "immediate dominator is outside the function",
@@ -919,8 +1002,8 @@ impl DominatorIntervals {
             }
             children[parent].push(block);
         }
-        let mut enter = vec![0; func.blocks.len()];
-        let mut exit = vec![0; func.blocks.len()];
+        let mut enter = vec![0; program.block_count()];
+        let mut exit = vec![0; program.block_count()];
         let mut clock = 0usize;
         let mut stack = vec![(0usize, false)];
         while let Some((block, leaving)) = stack.pop() {
@@ -929,7 +1012,7 @@ impl DominatorIntervals {
                 clock = clock.checked_add(1).ok_or_else(|| {
                     LiveIntervalError::new(
                         "LIVE_INTERVAL.DOMINATOR_TREE",
-                        Some(func.blocks[block].id),
+                        Some(program.block_id(block)),
                         None,
                         Vec::new(),
                         "dominator traversal index overflows usize",
@@ -941,7 +1024,7 @@ impl DominatorIntervals {
             clock = clock.checked_add(1).ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.DOMINATOR_TREE",
-                    Some(func.blocks[block].id),
+                    Some(program.block_id(block)),
                     None,
                     Vec::new(),
                     "dominator traversal index overflows usize",
