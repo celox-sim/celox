@@ -2899,9 +2899,42 @@ compacted before reallocation, preventing dead transitions from becoming
 fixed-only pressure.  Focused tests cover synthetic pressure through complete
 joint reallocation, one-arm reachability, loop reentry, a retained register
 prefix plus fixed stack store, and repeated-entry termination.  Production MIR
-is still unchanged, so this slice makes no Linux or timing claim.  Step 27d6
-must normalize the exact per-use result and lower it atomically into strict-SSA
-MIR.
+is still unchanged, so this slice makes no Linux or timing claim.
+
+Step 27d6 closes the rewrite boundary. The allocation IR now retains the full
+immutable source instruction, not merely its def/use row; lowering rejects a
+changed opcode, width, immediate, operand, phi row, CFG edge, or VReg domain.
+Synthetic constants, state loads, stack operations, and every width-explicit
+pure recipe operation lower through one canonical MIR mapping. The complete
+result is built in a private `MFunction`, canonical MIR verification runs, and
+an independent liveness reconstruction must reproduce the exact expanded
+allocation before anything can be published.
+
+The first complete diagnostic library gate exposed an out-of-SSA boundary
+which strict-SSA register liveness alone cannot represent. Thirty-two phi
+sources materialized before one edge, and then thirty-two phi destinations at
+one block entry, are not thirty-two simultaneously required registers: stack
+and immediate locations are legal parallel-copy inputs and stack slots are
+legal destinations. The retained model therefore keeps semantic phi rows in
+MIR while excluding explicitly non-register sources and destinations from
+physical liveness. Immediate and persistent-stack sources become exact,
+destination-qualified edge locations. A nontrivial state/pure recipe is
+materialized into an explicit edge-local stack home, and all of its temporary
+machine values still re-enter joint allocation. A stack-resident phi
+destination is defined directly by every incoming out-of-SSA copy rather than
+by a fictitious register definition followed by a store.
+
+Lowering converts the joint assignment plus these locations into an
+`AssignmentMap`, constructs the complete SSA-destruction parallel-copy plan,
+and independently verifies both that plan and its frame bounds. The
+`interval-diagnostic` driver now executes HomeGraph construction, initial home
+planning, explicit expansion, splitting to the joint fixed point, atomic MIR
+lowering, filtered physical-liveness reconstruction, and SSA-destruction
+verification as one gate. Production MIR remains on the interim allocator, so
+this step makes no Linux or throughput claim. Step 27d7 must integrate target
+fixed/clobber constraints, copy and phi affinities/coalescing, and final
+stack-slot interference coloring into the same closed result before any
+production switch.
 
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
@@ -2967,6 +3000,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d3 allocation-home expansion into machine values | this step | allocation expansion 3/3; allocation IR 8/8 including shifted instruction and phi-edge anchors | lib 815/815; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | expanded problem remains disconnected from production MIR | n/a | stack/state/remat/register transitions now have exact synthetic ranges; joint reallocation remains next |
 | 27d4 joint original/synthetic allocation boundary | this step | joint allocation 4/4 including affinity override, sibling-arm sharing, split requests, and fixed-pressure rejection | lib 819/819; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | split requests are not yet resolved and production MIR is unchanged | n/a | old assignments are affinities only; every machine range is jointly colored or returned in an exact split obligation |
 | 27d5 exact pressure-region splitting and joint fixed point | this step | allocation split 5/5 including complete synthetic-pressure allocation, sibling-arm isolation, loop reentry, partial stack residency, and repeated-entry termination | lib 824/824; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | exact result is not yet lowered to production MIR; no Linux semantic claim | n/a | reachable suffixes become multiple dominance regions or exact homes; dead synthetic DAGs are compacted and every value re-enters joint allocation |
+| 27d6 atomic MIR and out-of-SSA location lowering | this step | allocation lowering 3/3 including exact stack/recipe lowering, stale-input rejection, and more-than-K phi rows | lib 827/827 under `interval-diagnostic`; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | production MIR is unchanged; no Linux semantic or timing claim | n/a | the closed joint result lowers atomically; exact stack/immediate phi locations avoid fictitious source and destination pressure; constraints, coalescing, and stack coloring remain next |
 
 ## Related design records
 

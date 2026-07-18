@@ -53,6 +53,16 @@ pub(super) enum ExpandedUseSource {
         preferred_register: PhysReg,
     },
     Materialized(ExpandedMaterialization),
+    /// A semantic phi source resolved directly by out-of-SSA translation.
+    /// It remains in the MIR phi row but does not form a register live range
+    /// at the predecessor exit.
+    Edge(ExpandedEdgeLocation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ExpandedEdgeLocation {
+    Stack { home: StackHomeId },
+    Immediate { value: u64, recipe: RecipeId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +102,29 @@ pub(super) struct ExpandedRegisterRegion {
 pub(super) struct ExpandedStackHome {
     pub id: StackHomeId,
     pub root: LiveBundleId,
-    pub store: SyntheticInstructionId,
+    pub definition: ExpandedStackDefinition,
+    pub kind: ExpandedStackHomeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExpandedStackDefinition {
+    Store {
+        instruction: SyntheticInstructionId,
+        value: VReg,
+    },
+    Phi {
+        block: BlockId,
+        phi: usize,
+        destination: VReg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExpandedStackHomeKind {
+    /// Persistent root home established immediately after the root definition.
+    Root,
+    /// Edge-local recipe result consumed directly by one phi row from memory.
+    EdgeRecipe { use_id: BundleUseId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +198,11 @@ pub(super) struct LoweredMaterialization {
     pub source: ExpandedMaterialization,
 }
 
+pub(super) enum LoweredUseMaterialization {
+    Register(LoweredMaterialization),
+    Edge(ExpandedEdgeLocation),
+}
+
 pub(super) fn expand(
     func: &MFunction,
     cfg: &NormalizedCfg,
@@ -208,6 +245,13 @@ pub(super) fn expand(
                 .get(leaf.0 as usize)
                 .is_some_and(bundle_uses_stack)
         });
+        let keeps_original_register = leaves.iter().any(|&leaf| {
+            plan.bundles.get(leaf.0 as usize).is_some_and(|bundle| {
+                bundle.parent.is_none()
+                    && !bundle.uses.is_empty()
+                    && matches!(bundle.assignment, BundleAssignment::Register(_))
+            })
+        });
         let stack_home = if needs_stack {
             let id = StackHomeId(u32::try_from(stack_homes.len()).map_err(|_| {
                 AllocationExpandError::new(
@@ -218,19 +262,39 @@ pub(super) fn expand(
                     "expanded stack-home count exceeds u32",
                 )
             })?);
-            let store = ir
-                .insert_after_definition(
-                    root.definition,
-                    SyntheticOperation::StackStore { home: id },
-                    Uses::one(root.origin),
-                    false,
-                )
-                .map_err(AllocationExpandError::ir)?
-                .instruction;
+            let definition = match root.definition {
+                super::live_interval::DefinitionSite::Phi { block, phi, .. }
+                    if !keeps_original_register =>
+                {
+                    ir.assign_phi_definition_home(root.definition, root.origin, id)
+                        .map_err(AllocationExpandError::ir)?;
+                    ExpandedStackDefinition::Phi {
+                        block,
+                        phi,
+                        destination: root.origin,
+                    }
+                }
+                _ => {
+                    let instruction = ir
+                        .insert_after_definition(
+                            root.definition,
+                            SyntheticOperation::StackStore { home: id },
+                            Uses::one(root.origin),
+                            false,
+                        )
+                        .map_err(AllocationExpandError::ir)?
+                        .instruction;
+                    ExpandedStackDefinition::Store {
+                        instruction,
+                        value: root.origin,
+                    }
+                }
+            };
             stack_homes.push(ExpandedStackHome {
                 id,
                 root: root.id,
-                store,
+                definition,
+                kind: ExpandedStackHomeKind::Root,
             });
             Some(id)
         } else {
@@ -290,7 +354,7 @@ pub(super) fn expand(
                                 "region transition is not an exact root use",
                             )
                         })?;
-                    let lowered = lower_materialization(
+                    let lowered = lower_register_materialization(
                         &mut ir,
                         graph,
                         root,
@@ -341,11 +405,30 @@ pub(super) fn expand(
                 BundleAssignment::Home(selection) => {
                     for &use_id in &leaf.uses {
                         let use_ = root_use(root, use_id)?;
-                        let lowered = lower_materialization(
-                            &mut ir, graph, root, use_id, use_.site, selection, stack_home,
+                        let lowered = lower_use_materialization(
+                            &mut ir,
+                            graph,
+                            root,
+                            root.origin,
+                            use_id,
+                            use_.site,
+                            selection,
+                            stack_home,
+                            &mut stack_homes,
                         )?;
-                        ir.rewrite_use(use_.site, root.origin, lowered.value)
-                            .map_err(AllocationExpandError::ir)?;
+                        let (value, source) = match lowered {
+                            LoweredUseMaterialization::Register(lowered) => {
+                                ir.rewrite_use(use_.site, root.origin, lowered.value)
+                                    .map_err(AllocationExpandError::ir)?;
+                                (
+                                    lowered.value,
+                                    ExpandedUseSource::Materialized(lowered.source),
+                                )
+                            }
+                            LoweredUseMaterialization::Edge(location) => {
+                                (root.origin, ExpandedUseSource::Edge(location))
+                            }
+                        };
                         assign_expanded_use(
                             root,
                             &mut expanded_uses,
@@ -353,8 +436,8 @@ pub(super) fn expand(
                                 id: use_id,
                                 original_site: use_.site,
                                 site: use_.site,
-                                value: lowered.value,
-                                source: ExpandedUseSource::Materialized(lowered.source),
+                                value,
+                                source,
                             },
                         )?;
                     }
@@ -533,7 +616,176 @@ fn assign_expanded_use(
     Ok(())
 }
 
-pub(super) fn lower_materialization(
+pub(super) fn lower_use_materialization(
+    ir: &mut AllocationIr,
+    graph: &HomeGraph,
+    root: &LiveBundle,
+    current_value: VReg,
+    use_id: BundleUseId,
+    site: UseSite,
+    selection: &HomeSelection,
+    stack_home: Option<StackHomeId>,
+    stack_homes: &mut Vec<ExpandedStackHome>,
+) -> Result<LoweredUseMaterialization, AllocationExpandError> {
+    if matches!(site, UseSite::PhiEdge { .. }) {
+        return lower_phi_edge_materialization(
+            ir,
+            graph,
+            root,
+            current_value,
+            use_id,
+            site,
+            selection,
+            stack_home,
+            stack_homes,
+        )
+        .map(LoweredUseMaterialization::Edge);
+    }
+    lower_register_materialization(ir, graph, root, use_id, site, selection, stack_home)
+        .map(LoweredUseMaterialization::Register)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_phi_edge_materialization(
+    ir: &mut AllocationIr,
+    graph: &HomeGraph,
+    root: &LiveBundle,
+    current_value: VReg,
+    use_id: BundleUseId,
+    site: UseSite,
+    selection: &HomeSelection,
+    stack_home: Option<StackHomeId>,
+    stack_homes: &mut Vec<ExpandedStackHome>,
+) -> Result<ExpandedEdgeLocation, AllocationExpandError> {
+    let UseSite::PhiEdge { .. } = site else {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.EDGE_LOCATION_SITE",
+            Some(site.block()),
+            Some(root.id),
+            Some(use_id),
+            "phi-edge materialization requires an exact phi-edge use",
+        ));
+    };
+    let location = match selection.kind {
+        HomeKind::Stack => {
+            if !selection.materializations.is_empty() {
+                return Err(AllocationExpandError::new(
+                    "ALLOCATION_EXPAND.STACK_RECIPE",
+                    Some(site.block()),
+                    Some(root.id),
+                    Some(use_id),
+                    "stack phi-edge location unexpectedly carries a recipe DAG",
+                ));
+            }
+            ExpandedEdgeLocation::Stack {
+                home: stack_home.ok_or_else(|| {
+                    AllocationExpandError::new(
+                        "ALLOCATION_EXPAND.STACK_HOME",
+                        Some(site.block()),
+                        Some(root.id),
+                        Some(use_id),
+                        "stack phi-edge location has no explicit root stack home",
+                    )
+                })?,
+            }
+        }
+        HomeKind::Rematerialize(_) | HomeKind::State(_) => {
+            let materialization = exact_recipe(selection, root, use_id, site)?;
+            match graph.recipe_nodes.get(materialization.recipe.0 as usize) {
+                Some(RecipeNode::Constant(value)) => ExpandedEdgeLocation::Immediate {
+                    value: *value,
+                    recipe: materialization.recipe,
+                },
+                Some(_) => {
+                    let (value, _instructions) =
+                        lower_recipe(ir, graph, root, site, materialization.recipe)?;
+                    let id = StackHomeId(u32::try_from(stack_homes.len()).map_err(|_| {
+                        AllocationExpandError::new(
+                            "ALLOCATION_EXPAND.STACK_HOME_ID_RANGE",
+                            Some(site.block()),
+                            Some(root.id),
+                            Some(use_id),
+                            "expanded edge stack-home count exceeds u32",
+                        )
+                    })?);
+                    let store = ir
+                        .insert_before_use(
+                            site,
+                            SyntheticOperation::StackStore { home: id },
+                            Uses::one(value),
+                            false,
+                        )
+                        .map_err(AllocationExpandError::ir)?
+                        .instruction;
+                    stack_homes.push(ExpandedStackHome {
+                        id,
+                        root: root.id,
+                        definition: ExpandedStackDefinition::Store {
+                            instruction: store,
+                            value,
+                        },
+                        kind: ExpandedStackHomeKind::EdgeRecipe { use_id },
+                    });
+                    ExpandedEdgeLocation::Stack { home: id }
+                }
+                None => {
+                    return Err(AllocationExpandError::new(
+                        "ALLOCATION_EXPAND.RECIPE_RANGE",
+                        Some(site.block()),
+                        Some(root.id),
+                        Some(use_id),
+                        "phi-edge materialization references a missing recipe node",
+                    ));
+                }
+            }
+        }
+        HomeKind::Register => {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.HOME_CLASS",
+                Some(site.block()),
+                Some(root.id),
+                Some(use_id),
+                "register residency cannot be lowered as a phi-edge home",
+            ));
+        }
+    };
+    ir.assign_phi_edge_home(site, current_value, root.origin)
+        .map_err(AllocationExpandError::ir)?;
+    Ok(location)
+}
+
+fn exact_recipe<'a>(
+    selection: &'a HomeSelection,
+    root: &LiveBundle,
+    use_id: BundleUseId,
+    site: UseSite,
+) -> Result<&'a super::home_graph::UseMaterialization, AllocationExpandError> {
+    let mut matching = selection
+        .materializations
+        .iter()
+        .filter(|materialization| materialization.use_id == use_id);
+    let materialization = matching.next().ok_or_else(|| {
+        AllocationExpandError::new(
+            "ALLOCATION_EXPAND.RECIPE_USE",
+            Some(site.block()),
+            Some(root.id),
+            Some(use_id),
+            "selected non-stack home has no exact recipe for this use",
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.RECIPE_USE",
+            Some(site.block()),
+            Some(root.id),
+            Some(use_id),
+            "selected non-stack home has duplicate recipes for this use",
+        ));
+    }
+    Ok(materialization)
+}
+
+fn lower_register_materialization(
     ir: &mut AllocationIr,
     graph: &HomeGraph,
     root: &LiveBundle,
@@ -588,28 +840,7 @@ pub(super) fn lower_materialization(
             })
         }
         HomeKind::Rematerialize(_) | HomeKind::State(_) => {
-            let mut matching = selection
-                .materializations
-                .iter()
-                .filter(|materialization| materialization.use_id == use_id);
-            let materialization = matching.next().ok_or_else(|| {
-                AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.RECIPE_USE",
-                    Some(site.block()),
-                    Some(root.id),
-                    Some(use_id),
-                    "selected non-stack home has no exact recipe for this use",
-                )
-            })?;
-            if matching.next().is_some() {
-                return Err(AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.RECIPE_USE",
-                    Some(site.block()),
-                    Some(root.id),
-                    Some(use_id),
-                    "selected non-stack home has duplicate recipes for this use",
-                ));
-            }
+            let materialization = exact_recipe(selection, root, use_id, site)?;
             let (value, instructions) =
                 lower_recipe(ir, graph, root, site, materialization.recipe)?;
             Ok(LoweredMaterialization {
@@ -748,6 +979,32 @@ fn verify_expanded_uses(
                     Some(use_.id),
                     "expanded root uses are not in dense HomeGraph order",
                 ));
+            }
+            if matches!(use_.source, ExpandedUseSource::Edge(_)) {
+                if !matches!(use_.site, UseSite::PhiEdge { .. }) || use_.value != root.origin {
+                    return Err(AllocationExpandError::new(
+                        "ALLOCATION_EXPAND.EDGE_USE_IDENTITY",
+                        Some(use_.site.block()),
+                        Some(root.id),
+                        Some(use_.id),
+                        "non-register edge location does not retain its source root phi identity",
+                    ));
+                }
+                if intervals
+                    .intervals
+                    .get(use_.value.0 as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|interval| interval.uses.contains(&use_.site))
+                {
+                    return Err(AllocationExpandError::new(
+                        "ALLOCATION_EXPAND.EDGE_REGISTER_PRESSURE",
+                        Some(use_.site.block()),
+                        Some(root.id),
+                        Some(use_.id),
+                        "non-register phi location still contributes a register live-range use",
+                    ));
+                }
+                continue;
             }
             let interval = intervals
                 .intervals

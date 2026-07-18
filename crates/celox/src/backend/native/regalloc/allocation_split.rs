@@ -438,14 +438,16 @@ pub(super) fn apply_split(
 
     for entry in &plan.entries {
         let entry_use = expanded_use(&next, plan.root, entry.entry)?.clone();
-        let lowered = allocation_expand::lower_materialization(
+        let lowered = allocation_expand::lower_use_materialization(
             &mut next.ir,
             graph,
             graph_root,
+            plan.value,
             entry.entry,
             entry_use.original_site,
             &entry.home,
             stack_home,
+            &mut next.stack_homes,
         )
         .map_err(AllocationSplitError::expand)?;
         match entry.kind {
@@ -459,16 +461,56 @@ pub(super) fn apply_split(
                         "materialized split entry owns more than its exact entry use",
                     ));
                 }
-                rewrite_expanded_use(
-                    &mut next,
-                    plan.root,
-                    entry.entry,
-                    plan.value,
-                    lowered.value,
-                    ExpandedUseSource::Materialized(lowered.source),
-                )?;
+                match lowered {
+                    allocation_expand::LoweredUseMaterialization::Register(lowered) => {
+                        rewrite_expanded_use(
+                            &mut next,
+                            plan.root,
+                            entry.entry,
+                            plan.value,
+                            lowered.value,
+                            ExpandedUseSource::Materialized(lowered.source),
+                        )?;
+                    }
+                    allocation_expand::LoweredUseMaterialization::Edge(location) => {
+                        let target = next
+                            .roots
+                            .get_mut(plan.root.0 as usize)
+                            .and_then(|root| root.uses.get_mut(entry.entry.0 as usize))
+                            .ok_or_else(|| {
+                                AllocationSplitError::new(
+                                    "ALLOCATION_SPLIT.USE_RANGE",
+                                    Some(entry_use.site.block()),
+                                    Some(plan.value),
+                                    Some(plan.root),
+                                    "phi-edge home references a missing expanded use",
+                                )
+                            })?;
+                        if target.value != plan.value {
+                            return Err(AllocationSplitError::new(
+                                "ALLOCATION_SPLIT.USE_OWNERSHIP",
+                                Some(target.site.block()),
+                                Some(target.value),
+                                Some(plan.root),
+                                "phi-edge home no longer belongs to the split register region",
+                            ));
+                        }
+                        target.value = graph_root.origin;
+                        target.source = ExpandedUseSource::Edge(location);
+                    }
+                }
             }
             SplitEntryKind::RegisterRegion => {
+                let allocation_expand::LoweredUseMaterialization::Register(lowered) = lowered
+                else {
+                    return Err(AllocationSplitError::new(
+                        "ALLOCATION_SPLIT.REGION_EDGE_ENTRY",
+                        Some(entry_use.site.block()),
+                        Some(plan.value),
+                        Some(plan.root),
+                        "multi-use register region cannot start from a non-register phi-edge location",
+                    ));
+                };
                 let region = fresh_region_id(&next)?;
                 next.register_regions.push(ExpandedRegisterRegion {
                     id: region,
@@ -786,7 +828,7 @@ fn region_source(
                 }
                 source_region = Some(region);
             }
-            ExpandedUseSource::Materialized(_) => {
+            ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => {
                 return Err(AllocationSplitError::new(
                     "ALLOCATION_SPLIT.REGION_SOURCE",
                     Some(use_.site.block()),
@@ -1347,7 +1389,9 @@ fn stack_home(
     let homes = expanded
         .stack_homes
         .iter()
-        .filter(|home| home.root == root)
+        .filter(|home| {
+            home.root == root && home.kind == super::allocation_expand::ExpandedStackHomeKind::Root
+        })
         .collect::<Vec<_>>();
     match homes.as_slice() {
         [] => Ok(None),
@@ -1413,7 +1457,11 @@ fn ensure_stack_home(
     expanded.stack_homes.push(ExpandedStackHome {
         id,
         root: root.id,
-        store,
+        definition: super::allocation_expand::ExpandedStackDefinition::Store {
+            instruction: store,
+            value: root.origin,
+        },
+        kind: super::allocation_expand::ExpandedStackHomeKind::Root,
     });
     Ok(id)
 }
@@ -1499,7 +1547,9 @@ fn normalize_register_regions(
         .flat_map(|root| &root.uses)
         .filter_map(|use_| match use_.source {
             ExpandedUseSource::RegisterRegion { region, .. } => Some(region),
-            ExpandedUseSource::OriginalRegister { .. } | ExpandedUseSource::Materialized(_) => None,
+            ExpandedUseSource::OriginalRegister { .. }
+            | ExpandedUseSource::Materialized(_)
+            | ExpandedUseSource::Edge(_) => None,
         })
         .collect::<BTreeSet<_>>();
     let mut metadata = BTreeMap::new();
@@ -1609,15 +1659,28 @@ fn prune_dead_materializations(
         compact_materialization(&compaction, &mut region.entry, region.root, region.value)?;
     }
     for home in &mut expanded.stack_homes {
-        home.store = compaction.instruction(home.store).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.DCE_STACK_STORE",
-                None,
-                None,
-                Some(home.root),
-                "explicit stack home references a removed store",
-            )
-        })?;
+        if let super::allocation_expand::ExpandedStackDefinition::Store { instruction, value } =
+            &mut home.definition
+        {
+            *instruction = compaction.instruction(*instruction).ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.DCE_STACK_STORE",
+                    None,
+                    None,
+                    Some(home.root),
+                    "explicit stack home references a removed store",
+                )
+            })?;
+            *value = compaction.value(*value).ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.DCE_STACK_VALUE",
+                    None,
+                    Some(*value),
+                    Some(home.root),
+                    "explicit stack store references a removed value",
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -1659,7 +1722,7 @@ fn split_progress(expanded: &ExpandedAllocationProblem) -> SplitProgress {
             let original = match use_.source {
                 ExpandedUseSource::OriginalRegister { .. } => true,
                 ExpandedUseSource::RegisterRegion { .. } => false,
-                ExpandedUseSource::Materialized(_) => continue,
+                ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => continue,
             };
             let region = regions
                 .entry((root.id, use_.value))

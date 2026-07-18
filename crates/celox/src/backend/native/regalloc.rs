@@ -9,6 +9,8 @@ mod allocation_expand;
 #[allow(dead_code)]
 mod allocation_ir;
 #[allow(dead_code)]
+mod allocation_lower;
+#[allow(dead_code)]
 mod allocation_reallocate;
 #[allow(dead_code)]
 mod allocation_split;
@@ -228,6 +230,58 @@ fn interval_allocation_error(
     )
 }
 
+fn allocation_expand_error(
+    phase: &'static str,
+    error: allocation_expand::AllocationExpandError,
+) -> RegallocError {
+    let identity = match (error.root, error.use_id) {
+        (Some(root), Some(use_id)) => format!(" root={root:?} use={use_id:?}"),
+        (Some(root), None) => format!(" root={root:?}"),
+        (None, Some(use_id)) => format!(" use={use_id:?}"),
+        (None, None) => String::new(),
+    };
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        None,
+        Vec::new(),
+        format!("{}{identity}", error.message),
+    )
+}
+
+fn allocation_split_error(
+    phase: &'static str,
+    error: allocation_split::AllocationSplitError,
+) -> RegallocError {
+    let root = error
+        .root
+        .map(|root| format!(" root={root:?}"))
+        .unwrap_or_default();
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        None,
+        error.value.into_iter().collect(),
+        format!("{}{root}", error.message),
+    )
+}
+
+fn allocation_lower_error(
+    phase: &'static str,
+    error: allocation_lower::AllocationLowerError,
+) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
 fn ssa_destruction_error(
     phase: &'static str,
     error: super::ssa_destroy::SsaDestructionError,
@@ -406,7 +460,7 @@ fn run_regalloc_in_place(
             );
         }
         let allocation_start = timing.then(crate::timing::now);
-        let _plan = interval_allocator::allocate_roots(
+        let plan = interval_allocator::allocate_roots(
             &homes,
             &normalized_cfg,
             assignment::ALLOCATABLE_REGS,
@@ -415,6 +469,51 @@ fn run_regalloc_in_place(
         if let Some(start) = allocation_start {
             eprintln!(
                 "[regalloc-timing] label={label} interval_allocation elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        let expand_start = timing.then(crate::timing::now);
+        let mut expanded = allocation_expand::expand(
+            func,
+            &normalized_cfg,
+            &homes,
+            &plan,
+            assignment::ALLOCATABLE_REGS,
+        )
+        .map_err(|error| allocation_expand_error("interval allocation expansion", error))?;
+        if let Some(start) = expand_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_expand elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        let reallocation_start = timing.then(crate::timing::now);
+        let allocation = allocation_split::allocate_with_splitting(
+            &mut expanded,
+            &homes,
+            &normalized_cfg,
+            assignment::ALLOCATABLE_REGS,
+        )
+        .map_err(|error| allocation_split_error("interval joint reallocation", error))?;
+        if let Some(start) = reallocation_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_joint_reallocation elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        let lowering_start = timing.then(crate::timing::now);
+        let _lowered = allocation_lower::lower(
+            func,
+            &normalized_cfg,
+            &homes,
+            &expanded,
+            &allocation,
+            assignment::ALLOCATABLE_REGS,
+        )
+        .map_err(|error| allocation_lower_error("interval atomic MIR lowering", error))?;
+        if let Some(start) = lowering_start {
+            eprintln!(
+                "[regalloc-timing] label={label} interval_atomic_lowering elapsed={:?}",
                 start.elapsed()
             );
         }

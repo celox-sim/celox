@@ -12,7 +12,10 @@ use std::fmt;
 
 use crate::backend::native::mir::{BlockId, VReg};
 
-use super::allocation_expand::{ExpandedAllocationProblem, ExpandedUseSource};
+use super::allocation_expand::{
+    ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition,
+    ExpandedStackHomeKind, ExpandedUseSource,
+};
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{BundleUseId, LiveBundleId};
@@ -169,13 +172,13 @@ impl JointAllocationProblem {
 
         let mut fixed_region_uses = BTreeMap::<VReg, Vec<UseSite>>::new();
         let mut stack_roots = BTreeSet::new();
-        for home in &expanded.stack_homes {
-            if !stack_roots.insert(home.root) {
+        for (home_index, home) in expanded.stack_homes.iter().enumerate() {
+            if home.id.0 as usize != home_index {
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.STACK_HOME_IDENTITY",
                     None,
                     None,
-                    "one expanded root owns more than one stack home",
+                    "expanded stack homes are not a dense identity-ordered domain",
                 ));
             }
             let root = expanded.roots.get(home.root.0 as usize).ok_or_else(|| {
@@ -194,11 +197,114 @@ impl JointAllocationProblem {
                     "expanded stack-home root differs from its dense row",
                 ));
             }
-            let site = expanded
-                .ir
-                .resolve_stack_store_use_site(home.store, home.id, root.origin, &expanded.intervals)
-                .map_err(JointAllocationError::ir)?;
-            fixed_region_uses.entry(root.origin).or_default().push(site);
+            match home.kind {
+                ExpandedStackHomeKind::Root => {
+                    if !stack_roots.insert(home.root) {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.STACK_HOME_IDENTITY",
+                            None,
+                            Some(root.origin),
+                            "one expanded root owns more than one persistent stack home",
+                        ));
+                    }
+                    match home.definition {
+                        ExpandedStackDefinition::Store { instruction, value }
+                            if value == root.origin =>
+                        {
+                            let site = expanded
+                                .ir
+                                .resolve_stack_store_use_site(
+                                    instruction,
+                                    home.id,
+                                    value,
+                                    &expanded.intervals,
+                                )
+                                .map_err(JointAllocationError::ir)?;
+                            fixed_region_uses.entry(root.origin).or_default().push(site);
+                        }
+                        ExpandedStackDefinition::Phi {
+                            block,
+                            phi,
+                            destination,
+                        } if destination == root.origin => {
+                            expanded
+                                .ir
+                                .verify_phi_stack_definition(block, phi, destination, home.id)
+                                .map_err(JointAllocationError::ir)?;
+                        }
+                        _ => {
+                            return Err(JointAllocationError::new(
+                                "JOINT_ALLOC.STACK_HOME_DEFINITION",
+                                None,
+                                Some(root.origin),
+                                "persistent stack home has an incompatible definition",
+                            ));
+                        }
+                    }
+                }
+                ExpandedStackHomeKind::EdgeRecipe { use_id } => {
+                    let ExpandedStackDefinition::Store { instruction, value } = home.definition
+                    else {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_DEFINITION",
+                            None,
+                            Some(root.origin),
+                            "edge recipe stack home is not defined by an explicit store",
+                        ));
+                    };
+                    let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_USE",
+                            None,
+                            Some(value),
+                            "edge recipe stack home references a missing root use",
+                        )
+                    })?;
+                    let ExpandedUseSource::Edge(ExpandedEdgeLocation::Stack { home: use_home }) =
+                        &use_.source
+                    else {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_USE",
+                            Some(use_.site.block()),
+                            Some(value),
+                            "edge recipe stack home is not owned by its exact phi use",
+                        ));
+                    };
+                    let UseSite::PhiEdge { predecessor, .. } = use_.site else {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_USE",
+                            Some(use_.site.block()),
+                            Some(value),
+                            "edge recipe stack home is attached to an instruction use",
+                        ));
+                    };
+                    if *use_home != home.id || use_.value != root.origin {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_USE",
+                            Some(predecessor),
+                            Some(value),
+                            "edge stack metadata and expanded root use disagree",
+                        ));
+                    }
+                    let store = expanded
+                        .ir
+                        .resolve_stack_store_use_site(
+                            instruction,
+                            home.id,
+                            value,
+                            &expanded.intervals,
+                        )
+                        .map_err(JointAllocationError::ir)?;
+                    if store.block() != predecessor || store.slot() >= use_.site.slot() {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.EDGE_HOME_ORDER",
+                            Some(predecessor),
+                            Some(value),
+                            "edge recipe store is not ordered before its exact phi-edge location",
+                        ));
+                    }
+                }
+            }
         }
 
         let region_metadata = expanded
@@ -258,6 +364,7 @@ impl JointAllocationProblem {
                         preferred_register
                     }
                     ExpandedUseSource::Materialized(_) => continue,
+                    ExpandedUseSource::Edge(_) => continue,
                 };
                 let region = regions.entry(use_.value).or_insert_with(|| RegionBuilder {
                     root: root.id,

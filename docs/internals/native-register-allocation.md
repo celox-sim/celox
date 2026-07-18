@@ -3,9 +3,12 @@
 > **Status:** the Braun--Hack W/S pipeline below is the current production
 > allocator.  The interval-based replacement described in the next section is
 > implemented through explicit home expansion, joint original/synthetic
-> allocation, and pressure-driven live-region splitting, but does not yet
-> rewrite production MIR.  A replacement is accepted only by correctness tests
-> and the executable Heliodor gate; speculative phase designs are not normative.
+> allocation, pressure-driven live-region splitting, and atomic strict-SSA plus
+> out-of-SSA lowering in the diagnostic path, but does not yet rewrite
+> production MIR. Fixed-register/clobber constraints, coalescing, and stack-slot
+> coloring remain before that switch. A replacement is accepted only by
+> correctness tests and the executable Heliodor gate; speculative phase designs
+> are not normative.
 
 The native backend treats register allocation as a verified sequence of IR
 transformations.  It is not permitted to recover from an invalid MIR graph,
@@ -54,9 +57,9 @@ Steps 27a through 27c of the throughput plan already provide useful pieces:
 - physical-register interval unions, allocation-owned recoloring, eviction,
   and a first dominance-aware region splitter.
 
-Those pieces are prerequisites, not a complete allocator.  The diagnostic
-plan still has three structural defects which must be removed before it can
-rewrite MIR:
+Those pieces were prerequisites, not a complete allocator. Before Steps
+27d1--27d6, the diagnostic plan had three structural defects which had to be
+removed before it could rewrite MIR:
 
 1. A split currently finalizes at most one register child and sends every
    remaining use directly to a home.  It cannot discover two disjoint hot
@@ -67,12 +70,19 @@ rewrite MIR:
    prove that a stack value reaches every selected reload.  Adding a store
    later in reconstruction would repeat the old error of changing liveness
    after allocation.
-3. A home child currently has an empty live range and is treated as final.
+3. A home child had an empty live range and was treated as final.
    Real code still needs a register for the original definition-to-store,
    every reload-to-use, and every intermediate result in a state/remat recipe.
    Those synthetic machine values can interfere with already assigned roots.
-   Inventing scratch registers in the rewriter would make the physical
+   Inventing scratch registers in the rewriter would have made the physical
    allocation incomplete.
+
+The retained 27d pipeline now removes all three defects: stack definitions are
+explicit, every executable transition re-enters joint allocation, one root may
+own multiple register regions, and the closed result lowers atomically into a
+private MIR function. Production still uses the interim allocator until target
+constraints, coalescing, and final frame coloring are integrated into that
+closed result.
 
 The production boundary is therefore not `AllocationPlan`.  That type remains
 solver-internal and may contain queue stages, rejected parents, cached costs,
@@ -102,14 +112,16 @@ RegisterRegion
     or explicit Home -> Register transition at a point/edge
 
 StackHome
-  logical root identity and colored frame class
+  logical root identity and provisional frame class
   explicit Register/Recipe -> Stack definitions at points/edges
+    or an out-of-SSA phi destination defined on every incoming edge
   exact Stack -> Register reload demands
 
 Location
   RegisterRegion
   StackHome reload
   exact versioned state/rematerialization Recipe
+  phi-edge Stack or Immediate source
 ```
 
 Every original instruction use and phi-edge use has exactly one location.  A
@@ -153,11 +165,13 @@ without mutating MIR:
    resulting def-to-store, reload-to-use, and recipe-intermediate ranges return
    to the ordinary allocation queue; none receives an invented scratch
    register after allocation.
-5. Freeze `AllocationResult` only after every original and synthetic machine
-   value has a physical assignment.  Then lower the allocation IR, rename
-   exact instruction and phi-edge uses, insert required phis, and lower
-   physical constraints.  Rewrite never consults spill weights, rejected
-   candidates, or allocator caches.
+5. Freeze `AllocationResult` only after every register-resident original and
+   synthetic machine value has a physical assignment. Phi sources and
+   destinations resolved directly through stack/immediate out-of-SSA locations
+   are explicit exceptions, not phantom register ranges. Then lower the
+   allocation IR, rename exact instruction and phi-edge uses, and construct the
+   complete edge parallel-copy plan. Rewrite never consults spill weights,
+   rejected candidates, or allocator caches.
 6. Independently rebuild MIR liveness, physical interference, stack reaching
    definitions, MemorySSA recipe versions, fixed-register constraints, and
    edge parallel copies.  Failure is a producer bug, not a request to retry
@@ -214,9 +228,11 @@ Each retained slice ends at a verified representation boundary:
    fixed point.  Test diamonds, loops, stack-backed prefixes, multiple regions,
    and termination.
 6. Normalize the completed solver state into exact per-use locations and lower
-   one strict-SSA result atomically.  Verify definition dominance, phi-edge
-   ownership, recipes, and unchanged MIR semantics before swapping it into the
-   function.
+   one strict-SSA result atomically. Verify exact source-MIR instruction
+   identity, definition dominance, recipe DAG edges, phi source/destination
+   locations, independently rebuilt physical liveness, and the complete
+   out-of-SSA parallel-copy plan before publication. **Complete in the
+   diagnostic path.**
 7. Integrate fixed constraints, copy/phi coalescing, and final stack-slot
    coloring, then run the complete native and counter suites.
 8. Replace production W/S only after differential MIR execution and the exact
@@ -229,20 +245,21 @@ these slices.  In particular, changing conflict-container order, map
 thresholds, or per-register projection caches is out of scope unless a
 completed architectural slice still fails its complexity contract.
 
-The first retained implementation slice now provides the allocation IR and
+The first retained implementation slice provided the allocation IR and
 shared liveness boundary.  Original MIR instructions and phis are represented
 by immutable anchors; synthetic stack stores, reloads, and recipe nodes receive
 checked machine-value definitions.  Both representations use the exact same
-CFG-sparse live-interval construction and independent equation verifier.  Home
-selection, recursive child allocation, and MIR lowering remain disconnected,
-so production code generation is still the interim allocator below.
+CFG-sparse live-interval construction and independent equation verifier.  The
+later retained slices connect home selection, recursive region allocation, and
+atomic MIR lowering while leaving production code generation on the interim
+allocator below.
 
 Explicit synthetic stack operations now also have an independent sparse
 all-path verifier.  It builds Boolean SSA only for homes with reload demands,
 places AND meets through iterated dominance frontiers, and respects exact
 operation order and normalized edge isolation.  Stores on every join arm
-establish a home; a missing arm or a store after the reload does not.  The next
-slice must return all resulting machine values to allocation.
+establish a home; a missing arm or a store after the reload does not.  Later
+slices return every resulting machine value to joint allocation.
 
 Allocator-selected homes now expand into that allocation IR without changing
 production MIR.  A selected stack home has an explicit store and per-use
@@ -253,10 +270,10 @@ assignments are retained only as preferences.  Expansion then proves every
 stack reload, recomputes exact liveness for every original and synthetic
 machine value, and checks that each rewritten use is owned by its replacement
 interval.  Immutable input-MIR use anchors and their shifted allocation-IR
-positions are stored separately, including phi-edge exit slots.  The next
-slice must enqueue those recomputed intervals together and permit any finite
-number of register regions; the old diagnostic assignments are not yet a
-complete physical allocation.
+positions are stored separately, including phi-edge exit slots.  The joint
+allocator enqueues those recomputed intervals together and permits any finite
+number of register regions; old diagnostic assignments are only affinities,
+not a complete physical allocation.
 
 The recomputed intervals now feed one joint allocation problem.  Every
 machine definition, including original values, stack/reload ranges, and every
@@ -286,11 +303,29 @@ Applying a plan mutates a clone of the allocation IR, rewrites immutable exact
 use anchors, removes unreferenced region metadata and dead pure synthetic
 DAGs, compacts their value/instruction identities, reruns the all-path stack
 proof and exact liveness, and rebuilds the joint problem.  Publication requires
-the ownership progress tuple to decrease.  The resulting fixed-point allocator
+the ownership progress tuple to decrease. The resulting fixed-point allocator
 passes focused synthetic-pressure, sibling-arm, loop-reentry, partial-stack,
-and repeated-entry tests.  Exact per-use result normalization and atomic
-strict-SSA MIR lowering remain next; production code generation is therefore
-still the interim allocator below.
+and repeated-entry tests.
+
+The completed result now lowers exactly once into a private `MFunction`.
+Original instructions are compared against full immutable snapshots, including
+opcode, width, immediate, and operands. Synthetic stack, state, constant, and
+pure-recipe operations use one shared width-explicit MIR mapping. The lowered
+function is accepted only when canonical MIR verification and an independent
+physical-liveness rebuild reproduce the allocation problem exactly.
+
+Phi boundaries are locations rather than forced simultaneous register ranges.
+A stack/immediate phi source remains in the semantic phi row but is excluded
+from predecessor-exit register liveness and becomes an exact destination-
+qualified out-of-SSA source. A stack-resident phi destination is likewise
+defined directly by every incoming parallel copy instead of becoming a
+register definition followed by a store. Nontrivial edge recipes materialize
+to an explicit edge-local stack home; all recipe intermediates still enter
+joint allocation. This is required for functions with more phi rows on one
+edge than physical registers. The resulting `AssignmentMap` and complete SSA
+destruction plan are independently verified. Production code generation is
+still the interim allocator below until fixed constraints, coalescing, and
+stack-slot coloring are part of the same closed result.
 
 ## Interim allocator architecture
 

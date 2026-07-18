@@ -184,21 +184,16 @@ fn verify_edge_locations(
     assignment: &AssignmentMap,
 ) -> Result<(), AllocationError> {
     for successor in &func.blocks {
-        let mut by_pred = BTreeMap::<BlockId, Vec<VReg>>::new();
+        let mut registers = BTreeMap::<(BlockId, PhysReg), VReg>::new();
         for phi in &successor.phis {
             for &(pred, source) in &phi.sources {
-                by_pred.entry(pred).or_default().push(source);
-            }
-        }
-        for (pred, sources) in by_pred {
-            let mut registers = BTreeMap::<PhysReg, VReg>::new();
-            for source in sources {
                 let location = assignment
-                    .edge_location(pred, source)
+                    .phi_edge_location(pred, successor.id, phi.dst, source)
+                    .or_else(|| assignment.edge_location(pred, source))
                     .or_else(|| assignment.get(source).map(EdgeLocation::Register))
                     .or_else(|| assignment.edge_spill_slot(source).map(EdgeLocation::Stack));
                 if let Some(EdgeLocation::Register(reg)) = location
-                    && let Some(other) = registers.insert(reg, source)
+                    && let Some(other) = registers.insert((pred, reg), source)
                     && other != source
                 {
                     return Err(error(

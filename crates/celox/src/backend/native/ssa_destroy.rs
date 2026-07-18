@@ -514,7 +514,10 @@ fn source_location(
     destination: VReg,
     source: VReg,
 ) -> Result<ParallelCopySource, SsaDestructionError> {
-    if let Some(location) = assignment.edge_location(predecessor, source) {
+    if let Some(location) = assignment
+        .phi_edge_location(predecessor, successor, destination, source)
+        .or_else(|| assignment.edge_location(predecessor, source))
+    {
         return Ok(match location {
             EdgeLocation::Register(register) => ParallelCopySource::Register(register),
             EdgeLocation::Stack(slot) => ParallelCopySource::Stack(slot),

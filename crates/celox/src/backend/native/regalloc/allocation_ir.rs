@@ -6,16 +6,19 @@
 //! them against immutable original-MIR anchors without mutating `MFunction`;
 //! successful allocation can later lower the complete result atomically.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
+use crate::backend::native::mir::{
+    BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, Uses, VReg,
+};
 
 use super::cfg::NormalizedCfg;
-use super::home_graph::{LiveBundleId, RecipeId};
+use super::home_graph::{HomeGraph, LiveBundleId, RecipeId, RecipeNode};
 use super::live_interval::{
     DefinitionSite, LiveIntervalError, LiveIntervals, LivenessProgram, UseSite, analyze_program,
 };
+use super::reload::materialize_pure_step;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct StackHomeId(pub u32);
@@ -73,9 +76,12 @@ enum AllocationInstructionOrigin {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AllocationInstruction {
     origin: AllocationInstructionOrigin,
+    /// Exact immutable source MIR instruction, including opcode, widths, and
+    /// immediates. Synthetic instructions have no source-MIR snapshot.
+    original: Option<MInst>,
     uses: Uses,
     definition: Option<VReg>,
 }
@@ -84,7 +90,11 @@ struct AllocationInstruction {
 struct AllocationPhi {
     original_phi: usize,
     destination: VReg,
+    original_sources: Vec<(BlockId, VReg)>,
     sources: Vec<(BlockId, VReg)>,
+    register_sources: Vec<bool>,
+    register_definition: bool,
+    stack_home: Option<StackHomeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +218,11 @@ impl AllocationIr {
                 .map(|(original_phi, phi)| AllocationPhi {
                     original_phi,
                     destination: phi.dst,
+                    original_sources: phi.sources.clone(),
                     sources: phi.sources.clone(),
+                    register_sources: vec![true; phi.sources.len()],
+                    register_definition: true,
+                    stack_home: None,
                 })
                 .collect();
             let instructions = block
@@ -217,6 +231,7 @@ impl AllocationIr {
                 .enumerate()
                 .map(|(instruction, inst)| AllocationInstruction {
                     origin: AllocationInstructionOrigin::Original { instruction },
+                    original: Some(inst.clone()),
                     uses: inst.uses(),
                     definition: inst.def(),
                 })
@@ -247,6 +262,219 @@ impl AllocationIr {
 
     pub(super) fn value_count(&self) -> u32 {
         self.next_value
+    }
+
+    /// Materialize the complete allocation IR into a private strict-SSA MIR
+    /// function. The source function is immutable and every original def/use
+    /// row is matched against the snapshot captured by [`Self::from_mir`]
+    /// before rewritten operands or synthetic instructions are emitted.
+    pub(super) fn materialize(
+        &self,
+        original: &MFunction,
+        graph: &HomeGraph,
+        stack_offsets: &[i32],
+    ) -> Result<MFunction, AllocationIrError> {
+        self.verify_structure()?;
+        original.verify_result().map_err(|error| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.SOURCE_MIR",
+                error.block,
+                error.instruction,
+                Vec::new(),
+                error.message,
+            )
+        })?;
+        if original.vregs.count() != self.original_value_count
+            || original.blocks.len() != self.blocks.len()
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SOURCE_SHAPE",
+                original.blocks.first().map(|block| block.id),
+                None,
+                Vec::new(),
+                "source MIR no longer has the value or block domain captured by allocation IR",
+            ));
+        }
+
+        let mut output = original.clone();
+        while output.vregs.count() < self.next_value {
+            let expected = VReg(output.vregs.count());
+            let allocated = output.vregs.try_alloc().map_err(|_| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.VALUE_ID_RANGE",
+                    None,
+                    None,
+                    vec![expected],
+                    "materialized MIR exhausted the VReg namespace",
+                )
+            })?;
+            if allocated != expected {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.VALUE_IDENTITY",
+                    None,
+                    None,
+                    vec![expected, allocated],
+                    "materialized MIR did not preserve dense allocation-value identity",
+                ));
+            }
+            output.spill_descs.push(SpillDesc::transient());
+        }
+
+        let mut recipe_definitions = HashMap::<VReg, (LiveBundleId, RecipeId)>::new();
+        let mut blocks = Vec::with_capacity(self.blocks.len());
+        for (block_index, allocation_block) in self.blocks.iter().enumerate() {
+            let source = &original.blocks[block_index];
+            if source.id != allocation_block.id
+                || source.insts.len() != allocation_block.original_instruction_count
+                || source.successors() != allocation_block.successors
+                || source
+                    .insts
+                    .last()
+                    .filter(|instruction| instruction.is_terminator())
+                    .map(|_| source.insts.len() - 1)
+                    != allocation_block.original_terminator
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.SOURCE_BLOCK",
+                    Some(allocation_block.id),
+                    None,
+                    Vec::new(),
+                    "source MIR block identity, instruction domain, or CFG changed after allocation-IR construction",
+                ));
+            }
+            if source.phis.len() != allocation_block.phis.len() {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.SOURCE_PHI",
+                    Some(allocation_block.id),
+                    None,
+                    Vec::new(),
+                    "source MIR phi domain changed after allocation-IR construction",
+                ));
+            }
+
+            let mut block = MBlock::new(allocation_block.id);
+            block.phis.reserve(allocation_block.phis.len());
+            for phi in &allocation_block.phis {
+                let source_phi = &source.phis[phi.original_phi];
+                if source_phi.dst != phi.destination || source_phi.sources != phi.original_sources {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.SOURCE_PHI",
+                        Some(allocation_block.id),
+                        None,
+                        vec![phi.destination],
+                        "source MIR phi changed after allocation-IR construction",
+                    ));
+                }
+                if phi.sources.len() != phi.original_sources.len()
+                    || phi.sources.iter().zip(&phi.original_sources).any(
+                        |((predecessor, _), (original_predecessor, _))| {
+                            predecessor != original_predecessor
+                        },
+                    )
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.PHI_EDGE_IDENTITY",
+                        Some(allocation_block.id),
+                        None,
+                        vec![phi.destination],
+                        "allocation rewrite changed phi predecessor identity or order",
+                    ));
+                }
+                block.phis.push(PhiNode {
+                    dst: phi.destination,
+                    sources: phi.sources.clone(),
+                });
+            }
+
+            block.insts.reserve(allocation_block.instructions.len());
+            for (position, instruction) in allocation_block.instructions.iter().enumerate() {
+                let lowered = match instruction.origin {
+                    AllocationInstructionOrigin::Original {
+                        instruction: original_instruction,
+                    } => {
+                        let source_instruction =
+                            source.insts.get(original_instruction).ok_or_else(|| {
+                                AllocationIrError::new(
+                                    "ALLOCATION_IR.SOURCE_INSTRUCTION",
+                                    Some(allocation_block.id),
+                                    Some(original_instruction),
+                                    Vec::new(),
+                                    "allocation IR references a missing source MIR instruction",
+                                )
+                            })?;
+                        let original_snapshot = instruction.original.as_ref().ok_or_else(|| {
+                            AllocationIrError::new(
+                                "ALLOCATION_IR.SOURCE_INSTRUCTION",
+                                Some(allocation_block.id),
+                                Some(original_instruction),
+                                Vec::new(),
+                                "original allocation instruction has no immutable operand snapshot",
+                            )
+                        })?;
+                        if source_instruction != original_snapshot {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.SOURCE_INSTRUCTION",
+                                Some(allocation_block.id),
+                                Some(original_instruction),
+                                instruction.uses.to_vec(),
+                                "source MIR instruction changed after allocation-IR construction",
+                            ));
+                        }
+                        rewrite_original_instruction(
+                            source_instruction,
+                            original_snapshot.uses(),
+                            instruction.uses,
+                            self.original_value_count,
+                            allocation_block.id,
+                            original_instruction,
+                        )?
+                    }
+                    AllocationInstructionOrigin::Synthetic { operation, .. } => {
+                        if instruction.original.is_some() {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.SOURCE_INSTRUCTION",
+                                Some(allocation_block.id),
+                                Some(position),
+                                instruction.uses.to_vec(),
+                                "synthetic allocation instruction carries a source-MIR operand snapshot",
+                            ));
+                        }
+                        materialize_synthetic_instruction(
+                            graph,
+                            stack_offsets,
+                            &mut recipe_definitions,
+                            allocation_block.id,
+                            position,
+                            operation,
+                            instruction.uses,
+                            instruction.definition,
+                        )?
+                    }
+                };
+                if lowered.uses() != instruction.uses || lowered.def() != instruction.definition {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.LOWERED_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        instruction.uses.to_vec(),
+                        "lowered MIR instruction does not preserve allocation-IR def/use identity",
+                    ));
+                }
+                block.insts.push(lowered);
+            }
+            blocks.push(block);
+        }
+        output.blocks = blocks;
+        output.verify_result().map_err(|error| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.LOWERED_MIR",
+                error.block,
+                error.instruction,
+                Vec::new(),
+                error.message,
+            )
+        })?;
+        Ok(output)
     }
 
     pub(super) fn insert_before_use(
@@ -343,10 +571,11 @@ impl AllocationIr {
                         "phi-edge use references a missing original phi",
                     ));
                 };
-                let Some((_, source)) = phi_row
+                let Some((source_index, (_, source))) = phi_row
                     .sources
                     .iter_mut()
-                    .find(|(block, _)| *block == predecessor)
+                    .enumerate()
+                    .find(|(_, (block, _))| *block == predecessor)
                 else {
                     return Err(AllocationIrError::new(
                         "ALLOCATION_IR.PHI_EDGE",
@@ -356,6 +585,15 @@ impl AllocationIr {
                         "phi has no source for the requested predecessor edge",
                     ));
                 };
+                if !phi_row.register_sources[source_index] {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.PHI_EDGE_LOCATION",
+                        Some(successor),
+                        None,
+                        vec![original],
+                        "phi-edge source already has a non-register allocation location",
+                    ));
+                }
                 if *source != original {
                     return Err(AllocationIrError::new(
                         "ALLOCATION_IR.USE_IDENTITY",
@@ -367,6 +605,153 @@ impl AllocationIr {
                 }
                 *source = replacement;
             }
+        }
+        Ok(())
+    }
+
+    /// Resolve one semantic phi source directly from a non-register edge
+    /// location. The source VReg remains in lowered MIR for SSA semantics and
+    /// out-of-SSA identity, but it is removed from allocation liveness.
+    pub(super) fn assign_phi_edge_home(
+        &mut self,
+        site: UseSite,
+        current: VReg,
+        semantic: VReg,
+    ) -> Result<(), AllocationIrError> {
+        let UseSite::PhiEdge {
+            predecessor,
+            successor,
+            phi,
+            ..
+        } = site
+        else {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.EDGE_LOCATION_SITE",
+                Some(site.block()),
+                None,
+                vec![current],
+                "non-register edge locations are valid only for phi-edge uses",
+            ));
+        };
+        let successor_index = self.block(successor)?;
+        let phi_row = self.blocks[successor_index]
+            .phis
+            .get_mut(phi)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.PHI_RANGE",
+                    Some(successor),
+                    None,
+                    vec![current],
+                    "phi-edge location references a missing original phi",
+                )
+            })?;
+        let (source_index, (_, source)) = phi_row
+            .sources
+            .iter()
+            .enumerate()
+            .find(|(_, (block, _))| *block == predecessor)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.PHI_EDGE",
+                    Some(successor),
+                    None,
+                    vec![current],
+                    "phi has no source for the requested predecessor edge",
+                )
+            })?;
+        if *source != current || !phi_row.register_sources[source_index] {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.USE_IDENTITY",
+                Some(successor),
+                None,
+                vec![current, *source],
+                "phi-edge source differs from the register use being assigned a home",
+            ));
+        }
+        if semantic.0 >= self.original_value_count {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.EDGE_SEMANTIC_VALUE",
+                Some(successor),
+                None,
+                vec![semantic],
+                "non-register phi location must retain an immutable source-MIR value identity",
+            ));
+        }
+        phi_row.sources[source_index].1 = semantic;
+        phi_row.register_sources[source_index] = false;
+        Ok(())
+    }
+
+    /// Resolve a semantic phi destination directly into a stack home. This is
+    /// the destination-side counterpart of [`Self::assign_phi_edge_home`]:
+    /// out-of-SSA copies define the slot on every incoming edge, so the phi
+    /// destination itself must not create an artificial register definition.
+    pub(super) fn assign_phi_definition_home(
+        &mut self,
+        site: DefinitionSite,
+        destination: VReg,
+        home: StackHomeId,
+    ) -> Result<(), AllocationIrError> {
+        let DefinitionSite::Phi { block, phi, .. } = site else {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.PHI_HOME_SITE",
+                Some(site.block()),
+                None,
+                vec![destination],
+                "phi stack destination requires a phi definition site",
+            ));
+        };
+        let block_index = self.block(block)?;
+        let row = self.blocks[block_index].phis.get_mut(phi).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.PHI_RANGE",
+                Some(block),
+                None,
+                vec![destination],
+                "phi stack destination references a missing phi row",
+            )
+        })?;
+        if row.destination != destination || !row.register_definition || row.stack_home.is_some() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.PHI_HOME_IDENTITY",
+                Some(block),
+                None,
+                vec![destination, row.destination],
+                "phi destination differs or already has an allocation home",
+            ));
+        }
+        row.register_definition = false;
+        row.stack_home = Some(home);
+        Ok(())
+    }
+
+    pub(super) fn verify_phi_stack_definition(
+        &self,
+        block: BlockId,
+        phi: usize,
+        destination: VReg,
+        home: StackHomeId,
+    ) -> Result<(), AllocationIrError> {
+        let block_index = self.block(block)?;
+        let row = self.blocks[block_index].phis.get(phi).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.PHI_RANGE",
+                Some(block),
+                None,
+                vec![destination],
+                "expanded phi stack home references a missing phi row",
+            )
+        })?;
+        if row.destination != destination || row.register_definition || row.stack_home != Some(home)
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.PHI_HOME_IDENTITY",
+                Some(block),
+                None,
+                vec![destination, row.destination],
+                "expanded phi stack metadata differs from allocation IR",
+            ));
         }
         Ok(())
     }
@@ -574,7 +959,12 @@ impl AllocationIr {
 
         for block in &self.blocks {
             for phi in &block.phis {
-                queue.extend(phi.sources.iter().map(|(_, value)| *value));
+                queue.extend(
+                    phi.sources
+                        .iter()
+                        .zip(&phi.register_sources)
+                        .filter_map(|((_, value), register)| register.then_some(*value)),
+                );
             }
             for instruction in &block.instructions {
                 match instruction.origin {
@@ -814,6 +1204,7 @@ impl AllocationIr {
                     anchor,
                     operation,
                 },
+                original: None,
                 uses,
                 definition,
             },
@@ -1026,7 +1417,18 @@ impl AllocationIr {
                 ));
             }
             if block.phis.iter().enumerate().any(|(index, phi)| {
-                phi.original_phi != index || phi.destination.0 >= self.original_value_count
+                phi.original_phi != index
+                    || phi.destination.0 >= self.original_value_count
+                    || phi
+                        .original_sources
+                        .iter()
+                        .any(|(_, value)| value.0 >= self.original_value_count)
+                    || phi
+                        .sources
+                        .iter()
+                        .any(|(_, value)| value.0 >= self.next_value)
+                    || phi.register_sources.len() != phi.sources.len()
+                    || (phi.register_definition == phi.stack_home.is_some())
             }) {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.PHI_IDENTITY",
@@ -1054,6 +1456,55 @@ impl AllocationIr {
                 ));
             }
             for instruction in &block.instructions {
+                match instruction.origin {
+                    AllocationInstructionOrigin::Original { .. } => {
+                        let Some(original) = instruction.original.as_ref() else {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.ORIGINAL_SIGNATURE",
+                                Some(block.id),
+                                None,
+                                instruction.uses.to_vec(),
+                                "original instruction has no immutable source operand snapshot",
+                            ));
+                        };
+                        if original
+                            .uses()
+                            .iter()
+                            .any(|value| value.0 >= self.original_value_count)
+                            || original
+                                .def()
+                                .is_some_and(|value| value.0 >= self.original_value_count)
+                            || original.def() != instruction.definition
+                        {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.ORIGINAL_SIGNATURE",
+                                Some(block.id),
+                                None,
+                                original.uses().to_vec(),
+                                "original instruction snapshot references a synthetic value",
+                            ));
+                        }
+                    }
+                    AllocationInstructionOrigin::Synthetic {
+                        anchor, operation, ..
+                    } => {
+                        if instruction.original.is_some() {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.SYNTHETIC_SIGNATURE",
+                                Some(block.id),
+                                None,
+                                instruction.uses.to_vec(),
+                                "synthetic instruction carries a source-MIR operand snapshot",
+                            ));
+                        }
+                        self.verify_operation(
+                            anchor,
+                            operation,
+                            instruction.uses,
+                            instruction.definition.is_some(),
+                        )?;
+                    }
+                }
                 for value in instruction.uses {
                     if value.0 >= self.next_value {
                         return Err(AllocationIrError::new(
@@ -1132,6 +1583,290 @@ impl AllocationIr {
         }
         Ok(())
     }
+}
+
+fn rewrite_original_instruction(
+    source: &MInst,
+    original_uses: Uses,
+    rewritten_uses: Uses,
+    original_value_count: u32,
+    block: BlockId,
+    instruction: usize,
+) -> Result<MInst, AllocationIrError> {
+    if original_uses.len() != rewritten_uses.len() {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.REWRITE_ARITY",
+            Some(block),
+            Some(instruction),
+            rewritten_uses.to_vec(),
+            "allocation rewrite changed an original instruction's operand arity",
+        ));
+    }
+    let mut replacements = BTreeMap::<VReg, VReg>::new();
+    for (&original, &rewritten) in original_uses.iter().zip(rewritten_uses.iter()) {
+        if rewritten != original && rewritten.0 < original_value_count {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.REWRITE_IDENTITY",
+                Some(block),
+                Some(instruction),
+                vec![original, rewritten],
+                "allocator-owned rewrite replaced one source-MIR value with another source-MIR value",
+            ));
+        }
+        if let Some(previous) = replacements.insert(original, rewritten)
+            && previous != rewritten
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.REWRITE_DUPLICATE",
+                Some(block),
+                Some(instruction),
+                vec![original, previous, rewritten],
+                "duplicate source operand was rewritten to two different allocation values",
+            ));
+        }
+    }
+    let mut lowered = source.clone();
+    for (original, rewritten) in replacements {
+        if original != rewritten {
+            lowered.rewrite_use(original, rewritten);
+        }
+    }
+    if lowered.uses() != rewritten_uses {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.REWRITE_EXACT",
+            Some(block),
+            Some(instruction),
+            rewritten_uses.to_vec(),
+            "MIR operand rewriting did not produce the exact allocation-IR use row",
+        ));
+    }
+    Ok(lowered)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_synthetic_instruction(
+    graph: &HomeGraph,
+    stack_offsets: &[i32],
+    recipe_definitions: &mut HashMap<VReg, (LiveBundleId, RecipeId)>,
+    block: BlockId,
+    instruction: usize,
+    operation: SyntheticOperation,
+    uses: Uses,
+    definition: Option<VReg>,
+) -> Result<MInst, AllocationIrError> {
+    let operands = uses.to_vec();
+    match operation {
+        SyntheticOperation::StackStore { home } => {
+            let [source] = operands.as_slice() else {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            };
+            if definition.is_some() {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            }
+            Ok(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: stack_offset(stack_offsets, home, block, instruction)?,
+                src: *source,
+                size: OpSize::S64,
+            })
+        }
+        SyntheticOperation::StackReload { home } => {
+            let ([], Some(destination)) = (operands.as_slice(), definition) else {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            };
+            Ok(MInst::Load {
+                dst: destination,
+                base: BaseReg::StackFrame,
+                offset: stack_offset(stack_offsets, home, block, instruction)?,
+                size: OpSize::S64,
+            })
+        }
+        SyntheticOperation::RecipeNode { root, node } => {
+            if graph
+                .bundles
+                .get(root.0 as usize)
+                .is_none_or(|bundle| bundle.id != root)
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.RECIPE_ROOT",
+                    Some(block),
+                    Some(instruction),
+                    operands,
+                    "synthetic recipe references a missing HomeGraph root",
+                ));
+            }
+            let recipe = graph.recipe_nodes.get(node.0 as usize).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.RECIPE_NODE",
+                    Some(block),
+                    Some(instruction),
+                    operands.clone(),
+                    "synthetic recipe references a missing HomeGraph node",
+                )
+            })?;
+            let destination = definition.ok_or_else(|| {
+                synthetic_signature_error(block, instruction, operation, operands.clone())
+            })?;
+            let lowered = match recipe {
+                RecipeNode::Constant(value) => {
+                    if !operands.is_empty() {
+                        return Err(synthetic_signature_error(
+                            block,
+                            instruction,
+                            operation,
+                            operands,
+                        ));
+                    }
+                    MInst::LoadImm {
+                        dst: destination,
+                        value: *value,
+                    }
+                }
+                RecipeNode::State(state) => {
+                    if !operands.is_empty() {
+                        return Err(synthetic_signature_error(
+                            block,
+                            instruction,
+                            operation,
+                            operands,
+                        ));
+                    }
+                    MInst::Load {
+                        dst: destination,
+                        base: BaseReg::SimState,
+                        offset: state.load.offset,
+                        size: state.load.size,
+                    }
+                }
+                RecipeNode::Unary {
+                    operation: step,
+                    input,
+                } => {
+                    let [source] = operands.as_slice() else {
+                        return Err(synthetic_signature_error(
+                            block,
+                            instruction,
+                            operation,
+                            operands,
+                        ));
+                    };
+                    verify_recipe_input(
+                        recipe_definitions,
+                        *source,
+                        root,
+                        *input,
+                        block,
+                        instruction,
+                    )?;
+                    materialize_pure_step(*step, destination, *source)
+                }
+                RecipeNode::Or64 { left, right } => {
+                    let [lhs, rhs] = operands.as_slice() else {
+                        return Err(synthetic_signature_error(
+                            block,
+                            instruction,
+                            operation,
+                            operands,
+                        ));
+                    };
+                    verify_recipe_input(recipe_definitions, *lhs, root, *left, block, instruction)?;
+                    verify_recipe_input(
+                        recipe_definitions,
+                        *rhs,
+                        root,
+                        *right,
+                        block,
+                        instruction,
+                    )?;
+                    MInst::Or {
+                        dst: destination,
+                        lhs: *lhs,
+                        rhs: *rhs,
+                    }
+                }
+            };
+            if recipe_definitions
+                .insert(destination, (root, node))
+                .is_some()
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.RECIPE_DEFINITION",
+                    Some(block),
+                    Some(instruction),
+                    vec![destination],
+                    "synthetic recipe value has more than one semantic definition",
+                ));
+            }
+            Ok(lowered)
+        }
+    }
+}
+
+fn synthetic_signature_error(
+    block: BlockId,
+    instruction: usize,
+    operation: SyntheticOperation,
+    values: Vec<VReg>,
+) -> AllocationIrError {
+    AllocationIrError::new(
+        "ALLOCATION_IR.SYNTHETIC_SIGNATURE",
+        Some(block),
+        Some(instruction),
+        values,
+        format!("invalid lowered def/use signature for {operation:?}"),
+    )
+}
+
+fn stack_offset(
+    offsets: &[i32],
+    home: StackHomeId,
+    block: BlockId,
+    instruction: usize,
+) -> Result<i32, AllocationIrError> {
+    offsets.get(home.0 as usize).copied().ok_or_else(|| {
+        AllocationIrError::new(
+            "ALLOCATION_IR.STACK_LAYOUT",
+            Some(block),
+            Some(instruction),
+            Vec::new(),
+            format!("stack home {home:?} has no concrete frame offset"),
+        )
+    })
+}
+
+fn verify_recipe_input(
+    definitions: &HashMap<VReg, (LiveBundleId, RecipeId)>,
+    value: VReg,
+    root: LiveBundleId,
+    node: RecipeId,
+    block: BlockId,
+    instruction: usize,
+) -> Result<(), AllocationIrError> {
+    if definitions.get(&value) != Some(&(root, node)) {
+        return Err(AllocationIrError::new(
+            "ALLOCATION_IR.RECIPE_EDGE",
+            Some(block),
+            Some(instruction),
+            vec![value],
+            format!("recipe operand does not implement edge {root:?}/{node:?}"),
+        ));
+    }
+    Ok(())
 }
 
 fn compact_value(
@@ -1236,6 +1971,11 @@ fn verify_stack_home_reaching_definitions(
     let mut required_homes = BTreeSet::<StackHomeId>::new();
     let mut definition_blocks = HashMap::<StackHomeId, BTreeSet<usize>>::new();
     for (block, row) in program.blocks.iter().enumerate() {
+        for phi in &row.phis {
+            if let Some(home) = phi.stack_home {
+                definition_blocks.entry(home).or_default().insert(block);
+            }
+        }
         for instruction in &row.instructions {
             let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
             else {
@@ -1342,6 +2082,13 @@ fn verify_stack_home_reaching_definitions(
         let mut changes = Vec::<(StackHomeId, Option<StackDefinition>)>::new();
         for &(home, phi) in &phis_by_block[block] {
             set_stack_definition(&mut current, &mut changes, home, StackDefinition::Phi(phi));
+        }
+        for phi in &program.blocks[block].phis {
+            if let Some(home) = phi.stack_home
+                && required_homes.contains(&home)
+            {
+                set_stack_definition(&mut current, &mut changes, home, StackDefinition::True);
+            }
         }
         for instruction in &program.blocks[block].instructions {
             let AllocationInstructionOrigin::Synthetic { id, operation, .. } = instruction.origin
@@ -1491,8 +2238,16 @@ impl LivenessProgram for AllocationIr {
         self.blocks[block].phis[phi].destination
     }
 
+    fn phi_definition_in_register(&self, block: usize, phi: usize) -> bool {
+        self.blocks[block].phis[phi].register_definition
+    }
+
     fn phi_sources(&self, block: usize, phi: usize) -> &[(BlockId, VReg)] {
         &self.blocks[block].phis[phi].sources
+    }
+
+    fn phi_source_in_register(&self, block: usize, phi: usize, source: usize) -> bool {
+        self.blocks[block].phis[phi].register_sources[source]
     }
 
     fn instruction_count(&self, block: usize) -> usize {
@@ -1511,7 +2266,9 @@ impl LivenessProgram for AllocationIr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{
+        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
+    };
 
     fn function(value_count: u32, blocks: Vec<MBlock>) -> MFunction {
         let mut values = VRegAllocator::new();
@@ -1681,6 +2438,7 @@ mod tests {
         let mut function = function(4, vec![entry, left, right, merge]);
         let cfg = normalize(&mut function);
         let original = super::super::live_interval::analyze(&function, &cfg).unwrap();
+        let definition = original.intervals[1].as_ref().unwrap().definition;
         let edge = original.intervals[1]
             .as_ref()
             .unwrap()
@@ -1690,6 +2448,16 @@ mod tests {
             .find(|site| matches!(site, UseSite::PhiEdge { .. }))
             .unwrap();
         let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        allocation_ir
+            .insert_after_definition(
+                definition,
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(0),
+                },
+                Uses::one(VReg(1)),
+                false,
+            )
+            .unwrap();
 
         let reload = allocation_ir
             .insert_before_use(
@@ -1731,6 +2499,55 @@ mod tests {
                 .count(),
             1,
             "the sibling phi edge must still use the original value"
+        );
+
+        allocation_ir.verify_stack_homes(&cfg).unwrap();
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let source_before = format!("{function:?}");
+        let lowered = allocation_ir.materialize(&function, &graph, &[0]).unwrap();
+        assert_eq!(format!("{function:?}"), source_before);
+        assert_eq!(
+            super::super::live_interval::analyze(&lowered, &cfg).unwrap(),
+            intervals
+        );
+        let UseSite::PhiEdge {
+            predecessor,
+            successor,
+            phi,
+            ..
+        } = resolved_edge
+        else {
+            unreachable!()
+        };
+        let edge_block = lowered
+            .blocks
+            .iter()
+            .find(|block| block.id == predecessor)
+            .unwrap();
+        assert!(matches!(
+            edge_block.insts.as_slice(),
+            [
+                MInst::Load {
+                    dst,
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Jump { target },
+            ] if *dst == reload && *target == successor
+        ));
+        let merge = lowered
+            .blocks
+            .iter()
+            .find(|block| block.id == successor)
+            .unwrap();
+        assert_eq!(
+            merge.phis[phi]
+                .sources
+                .iter()
+                .find(|(source, _)| *source == predecessor)
+                .map(|(_, value)| *value),
+            Some(reload)
         );
     }
 

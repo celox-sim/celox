@@ -8,9 +8,11 @@ use crate::backend::native::mir::{
 
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
+#[cfg(test)]
+use super::reload::PureStep;
 use super::reload::{
-    ExpectedMaterializedReload, PointUse, PureStep, ReloadRecipeAnalysis, ResolvedBase,
-    ResolvedRecipe,
+    ExpectedMaterializedReload, PointUse, ReloadRecipeAnalysis, ResolvedBase, ResolvedRecipe,
+    materialize_pure_step,
 };
 use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillPlan};
 
@@ -787,55 +789,6 @@ fn prepare_recipe(
             instructions,
         },
     ))
-}
-
-fn materialize_pure_step(step: PureStep, dst: VReg, source: VReg) -> MInst {
-    match step {
-        PureStep::Copy64 => MInst::Mov { dst, src: source },
-        PureStep::Copy32 => MInst::Mov32 { dst, src: source },
-        PureStep::AndImm64 { immediate } => MInst::AndImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::AndImm32 { immediate } => MInst::AndImm32 {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::OrImm64 { immediate } => MInst::OrImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::ShrImm64 { immediate } => MInst::ShrImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::ShlImm64 { immediate } => MInst::ShlImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::SarImm64 { immediate } => MInst::SarImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::AddImm64 { immediate } => MInst::AddImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::SubImm64 { immediate } => MInst::SubImm {
-            dst,
-            src: source,
-            imm: immediate,
-        },
-        PureStep::BitNot64 => MInst::BitNot { dst, src: source },
-        PureStep::Neg64 => MInst::Neg { dst, src: source },
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

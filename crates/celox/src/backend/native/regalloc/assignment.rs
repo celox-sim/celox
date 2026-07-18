@@ -175,6 +175,11 @@ pub struct AssignmentMap {
     pub edge_spill_slots: HashMap<VReg, i32>,
     pub edge_locations: HashMap<(BlockId, VReg), EdgeLocation>,
     pub edge_location_points: HashMap<(BlockId, VReg), usize>,
+    /// Exact out-of-SSA source location for one semantic phi row. This is
+    /// intentionally destination-qualified: the same source VReg may feed
+    /// multiple phi rows on one edge through independently materialized
+    /// stack/immediate locations.
+    pub phi_edge_locations: HashMap<(BlockId, BlockId, VReg, VReg), EdgeLocation>,
 }
 
 impl AssignmentMap {
@@ -196,6 +201,30 @@ impl AssignmentMap {
 
     pub fn edge_location(&self, pred: BlockId, vreg: VReg) -> Option<EdgeLocation> {
         self.edge_locations.get(&(pred, vreg)).copied()
+    }
+
+    pub fn phi_edge_location(
+        &self,
+        pred: BlockId,
+        succ: BlockId,
+        destination: VReg,
+        source: VReg,
+    ) -> Option<EdgeLocation> {
+        self.phi_edge_locations
+            .get(&(pred, succ, destination, source))
+            .copied()
+    }
+
+    pub fn set_phi_edge_location(
+        &mut self,
+        pred: BlockId,
+        succ: BlockId,
+        destination: VReg,
+        source: VReg,
+        location: EdgeLocation,
+    ) {
+        self.phi_edge_locations
+            .insert((pred, succ, destination, source), location);
     }
 
     pub fn set_edge_location(&mut self, pred: BlockId, vreg: VReg, location: EdgeLocation) {

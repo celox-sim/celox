@@ -237,7 +237,17 @@ pub(super) trait LivenessProgram {
     fn block_id(&self, block: usize) -> BlockId;
     fn phi_count(&self, block: usize) -> usize;
     fn phi_definition(&self, block: usize, phi: usize) -> VReg;
+    fn phi_definition_in_register(&self, _block: usize, _phi: usize) -> bool {
+        true
+    }
     fn phi_sources(&self, block: usize, phi: usize) -> &[(BlockId, VReg)];
+    /// Whether one semantic phi source must reside in a register at the edge.
+    /// Ordinary MIR sources do. Allocation IR may instead resolve a source to
+    /// an explicit stack/immediate edge location, in which case it must not
+    /// create artificial simultaneous register pressure with sibling rows.
+    fn phi_source_in_register(&self, _block: usize, _phi: usize, _source: usize) -> bool {
+        true
+    }
     fn instruction_count(&self, block: usize) -> usize;
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses;
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg>;
@@ -286,6 +296,174 @@ pub(super) fn analyze(
     cfg: &NormalizedCfg,
 ) -> Result<LiveIntervals, LiveIntervalError> {
     analyze_program(func, cfg)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct NonRegisterPhiSource {
+    pub predecessor: BlockId,
+    pub successor: BlockId,
+    pub phi: usize,
+    pub value: VReg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct NonRegisterPhiDefinition {
+    pub block: BlockId,
+    pub phi: usize,
+    pub value: VReg,
+}
+
+/// Independently rebuild physical-register liveness for lowered MIR whose
+/// semantic phi rows include explicit stack/immediate edge locations.
+pub(super) fn analyze_with_nonregister_phi_sources(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    nonregister_sources: &BTreeSet<NonRegisterPhiSource>,
+    nonregister_definitions: &BTreeSet<NonRegisterPhiDefinition>,
+) -> Result<LiveIntervals, LiveIntervalError> {
+    for source in nonregister_sources {
+        let successor = cfg
+            .block_index
+            .get(&source.successor)
+            .copied()
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.EDGE_LOCATION_BLOCK",
+                    Some(source.successor),
+                    None,
+                    vec![source.value],
+                    "non-register phi source references a successor outside normalized CFG",
+                )
+            })?;
+        let phi = func.blocks[successor].phis.get(source.phi).ok_or_else(|| {
+            LiveIntervalError::new(
+                "LIVE_INTERVAL.EDGE_LOCATION_PHI",
+                Some(source.successor),
+                None,
+                vec![source.value],
+                "non-register edge location references a missing phi row",
+            )
+        })?;
+        if phi
+            .sources
+            .iter()
+            .filter(|(predecessor, value)| {
+                *predecessor == source.predecessor && *value == source.value
+            })
+            .count()
+            != 1
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.EDGE_LOCATION_SOURCE",
+                Some(source.successor),
+                None,
+                vec![source.value],
+                "non-register edge location does not identify one exact semantic phi source",
+            ));
+        }
+    }
+    for definition in nonregister_definitions {
+        let block = cfg
+            .block_index
+            .get(&definition.block)
+            .copied()
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.PHI_LOCATION_BLOCK",
+                    Some(definition.block),
+                    None,
+                    vec![definition.value],
+                    "non-register phi definition references a block outside normalized CFG",
+                )
+            })?;
+        if func.blocks[block]
+            .phis
+            .get(definition.phi)
+            .is_none_or(|phi| phi.dst != definition.value)
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.PHI_LOCATION_DEFINITION",
+                Some(definition.block),
+                None,
+                vec![definition.value],
+                "non-register phi definition does not identify one exact semantic phi row",
+            ));
+        }
+    }
+    analyze_program(
+        &FilteredPhiLiveness {
+            func,
+            nonregister_sources,
+            nonregister_definitions,
+        },
+        cfg,
+    )
+}
+
+struct FilteredPhiLiveness<'a> {
+    func: &'a MFunction,
+    nonregister_sources: &'a BTreeSet<NonRegisterPhiSource>,
+    nonregister_definitions: &'a BTreeSet<NonRegisterPhiDefinition>,
+}
+
+impl LivenessProgram for FilteredPhiLiveness<'_> {
+    fn value_count(&self) -> u32 {
+        self.func.vregs.count()
+    }
+
+    fn block_count(&self) -> usize {
+        self.func.blocks.len()
+    }
+
+    fn block_id(&self, block: usize) -> BlockId {
+        self.func.blocks[block].id
+    }
+
+    fn phi_count(&self, block: usize) -> usize {
+        self.func.blocks[block].phis.len()
+    }
+
+    fn phi_definition(&self, block: usize, phi: usize) -> VReg {
+        self.func.blocks[block].phis[phi].dst
+    }
+
+    fn phi_definition_in_register(&self, block: usize, phi: usize) -> bool {
+        let row = &self.func.blocks[block].phis[phi];
+        !self
+            .nonregister_definitions
+            .contains(&NonRegisterPhiDefinition {
+                block: self.func.blocks[block].id,
+                phi,
+                value: row.dst,
+            })
+    }
+
+    fn phi_sources(&self, block: usize, phi: usize) -> &[(BlockId, VReg)] {
+        &self.func.blocks[block].phis[phi].sources
+    }
+
+    fn phi_source_in_register(&self, block: usize, phi: usize, source: usize) -> bool {
+        let successor = self.func.blocks[block].id;
+        let (predecessor, value) = self.func.blocks[block].phis[phi].sources[source];
+        !self.nonregister_sources.contains(&NonRegisterPhiSource {
+            predecessor,
+            successor,
+            phi,
+            value,
+        })
+    }
+
+    fn instruction_count(&self, block: usize) -> usize {
+        self.func.blocks[block].insts.len()
+    }
+
+    fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
+        self.func.blocks[block].insts[instruction].uses()
+    }
+
+    fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {
+        self.func.blocks[block].insts[instruction].def()
+    }
 }
 
 pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
@@ -463,6 +641,9 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
         let block_slots = slots[block_index];
         for phi_index in 0..program.phi_count(block_index) {
             let destination = program.phi_definition(block_index, phi_index);
+            if !program.phi_definition_in_register(block_index, phi_index) {
+                continue;
+            }
             let site = DefinitionSite::Phi {
                 block: block_id,
                 phi: phi_index,
@@ -530,7 +711,9 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
         for phi_index in 0..program.phi_count(successor) {
             let destination = program.phi_definition(successor, phi_index);
             let mut seen_predecessors = BTreeSet::new();
-            for &(predecessor_id, value) in program.phi_sources(successor, phi_index) {
+            for (source_index, &(predecessor_id, value)) in
+                program.phi_sources(successor, phi_index).iter().enumerate()
+            {
                 let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
                     return Err(LiveIntervalError::new(
                         "LIVE_INTERVAL.PHI_PREDECESSOR",
@@ -550,6 +733,9 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
                         vec![value],
                         "phi predecessor is absent from the CFG or appears more than once",
                     ));
+                }
+                if !program.phi_source_in_register(successor, phi_index, source_index) {
+                    continue;
                 }
                 let site = UseSite::PhiEdge {
                     predecessor: predecessor_id,
