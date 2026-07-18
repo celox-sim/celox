@@ -2607,6 +2607,41 @@ it is not a compile-only success or a Linux correctness result.  The next
 slice replaces those structures with shared sparse interval storage,
 transactional undo, and one region dataflow per register.
 
+Step 27c5b replaces those rejected structures.  All physical-register unions
+share one immutable CFG index, while each allocation bundle owns a
+`SparseRange` which resolves `BlockId` to the corresponding CFG row and proves
+segment order, membership, and self-noninterference exactly once.  Register
+queries accept only a token tied to that CFG index; the raw diagnostic API is a
+checked adapter to the same indexed implementation rather than a second query
+semantics.  Per-register block trees are sparse, conflict collection reuses a
+dense epoch table, and one register probe supplies the free, recolor, eviction,
+and split decisions for a bundle.  Recoloring uses an explicit undo journal
+instead of cloning the interval matrix, and failed/error exits restore the
+matrix exactly.  Free-region splitting builds one sparse graph per register,
+partitions it into disjoint dominated owners, and visits each free node once
+across the resulting candidates.  Displaced roots and split leaves enter a
+monotonic `NoEvict` stage, which prevents a finalized child from re-entering an
+unsupported eviction chain.
+
+The clean CPU-0 non-LTO diagnostic compile-only run retained at
+`target/heliodor/results/20260718T143501Z_celox_test_soc_linux_boot.log`
+completed with `compile_ns=178890305762` and `execute_ns=0`.  Allocation took
+21.582 s for `eval_apply_ff`, 25.729 s for `eval_only_ff`, 99.052 s for
+`eval_comb`, and 79.597 s for `eval_comb_apply_ff`.  The corresponding prior
+run took 240.678 s overall and 23.916 / 28.367 / 155.144 / 137.980 s in those
+four allocation phases.  This proves termination and removes about 61.8 s of
+diagnostic compile time, but it does not qualify the allocator or establish a
+Linux result: the legacy production allocator still emits the MIR.
+
+Two debugger stops on the unchanged prebuilt candidate identify the remaining
+architectural work.  One large function was restoring resident ranges through
+`MatrixTransaction::rollback -> assign_validated -> overlapping_entries_at`
+after a failed recolor; the fused function was scanning
+`collect_conflicts_validated` while probing registers.  The next slice must
+therefore replace destructive speculative recoloring and repeated
+bundle-by-register range scans.  Retaining the present search and making its
+ordered maps incrementally cheaper is not an acceptable completion path.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2660,6 +2695,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c3 per-use home partition | this step | allocator 5/5 including path-specific state/stack partition | lib 796/796; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact shared-stack versus per-use recipe partition replaces VReg-wide fallback |
 | 27c4 dominance/use-cluster region splitting | this step | allocator 8/8 including same-block, cross-block, and sibling-arm splits | lib 799/799; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact-use transitions and CFG-connected sparse register children complete |
 | 27c5a use-indexed HomeGraph | this step | HomeGraph 6/6; allocator 8/8 | lib 799/799; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic intentionally stopped after HomeGraph completion; production MIR unchanged | HomeGraph 8.128 / 6.755 / 6.611 s for the three reported large functions | nested full-analysis rebuild and quadratic home lookup removed; allocator core still fails the actual-scale gate |
+| 27c5b allocation-owned sparse ranges and transactional interval unions | this step | interval union 6/6; allocator 10/10 | lib 803/803; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 178.890 s; allocation 21.582 / 25.729 / 99.052 / 79.597 s | cloned matrix and repeated CFG resolution removed; destructive recolor and bundle-by-register scanning remain rejected |
 
 ## Related design records
 

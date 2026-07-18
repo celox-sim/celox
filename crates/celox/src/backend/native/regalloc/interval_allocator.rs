@@ -15,20 +15,21 @@ use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{
     BundleUseId, HomeGraph, HomeKind, LiveBundleId, STACK_HOME_CREATION_COST,
-    STACK_HOME_MATERIALIZATION_COST, UseMaterialization,
+    STACK_HOME_MATERIALIZATION_COST, UseHome, UseMaterialization,
 };
 use super::interval_union::{
-    AllocationBundleId, IntervalUnionError, LiveIntervalMatrix, live_length,
+    AllocationBundleId, ConflictCollector, IntervalUnionError, LiveIntervalMatrix, SparseRange,
+    live_length,
 };
 use super::live_interval::{DefinitionSite, LiveSegment, UseSite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AllocationStage {
     Original,
-    /// This bundle has already lost a register to a more valuable bundle.
-    /// It may be recolored or sent to a home, but cannot start another
-    /// eviction chain.
-    Evicted,
+    /// Monotonic no-eviction stage for displaced roots and finalized split
+    /// leaves. An unassigned root may still be recolored, split, or sent home;
+    /// once resident it cannot participate in another eviction chain.
+    NoEvict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +73,7 @@ pub(super) struct AllocatedBundle {
     pub parent: Option<AllocationBundleId>,
     pub origin: VReg,
     pub definition: DefinitionSite,
-    pub segments: Vec<LiveSegment>,
+    pub segments: SparseRange,
     pub uses: Vec<BundleUseId>,
     pub stage: AllocationStage,
     pub spill_cost: u64,
@@ -155,6 +156,47 @@ fn home_rank(kind: HomeKind) -> u8 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UseHomeChoice {
+    kind: HomeKind,
+    materialization: Option<UseMaterialization>,
+    cost: u32,
+}
+
+fn choose_use_home(
+    options: &[UseHome],
+    use_id: BundleUseId,
+    stack_available: bool,
+) -> Option<UseHomeChoice> {
+    let mut best = stack_available.then_some((
+        STACK_HOME_MATERIALIZATION_COST,
+        home_rank(HomeKind::Stack),
+        HomeKind::Stack,
+        None,
+    ));
+    for option in options {
+        let materialization = UseMaterialization {
+            use_id,
+            recipe: option.recipe,
+            cost: option.cost,
+        };
+        let choice = (
+            materialization.cost,
+            home_rank(option.kind),
+            option.kind,
+            Some(materialization),
+        );
+        if best.as_ref().is_none_or(|current| choice < *current) {
+            best = Some(choice);
+        }
+    }
+    best.map(|(cost, _, kind, materialization)| UseHomeChoice {
+        kind,
+        materialization,
+        cost,
+    })
+}
+
 fn partition_homes(
     graph: &HomeGraph,
     root: LiveBundleId,
@@ -171,36 +213,11 @@ fn partition_homes(
     let build = |stack_available: bool| -> Option<HomePartition> {
         let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
         for &use_id in uses {
-            let mut best = None::<(u32, u8, HomeKind, Option<UseMaterialization>)>;
-            if stack_available {
-                best = Some((
-                    STACK_HOME_MATERIALIZATION_COST,
-                    home_rank(HomeKind::Stack),
-                    HomeKind::Stack,
-                    None,
-                ));
-            }
             let options = homes.uses.get(use_id.0 as usize)?;
-            for option in options {
-                let materialization = UseMaterialization {
-                    use_id,
-                    recipe: option.recipe,
-                    cost: option.cost,
-                };
-                let choice = (
-                    materialization.cost,
-                    home_rank(option.kind),
-                    option.kind,
-                    Some(materialization),
-                );
-                if best.as_ref().is_none_or(|current| choice < *current) {
-                    best = Some(choice);
-                }
-            }
-            let (_, _, kind, materialization) = best?;
-            let group = grouped.entry(kind).or_default();
+            let choice = choose_use_home(options, use_id, stack_available)?;
+            let group = grouped.entry(choice.kind).or_default();
             group.0.push(use_id);
-            if let Some(materialization) = materialization {
+            if let Some(materialization) = choice.materialization {
                 group.1.push(materialization);
             }
         }
@@ -254,6 +271,269 @@ fn partition_homes(
         .unwrap_or(with_stack))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UsePartitionCost {
+    without_stack: Option<u64>,
+    with_stack: u64,
+    with_stack_uses_stack: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartitionCost {
+    total: u64,
+    uses_stack: bool,
+}
+
+/// Additive exact cost index for one allocation bundle's use set.  Split
+/// candidates remove their disjoint register-covered uses from these totals;
+/// only the winning complement is materialized into `HomePiece`s.
+#[derive(Debug)]
+struct HomeCostIndex {
+    root: LiveBundleId,
+    rows: Vec<Option<UsePartitionCost>>,
+    use_count: usize,
+    without_stack_total: u64,
+    without_stack_missing: usize,
+    with_stack_total: u64,
+    with_stack_use_count: usize,
+}
+
+impl HomeCostIndex {
+    fn new(
+        graph: &HomeGraph,
+        root: LiveBundleId,
+        uses: &[BundleUseId],
+    ) -> Result<Self, IntervalAllocationError> {
+        let Some(homes) = graph.homes.get(root.0 as usize) else {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_ROOT",
+                None,
+                None,
+                format!("root bundle {root:?} has no use-home row"),
+            ));
+        };
+        let mut rows = vec![None; homes.uses.len()];
+        let mut without_stack_total = 0_u64;
+        let mut without_stack_missing = 0_usize;
+        let mut with_stack_total = 0_u64;
+        let mut with_stack_use_count = 0_usize;
+        let mut previous = None;
+        for &use_id in uses {
+            if previous.is_some_and(|prior| prior >= use_id) {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_ORDER",
+                    None,
+                    None,
+                    format!("root bundle {root:?} has duplicate or unsorted uses"),
+                ));
+            }
+            previous = Some(use_id);
+            let Some(options) = homes.uses.get(use_id.0 as usize) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_RANGE",
+                    None,
+                    None,
+                    format!("bundle use {use_id:?} is outside root {root:?}"),
+                ));
+            };
+            let without_stack = choose_use_home(options, use_id, false);
+            let with_stack = choose_use_home(options, use_id, true).ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.NO_STACK_HOME",
+                    None,
+                    None,
+                    format!("root bundle {root:?} lacks its mandatory stack candidate"),
+                )
+            })?;
+            if matches!(
+                without_stack.map(|choice| choice.kind),
+                Some(HomeKind::Register | HomeKind::Stack)
+            ) || matches!(with_stack.kind, HomeKind::Register)
+            {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_HOME_CLASS",
+                    None,
+                    None,
+                    "use-local HomeGraph row contains an allocator-owned home",
+                ));
+            }
+            let without_stack = without_stack.map(|choice| u64::from(choice.cost));
+            if let Some(cost) = without_stack {
+                without_stack_total = without_stack_total.checked_add(cost).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        "non-stack home cost exceeds u64",
+                    )
+                })?;
+            } else {
+                without_stack_missing = without_stack_missing.checked_add(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        "missing-home count exceeds usize",
+                    )
+                })?;
+            }
+            with_stack_total = with_stack_total
+                .checked_add(u64::from(with_stack.cost))
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        "stack-enabled home cost exceeds u64",
+                    )
+                })?;
+            let with_stack_uses_stack = with_stack.kind == HomeKind::Stack;
+            if with_stack_uses_stack {
+                with_stack_use_count = with_stack_use_count.checked_add(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        "stack-use count exceeds usize",
+                    )
+                })?;
+            }
+            let row = UsePartitionCost {
+                without_stack,
+                with_stack: u64::from(with_stack.cost),
+                with_stack_uses_stack,
+            };
+            if rows[use_id.0 as usize].replace(row).is_some() {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_ORDER",
+                    None,
+                    None,
+                    format!("bundle use {use_id:?} appears more than once"),
+                ));
+            }
+        }
+        Ok(Self {
+            root,
+            rows,
+            use_count: uses.len(),
+            without_stack_total,
+            without_stack_missing,
+            with_stack_total,
+            with_stack_use_count,
+        })
+    }
+
+    fn excluding(
+        &self,
+        excluded: &[BundleUseId],
+    ) -> Result<PartitionCost, IntervalAllocationError> {
+        let mut without_stack_total = self.without_stack_total;
+        let mut without_stack_missing = self.without_stack_missing;
+        let mut with_stack_total = self.with_stack_total;
+        let mut with_stack_use_count = self.with_stack_use_count;
+        let mut previous = None;
+        for &use_id in excluded {
+            if previous.is_some_and(|prior| prior >= use_id) {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_ORDER",
+                    None,
+                    None,
+                    "split candidate contains duplicate or unsorted uses",
+                ));
+            }
+            previous = Some(use_id);
+            let row = self
+                .rows
+                .get(use_id.0 as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.USE_RANGE",
+                        None,
+                        None,
+                        format!(
+                            "split candidate use {use_id:?} is outside root {:?}",
+                            self.root
+                        ),
+                    )
+                })?;
+            if let Some(cost) = row.without_stack {
+                without_stack_total = without_stack_total.checked_sub(cost).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "non-stack complement cost underflowed",
+                    )
+                })?;
+            } else {
+                without_stack_missing = without_stack_missing.checked_sub(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "missing-home complement count underflowed",
+                    )
+                })?;
+            }
+            with_stack_total = with_stack_total
+                .checked_sub(row.with_stack)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "stack-enabled complement cost underflowed",
+                    )
+                })?;
+            if row.with_stack_uses_stack {
+                with_stack_use_count = with_stack_use_count.checked_sub(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "stack-use complement count underflowed",
+                    )
+                })?;
+            }
+        }
+        self.use_count.checked_sub(excluded.len()).ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_INDEX",
+                None,
+                None,
+                "split candidate covers more uses than its root bundle",
+            )
+        })?;
+        let stack_creation_cost = if with_stack_use_count != 0 {
+            u64::from(STACK_HOME_CREATION_COST)
+        } else {
+            0
+        };
+        let with_stack = with_stack_total
+            .checked_add(stack_creation_cost)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                    None,
+                    None,
+                    "stack-home creation cost exceeds u64",
+                )
+            })?;
+        if without_stack_missing == 0 && without_stack_total <= with_stack {
+            Ok(PartitionCost {
+                total: without_stack_total,
+                uses_stack: false,
+            })
+        } else {
+            Ok(PartitionCost {
+                total: with_stack,
+                uses_stack: with_stack_use_count != 0,
+            })
+        }
+    }
+}
+
 fn selection_covers(
     graph: &HomeGraph,
     root: LiveBundleId,
@@ -303,6 +583,13 @@ struct QueueItem {
     spill_cost: u64,
     live_length: u64,
     use_count: usize,
+}
+
+#[derive(Debug)]
+struct RegisterProbe {
+    register: PhysReg,
+    order: usize,
+    conflicts: Vec<AllocationBundleId>,
 }
 
 impl Ord for QueueItem {
@@ -426,9 +713,15 @@ struct RegionCandidate {
     segments: Vec<LiveSegment>,
     uses: Vec<BundleUseId>,
     transition: BundleTransition,
-    remaining: HomePartition,
     total_cost: u64,
-    stack_home_created: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegionSeed {
+    use_id: BundleUseId,
+    node: usize,
+    site: UseSite,
+    block: usize,
 }
 
 fn segment_node_at(
@@ -448,6 +741,7 @@ struct Allocator<'a> {
     dominance: Dominance,
     registers: Vec<PhysReg>,
     matrix: LiveIntervalMatrix,
+    conflict_collector: ConflictCollector,
     bundles: Vec<AllocatedBundle>,
     queue: BinaryHeap<QueueItem>,
 }
@@ -480,6 +774,9 @@ impl<'a> Allocator<'a> {
                 )
             })?);
             let uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
+            let segments = matrix
+                .make_range(root.segments.clone())
+                .map_err(IntervalAllocationError::union)?;
             let (spill_cost, assignment) = if uses.is_empty() {
                 (0, BundleAssignment::Dead)
             } else {
@@ -488,7 +785,7 @@ impl<'a> Allocator<'a> {
                     BundleAssignment::Unassigned,
                 )
             };
-            let length = live_length(&root.segments).ok_or_else(|| {
+            let length = live_length(&segments).ok_or_else(|| {
                 IntervalAllocationError::new(
                     "INTERVAL_ALLOC.LIVE_LENGTH",
                     Some(root.definition.block()),
@@ -510,7 +807,7 @@ impl<'a> Allocator<'a> {
                 parent: None,
                 origin: root.origin,
                 definition: root.definition,
-                segments: root.segments.clone(),
+                segments,
                 uses,
                 stage: AllocationStage::Original,
                 spill_cost,
@@ -532,6 +829,7 @@ impl<'a> Allocator<'a> {
             dominance: Dominance::new(cfg)?,
             registers: registers.to_vec(),
             matrix,
+            conflict_collector: ConflictCollector::default(),
             bundles,
             queue,
         })
@@ -571,109 +869,154 @@ impl<'a> Allocator<'a> {
         id: AllocationBundleId,
         register: PhysReg,
     ) -> Result<(), IntervalAllocationError> {
-        let segments = self.bundle(id)?.segments.clone();
+        let segments = self
+            .bundles
+            .get(id.0 as usize)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.BUNDLE_RANGE",
+                    None,
+                    Some(id),
+                    "allocation bundle is outside the stable bundle table",
+                )
+            })?
+            .segments
+            .validated();
         self.matrix
-            .assign(id, register, &segments)
+            .assign_validated(id, register, segments)
             .map_err(IntervalAllocationError::union)?;
         self.bundles[id.0 as usize].assignment = BundleAssignment::Register(register);
         Ok(())
     }
 
+    fn probe_registers(
+        &mut self,
+        id: AllocationBundleId,
+    ) -> Result<Vec<RegisterProbe>, IntervalAllocationError> {
+        let segments = &self
+            .bundles
+            .get(id.0 as usize)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.BUNDLE_RANGE",
+                    None,
+                    Some(id),
+                    "allocation bundle is outside the stable bundle table",
+                )
+            })?
+            .segments;
+        let bundle_count = self.bundles.len();
+        let validated = segments.validated();
+        let mut probes = Vec::with_capacity(self.registers.len());
+        for (order, register) in self.registers.iter().copied().enumerate() {
+            let mut conflicts = Vec::new();
+            self.matrix
+                .collect_conflicts_validated(
+                    register,
+                    validated,
+                    bundle_count,
+                    &mut self.conflict_collector,
+                    &mut conflicts,
+                )
+                .map_err(IntervalAllocationError::union)?;
+            probes.push(RegisterProbe {
+                register,
+                order,
+                conflicts,
+            });
+        }
+        Ok(probes)
+    }
+
     fn try_free_register(
         &mut self,
         id: AllocationBundleId,
+        probes: &[RegisterProbe],
     ) -> Result<bool, IntervalAllocationError> {
-        let segments = self.bundle(id)?.segments.clone();
-        for register in self.registers.clone() {
-            if self
-                .matrix
-                .conflicts(register, &segments)
-                .map_err(IntervalAllocationError::union)?
-                .is_empty()
-            {
-                self.assign_register(id, register)?;
+        for probe in probes {
+            if probe.conflicts.is_empty() {
+                self.assign_register(id, probe.register)?;
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    fn try_recolor(&mut self, id: AllocationBundleId) -> Result<bool, IntervalAllocationError> {
-        let segments = self.bundle(id)?.segments.clone();
-        for target in self.registers.clone() {
-            let conflicts = self
-                .matrix
-                .conflicts(target, &segments)
-                .map_err(IntervalAllocationError::union)?;
-            if conflicts.is_empty() || conflicts.len() > self.registers.len() {
+    fn try_recolor(
+        &mut self,
+        id: AllocationBundleId,
+        probes: &[RegisterProbe],
+    ) -> Result<bool, IntervalAllocationError> {
+        for probe in probes {
+            if probe.conflicts.is_empty() || probe.conflicts.len() > self.registers.len() {
                 continue;
             }
-            let Some((matrix, moves)) = recolor_residents(
-                &self.matrix,
+            let Some(moves) = recolor_residents(
+                &mut self.matrix,
                 &self.bundles,
                 &self.registers,
                 id,
-                target,
-                &conflicts,
+                probe.register,
+                &probe.conflicts,
             )?
             else {
                 continue;
             };
-            self.matrix = matrix;
             for (bundle, register) in moves {
                 self.bundles[bundle.0 as usize].assignment = BundleAssignment::Register(register);
             }
-            self.bundles[id.0 as usize].assignment = BundleAssignment::Register(target);
+            self.bundles[id.0 as usize].assignment = BundleAssignment::Register(probe.register);
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn try_evict(&mut self, id: AllocationBundleId) -> Result<bool, IntervalAllocationError> {
+    fn try_evict(
+        &mut self,
+        id: AllocationBundleId,
+        probes: &[RegisterProbe],
+    ) -> Result<bool, IntervalAllocationError> {
         let candidate = self.bundle(id)?;
         if candidate.stage != AllocationStage::Original {
             return Ok(false);
         }
         let candidate_cost = candidate.spill_cost;
-        let segments = candidate.segments.clone();
-        let mut best = None::<(u64, usize, PhysReg, Vec<AllocationBundleId>)>;
-        for (order, register) in self.registers.iter().copied().enumerate() {
-            let conflicts = self
-                .matrix
-                .conflicts(register, &segments)
-                .map_err(IntervalAllocationError::union)?;
-            if conflicts.is_empty()
-                || conflicts.iter().any(|conflict| {
-                    self.bundles[conflict.0 as usize].stage == AllocationStage::Evicted
+        let mut best = None::<(u64, usize, usize)>;
+        for (probe_index, probe) in probes.iter().enumerate() {
+            if probe.conflicts.is_empty()
+                || probe.conflicts.iter().any(|conflict| {
+                    self.bundles[conflict.0 as usize].stage == AllocationStage::NoEvict
                 })
             {
                 continue;
             }
-            let cost = conflicts.iter().fold(0_u64, |cost, conflict| {
+            let cost = probe.conflicts.iter().fold(0_u64, |cost, conflict| {
                 cost.saturating_add(self.bundles[conflict.0 as usize].spill_cost)
             });
             if candidate_cost <= cost {
                 continue;
             }
-            let key = (cost, order);
+            let key = (cost, probe.order);
             if best
                 .as_ref()
-                .is_none_or(|(best_cost, best_order, _, _)| key < (*best_cost, *best_order))
+                .is_none_or(|(best_cost, best_order, _)| key < (*best_cost, *best_order))
             {
-                best = Some((cost, order, register, conflicts));
+                best = Some((cost, probe.order, probe_index));
             }
         }
-        let Some((_, _, register, conflicts)) = best else {
+        let Some((_, _, probe_index)) = best else {
             return Ok(false);
         };
-        for conflict in conflicts {
+        let register = probes[probe_index].register;
+        for &conflict in &probes[probe_index].conflicts {
+            let conflict_segments = self.bundles[conflict.0 as usize].segments.validated();
             let _ = self
                 .matrix
-                .unassign(conflict)
+                .unassign_validated(conflict, conflict_segments)
                 .map_err(IntervalAllocationError::union)?;
             let displaced = &mut self.bundles[conflict.0 as usize];
             displaced.assignment = BundleAssignment::Unassigned;
-            displaced.stage = AllocationStage::Evicted;
+            displaced.stage = AllocationStage::NoEvict;
             self.queue.push(self.queue_item(conflict)?);
         }
         self.assign_register(id, register)?;
@@ -685,20 +1028,31 @@ impl<'a> Allocator<'a> {
         id: AllocationBundleId,
         register: PhysReg,
         register_order: usize,
+        home_costs: &HomeCostIndex,
     ) -> Result<Vec<RegionCandidate>, IntervalAllocationError> {
         let bundle = self.bundle(id)?;
-        let root = &self.graph.bundles[bundle.root.0 as usize];
+        let root = self
+            .graph
+            .bundles
+            .get(bundle.root.0 as usize)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.ROOT_RANGE",
+                    Some(bundle.definition.block()),
+                    Some(id),
+                    "allocation bundle references a missing HomeGraph root",
+                )
+            })?;
         let free = self
             .matrix
-            .free_segments(register, &bundle.segments)
+            .free_segments_validated(register, bundle.segments.validated())
             .map_err(IntervalAllocationError::union)?;
         if free.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut block_nodes = (0..self.cfg.successors.len())
-            .map(|_| Vec::new())
-            .collect::<Vec<Vec<usize>>>();
+        let mut block_nodes = BTreeMap::<usize, Vec<usize>>::new();
+        let mut node_blocks = Vec::with_capacity(free.len());
         for (node, segment) in free.iter().enumerate() {
             let Some(&block) = self.cfg.block_index.get(&segment.block) else {
                 return Err(IntervalAllocationError::new(
@@ -708,26 +1062,13 @@ impl<'a> Allocator<'a> {
                     "free segment references a block outside the CFG",
                 ));
             };
-            block_nodes[block].push(node);
-        }
-        let mut forward = vec![Vec::new(); free.len()];
-        let mut reverse = vec![Vec::new(); free.len()];
-        for (block, successors) in self.cfg.successors.iter().enumerate() {
-            let source_slot = self.graph.intervals.block_slots[block].exit;
-            let source = segment_node_at(&block_nodes[block], &free, source_slot);
-            let Some(source) = source else {
-                continue;
-            };
-            for &successor in successors {
-                let target_slot = self.graph.intervals.block_slots[successor].entry;
-                if let Some(target) = segment_node_at(&block_nodes[successor], &free, target_slot) {
-                    forward[source].push(target);
-                    reverse[target].push(source);
-                }
-            }
+            block_nodes.entry(block).or_default().push(node);
+            node_blocks.push(block);
         }
 
-        let mut use_nodes = BTreeMap::new();
+        let mut use_nodes = vec![None; root.uses.len()];
+        let mut entries = Vec::<RegionSeed>::new();
+        let mut free_use_count = 0_usize;
         for &use_id in &bundle.uses {
             let Some(use_) = root.uses.get(use_id.0 as usize) else {
                 return Err(IntervalAllocationError::new(
@@ -738,76 +1079,186 @@ impl<'a> Allocator<'a> {
                 ));
             };
             let Some(&block) = self.cfg.block_index.get(&use_.site.block()) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.USE_BLOCK",
+                    Some(use_.site.block()),
+                    Some(id),
+                    "bundle use references a block outside the CFG",
+                ));
+            };
+            let Some(nodes) = block_nodes.get(&block) else {
                 continue;
             };
-            if let Some(node) = segment_node_at(&block_nodes[block], &free, use_.site.slot()) {
-                use_nodes.insert(use_id, node);
+            if let Some(node) = segment_node_at(nodes, &free, use_.site.slot()) {
+                use_nodes[use_id.0 as usize] = Some(node);
+                free_use_count = free_use_count.checked_add(1).ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.USE_COUNT",
+                        Some(use_.site.block()),
+                        Some(id),
+                        "free-region use count exceeds usize",
+                    )
+                })?;
+                if matches!(use_.site, UseSite::Instruction { .. }) {
+                    entries.push(RegionSeed {
+                        use_id,
+                        node,
+                        site: use_.site,
+                        block,
+                    });
+                }
+            }
+        }
+        if free_use_count < 2 || entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Cross-block connectivity is needed only for blocks in this bundle's
+        // free sparse range.  Walking every CFG row for every bundle/register
+        // is quadratic on large branchified RTL functions.
+        let mut forward = vec![Vec::new(); free.len()];
+        let mut reverse = vec![Vec::new(); free.len()];
+        for (&block, nodes) in &block_nodes {
+            let Some(block_slots) = self.graph.intervals.block_slots.get(block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_BLOCK",
+                    None,
+                    Some(id),
+                    "free-region block has no slot-index row",
+                ));
+            };
+            let Some(source) = segment_node_at(nodes, &free, block_slots.exit) else {
+                continue;
+            };
+            let Some(successors) = self.cfg.successors.get(block) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_BLOCK",
+                    None,
+                    Some(id),
+                    "free-region block has no CFG successor row",
+                ));
+            };
+            for &successor in successors {
+                let Some(target_nodes) = block_nodes.get(&successor) else {
+                    continue;
+                };
+                let Some(target_slots) = self.graph.intervals.block_slots.get(successor) else {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.SPLIT_BLOCK",
+                        None,
+                        Some(id),
+                        "free-region successor has no slot-index row",
+                    ));
+                };
+                if let Some(target) = segment_node_at(target_nodes, &free, target_slots.entry) {
+                    forward[source].push(target);
+                    reverse[target].push(source);
+                }
             }
         }
 
-        let mut candidates = Vec::new();
-        for &entry_use in &bundle.uses {
-            let Some(&entry_node) = use_nodes.get(&entry_use) else {
+        // Partition the free graph among earliest dominating instruction uses.
+        // A node is claimed once, so sibling paths form separate clusters while
+        // a head use carries one cluster through all dominated successors.
+        // This replaces one whole-graph forward search per use.
+        entries.sort_unstable_by_key(|entry| {
+            (
+                self.dominance.enter[entry.block],
+                entry.site.slot(),
+                entry.use_id,
+            )
+        });
+        let mut owners = vec![None::<usize>; free.len()];
+        let mut seeds = Vec::<RegionSeed>::new();
+        let mut owner_nodes = Vec::<Vec<usize>>::new();
+        for entry in entries {
+            if owners[entry.node].is_some() {
+                continue;
+            }
+            let owner = seeds.len();
+            seeds.push(entry);
+            owner_nodes.push(Vec::new());
+            let mut work = vec![entry.node];
+            while let Some(node) = work.pop() {
+                if owners[node].is_some() {
+                    continue;
+                }
+                let block = node_blocks[node];
+                let dominated = if block == entry.block {
+                    node == entry.node
+                } else {
+                    self.dominance.block_dominates(entry.block, block)
+                };
+                if !dominated {
+                    continue;
+                }
+                owners[node] = Some(owner);
+                owner_nodes[owner].push(node);
+                work.extend(forward[node].iter().copied());
+            }
+        }
+        let mut covered_by_seed = vec![Vec::<BundleUseId>::new(); seeds.len()];
+        for &use_id in &bundle.uses {
+            let Some(node) = use_nodes[use_id.0 as usize] else {
                 continue;
             };
-            let entry_site = root.uses[entry_use.0 as usize].site;
-            if !matches!(entry_site, UseSite::Instruction { .. }) {
+            let Some(owner) = owners[node] else {
                 continue;
+            };
+            let Some(seed) = seeds.get(owner) else {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.SPLIT_OWNER",
+                    Some(root.uses[use_id.0 as usize].site.block()),
+                    Some(id),
+                    "free-region owner references a missing seed",
+                ));
+            };
+            if self
+                .dominance
+                .use_dominates(self.cfg, seed.site, root.uses[use_id.0 as usize].site)
+            {
+                covered_by_seed[owner].push(use_id);
             }
-            let mut reachable = vec![false; free.len()];
-            let mut work = vec![entry_node];
-            reachable[entry_node] = true;
-            while let Some(node) = work.pop() {
-                for &successor in &forward[node] {
-                    if !reachable[successor] {
-                        reachable[successor] = true;
-                        work.push(successor);
-                    }
-                }
-            }
-            let covered = bundle
-                .uses
-                .iter()
-                .copied()
-                .filter(|use_id| {
-                    use_nodes.get(use_id).is_some_and(|&node| reachable[node])
-                        && self.dominance.use_dominates(
-                            self.cfg,
-                            entry_site,
-                            root.uses[use_id.0 as usize].site,
-                        )
-                })
-                .collect::<Vec<_>>();
-            if covered.len() < 2 || covered.binary_search(&entry_use).is_err() {
-                continue;
-            }
+        }
+        for covered in &mut covered_by_seed {
+            covered.sort_unstable();
+        }
 
-            let mut needed = vec![false; free.len()];
+        let mut candidates = Vec::new();
+        // Owner node sets are disjoint. `needed` is initialized once, and the
+        // reverse slices plus segment materialization visit every free node at
+        // most once over all candidates for this physical register.
+        let mut needed = vec![false; free.len()];
+        for (owner, seed) in seeds.iter().enumerate() {
+            let covered = &covered_by_seed[owner];
+            if covered.len() < 2 || covered.binary_search(&seed.use_id).is_err() {
+                continue;
+            }
             let mut work = covered
                 .iter()
-                .filter_map(|use_id| use_nodes.get(use_id).copied())
+                .filter_map(|use_id| use_nodes[use_id.0 as usize])
                 .collect::<Vec<_>>();
             for &node in &work {
                 needed[node] = true;
             }
             while let Some(node) = work.pop() {
                 for &predecessor in &reverse[node] {
-                    if reachable[predecessor] && !needed[predecessor] {
+                    if owners[predecessor] == Some(owner) && !needed[predecessor] {
                         needed[predecessor] = true;
                         work.push(predecessor);
                     }
                 }
             }
-            let mut segments = free
+            let mut segments = owner_nodes[owner]
                 .iter()
                 .copied()
-                .enumerate()
-                .filter_map(|(node, mut segment)| {
+                .filter_map(|node| {
                     if !needed[node] {
                         return None;
                     }
-                    if node == entry_node {
-                        segment.start = segment.start.max(entry_site.slot());
+                    let mut segment = free[node];
+                    if node == seed.node {
+                        segment.start = segment.start.max(seed.site.slot());
                     }
                     (segment.start < segment.end).then_some(segment)
                 })
@@ -815,62 +1266,80 @@ impl<'a> Allocator<'a> {
             segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
             if !covered.iter().all(|use_id| {
                 let site = root.uses[use_id.0 as usize].site;
-                segments
-                    .iter()
-                    .any(|segment| segment.block == site.block() && segment.contains(site.slot()))
+                use_nodes[use_id.0 as usize].is_some_and(|node| {
+                    needed[node]
+                        && (node != seed.node || seed.site.slot() <= site.slot())
+                        && free[node].contains(site.slot())
+                })
             }) {
                 continue;
             }
 
-            let entry_partition = partition_homes(self.graph, bundle.root, &[entry_use])?;
+            let entry_partition = partition_homes(self.graph, bundle.root, &[seed.use_id])?;
             let [entry_piece] = entry_partition.pieces.as_slice() else {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.TRANSITION_HOME",
-                    Some(entry_site.block()),
+                    Some(seed.site.block()),
                     Some(id),
                     "one transition use produced more than one home piece",
                 ));
             };
-            let remaining_uses = bundle
-                .uses
-                .iter()
-                .copied()
-                .filter(|use_id| covered.binary_search(use_id).is_err())
-                .collect::<Vec<_>>();
-            let remaining = partition_homes(self.graph, bundle.root, &remaining_uses)?;
             let entry_uses_stack = entry_piece.selection.kind == HomeKind::Stack;
-            let remaining_uses_stack = remaining
-                .pieces
-                .iter()
-                .any(|piece| piece.selection.kind == HomeKind::Stack);
+            let remaining = home_costs.excluding(covered)?;
             let mut total_cost = entry_partition
                 .total_cost
-                .saturating_add(remaining.total_cost);
-            if entry_uses_stack && remaining_uses_stack {
-                total_cost = total_cost.saturating_sub(u64::from(STACK_HOME_CREATION_COST));
+                .checked_add(remaining.total)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        Some(seed.site.block()),
+                        Some(id),
+                        "split candidate cost exceeds u64",
+                    )
+                })?;
+            if entry_uses_stack && remaining.uses_stack {
+                total_cost = total_cost
+                    .checked_sub(u64::from(STACK_HOME_CREATION_COST))
+                    .ok_or_else(|| {
+                        IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_COST_INDEX",
+                            Some(seed.site.block()),
+                            Some(id),
+                            "shared stack-home cost underflowed",
+                        )
+                    })?;
             }
             candidates.push(RegionCandidate {
                 register,
                 register_order,
                 segments,
-                uses: covered,
+                uses: covered.clone(),
                 transition: BundleTransition {
-                    at: entry_site,
+                    at: seed.site,
                     home: entry_piece.selection.clone(),
                 },
-                remaining,
                 total_cost,
-                stack_home_created: entry_uses_stack || remaining_uses_stack,
             });
         }
         Ok(candidates)
     }
 
-    fn try_split(&mut self, id: AllocationBundleId) -> Result<bool, IntervalAllocationError> {
-        let baseline = self.bundle(id)?.spill_cost;
+    fn try_split(
+        &mut self,
+        id: AllocationBundleId,
+        probes: &[RegisterProbe],
+    ) -> Result<bool, IntervalAllocationError> {
+        let bundle = self.bundle(id)?;
+        if bundle.uses.len() < 2 {
+            return Ok(false);
+        }
+        let baseline = bundle.spill_cost;
+        let root = bundle.root;
+        let uses = bundle.uses.clone();
+        let home_costs = HomeCostIndex::new(self.graph, root, &uses)?;
         let mut best = None::<RegionCandidate>;
-        for (order, register) in self.registers.iter().copied().enumerate() {
-            for candidate in self.region_candidates(id, register, order)? {
+        for probe in probes {
+            for candidate in self.region_candidates(id, probe.register, probe.order, &home_costs)? {
                 if candidate.total_cost >= baseline {
                     continue;
                 }
@@ -898,6 +1367,61 @@ impl<'a> Allocator<'a> {
         };
 
         let parent = self.bundle(id)?.clone();
+        let RegionCandidate {
+            register,
+            register_order: _,
+            segments,
+            uses: register_uses,
+            transition,
+            total_cost,
+        } = candidate;
+        let remaining_uses = parent
+            .uses
+            .iter()
+            .copied()
+            .filter(|use_id| register_uses.binary_search(use_id).is_err())
+            .collect::<Vec<_>>();
+        let remaining = partition_homes(self.graph, parent.root, &remaining_uses)?;
+        let transition_uses_stack = transition.home.kind == HomeKind::Stack;
+        let remaining_uses_stack = remaining
+            .pieces
+            .iter()
+            .any(|piece| piece.selection.kind == HomeKind::Stack);
+        let mut rebuilt_cost = transition
+            .home
+            .total_cost()
+            .checked_add(remaining.total_cost)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                    Some(transition.at.block()),
+                    Some(id),
+                    "materialized split cost exceeds u64",
+                )
+            })?;
+        if transition_uses_stack && remaining_uses_stack {
+            rebuilt_cost = rebuilt_cost
+                .checked_sub(u64::from(STACK_HOME_CREATION_COST))
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        Some(transition.at.block()),
+                        Some(id),
+                        "materialized shared stack-home cost underflowed",
+                    )
+                })?;
+        }
+        if rebuilt_cost != total_cost {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_INDEX",
+                Some(transition.at.block()),
+                Some(id),
+                format!(
+                    "indexed split cost {total_cost} differs from materialized cost {rebuilt_cost}"
+                ),
+            ));
+        }
+        let stack_home_created = transition_uses_stack || remaining_uses_stack;
         let register_child =
             AllocationBundleId(u32::try_from(self.bundles.len()).map_err(|_| {
                 IntervalAllocationError::new(
@@ -908,26 +1432,30 @@ impl<'a> Allocator<'a> {
                 )
             })?);
         let register_spill_cost =
-            partition_homes(self.graph, parent.root, &candidate.uses)?.total_cost;
+            partition_homes(self.graph, parent.root, &register_uses)?.total_cost;
+        let register_segments = self
+            .matrix
+            .make_range(segments)
+            .map_err(IntervalAllocationError::union)?;
+        self.matrix
+            .assign_validated(register_child, register, register_segments.validated())
+            .map_err(IntervalAllocationError::union)?;
         self.bundles.push(AllocatedBundle {
             id: register_child,
             root: parent.root,
             parent: Some(id),
             origin: parent.origin,
             definition: parent.definition,
-            segments: candidate.segments.clone(),
-            uses: candidate.uses,
-            stage: parent.stage,
+            segments: register_segments,
+            uses: register_uses,
+            stage: AllocationStage::NoEvict,
             spill_cost: register_spill_cost,
-            transitions: vec![candidate.transition],
-            assignment: BundleAssignment::Register(candidate.register),
+            transitions: vec![transition],
+            assignment: BundleAssignment::Register(register),
         });
-        self.matrix
-            .assign(register_child, candidate.register, &candidate.segments)
-            .map_err(IntervalAllocationError::union)?;
 
         let mut children = vec![register_child];
-        for piece in candidate.remaining.pieces {
+        for piece in remaining.pieces {
             let child = AllocationBundleId(u32::try_from(self.bundles.len()).map_err(|_| {
                 IntervalAllocationError::new(
                     "INTERVAL_ALLOC.BUNDLE_ID_RANGE",
@@ -936,15 +1464,19 @@ impl<'a> Allocator<'a> {
                     "split bundle count exceeds u32",
                 )
             })?);
+            let empty_segments = self
+                .matrix
+                .make_range(Vec::new())
+                .map_err(IntervalAllocationError::union)?;
             self.bundles.push(AllocatedBundle {
                 id: child,
                 root: parent.root,
                 parent: Some(id),
                 origin: parent.origin,
                 definition: parent.definition,
-                segments: Vec::new(),
+                segments: empty_segments,
                 uses: piece.uses,
-                stage: parent.stage,
+                stage: AllocationStage::NoEvict,
                 spill_cost: piece.selection.total_cost(),
                 transitions: Vec::new(),
                 assignment: BundleAssignment::Home(piece.selection),
@@ -953,7 +1485,7 @@ impl<'a> Allocator<'a> {
         }
         self.bundles[id.0 as usize].assignment = BundleAssignment::Split {
             children,
-            stack_home_created: candidate.stack_home_created,
+            stack_home_created,
         };
         Ok(true)
     }
@@ -963,7 +1495,6 @@ impl<'a> Allocator<'a> {
         let root = bundle.root;
         let origin = bundle.origin;
         let definition = bundle.definition;
-        let stage = bundle.stage;
         let uses = bundle.uses.clone();
         let partition = partition_homes(self.graph, root, &uses)?;
         if let [piece] = partition.pieces.as_slice() {
@@ -987,15 +1518,19 @@ impl<'a> Allocator<'a> {
                 )
             })?);
             let spill_cost = piece.selection.total_cost();
+            let empty_segments = self
+                .matrix
+                .make_range(Vec::new())
+                .map_err(IntervalAllocationError::union)?;
             self.bundles.push(AllocatedBundle {
                 id: child,
                 root,
                 parent: Some(id),
                 origin,
                 definition,
-                segments: Vec::new(),
+                segments: empty_segments,
                 uses: piece.uses,
-                stage,
+                stage: AllocationStage::NoEvict,
                 spill_cost,
                 transitions: Vec::new(),
                 assignment: BundleAssignment::Home(piece.selection),
@@ -1017,10 +1552,11 @@ impl<'a> Allocator<'a> {
             ) {
                 continue;
             }
-            if self.try_free_register(item.id)?
-                || self.try_recolor(item.id)?
-                || self.try_evict(item.id)?
-                || self.try_split(item.id)?
+            let probes = self.probe_registers(item.id)?;
+            if self.try_free_register(item.id, &probes)?
+                || self.try_recolor(item.id, &probes)?
+                || self.try_evict(item.id, &probes)?
+                || self.try_split(item.id, &probes)?
             {
                 continue;
             }
@@ -1044,32 +1580,151 @@ pub(super) fn allocate_roots(
     Ok(plan)
 }
 
+#[derive(Debug)]
+enum MatrixUndo {
+    Assign {
+        bundle: AllocationBundleId,
+        register: PhysReg,
+    },
+    Unassign {
+        bundle: AllocationBundleId,
+    },
+}
+
+/// In-place interval-matrix transaction.  Recoloring changes only the small
+/// resident neighborhood it explores; rollback replays those edits in reverse
+/// instead of cloning every physical-register union.
+struct MatrixTransaction<'matrix, 'bundles> {
+    matrix: &'matrix mut LiveIntervalMatrix,
+    bundles: &'bundles [AllocatedBundle],
+    undo: Vec<MatrixUndo>,
+}
+
+fn transaction_segments(
+    bundles: &[AllocatedBundle],
+    bundle: AllocationBundleId,
+) -> Result<&SparseRange, IntervalAllocationError> {
+    bundles
+        .get(bundle.0 as usize)
+        .map(|bundle| &bundle.segments)
+        .ok_or_else(|| {
+            IntervalAllocationError::new(
+                "INTERVAL_ALLOC.BUNDLE_RANGE",
+                None,
+                Some(bundle),
+                "matrix transaction references a bundle outside the stable table",
+            )
+        })
+}
+
+impl<'matrix, 'bundles> MatrixTransaction<'matrix, 'bundles> {
+    fn new(matrix: &'matrix mut LiveIntervalMatrix, bundles: &'bundles [AllocatedBundle]) -> Self {
+        Self {
+            matrix,
+            bundles,
+            undo: Vec::new(),
+        }
+    }
+
+    fn segments(
+        &self,
+        bundle: AllocationBundleId,
+    ) -> Result<&SparseRange, IntervalAllocationError> {
+        transaction_segments(self.bundles, bundle)
+    }
+
+    fn register(&self, bundle: AllocationBundleId) -> Option<PhysReg> {
+        self.matrix.register(bundle)
+    }
+
+    fn available_registers(
+        &self,
+        bundle: AllocationBundleId,
+        registers: &[PhysReg],
+        excluded: PhysReg,
+    ) -> Result<Vec<PhysReg>, IntervalAllocationError> {
+        let segments = self.segments(bundle)?.validated();
+        let mut available = Vec::new();
+        for &register in registers {
+            if register != excluded
+                && !self
+                    .matrix
+                    .interferes_validated(register, segments)
+                    .map_err(IntervalAllocationError::union)?
+            {
+                available.push(register);
+            }
+        }
+        Ok(available)
+    }
+
+    fn assign(
+        &mut self,
+        bundle: AllocationBundleId,
+        register: PhysReg,
+    ) -> Result<(), IntervalAllocationError> {
+        let segments = transaction_segments(self.bundles, bundle)?.validated();
+        self.matrix
+            .assign_validated(bundle, register, segments)
+            .map_err(IntervalAllocationError::union)?;
+        self.undo.push(MatrixUndo::Unassign { bundle });
+        Ok(())
+    }
+
+    fn unassign(&mut self, bundle: AllocationBundleId) -> Result<PhysReg, IntervalAllocationError> {
+        let segments = transaction_segments(self.bundles, bundle)?.validated();
+        let register = self
+            .matrix
+            .unassign_validated(bundle, segments)
+            .map_err(IntervalAllocationError::union)?;
+        self.undo.push(MatrixUndo::Assign { bundle, register });
+        Ok(register)
+    }
+
+    fn rollback(mut self) -> Result<(), IntervalAllocationError> {
+        while let Some(undo) = self.undo.pop() {
+            match undo {
+                MatrixUndo::Assign { bundle, register } => {
+                    let segments = transaction_segments(self.bundles, bundle)?.validated();
+                    self.matrix
+                        .assign_validated(bundle, register, segments)
+                        .map_err(IntervalAllocationError::union)?;
+                }
+                MatrixUndo::Unassign { bundle } => {
+                    let segments = transaction_segments(self.bundles, bundle)?.validated();
+                    let _ = self
+                        .matrix
+                        .unassign_validated(bundle, segments)
+                        .map_err(IntervalAllocationError::union)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn commit(self) {}
+}
+
+fn rollback_recolor_error(
+    original: IntervalAllocationError,
+    rollback: IntervalAllocationError,
+) -> IntervalAllocationError {
+    IntervalAllocationError::new(
+        "INTERVAL_ALLOC.RECOLOR_ROLLBACK",
+        rollback.block.or(original.block),
+        rollback.bundle.or(original.bundle),
+        format!("recolor failed with `{original}` and rollback failed with `{rollback}`"),
+    )
+}
+
 fn recolor_residents(
-    matrix: &LiveIntervalMatrix,
+    matrix: &mut LiveIntervalMatrix,
     bundles: &[AllocatedBundle],
     registers: &[PhysReg],
     candidate: AllocationBundleId,
     target: PhysReg,
     conflicts: &[AllocationBundleId],
-) -> Result<
-    Option<(LiveIntervalMatrix, BTreeMap<AllocationBundleId, PhysReg>)>,
-    IntervalAllocationError,
-> {
-    let mut trial = matrix.clone();
-    for &conflict in conflicts {
-        if trial.register(conflict) != Some(target) {
-            return Err(IntervalAllocationError::new(
-                "INTERVAL_ALLOC.RECOLOR_CONFLICT",
-                None,
-                Some(conflict),
-                "recolor set is not resident in the target register",
-            ));
-        }
-        let _ = trial
-            .unassign(conflict)
-            .map_err(IntervalAllocationError::union)?;
-    }
-
+) -> Result<Option<BTreeMap<AllocationBundleId, PhysReg>>, IntervalAllocationError> {
     // The search neighborhood is bounded by the physical register file, not
     // by a target-specific tuning constant. Work is additionally capped at
     // one register probe per neighborhood/register pair.
@@ -1088,40 +1743,57 @@ fn recolor_residents(
                 "recolor work bound overflows usize",
             )
         })?;
-    let mut moves = BTreeMap::new();
-    if !recolor_search(
-        &mut trial,
-        bundles,
-        registers,
-        target,
-        conflicts.to_vec(),
-        &mut budget,
-        &mut moves,
-    )? {
-        return Ok(None);
+    let mut transaction = MatrixTransaction::new(matrix, bundles);
+    let result = (|| {
+        for &conflict in conflicts {
+            if transaction.register(conflict) != Some(target) {
+                return Err(IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.RECOLOR_CONFLICT",
+                    None,
+                    Some(conflict),
+                    "recolor set is not resident in the target register",
+                ));
+            }
+            // Validate the canonical segment source before changing the
+            // matrix, including conflicts supplied by a corrupted caller.
+            let _ = transaction.segments(conflict)?;
+        }
+        for &conflict in conflicts {
+            let _ = transaction.unassign(conflict)?;
+        }
+
+        let mut moves = BTreeMap::new();
+        if !recolor_search(
+            &mut transaction,
+            registers,
+            target,
+            conflicts.to_vec(),
+            &mut budget,
+            &mut moves,
+        )? {
+            return Ok(None);
+        }
+        transaction.assign(candidate, target)?;
+        Ok(Some(moves))
+    })();
+    match result {
+        Ok(Some(moves)) => {
+            transaction.commit();
+            Ok(Some(moves))
+        }
+        Ok(None) => {
+            transaction.rollback()?;
+            Ok(None)
+        }
+        Err(error) => match transaction.rollback() {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(rollback_recolor_error(error, rollback)),
+        },
     }
-    let candidate_segments = bundles
-        .get(candidate.0 as usize)
-        .ok_or_else(|| {
-            IntervalAllocationError::new(
-                "INTERVAL_ALLOC.BUNDLE_RANGE",
-                None,
-                Some(candidate),
-                "recolor candidate is outside the bundle table",
-            )
-        })?
-        .segments
-        .clone();
-    trial
-        .assign(candidate, target, &candidate_segments)
-        .map_err(IntervalAllocationError::union)?;
-    trial.verify().map_err(IntervalAllocationError::union)?;
-    Ok(Some((trial, moves)))
 }
 
 fn recolor_search(
-    matrix: &mut LiveIntervalMatrix,
-    bundles: &[AllocatedBundle],
+    transaction: &mut MatrixTransaction<'_, '_>,
     registers: &[PhysReg],
     target: PhysReg,
     pending: Vec<AllocationBundleId>,
@@ -1134,29 +1806,7 @@ fn recolor_search(
 
     let mut selected = None::<(usize, Vec<PhysReg>)>;
     for (index, &bundle) in pending.iter().enumerate() {
-        let segments = bundles
-            .get(bundle.0 as usize)
-            .ok_or_else(|| {
-                IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.BUNDLE_RANGE",
-                    None,
-                    Some(bundle),
-                    "recolor resident is outside the bundle table",
-                )
-            })?
-            .segments
-            .clone();
-        let mut alternatives = Vec::new();
-        for &register in registers {
-            if register != target
-                && matrix
-                    .conflicts(register, &segments)
-                    .map_err(IntervalAllocationError::union)?
-                    .is_empty()
-            {
-                alternatives.push(register);
-            }
-        }
+        let alternatives = transaction.available_registers(bundle, registers, target)?;
         if alternatives.is_empty() {
             return Ok(false);
         }
@@ -1166,10 +1816,15 @@ fn recolor_search(
             selected = Some((index, alternatives));
         }
     }
-    let (selected_index, alternatives) =
-        selected.expect("a non-empty recolor set selects one resident");
+    let Some((selected_index, alternatives)) = selected else {
+        return Err(IntervalAllocationError::new(
+            "INTERVAL_ALLOC.RECOLOR_SELECTION",
+            None,
+            None,
+            "non-empty recolor set produced no resident selection",
+        ));
+    };
     let selected_bundle = pending[selected_index];
-    let selected_segments = bundles[selected_bundle.0 as usize].segments.clone();
     let mut remaining = pending;
     remaining.remove(selected_index);
     for register in alternatives {
@@ -1177,13 +1832,10 @@ fn recolor_search(
             return Ok(false);
         }
         *budget -= 1;
-        matrix
-            .assign(selected_bundle, register, &selected_segments)
-            .map_err(IntervalAllocationError::union)?;
+        transaction.assign(selected_bundle, register)?;
         moves.insert(selected_bundle, register);
         if recolor_search(
-            matrix,
-            bundles,
+            transaction,
             registers,
             target,
             remaining.clone(),
@@ -1192,9 +1844,7 @@ fn recolor_search(
         )? {
             return Ok(true);
         }
-        let _ = matrix
-            .unassign(selected_bundle)
-            .map_err(IntervalAllocationError::union)?;
+        let _ = transaction.unassign(selected_bundle)?;
         moves.remove(&selected_bundle);
     }
     Ok(false)
@@ -1251,18 +1901,36 @@ impl AllocationPlan {
             }
 
             if let Some(parent) = bundle.parent {
-                if index < graph.bundles.len()
-                    || parent.0 as usize >= index
-                    || self.bundles[parent.0 as usize].root != bundle.root
-                    || self.bundles[parent.0 as usize].stage != bundle.stage
-                    || bundle.uses.is_empty()
-                    || bundle.uses.windows(2).any(|pair| pair[0] >= pair[1])
-                {
+                if index < graph.bundles.len() || parent.0 as usize >= index {
                     return Err(IntervalAllocationError::new(
-                        "INTERVAL_ALLOC.CHILD_SHAPE",
+                        "INTERVAL_ALLOC.CHILD_PARENT",
                         Some(root.definition.block()),
                         Some(bundle.id),
-                        "split child has an invalid parent, root, stage, or use set",
+                        format!("split child index {index} has non-preceding parent {parent:?}"),
+                    ));
+                }
+                if self.bundles[parent.0 as usize].root != bundle.root {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.CHILD_ROOT",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        "split child and parent reference different HomeGraph roots",
+                    ));
+                }
+                if bundle.stage != AllocationStage::NoEvict {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.CHILD_STAGE",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        format!("split child remained in {:?} stage", bundle.stage),
+                    ));
+                }
+                if bundle.uses.is_empty() || bundle.uses.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.CHILD_USES",
+                        Some(root.definition.block()),
+                        Some(bundle.id),
+                        "split child has an empty, duplicate, or unsorted use set",
                     ));
                 }
                 match &bundle.assignment {
@@ -1333,7 +2001,7 @@ impl AllocationPlan {
                             ));
                         }
                         rebuilt
-                            .assign(bundle.id, *register, &bundle.segments)
+                            .assign(bundle.id, *register, bundle.segments.as_slice())
                             .map_err(IntervalAllocationError::union)?;
                     }
                     BundleAssignment::Unassigned
@@ -1353,7 +2021,7 @@ impl AllocationPlan {
             let expected_uses = root.uses.iter().map(|use_| use_.id).collect::<Vec<_>>();
             if index >= graph.bundles.len()
                 || bundle.root.0 as usize != index
-                || bundle.segments != root.segments
+                || bundle.segments.as_slice() != root.segments.as_slice()
                 || bundle.uses != expected_uses
                 || !bundle.transitions.is_empty()
             {
@@ -1383,7 +2051,7 @@ impl AllocationPlan {
             match &bundle.assignment {
                 BundleAssignment::Register(register) => {
                     rebuilt
-                        .assign(bundle.id, *register, &bundle.segments)
+                        .assign(bundle.id, *register, bundle.segments.as_slice())
                         .map_err(IntervalAllocationError::union)?;
                 }
                 BundleAssignment::Home(selection) => {
@@ -1445,7 +2113,7 @@ impl AllocationPlan {
                         };
                         if child.parent != Some(bundle.id)
                             || child.root != bundle.root
-                            || child.stage != bundle.stage
+                            || child.stage != AllocationStage::NoEvict
                             || !seen_children.insert(child_id)
                             || child.uses.iter().any(|use_id| !seen_uses.insert(*use_id))
                         {
@@ -1760,7 +2428,7 @@ mod tests {
         let short = &plan.bundles[bundle_id(&graph, VReg(2)).0 as usize];
         assert_eq!(long.assignment, BundleAssignment::Register(PhysReg::RAX));
         assert!(matches!(short.assignment, BundleAssignment::Home(_)));
-        assert_eq!(short.stage, AllocationStage::Evicted);
+        assert_eq!(short.stage, AllocationStage::NoEvict);
         assert!(long.spill_cost > short.spill_cost);
     }
 
@@ -1802,10 +2470,110 @@ mod tests {
         allocator.assign_register(early, PhysReg::RAX).unwrap();
         allocator.assign_register(late, PhysReg::RDX).unwrap();
 
-        assert!(allocator.try_recolor(candidate).unwrap());
+        let probes = allocator.probe_registers(candidate).unwrap();
+        assert!(allocator.try_recolor(candidate, &probes).unwrap());
         assert_eq!(allocator.matrix.register(candidate), Some(PhysReg::RAX));
         assert_eq!(allocator.matrix.register(early), Some(PhysReg::RDX));
         assert_eq!(allocator.matrix.register(late), Some(PhysReg::RDX));
+        allocator.matrix.verify().unwrap();
+    }
+
+    #[test]
+    fn failed_transactional_recolor_restores_the_exact_sparse_matrix() {
+        let insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 2,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 3,
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(1),
+            },
+            MInst::Mov {
+                dst: VReg(4),
+                src: VReg(2),
+            },
+            MInst::Mov {
+                dst: VReg(5),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(6, insts);
+        let (cfg, graph) = model(&mut function);
+        let mut allocator = Allocator::new(&graph, &cfg, &[PhysReg::RAX, PhysReg::RDX]).unwrap();
+        let candidate = bundle_id(&graph, VReg(0));
+        let first = bundle_id(&graph, VReg(1));
+        let second = bundle_id(&graph, VReg(2));
+        allocator.assign_register(first, PhysReg::RAX).unwrap();
+        allocator.assign_register(second, PhysReg::RDX).unwrap();
+        let before = allocator.matrix.clone();
+
+        let probes = allocator.probe_registers(candidate).unwrap();
+        assert!(!allocator.try_recolor(candidate, &probes).unwrap());
+        assert_eq!(allocator.matrix, before);
+        assert_eq!(allocator.matrix.register(first), Some(PhysReg::RAX));
+        assert_eq!(allocator.matrix.register(second), Some(PhysReg::RDX));
+        allocator.matrix.verify().unwrap();
+    }
+
+    #[test]
+    fn erroneous_recolor_rolls_back_every_journaled_matrix_edit() {
+        let insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 2,
+            },
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(1),
+            },
+            MInst::LoadImm {
+                dst: VReg(3),
+                value: 3,
+            },
+            MInst::Mov {
+                dst: VReg(4),
+                src: VReg(3),
+            },
+            MInst::Mov {
+                dst: VReg(5),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(6, insts);
+        let (cfg, graph) = model(&mut function);
+        let mut allocator = Allocator::new(&graph, &cfg, &[PhysReg::RAX, PhysReg::RDX]).unwrap();
+        let resident = bundle_id(&graph, VReg(1));
+        let disjoint = bundle_id(&graph, VReg(3));
+        allocator.assign_register(resident, PhysReg::RAX).unwrap();
+        allocator.assign_register(disjoint, PhysReg::RDX).unwrap();
+        let before = allocator.matrix.clone();
+
+        let error = recolor_residents(
+            &mut allocator.matrix,
+            &allocator.bundles,
+            &allocator.registers,
+            AllocationBundleId(u32::MAX),
+            PhysReg::RAX,
+            &[resident],
+        )
+        .unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_ALLOC.BUNDLE_RANGE");
+        assert_eq!(allocator.matrix, before);
         allocator.matrix.verify().unwrap();
     }
 
@@ -1911,6 +2679,7 @@ mod tests {
             .map(|child| &plan.bundles[child.0 as usize])
             .find(|child| matches!(child.assignment, BundleAssignment::Register(_)))
             .unwrap();
+        assert_eq!(register_child.stage, AllocationStage::NoEvict);
         assert_eq!(register_child.uses, vec![BundleUseId(1), BundleUseId(2)]);
         assert_eq!(register_child.transitions.len(), 1);
         assert_eq!(
@@ -2066,7 +2835,8 @@ mod tests {
         let candidate = bundle_id(&graph, VReg(0));
         let resident = bundle_id(&graph, VReg(1));
         allocator.assign_register(resident, PhysReg::RAX).unwrap();
-        assert!(allocator.try_split(candidate).unwrap());
+        let probes = allocator.probe_registers(candidate).unwrap();
+        assert!(allocator.try_split(candidate, &probes).unwrap());
         let BundleAssignment::Split { children, .. } =
             &allocator.bundles[candidate.0 as usize].assignment
         else {

@@ -9,6 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::backend::native::mir::BlockId;
 
@@ -18,6 +20,107 @@ use super::live_interval::{LiveSegment, SlotIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct AllocationBundleId(pub u32);
+
+/// Reusable dense visitation epochs for conflict queries. Allocation bundle
+/// IDs are stable dense table indexes, so this replaces a freshly allocated
+/// ordered set on every physical-register probe.
+#[derive(Debug, Default)]
+pub(super) struct ConflictCollector {
+    marks: Vec<u32>,
+    epoch: u32,
+}
+
+/// Borrowed canonical sparse range proved once at an allocator boundary.
+/// All physical-register unions in one matrix share the same CFG index, so a
+/// token can be reused across every register probe without rechecking order,
+/// self-interference, and block membership.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ValidatedSegments<'a> {
+    index: &'a Arc<IntervalIndex>,
+    segments: &'a [LiveSegment],
+    block_indices: &'a [usize],
+}
+
+impl<'a> ValidatedSegments<'a> {
+    fn as_slice(self) -> &'a [LiveSegment] {
+        self.segments
+    }
+
+    fn iter(self) -> impl Iterator<Item = (LiveSegment, usize)> + 'a {
+        debug_assert_eq!(self.segments.len(), self.block_indices.len());
+        self.segments
+            .iter()
+            .copied()
+            .zip(self.block_indices.iter().copied())
+    }
+}
+
+/// Allocation-owned sparse range with CFG row identities resolved once.
+/// `LiveSegment::block` remains the semantic/diagnostic identity; interval
+/// unions use the parallel row index for all hot ordered-map operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SparseRange {
+    index: Arc<IntervalIndex>,
+    segments: Vec<LiveSegment>,
+    block_indices: Vec<usize>,
+}
+
+impl SparseRange {
+    pub(super) fn validated(&self) -> ValidatedSegments<'_> {
+        debug_assert_eq!(self.segments.len(), self.block_indices.len());
+        ValidatedSegments {
+            index: &self.index,
+            segments: &self.segments,
+            block_indices: &self.block_indices,
+        }
+    }
+
+    pub(super) fn as_slice(&self) -> &[LiveSegment] {
+        &self.segments
+    }
+}
+
+impl Deref for SparseRange {
+    type Target = [LiveSegment];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl ConflictCollector {
+    fn begin(&mut self, bundle_count: usize) {
+        if self.marks.len() < bundle_count {
+            self.marks.resize(bundle_count, 0);
+        }
+        if self.epoch == u32::MAX {
+            self.marks.fill(0);
+            self.epoch = 1;
+        } else {
+            self.epoch += 1;
+        }
+    }
+
+    fn record(
+        &mut self,
+        bundle: AllocationBundleId,
+        output: &mut Vec<AllocationBundleId>,
+    ) -> Result<(), IntervalUnionError> {
+        let Some(mark) = self.marks.get_mut(bundle.0 as usize) else {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.BUNDLE_RANGE",
+                None,
+                [bundle],
+                "interval union references a bundle outside the allocation table",
+            ));
+        };
+        if *mark != self.epoch {
+            *mark = self.epoch;
+            output.push(bundle);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnionEntry {
@@ -67,13 +170,20 @@ impl std::error::Error for IntervalUnionError {}
 /// All assigned sparse intervals for one physical register.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IntervalUnion {
-    block_index: HashMap<BlockId, usize>,
-    block_ids: Vec<BlockId>,
-    blocks: Vec<BTreeMap<SlotIndex, UnionEntry>>,
-    memberships: BTreeMap<AllocationBundleId, Vec<LiveSegment>>,
+    index: Arc<IntervalIndex>,
+    /// Only CFG blocks which currently contain an assigned segment exist.
+    /// Empty per-register/per-block trees would multiply large RTL CFGs by
+    /// the physical register count.
+    blocks: BTreeMap<usize, BTreeMap<SlotIndex, UnionEntry>>,
 }
 
-impl IntervalUnion {
+#[derive(Debug, PartialEq, Eq)]
+struct IntervalIndex {
+    block_index: HashMap<BlockId, usize>,
+    block_ids: Vec<BlockId>,
+}
+
+impl IntervalIndex {
     fn new(cfg: &NormalizedCfg) -> Result<Self, IntervalUnionError> {
         let block_count = cfg.successors.len();
         if cfg.block_index.len() != block_count {
@@ -117,14 +227,16 @@ impl IntervalUnion {
         Ok(Self {
             block_index: cfg.block_index.clone(),
             block_ids,
-            blocks: (0..block_count).map(|_| BTreeMap::new()).collect(),
-            memberships: BTreeMap::new(),
         })
     }
 
-    fn validate_segments(&self, segments: &[LiveSegment]) -> Result<(), IntervalUnionError> {
+    fn make_range(
+        self: &Arc<Self>,
+        segments: Vec<LiveSegment>,
+    ) -> Result<SparseRange, IntervalUnionError> {
+        let mut block_indices = Vec::with_capacity(segments.len());
         let mut previous = None::<LiveSegment>;
-        for &segment in segments {
+        for &segment in &segments {
             if segment.start >= segment.end {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.SEGMENT_RANGE",
@@ -136,12 +248,20 @@ impl IntervalUnion {
                     ),
                 ));
             }
-            if !self.block_index.contains_key(&segment.block) {
+            let Some(&block_index) = self.block_index.get(&segment.block) else {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.SEGMENT_BLOCK",
                     Some(segment.block),
                     [],
                     "segment references a block outside the normalized CFG",
+                ));
+            };
+            if self.block_ids.get(block_index) != Some(&segment.block) {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.CFG_SHAPE",
+                    Some(segment.block),
+                    [],
+                    "CFG row does not resolve back to the segment block",
                 ));
             }
             if let Some(prior) = previous {
@@ -163,72 +283,129 @@ impl IntervalUnion {
                 }
             }
             previous = Some(segment);
+            block_indices.push(block_index);
         }
-        Ok(())
+        Ok(SparseRange {
+            index: Arc::clone(self),
+            segments,
+            block_indices,
+        })
+    }
+}
+
+impl IntervalUnion {
+    fn new(index: Arc<IntervalIndex>) -> Self {
+        Self {
+            index,
+            blocks: BTreeMap::new(),
+        }
     }
 
-    fn overlapping_entries(
+    fn overlapping_entries_at(
         &self,
         segment: LiveSegment,
-    ) -> Result<Vec<(SlotIndex, UnionEntry)>, IntervalUnionError> {
-        let Some(&block) = self.block_index.get(&segment.block) else {
-            return Err(IntervalUnionError::new(
-                "INTERVAL_UNION.SEGMENT_BLOCK",
-                Some(segment.block),
-                [],
-                "segment references a block outside the normalized CFG",
-            ));
-        };
+        block: usize,
+    ) -> Vec<(SlotIndex, UnionEntry)> {
         let mut overlaps = Vec::new();
-        for (&start, &entry) in self.blocks[block]
-            .range((Unbounded, Excluded(segment.end)))
-            .rev()
-        {
+        let Some(entries) = self.blocks.get(&block) else {
+            return overlaps;
+        };
+        for (&start, &entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
             if entry.end <= segment.start {
                 break;
             }
             overlaps.push((start, entry));
         }
         overlaps.reverse();
-        Ok(overlaps)
+        overlaps
     }
 
-    fn conflicts(
+    fn interferes_indexed(&self, segments: ValidatedSegments<'_>) -> bool {
+        for (segment, block) in segments.iter() {
+            let Some(entries) = self.blocks.get(&block) else {
+                continue;
+            };
+            for (&start, entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
+                if entry.end <= segment.start {
+                    break;
+                }
+                if start < segment.end {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn collect_conflicts_indexed(
         &self,
-        segments: &[LiveSegment],
-    ) -> Result<Vec<AllocationBundleId>, IntervalUnionError> {
-        self.validate_segments(segments)?;
+        segments: ValidatedSegments<'_>,
+        bundle_count: usize,
+        collector: &mut ConflictCollector,
+        output: &mut Vec<AllocationBundleId>,
+    ) -> Result<(), IntervalUnionError> {
+        collector.begin(bundle_count);
+        output.clear();
+        for (segment, block) in segments.iter() {
+            let Some(entries) = self.blocks.get(&block) else {
+                continue;
+            };
+            for (&start, entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
+                if entry.end <= segment.start {
+                    break;
+                }
+                if start < segment.end {
+                    collector.record(entry.bundle, output)?;
+                }
+            }
+        }
+        output.sort_unstable();
+        Ok(())
+    }
+
+    fn conflicts_indexed(&self, segments: ValidatedSegments<'_>) -> Vec<AllocationBundleId> {
         let mut conflicts = BTreeSet::new();
-        for &segment in segments {
+        for (segment, block) in segments.iter() {
             conflicts.extend(
-                self.overlapping_entries(segment)?
+                self.overlapping_entries_at(segment, block)
                     .into_iter()
                     .map(|(_, entry)| entry.bundle),
             );
         }
-        Ok(conflicts.into_iter().collect())
+        conflicts.into_iter().collect()
     }
 
-    fn insert(
+    fn insert_indexed(
         &mut self,
         bundle: AllocationBundleId,
-        segments: &[LiveSegment],
+        segments: ValidatedSegments<'_>,
     ) -> Result<(), IntervalUnionError> {
-        self.validate_segments(segments)?;
-        if self.memberships.contains_key(&bundle) {
+        if segments.as_slice().is_empty() {
             return Err(IntervalUnionError::new(
-                "INTERVAL_UNION.DUPLICATE_BUNDLE",
+                "INTERVAL_UNION.EMPTY_ASSIGNMENT",
                 None,
                 [bundle],
-                "bundle is already present in this physical register",
+                "a register assignment must own at least one live segment",
             ));
         }
-        let conflicts = self.conflicts(segments)?;
+        for (segment, block) in segments.iter() {
+            if self
+                .blocks
+                .get(&block)
+                .is_some_and(|entries| entries.contains_key(&segment.start))
+            {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.INTERFERENCE",
+                    Some(segment.block),
+                    [bundle],
+                    "validated insertion would replace an existing register segment",
+                ));
+            }
+        }
+        let conflicts = self.conflicts_indexed(segments);
         if !conflicts.is_empty() {
-            let block = segments.iter().find_map(|segment| {
-                self.overlapping_entries(*segment)
-                    .ok()
-                    .and_then(|entries| (!entries.is_empty()).then_some(segment.block))
+            let block = segments.iter().find_map(|(segment, block)| {
+                (!self.overlapping_entries_at(segment, block).is_empty()).then_some(segment.block)
             });
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.INTERFERENCE",
@@ -237,10 +414,8 @@ impl IntervalUnion {
                 "cannot assign overlapping live bundles to one physical register",
             ));
         }
-
-        for &segment in segments {
-            let block = self.block_index[&segment.block];
-            let previous = self.blocks[block].insert(
+        for (segment, block) in segments.iter() {
+            let previous = self.blocks.entry(block).or_default().insert(
                 segment.start,
                 UnionEntry {
                     end: segment.end,
@@ -249,25 +424,27 @@ impl IntervalUnion {
             );
             debug_assert!(previous.is_none());
         }
-        self.memberships.insert(bundle, segments.to_vec());
         Ok(())
     }
 
-    fn remove(
+    fn remove_indexed(
         &mut self,
         bundle: AllocationBundleId,
-    ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
-        let Some(segments) = self.memberships.get(&bundle) else {
+        segments: ValidatedSegments<'_>,
+    ) -> Result<(), IntervalUnionError> {
+        if segments.as_slice().is_empty() {
             return Err(IntervalUnionError::new(
-                "INTERVAL_UNION.MISSING_BUNDLE",
+                "INTERVAL_UNION.EMPTY_ASSIGNMENT",
                 None,
                 [bundle],
-                "cannot remove a bundle which is not assigned to this register",
+                "a register assignment must own at least one live segment",
             ));
-        };
-        for &segment in segments {
-            let block = self.block_index[&segment.block];
-            if self.blocks[block].get(&segment.start)
+        }
+        for (segment, block) in segments.iter() {
+            if self
+                .blocks
+                .get(&block)
+                .and_then(|entries| entries.get(&segment.start))
                 != Some(&UnionEntry {
                     end: segment.end,
                     bundle,
@@ -281,29 +458,46 @@ impl IntervalUnion {
                 ));
             }
         }
-        let segments = self
-            .memberships
-            .remove(&bundle)
-            .expect("membership was checked above");
-        for &segment in &segments {
-            let block = self.block_index[&segment.block];
-            self.blocks[block].remove(&segment.start);
+        for (segment, block) in segments.iter() {
+            let remove_block = {
+                let Some(entries) = self.blocks.get_mut(&block) else {
+                    return Err(IntervalUnionError::new(
+                        "INTERVAL_UNION.MEMBERSHIP",
+                        Some(segment.block),
+                        [bundle],
+                        "validated bundle block disappeared during removal",
+                    ));
+                };
+                if entries.remove(&segment.start)
+                    != Some(UnionEntry {
+                        end: segment.end,
+                        bundle,
+                    })
+                {
+                    return Err(IntervalUnionError::new(
+                        "INTERVAL_UNION.MEMBERSHIP",
+                        Some(segment.block),
+                        [bundle],
+                        "validated bundle segment disappeared during removal",
+                    ));
+                }
+                entries.is_empty()
+            };
+            if remove_block {
+                self.blocks.remove(&block);
+            }
         }
-        Ok(segments)
+        Ok(())
     }
 
     /// Subtract every occupied segment from the input, preserving sparse CFG
     /// block identity. These are the maximal regions available for splitting
     /// a bundle onto this register.
-    fn free_segments(
-        &self,
-        segments: &[LiveSegment],
-    ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
-        self.validate_segments(segments)?;
+    fn free_segments_indexed(&self, segments: ValidatedSegments<'_>) -> Vec<LiveSegment> {
         let mut free = Vec::new();
-        for &segment in segments {
+        for (segment, block) in segments.iter() {
             let mut cursor = segment.start;
-            for (occupied_start, entry) in self.overlapping_entries(segment)? {
+            for (occupied_start, entry) in self.overlapping_entries_at(segment, block) {
                 let occupied_start = occupied_start.max(segment.start);
                 let occupied_end = entry.end.min(segment.end);
                 if cursor < occupied_start {
@@ -323,17 +517,17 @@ impl IntervalUnion {
                 });
             }
         }
-        Ok(free)
+        free
     }
 
     fn verify(&self) -> Result<(), IntervalUnionError> {
-        if self.blocks.len() != self.block_ids.len()
-            || self.block_index.len() != self.block_ids.len()
+        if self.index.block_index.len() != self.index.block_ids.len()
             || self
+                .index
                 .block_ids
                 .iter()
                 .enumerate()
-                .any(|(index, block)| self.block_index.get(block) != Some(&index))
+                .any(|(index, block)| self.index.block_index.get(block) != Some(&index))
         {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.CFG_SHAPE",
@@ -343,55 +537,45 @@ impl IntervalUnion {
             ));
         }
 
-        let mut expected = (0..self.blocks.len())
-            .map(|_| BTreeMap::<SlotIndex, UnionEntry>::new())
-            .collect::<Vec<_>>();
-        for (&bundle, segments) in &self.memberships {
-            self.validate_segments(segments)?;
-            for &segment in segments {
-                let block = self.block_index[&segment.block];
-                if expected[block]
-                    .insert(
-                        segment.start,
-                        UnionEntry {
-                            end: segment.end,
-                            bundle,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(IntervalUnionError::new(
-                        "INTERVAL_UNION.INTERFERENCE",
-                        Some(segment.block),
-                        [bundle],
-                        "two memberships begin at one register/slot",
-                    ));
-                }
+        for (&block, entries) in &self.blocks {
+            let Some(&block_id) = self.index.block_ids.get(block) else {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.SEGMENT_BLOCK",
+                    None,
+                    [],
+                    format!("sparse union references out-of-range CFG block {block}"),
+                ));
+            };
+            if entries.is_empty() {
+                return Err(IntervalUnionError::new(
+                    "INTERVAL_UNION.EMPTY_BLOCK",
+                    Some(block_id),
+                    [],
+                    "sparse union retains an empty block tree",
+                ));
             }
-        }
-        for (block, entries) in expected.iter().enumerate() {
             let mut prior = None::<(SlotIndex, UnionEntry)>;
             for (&start, &entry) in entries {
+                if start >= entry.end {
+                    return Err(IntervalUnionError::new(
+                        "INTERVAL_UNION.SEGMENT_RANGE",
+                        Some(block_id),
+                        [entry.bundle],
+                        "union contains an empty or reversed segment",
+                    ));
+                }
                 if let Some((_, previous)) = prior
                     && previous.end > start
                 {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.INTERFERENCE",
-                        Some(self.block_ids[block]),
+                        Some(block_id),
                         [previous.bundle, entry.bundle],
-                        "independent union verification found overlapping memberships",
+                        "ordered union contains overlapping assignments",
                     ));
                 }
                 prior = Some((start, entry));
             }
-        }
-        if self.blocks != expected {
-            return Err(IntervalUnionError::new(
-                "INTERVAL_UNION.MEMBERSHIP",
-                None,
-                [],
-                "ordered segment tables differ from independently rebuilt memberships",
-            ));
         }
         Ok(())
     }
@@ -400,6 +584,7 @@ impl IntervalUnion {
 /// Bidirectional physical-register interference matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LiveIntervalMatrix {
+    index: Arc<IntervalIndex>,
     register_order: Vec<PhysReg>,
     unions: BTreeMap<PhysReg, IntervalUnion>,
     assignments: BTreeMap<AllocationBundleId, PhysReg>,
@@ -410,9 +595,13 @@ impl LiveIntervalMatrix {
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<Self, IntervalUnionError> {
+        let index = Arc::new(IntervalIndex::new(cfg)?);
         let mut unions = BTreeMap::new();
         for &register in registers {
-            if unions.insert(register, IntervalUnion::new(cfg)?).is_some() {
+            if unions
+                .insert(register, IntervalUnion::new(Arc::clone(&index)))
+                .is_some()
+            {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.DUPLICATE_REGISTER",
                     None,
@@ -430,6 +619,7 @@ impl LiveIntervalMatrix {
             ));
         }
         Ok(Self {
+            index,
             register_order: registers.to_vec(),
             unions,
             assignments: BTreeMap::new(),
@@ -466,12 +656,90 @@ impl LiveIntervalMatrix {
         self.assignments.get(&bundle).copied()
     }
 
+    pub(super) fn make_range(
+        &self,
+        segments: Vec<LiveSegment>,
+    ) -> Result<SparseRange, IntervalUnionError> {
+        self.index.make_range(segments)
+    }
+
+    fn validate_token(&self, segments: ValidatedSegments<'_>) -> Result<(), IntervalUnionError> {
+        if !Arc::ptr_eq(&self.index, segments.index) {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.RANGE_CFG",
+                None,
+                [],
+                "sparse range belongs to a different normalized CFG",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn conflicts(
         &self,
         register: PhysReg,
         segments: &[LiveSegment],
     ) -> Result<Vec<AllocationBundleId>, IntervalUnionError> {
-        self.union(register)?.conflicts(segments)
+        let range = self.make_range(segments.to_vec())?;
+        self.conflicts_validated(register, range.validated())
+    }
+
+    pub(super) fn conflicts_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<Vec<AllocationBundleId>, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self.union(register)?.conflicts_indexed(segments))
+    }
+
+    pub(super) fn interferes(
+        &self,
+        register: PhysReg,
+        segments: &[LiveSegment],
+    ) -> Result<bool, IntervalUnionError> {
+        let range = self.make_range(segments.to_vec())?;
+        self.interferes_validated(register, range.validated())
+    }
+
+    pub(super) fn interferes_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<bool, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self.union(register)?.interferes_indexed(segments))
+    }
+
+    pub(super) fn collect_conflicts(
+        &self,
+        register: PhysReg,
+        segments: &[LiveSegment],
+        bundle_count: usize,
+        collector: &mut ConflictCollector,
+        output: &mut Vec<AllocationBundleId>,
+    ) -> Result<(), IntervalUnionError> {
+        let range = self.make_range(segments.to_vec())?;
+        self.collect_conflicts_validated(
+            register,
+            range.validated(),
+            bundle_count,
+            collector,
+            output,
+        )
+    }
+
+    pub(super) fn collect_conflicts_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+        bundle_count: usize,
+        collector: &mut ConflictCollector,
+        output: &mut Vec<AllocationBundleId>,
+    ) -> Result<(), IntervalUnionError> {
+        self.validate_token(segments)?;
+        self.union(register)?
+            .collect_conflicts_indexed(segments, bundle_count, collector, output)
     }
 
     pub(super) fn free_segments(
@@ -479,7 +747,17 @@ impl LiveIntervalMatrix {
         register: PhysReg,
         segments: &[LiveSegment],
     ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
-        self.union(register)?.free_segments(segments)
+        let range = self.make_range(segments.to_vec())?;
+        self.free_segments_validated(register, range.validated())
+    }
+
+    pub(super) fn free_segments_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self.union(register)?.free_segments_indexed(segments))
     }
 
     pub(super) fn assign(
@@ -488,6 +766,17 @@ impl LiveIntervalMatrix {
         register: PhysReg,
         segments: &[LiveSegment],
     ) -> Result<(), IntervalUnionError> {
+        let range = self.make_range(segments.to_vec())?;
+        self.assign_validated(bundle, register, range.validated())
+    }
+
+    pub(super) fn assign_validated(
+        &mut self,
+        bundle: AllocationBundleId,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<(), IntervalUnionError> {
+        self.validate_token(segments)?;
         if let Some(current) = self.register(bundle) {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
@@ -496,7 +785,7 @@ impl LiveIntervalMatrix {
                 format!("bundle is already assigned to {current}"),
             ));
         }
-        self.union_mut(register)?.insert(bundle, segments)?;
+        self.union_mut(register)?.insert_indexed(bundle, segments)?;
         self.assignments.insert(bundle, register);
         Ok(())
     }
@@ -504,7 +793,18 @@ impl LiveIntervalMatrix {
     pub(super) fn unassign(
         &mut self,
         bundle: AllocationBundleId,
-    ) -> Result<(PhysReg, Vec<LiveSegment>), IntervalUnionError> {
+        segments: &[LiveSegment],
+    ) -> Result<PhysReg, IntervalUnionError> {
+        let range = self.make_range(segments.to_vec())?;
+        self.unassign_validated(bundle, range.validated())
+    }
+
+    pub(super) fn unassign_validated(
+        &mut self,
+        bundle: AllocationBundleId,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<PhysReg, IntervalUnionError> {
+        self.validate_token(segments)?;
         let Some(&register) = self.assignments.get(&bundle) else {
             return Err(IntervalUnionError::new(
                 "INTERVAL_UNION.MISSING_ASSIGNMENT",
@@ -513,9 +813,9 @@ impl LiveIntervalMatrix {
                 "bundle has no physical-register assignment",
             ));
         };
-        let segments = self.union_mut(register)?.remove(bundle)?;
+        self.union_mut(register)?.remove_indexed(bundle, segments)?;
         self.assignments.remove(&bundle);
-        Ok((register, segments))
+        Ok(register)
     }
 
     pub(super) fn verify(&self) -> Result<(), IntervalUnionError> {
@@ -535,14 +835,18 @@ impl LiveIntervalMatrix {
         }
         let mut rebuilt = BTreeMap::new();
         for (&register, union) in &self.unions {
-            for &bundle in union.memberships.keys() {
-                if let Some(other) = rebuilt.insert(bundle, register) {
-                    return Err(IntervalUnionError::new(
-                        "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
-                        None,
-                        [bundle],
-                        format!("bundle appears in both {other} and {register}"),
-                    ));
+            for entries in union.blocks.values() {
+                for entry in entries.values() {
+                    if let Some(other) = rebuilt.insert(entry.bundle, register)
+                        && other != register
+                    {
+                        return Err(IntervalUnionError::new(
+                            "INTERVAL_UNION.DUPLICATE_ASSIGNMENT",
+                            None,
+                            [entry.bundle],
+                            format!("bundle appears in both {other} and {register}"),
+                        ));
+                    }
                 }
             }
         }
@@ -668,15 +972,37 @@ mod tests {
         let first = intervals.intervals[0].as_ref().unwrap();
         let second = intervals.intervals[1].as_ref().unwrap();
         let mut matrix = LiveIntervalMatrix::new(&cfg, &[PhysReg::RAX]).unwrap();
+        let first_range = matrix.make_range(first.segments.clone()).unwrap();
+        let second_range = matrix.make_range(second.segments.clone()).unwrap();
         matrix
-            .assign(AllocationBundleId(0), PhysReg::RAX, &first.segments)
+            .assign_validated(AllocationBundleId(0), PhysReg::RAX, first_range.validated())
             .unwrap();
         let before = matrix.clone();
         let error = matrix
-            .assign(AllocationBundleId(1), PhysReg::RAX, &second.segments)
+            .assign_validated(
+                AllocationBundleId(1),
+                PhysReg::RAX,
+                second_range.validated(),
+            )
             .unwrap_err();
         assert_eq!(error.rule, "INTERVAL_UNION.INTERFERENCE");
         assert_eq!(matrix, before);
+        matrix.verify().unwrap();
+    }
+
+    #[test]
+    fn empty_register_assignment_is_rejected_without_a_phantom_membership() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        let mut function = function(0, vec![block]);
+        let cfg = normalize(&mut function);
+        let mut matrix = LiveIntervalMatrix::new(&cfg, &[PhysReg::RAX]).unwrap();
+
+        let error = matrix
+            .assign(AllocationBundleId(0), PhysReg::RAX, &[])
+            .unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_UNION.EMPTY_ASSIGNMENT");
+        assert_eq!(matrix.register(AllocationBundleId(0)), None);
         matrix.verify().unwrap();
     }
 
@@ -709,7 +1035,49 @@ mod tests {
         matrix
             .assign(AllocationBundleId(1), PhysReg::RAX, &inner.segments)
             .unwrap();
+        let outer_range = matrix.make_range(outer.segments.clone()).unwrap();
         let free = matrix.free_segments(PhysReg::RAX, &outer.segments).unwrap();
+        assert_eq!(
+            free,
+            matrix
+                .free_segments_validated(PhysReg::RAX, outer_range.validated())
+                .unwrap()
+        );
+        assert_eq!(
+            matrix.conflicts(PhysReg::RAX, &outer.segments).unwrap(),
+            matrix
+                .conflicts_validated(PhysReg::RAX, outer_range.validated())
+                .unwrap()
+        );
+        assert_eq!(
+            matrix.interferes(PhysReg::RAX, &outer.segments).unwrap(),
+            matrix
+                .interferes_validated(PhysReg::RAX, outer_range.validated())
+                .unwrap()
+        );
+        let mut raw_collector = ConflictCollector::default();
+        let mut raw_conflicts = Vec::new();
+        matrix
+            .collect_conflicts(
+                PhysReg::RAX,
+                &outer.segments,
+                2,
+                &mut raw_collector,
+                &mut raw_conflicts,
+            )
+            .unwrap();
+        let mut indexed_collector = ConflictCollector::default();
+        let mut indexed_conflicts = Vec::new();
+        matrix
+            .collect_conflicts_validated(
+                PhysReg::RAX,
+                outer_range.validated(),
+                2,
+                &mut indexed_collector,
+                &mut indexed_conflicts,
+            )
+            .unwrap();
+        assert_eq!(raw_conflicts, indexed_conflicts);
         assert_eq!(
             free,
             vec![
@@ -725,6 +1093,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sparse_range_is_validated_once_and_bound_to_its_cfg_index() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        block.push(MInst::Return);
+        let mut first_function = function(2, vec![block.clone()]);
+        let first_cfg = normalize(&mut first_function);
+        let intervals = live_interval::analyze(&first_function, &first_cfg).unwrap();
+        let source = intervals.intervals[0].as_ref().unwrap();
+        let first_matrix = LiveIntervalMatrix::new(&first_cfg, &[PhysReg::RAX]).unwrap();
+        let range = first_matrix.make_range(source.segments.clone()).unwrap();
+
+        let mut invalid = source.segments.clone();
+        invalid[0].block = BlockId(99);
+        let error = first_matrix.make_range(invalid).unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_UNION.SEGMENT_BLOCK");
+
+        let mut second_function = function(2, vec![block]);
+        let second_cfg = normalize(&mut second_function);
+        let second_matrix = LiveIntervalMatrix::new(&second_cfg, &[PhysReg::RAX]).unwrap();
+        let error = second_matrix
+            .interferes_validated(PhysReg::RAX, range.validated())
+            .unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_UNION.RANGE_CFG");
     }
 
     #[test]
@@ -747,14 +1148,21 @@ mod tests {
         let source = intervals.intervals[0].as_ref().unwrap();
         let destination = intervals.intervals[1].as_ref().unwrap();
         let mut matrix = LiveIntervalMatrix::new(&cfg, &[PhysReg::RAX, PhysReg::RDX]).unwrap();
+        let source_range = matrix.make_range(source.segments.clone()).unwrap();
         matrix
-            .assign(AllocationBundleId(0), PhysReg::RAX, &source.segments)
+            .assign_validated(
+                AllocationBundleId(0),
+                PhysReg::RAX,
+                source_range.validated(),
+            )
             .unwrap();
         matrix
             .assign(AllocationBundleId(1), PhysReg::RDX, &destination.segments)
             .unwrap();
-        let (_, removed) = matrix.unassign(AllocationBundleId(0)).unwrap();
-        assert_eq!(removed, source.segments);
+        let removed_from = matrix
+            .unassign_validated(AllocationBundleId(0), source_range.validated())
+            .unwrap();
+        assert_eq!(removed_from, PhysReg::RAX);
         assert_eq!(matrix.register(AllocationBundleId(0)), None);
         assert_eq!(matrix.register(AllocationBundleId(1)), Some(PhysReg::RDX));
         matrix.verify().unwrap();
