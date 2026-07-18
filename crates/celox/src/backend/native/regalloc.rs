@@ -16,6 +16,8 @@ mod home_graph;
 #[allow(dead_code)]
 mod home_verify;
 #[allow(dead_code)]
+mod interval_allocator;
+#[allow(dead_code)]
 mod interval_union;
 mod legalize;
 #[allow(dead_code)]

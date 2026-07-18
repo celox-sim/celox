@@ -400,6 +400,7 @@ impl IntervalUnion {
 /// Bidirectional physical-register interference matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LiveIntervalMatrix {
+    register_order: Vec<PhysReg>,
     unions: BTreeMap<PhysReg, IntervalUnion>,
     assignments: BTreeMap<AllocationBundleId, PhysReg>,
 }
@@ -429,6 +430,7 @@ impl LiveIntervalMatrix {
             ));
         }
         Ok(Self {
+            register_order: registers.to_vec(),
             unions,
             assignments: BTreeMap::new(),
         })
@@ -457,7 +459,7 @@ impl LiveIntervalMatrix {
     }
 
     pub(super) fn registers(&self) -> impl Iterator<Item = PhysReg> + '_ {
-        self.unions.keys().copied()
+        self.register_order.iter().copied()
     }
 
     pub(super) fn register(&self, bundle: AllocationBundleId) -> Option<PhysReg> {
@@ -517,6 +519,17 @@ impl LiveIntervalMatrix {
     }
 
     pub(super) fn verify(&self) -> Result<(), IntervalUnionError> {
+        if self.register_order.len() != self.unions.len()
+            || self.register_order.iter().copied().collect::<BTreeSet<_>>()
+                != self.unions.keys().copied().collect()
+        {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.REGISTER_ORDER",
+                None,
+                [],
+                "register preference order is not a bijection over interval unions",
+            ));
+        }
         for union in self.unions.values() {
             union.verify()?;
         }

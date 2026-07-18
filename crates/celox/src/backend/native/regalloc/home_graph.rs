@@ -107,6 +107,7 @@ pub(super) struct UseMaterialization {
     pub use_id: BundleUseId,
     /// Exact, versioned recipe proved at this use.
     pub recipe: RecipeId,
+    pub cost: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,11 +577,17 @@ fn bundle_candidates(
         let uses = per_use.keys().copied().collect::<Vec<_>>();
         let materializations = per_use
             .into_iter()
-            .map(|(use_id, recipe)| UseMaterialization { use_id, recipe })
-            .collect::<Vec<_>>();
-        let materialization_cost = materializations.iter().try_fold(0_u32, |cost, item| {
-            Ok::<_, HomeGraphError>(cost.saturating_add(recipe_cost(&recipes.nodes, item.recipe)?))
-        })?;
+            .map(|(use_id, recipe)| {
+                Ok(UseMaterialization {
+                    use_id,
+                    recipe,
+                    cost: recipe_cost(&recipes.nodes, recipe)?,
+                })
+            })
+            .collect::<Result<Vec<_>, HomeGraphError>>()?;
+        let materialization_cost = materializations
+            .iter()
+            .fold(0_u32, |cost, item| cost.saturating_add(item.cost));
         candidates.push(HomeCandidate {
             kind,
             uses,
@@ -768,8 +775,15 @@ impl HomeGraph {
                     "state and pure-rematerialization candidate classes are inconsistent",
                 ));
             }
-            expected_cost =
-                expected_cost.saturating_add(recipe_cost(&self.recipe_nodes, item.recipe)?);
+            let actual_cost = recipe_cost(&self.recipe_nodes, item.recipe)?;
+            if item.cost != actual_cost {
+                return Err(Self::candidate_error(
+                    bundle,
+                    "HOME_GRAPH.MATERIALIZATION_COST",
+                    "use-local materialization cost differs from its exact recipe DAG",
+                ));
+            }
+            expected_cost = expected_cost.saturating_add(item.cost);
         }
         if candidate.materialization_cost != expected_cost {
             return Err(Self::candidate_error(
