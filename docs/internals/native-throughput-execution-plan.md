@@ -2563,6 +2563,25 @@ threshold.  A regression in which a state load is valid before an overlapping
 write but not after it produces a state child for the first use and a stack
 child only for the second.
 
+Step 27c4 makes splitting an allocation decision.  After free-register,
+recolor, and eviction attempts fail, each physical interval union subtracts
+its occupied sparse segments from the bundle.  Free pieces are connected only
+across real CFG exit/entry edges.  A candidate region begins at an existing
+instruction use, materializes the exact recipe proved at that use, and includes
+only reachable later uses which that entry dominates.  A reverse slice through
+the free-piece graph retains only segments needed to connect those uses.
+Register and home children then partition the root uses exactly once; stack
+children and transitions share one logical stack-home creation.  The split is
+accepted only when its exact transition plus remainder-home cost is lower than
+the unsplit home cost.  Per-block ordered indexes keep use/edge lookup
+logarithmic in the number of free pieces in that block.
+
+Focused regressions cover a same-block free suffix, a connected multi-block
+region, and a diamond where a transition on one arm must not claim uses from
+its sibling.  The plan verifier independently checks transition recipe
+validity, point dominance, child segment containment, exact use partitioning,
+shared stack identity, and a freshly rebuilt physical interval matrix.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2614,6 +2633,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c1 sparse physical interval unions | this step | interval-union insertion/removal/interference/free-region 4/4 | lib 791/791; check, strict clippy, and format pass | diagnostic allocator structure is not connected to production MIR | n/a | per-register sparse interference matrix and independent rebuild verifier complete |
 | 27c2 complete-bundle allocation policy | this step | allocation queue/eviction/recolor/home selection 4/4 | lib 795/795; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | terminating work queue, transactional recolor, monotonic eviction, and independent plan verification complete |
 | 27c3 per-use home partition | this step | allocator 5/5 including path-specific state/stack partition | lib 796/796; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact shared-stack versus per-use recipe partition replaces VReg-wide fallback |
+| 27c4 dominance/use-cluster region splitting | this step | allocator 8/8 including same-block, cross-block, and sibling-arm splits | lib 799/799; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact-use transitions and CFG-connected sparse register children complete |
 
 ## Related design records
 
