@@ -14,6 +14,8 @@ mod cssa;
 #[allow(dead_code)]
 mod home_verify;
 mod legalize;
+#[allow(dead_code)]
+mod live_interval;
 mod next_use;
 mod pressure;
 mod reconstruct;

@@ -2403,6 +2403,100 @@ allocator prerequisite.  Forwarding-only range SSA was rejected, and lazy
 writeback plus allocation-owned materialization remains the next implementation
 boundary**.
 
+### Step 27: Replace split-before-home planning with unified live-range allocation
+
+The second Step 26 trial proved that lazy writeback by itself does not supply
+the missing allocation decision.  It represented access-boundary atoms in
+range SSA and kept wide store sources as shared carriers, so the first trial's
+one-bit extraction/reassembly explosion was removed.  It also removed the
+intended packed read-modify-write sequences.  Post-allocation MIR nevertheless
+showed the removed state homes being replaced directly by long-lived stack
+homes: values assembled from `sim + 136376` and `sim + 136568`, for example,
+were stored to stack slots immediately in the comb prefix and carried to the
+FF suffix.  The fused frame grew from 37,760 to 39,704 bytes.  A trace-free,
+non-LTO CPU-0 run did not reach the semantic completion marker within 260
+seconds and had progressed only to the kernel `workingset` initialization.
+The complete trial was removed without a commit.
+
+This is an allocator architecture failure, not a reason to add another
+promotion threshold.  The present pipeline makes three decisions in the wrong
+order:
+
+- `LogicalValue` is exactly one MIR VReg and receives one phi-congruence spill
+  home before its actual split ranges exist;
+- the Braun--Hack W/S walk chooses register residency and stack operations,
+  then a later pass substitutes a MemorySSA recipe for selected operations;
+- coloring runs once after reconstruction and cannot request a different
+  split, home, or coalescing decision from the plan which created its live
+  ranges.
+
+The replacement keeps SSA and the verified machine backend, but introduces an
+explicit allocation model with four separate identities:
+
+1. A **machine value** is a 32- or 64-bit MIR result.  No arbitrary HDL width
+   is attached to a VReg.
+2. A **logical state value** is a range/version identity in StateSSA and
+   MemorySSA.  It may be materialized by one or more machine values.
+3. A **live bundle** is one connected, independently splittable subset of a
+   machine value's live range, with exact instruction uses and phi-edge uses.
+4. A **home** is one way to recreate a bundle: a physical register, a colored
+   stack slot, a MemorySSA-proved state recipe, or a pure rematerialization
+   DAG.  Home validity and home cost are properties of a bundle and its use
+   cluster, not global properties of the source VReg.
+
+The production algorithm will follow the live-interval/splitting structure
+used by modern optimizing compilers rather than adding cases to the current
+single forward walk:
+
+1. Assign stable slot indexes to block entries, instruction uses/defs, exits,
+   and phi edges.  Build exact sparse live segments and use lists over the
+   complete CFG.  Record loop/SCC nesting and block-frequency estimates
+   separately from semantic liveness.
+2. Lower fixed-register and pseudo-clobber constraints before the final
+   allocation decision.  Build per-register live-interval unions so an
+   assignment is checked against actual interference, not only scalar pressure.
+3. Process live bundles by spill weight.  Try a free register, bounded
+   recoloring, and eviction of cheaper bundles.  If none succeeds, split at
+   dominance, loop, and use-cluster boundaries and return the children to the
+   work queue.  A split is an SSA rewrite with explicit edge values, not a
+   textual reload insertion.
+4. Choose register, state, stack, or rematerialized residency for each child by
+   the complete cost of its guaranteed use cluster.  A state recipe may be a
+   verified multi-load/shift/merge DAG.  The decision includes writeback and
+   transition costs, so eliminating a packed store cannot silently create a
+   second mandatory stack home.
+5. Rebuild only affected intervals after splitting, then allocate again until
+   every bundle is assigned.  Coalesce copies/phis when the merged interval is
+   colorable; color stack slots from the final spilled-interval interference
+   graph.
+6. Reconstruct MIR from the selected homes and independently recompute CFG
+   liveness, physical interference, MemorySSA versions, state bit ranges,
+   fixed-register constraints, and spill-home dominance.  The verifier must
+   not consume cached facts from the allocator's decision procedure.
+
+Implementation slices are deliberately architectural and each has its own
+tests before generated code is allowed to change:
+
+- **27a:** exact slot indexes, live segments, instruction/phi-edge use lists,
+  interference queries, and an independent dataflow verifier;
+- **27b:** live bundles and a home graph containing stack, unary remat, exact
+  state, and multi-load state recipes, with MemorySSA validity at every use;
+- **27c:** interval-union allocation, eviction, bounded recoloring, and
+  dominance/loop/use-cluster splitting behind a diagnostic implementation
+  selector;
+- **27d:** constraint lowering, phi/copy coalescing, stack-slot coloring, and
+  complete post-allocation verification, followed by replacement of the W/S
+  planner only after differential MIR execution passes;
+- **27e:** expose range StateSSA values to this allocator and enable lazy
+  packed writeback.  No broad cross-phase load/store removal is enabled before
+  the allocator can choose all four homes for every resulting live bundle.
+
+No slice is accepted from frame size, instruction counts, compile-only output,
+or a partial kernel log.  Every code-changing slice must pass the focused
+verifier tests, common native tests, complete SIR/MIR inspection, and the exact
+`cy=9ae070 x3=aa pass=1` Linux marker.  Release/LTO remains deferred until the
+new allocator produces a substantial non-LTO execution win.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -2443,6 +2537,7 @@ boundary**.
 | 23 coupled update short-circuit and dynamic StateSSA placement | this step | BranchifyMux 44/44; placement 12/12; StateSSA 8/8 | lib 774/774; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; exact final SIR/MIR trace retained | compile 77.247 s; execute 120.990 s | exact local defect fixed; execute -1.79%; dominant gap remains open |
 | 24 cross-phase stable-forwarding diagnostic | rejected (no commit) | exact full SIR/MIR comparison | unchanged source and pre/post SIR hashes | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1` | compile 82.193 s; execute 121.003 s | no improvement; switch remains disabled |
 | 26a disjoint bit-range state reload homes | this step | reload 32/32; complete normalized post-RA MIR inspection | lib 776/776; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR unchanged | compile 75.665 s; execute 114.833 s | allocator prerequisite retained; one stack home removed; aggregate promotion remains open |
+| 27a exact sparse live intervals | this step | live-interval construction and independent verification 5/5 | lib 781/781; check and format pass | analysis-only module is not connected to allocation; generated MIR is unchanged | n/a | stable instruction/phi-edge slots, CFG-sparse segments, and an independent liveness verifier complete |
 
 ## Related design records
 
