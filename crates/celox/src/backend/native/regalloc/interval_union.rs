@@ -128,6 +128,16 @@ struct UnionEntry {
     bundle: AllocationBundleId,
 }
 
+/// Exact occupied subrange of one canonical candidate segment.  Conflict
+/// collection and split projection share this result, so allocation never
+/// searches the same physical interval union a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OccupancyCut {
+    pub segment: usize,
+    pub start: SlotIndex,
+    pub end: SlotIndex,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IntervalUnionError {
     pub rule: &'static str,
@@ -360,6 +370,43 @@ impl IntervalUnion {
             }
         }
         output.sort_unstable();
+        Ok(())
+    }
+
+    fn collect_interference_indexed(
+        &self,
+        segments: ValidatedSegments<'_>,
+        bundle_count: usize,
+        collector: &mut ConflictCollector,
+        conflicts: &mut Vec<AllocationBundleId>,
+        cuts: &mut Vec<OccupancyCut>,
+    ) -> Result<(), IntervalUnionError> {
+        collector.begin(bundle_count);
+        conflicts.clear();
+        cuts.clear();
+        for (segment_index, (segment, block)) in segments.iter().enumerate() {
+            let Some(entries) = self.blocks.get(&block) else {
+                continue;
+            };
+            let first_cut = cuts.len();
+            for (&start, entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
+                if entry.end <= segment.start {
+                    break;
+                }
+                if start < segment.end {
+                    collector.record(entry.bundle, conflicts)?;
+                    cuts.push(OccupancyCut {
+                        segment: segment_index,
+                        start: start.max(segment.start),
+                        end: entry.end.min(segment.end),
+                    });
+                }
+            }
+            // The ordered map was traversed backwards to stop at the first
+            // non-overlap. Restore canonical segment/start order once here.
+            cuts[first_cut..].reverse();
+        }
+        conflicts.sort_unstable();
         Ok(())
     }
 
@@ -742,6 +789,25 @@ impl LiveIntervalMatrix {
             .collect_conflicts_indexed(segments, bundle_count, collector, output)
     }
 
+    pub(super) fn collect_interference_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+        bundle_count: usize,
+        collector: &mut ConflictCollector,
+        conflicts: &mut Vec<AllocationBundleId>,
+        cuts: &mut Vec<OccupancyCut>,
+    ) -> Result<(), IntervalUnionError> {
+        self.validate_token(segments)?;
+        self.union(register)?.collect_interference_indexed(
+            segments,
+            bundle_count,
+            collector,
+            conflicts,
+            cuts,
+        )
+    }
+
     pub(super) fn free_segments(
         &self,
         register: PhysReg,
@@ -1078,6 +1144,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(raw_conflicts, indexed_conflicts);
+        let mut projected_conflicts = Vec::new();
+        let mut cuts = Vec::new();
+        matrix
+            .collect_interference_validated(
+                PhysReg::RAX,
+                outer_range.validated(),
+                2,
+                &mut indexed_collector,
+                &mut projected_conflicts,
+                &mut cuts,
+            )
+            .unwrap();
+        assert_eq!(projected_conflicts, indexed_conflicts);
+        assert_eq!(
+            cuts,
+            vec![OccupancyCut {
+                segment: 0,
+                start: inner.segments[0].start,
+                end: inner.segments[0].end,
+            }]
+        );
         assert_eq!(
             free,
             vec![

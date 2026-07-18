@@ -19,8 +19,8 @@ use super::home_graph::{
     STACK_HOME_MATERIALIZATION_COST, UseHome, UseMaterialization,
 };
 use super::interval_union::{
-    AllocationBundleId, ConflictCollector, IntervalUnionError, LiveIntervalMatrix, SparseRange,
-    live_length,
+    AllocationBundleId, ConflictCollector, IntervalUnionError, LiveIntervalMatrix, OccupancyCut,
+    SparseRange, live_length,
 };
 use super::live_interval::{DefinitionSite, LiveSegment, SlotIndex, UseSite};
 
@@ -763,6 +763,7 @@ struct RegisterProbe {
     register: PhysReg,
     order: usize,
     conflicts: Option<Vec<AllocationBundleId>>,
+    cuts: Option<Vec<OccupancyCut>>,
 }
 
 impl Ord for QueueItem {
@@ -904,7 +905,6 @@ struct RegionSeed {
 #[derive(Debug)]
 struct SplitTopology {
     node_blocks: Vec<usize>,
-    block_nodes: BTreeMap<usize, Vec<usize>>,
     node_entries: Vec<SlotIndex>,
     node_exits: Vec<SlotIndex>,
     use_nodes: Vec<Option<usize>>,
@@ -1064,7 +1064,6 @@ impl SplitTopology {
 
         Ok(Self {
             node_blocks,
-            block_nodes,
             node_entries,
             node_exits,
             use_nodes,
@@ -1308,6 +1307,7 @@ impl<'a> Allocator<'a> {
                 register,
                 order,
                 conflicts: None,
+                cuts: None,
             })
             .collect()
     }
@@ -1317,8 +1317,16 @@ impl<'a> Allocator<'a> {
         id: AllocationBundleId,
         probe: &mut RegisterProbe,
     ) -> Result<(), IntervalAllocationError> {
-        if probe.conflicts.is_some() {
-            return Ok(());
+        if probe.conflicts.is_some() || probe.cuts.is_some() {
+            if probe.conflicts.is_some() && probe.cuts.is_some() {
+                return Ok(());
+            }
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.PROBE_STATE",
+                None,
+                Some(id),
+                "register probe cached only one of conflicts and occupancy cuts",
+            ));
         }
         let segments = self
             .bundles
@@ -1334,16 +1342,19 @@ impl<'a> Allocator<'a> {
             .segments
             .validated();
         let mut conflicts = Vec::new();
+        let mut cuts = Vec::new();
         self.matrix
-            .collect_conflicts_validated(
+            .collect_interference_validated(
                 probe.register,
                 segments,
                 self.bundles.len(),
                 &mut self.conflict_collector,
                 &mut conflicts,
+                &mut cuts,
             )
             .map_err(IntervalAllocationError::union)?;
         probe.conflicts = Some(conflicts);
+        probe.cuts = Some(cuts);
         Ok(())
     }
 
@@ -1498,14 +1509,17 @@ impl<'a> Allocator<'a> {
         Ok(true)
     }
 
-    fn region_candidates(
+    fn consider_region_candidates(
         &self,
         id: AllocationBundleId,
         register: PhysReg,
         register_order: usize,
         topology: &SplitTopology,
+        cuts: &[OccupancyCut],
         home_plan: &RootHomePlan,
-    ) -> Result<Vec<RegionCandidate>, IntervalAllocationError> {
+        baseline: u64,
+        best: &mut Option<RegionCandidate>,
+    ) -> Result<(), IntervalAllocationError> {
         let bundle = self.bundle(id)?;
         let root = self
             .graph
@@ -1519,14 +1533,6 @@ impl<'a> Allocator<'a> {
                     "allocation bundle references a missing HomeGraph root",
                 )
             })?;
-        let free = self
-            .matrix
-            .free_segments_validated(register, bundle.segments.validated())
-            .map_err(IntervalAllocationError::union)?;
-        if free.is_empty() {
-            return Ok(Vec::new());
-        }
-
         if topology.node_blocks.len() != bundle.segments.len()
             || topology.node_entries.len() != bundle.segments.len()
             || topology.node_exits.len() != bundle.segments.len()
@@ -1538,57 +1544,74 @@ impl<'a> Allocator<'a> {
                 "split topology shape differs from its canonical live range",
             ));
         }
+        let mut free = Vec::with_capacity(bundle.segments.len().saturating_add(cuts.len()));
         let mut fragment_starts = vec![usize::MAX; bundle.segments.len()];
         let mut fragment_ends = vec![0; bundle.segments.len()];
-        let mut node_blocks = Vec::with_capacity(free.len());
-        for (node, segment) in free.iter().enumerate() {
-            let Some(&block) = self.cfg.block_index.get(&segment.block) else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_BLOCK",
-                    Some(segment.block),
-                    Some(id),
-                    "free segment references a block outside the CFG",
-                ));
-            };
-            let Some(canonical_nodes) = topology.block_nodes.get(&block) else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
-                    Some(segment.block),
-                    Some(id),
-                    "free segment has no canonical topology node in its block",
-                ));
-            };
-            let Some(parent) =
-                segment_node_at(canonical_nodes, bundle.segments.as_slice(), segment.start)
-            else {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
-                    Some(segment.block),
-                    Some(id),
-                    "free segment starts outside the canonical live range",
-                ));
-            };
-            let canonical = bundle.segments[parent];
-            if canonical.start > segment.start || segment.end > canonical.end {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
-                    Some(segment.block),
-                    Some(id),
-                    "free segment is not contained by its canonical topology node",
+        let mut node_blocks = Vec::with_capacity(free.capacity());
+        let mut cut_index = 0_usize;
+        for (parent, &canonical) in bundle.segments.iter().enumerate() {
+            let first_fragment = free.len();
+            let mut cursor = canonical.start;
+            while let Some(&cut) = cuts.get(cut_index) {
+                if cut.segment < parent {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.OCCUPANCY_CUT_ORDER",
+                        Some(canonical.block),
+                        Some(id),
+                        "occupancy cuts are not in canonical segment order",
+                    ));
+                }
+                if cut.segment != parent {
+                    break;
+                }
+                if cut.start < cursor
+                    || cut.start >= cut.end
+                    || cut.end > canonical.end
+                    || cut.start < canonical.start
+                {
+                    return Err(IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.OCCUPANCY_CUT_RANGE",
+                        Some(canonical.block),
+                        Some(id),
+                        "occupancy cut is overlapping or outside its canonical segment",
+                    ));
+                }
+                if cursor < cut.start {
+                    free.push(LiveSegment {
+                        block: canonical.block,
+                        start: cursor,
+                        end: cut.start,
+                    });
+                }
+                cursor = cut.end;
+                cut_index += 1;
+            }
+            if cursor < canonical.end {
+                free.push(LiveSegment {
+                    block: canonical.block,
+                    start: cursor,
+                    end: canonical.end,
+                });
+            }
+            if first_fragment != free.len() {
+                fragment_starts[parent] = first_fragment;
+                fragment_ends[parent] = free.len();
+                node_blocks.extend(std::iter::repeat_n(
+                    topology.node_blocks[parent],
+                    free.len() - first_fragment,
                 ));
             }
-            if fragment_starts[parent] == usize::MAX {
-                fragment_starts[parent] = node;
-            } else if fragment_ends[parent] != node {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.SPLIT_TOPOLOGY",
-                    Some(segment.block),
-                    Some(id),
-                    "one canonical node has non-contiguous projected fragments",
-                ));
-            }
-            fragment_ends[parent] = node + 1;
-            node_blocks.push(topology.node_blocks[parent]);
+        }
+        if cut_index != cuts.len() {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.OCCUPANCY_CUT_RANGE",
+                Some(bundle.definition.block()),
+                Some(id),
+                "occupancy cut references a missing canonical segment",
+            ));
+        }
+        if free.is_empty() {
+            return Ok(());
         }
 
         let mut use_nodes = vec![None; root.uses.len()];
@@ -1639,7 +1662,7 @@ impl<'a> Allocator<'a> {
             }
         }
         if free_use_count < 2 || entries.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         // The canonical CFG edges were built once. A register contributes only
@@ -1728,10 +1751,10 @@ impl<'a> Allocator<'a> {
             covered.sort_unstable();
         }
 
-        let mut candidates = Vec::new();
         // Owner node sets are disjoint. `needed` is initialized once, and the
-        // reverse slices plus segment materialization visit every free node at
-        // most once over all candidates for this physical register.
+        // reverse slices visit every free node at most once over all candidates
+        // for this physical register. Segment vectors are materialized only
+        // when a candidate improves the current global incumbent.
         let mut needed = vec![false; free.len()];
         for (owner, seed) in seeds.iter().enumerate() {
             let covered = &covered_by_seed[owner];
@@ -1753,21 +1776,6 @@ impl<'a> Allocator<'a> {
                     }
                 }
             }
-            let mut segments = owner_nodes[owner]
-                .iter()
-                .copied()
-                .filter_map(|node| {
-                    if !needed[node] {
-                        return None;
-                    }
-                    let mut segment = free[node];
-                    if node == seed.node {
-                        segment.start = segment.start.max(seed.site.slot());
-                    }
-                    (segment.start < segment.end).then_some(segment)
-                })
-                .collect::<Vec<_>>();
-            segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
             if !covered.iter().all(|use_id| {
                 let site = root.uses[use_id.0 as usize].site;
                 use_nodes[use_id.0 as usize].is_some_and(|node| {
@@ -1802,7 +1810,42 @@ impl<'a> Allocator<'a> {
                         )
                     })?;
             }
-            candidates.push(RegionCandidate {
+            if total_cost >= baseline {
+                continue;
+            }
+            let candidate_key = (
+                total_cost,
+                std::cmp::Reverse(covered.len()),
+                register_order,
+                seed.site,
+            );
+            if best.as_ref().is_some_and(|current| {
+                candidate_key
+                    >= (
+                        current.total_cost,
+                        std::cmp::Reverse(current.uses.len()),
+                        current.register_order,
+                        current.transition_at,
+                    )
+            }) {
+                continue;
+            }
+            let mut segments = owner_nodes[owner]
+                .iter()
+                .copied()
+                .filter_map(|node| {
+                    if !needed[node] {
+                        return None;
+                    }
+                    let mut segment = free[node];
+                    if node == seed.node {
+                        segment.start = segment.start.max(seed.site.slot());
+                    }
+                    (segment.start < segment.end).then_some(segment)
+                })
+                .collect::<Vec<_>>();
+            segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+            *best = Some(RegionCandidate {
                 register,
                 register_order,
                 segments,
@@ -1812,13 +1855,13 @@ impl<'a> Allocator<'a> {
                 total_cost,
             });
         }
-        Ok(candidates)
+        Ok(())
     }
 
     fn try_split(
         &mut self,
         id: AllocationBundleId,
-        probes: &[RegisterProbe],
+        probes: &mut [RegisterProbe],
     ) -> Result<bool, IntervalAllocationError> {
         let bundle = self.bundle(id)?;
         if bundle.uses.len() < 2 {
@@ -1826,34 +1869,31 @@ impl<'a> Allocator<'a> {
         }
         let baseline = bundle.spill_cost;
         let root = bundle.root;
+        for probe in probes.iter_mut() {
+            self.materialize_conflicts(id, probe)?;
+        }
         let topology = self.split_topology(id)?;
         let home_plan = self.home_plan(root)?;
         let mut best = None::<RegionCandidate>;
-        for probe in probes {
-            for candidate in
-                self.region_candidates(id, probe.register, probe.order, &topology, home_plan)?
-            {
-                if candidate.total_cost >= baseline {
-                    continue;
-                }
-                let candidate_key = (
-                    candidate.total_cost,
-                    std::cmp::Reverse(candidate.uses.len()),
-                    candidate.register_order,
-                    candidate.transition_at,
-                );
-                if best.as_ref().is_none_or(|current| {
-                    candidate_key
-                        < (
-                            current.total_cost,
-                            std::cmp::Reverse(current.uses.len()),
-                            current.register_order,
-                            current.transition_at,
-                        )
-                }) {
-                    best = Some(candidate);
-                }
-            }
+        for probe in probes.iter() {
+            let cuts = probe.cuts.as_deref().ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.PROBE_STATE",
+                    None,
+                    Some(id),
+                    "split probe has no cached occupancy cuts",
+                )
+            })?;
+            self.consider_region_candidates(
+                id,
+                probe.register,
+                probe.order,
+                &topology,
+                cuts,
+                home_plan,
+                baseline,
+                &mut best,
+            )?;
         }
         let Some(candidate) = best else {
             return Ok(false);
@@ -2055,7 +2095,7 @@ impl<'a> Allocator<'a> {
             let mut probes = self.register_probes();
             if self.try_recolor(item.id, &mut probes)?
                 || self.try_evict(item.id, &mut probes)?
-                || self.try_split(item.id, &probes)?
+                || self.try_split(item.id, &mut probes)?
             {
                 continue;
             }
@@ -3316,8 +3356,8 @@ mod tests {
         let candidate = bundle_id(&graph, VReg(0));
         let resident = bundle_id(&graph, VReg(1));
         allocator.assign_register(resident, PhysReg::RAX).unwrap();
-        let probes = allocator.register_probes();
-        assert!(allocator.try_split(candidate, &probes).unwrap());
+        let mut probes = allocator.register_probes();
+        assert!(allocator.try_split(candidate, &mut probes).unwrap());
         let BundleAssignment::Split { children, .. } =
             &allocator.bundles[candidate.0 as usize].assignment
         else {

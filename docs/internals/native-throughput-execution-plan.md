@@ -2730,6 +2730,37 @@ phase remains.  Further work therefore moves to free-range/candidate search;
 the root home policy is not to be tuned with cutoffs.  Production MIR still
 uses the legacy allocator, so this remains a diagnostic compile-only result.
 
+Step 27c5f unifies interference and split projection instead of accelerating
+two separate searches.  Once availability has failed, one staged physical-
+register query now returns both the unique conflicting bundles used by
+recolor/eviction and exact occupied cuts indexed by the candidate's canonical
+segment number.  The register probe owns both results under one validity
+invariant.  If recolor and eviction fail without mutating the matrix, splitting
+consumes those cached cuts directly.  It no longer searches the same ordered
+interval union again, allocates a free-range difference there, resolves each
+free segment's block, and maps it back to a canonical topology node.
+
+Split selection is also streaming.  The free graph computes dominance,
+covered uses, the reverse slice, and exact home cost first.  Candidates which
+cannot beat the unsplit home or the current global incumbent are discarded
+before allocating a segment vector.  Only an improving candidate materializes
+segments and clones its use subset; there is no per-register vector of fully
+formed candidates.  The same-block, cross-block, and sibling-arm regressions
+continue to exercise the resulting CFG semantics, while the interval-union
+test independently checks that the staged query reports the same conflict set
+and exact canonical cuts.
+
+The retained CPU-0 non-LTO diagnostic is
+`target/heliodor/results/20260718T153550Z_celox_test_soc_linux_boot.log`.
+It completed with `compile_ns=111349015315`, `execute_ns=0`, and allocation
+times of 21.190 s for `eval_apply_ff`, 23.277 s for `eval_only_ff`, 30.433 s
+for `eval_comb`, and 11.727 s for `eval_comb_apply_ff`.  Relative to Step
+27c5e, those phases improve by 3.409 / 4.785 / 20.913 / 11.303 s and the
+critical compile interval improves by 14.862 s.  This is the first retained
+27c5 slice after immutable recoloring with a large improvement from one
+allocator design change.  Production MIR remains on the legacy allocator, so
+the result is still compile-only and makes no Linux semantic claim.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2787,6 +2818,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c5c staged register queries and immutable recolor planning | this step | allocator 10/10 including multi-resident recolor and atomic error rollback | lib 803/803; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 131.863 s; allocation 26.015 / 30.538 / 55.274 / 29.845 s | failed speculative recolor removed; per-register split-graph reconstruction remains rejected |
 | 27c5d bundle-owned split topology and occupancy cuts | this step | allocator 11/11 including topology reuse, same-block, cross-block, and sibling-arm splits; interval union 6/6 | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 129.858 s; allocation 26.500 / 31.208 / 53.007 / 25.172 s | repeated CFG/use topology construction removed; 2.005 s total improvement is insufficient, so remaining allocation-wide work stays open |
 | 27c5e root-owned home choice and additive cost plan | this step | allocator 11/11 including shared-stack partition, subset/complement equality, single-use materialization, and root-plan reuse | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 126.211 s; allocation 24.600 / 28.062 / 51.346 / 23.031 s | repeated home partition and losing-candidate materialization removed; free-range/candidate search remains the dominant open allocator design |
+| 27c5f staged conflict/cut queries and streaming region selection | this step | interval union 6/6 including exact canonical cuts; allocator 11/11 including same-block, cross-block, and sibling-arm split semantics | lib 804/804; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and docs pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 111.349 s; allocation 21.190 / 23.277 / 30.433 / 11.727 s | second interval-union search and fully materialized losing candidates removed; compile-only improves 14.862 s |
 
 ## Related design records
 
