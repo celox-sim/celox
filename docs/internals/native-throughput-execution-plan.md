@@ -2160,6 +2160,147 @@ allocator's split/home decisions remain open.
 Status: **complete and qualified as one SIR/StateSSA placement improvement;
 the dominant generated-execution gap remains unexplained**.
 
+### Step 24: Re-evaluate cross-phase stable forwarding on the current pipeline
+
+The previously staged cross-phase stable-slot rewrite was enabled only for a
+diagnostic build of the current Step 23 pipeline.  The source RTL was unchanged:
+the pre-optimized SIR hash remained
+`336d6b7bd66ea0c824293dd69c25fe2c7aa9f862b7a070ab73949db0bf3771d4`, and
+the post-optimized SIR hash remained
+`babcca2ac53a003eaf77dab35ae45faf052802de614b9a660b4d024eeddf5900`.
+The diagnostic native-optimized SIR and complete MIR hashes were respectively
+`380d95cf593dfbceac3b4af564de5b3525e6ab0d8a54773d9e0419bfaf550e48` and
+`69e9807199dd8396ba2952f24046429712e2bdaa6a8f282106e69f50bb7f28ac`.
+
+The complete MIR disproves the simple hypothesis that this existing switch
+already removes the important comb-to-FF round trips.  For example, the comb
+store to SIM offset 33,997,788 remains, and the FF suffix still loads that
+offset.  The rewrite changes other FF expressions and introduces additional
+reloads on their control-flow paths, but the fused spill frame changes only
+from 37,768 to 37,864 bytes.  It therefore does not implement the required
+phase-boundary MemorySSA/home selection.
+
+A same-process CPU-0 non-LTO run of that exact diagnostic binary reached normal
+`reboot: Power down` at exactly `cy=9ae070 x3=aa pass=1`.  Code generation took
+82.192516725 s and generated execution took 121.003125285 s.  Step 23 took
+120.989709386 s to execute, so the difference is 0.013415899 s and is not a
+throughput improvement.  The switch remains disabled and the worktree contains
+no retained diagnostic source change.
+
+Status: **rejected without a commit; the existing cross-phase rewrite is not a
+large-gap solution**.
+
+### Step 25: Identify one dominant hot-path difference before further changes
+
+Step 25 deliberately stops searching for isolated Mux or instruction-count
+improvements.  It must identify a difference that occurs on a substantial
+fraction of generated execution before implementation begins.
+
+1. Rebuild the unchanged Step 23 source with the non-LTO `heliodor-dev`
+   profile.  Sample the Linux execution with the existing basic-block perf map;
+   do not instrument RTL, SIR, MIR, or emitted machine code.  Retain the exact
+   Linux terminal marker and the trace hashes that identify the generated code.
+2. Sample the matching Veryl AOT execution and map its hot samples to the 31
+   emitted C chunks.  Sampling data is only a locator: inspect the complete
+   post-RA instruction paths and corresponding C/RTL before assigning a cause.
+3. For the dominant Celox blocks, compare the actual executed transition with
+   Veryl.  Separate state-memory round trips, stack spill/reload, parallel-copy
+   (`mov`/`xchg`) repair, duplicated comb/FF evaluation, and work skipped by
+   control flow.  Do not infer hot cost from whole-function size or cold code.
+4. Select an architectural change only if the affected transitions account for
+   at least a substantial hot share or occur on the full per-cycle path.  The
+   likely design choices are phase-boundary MemorySSA homes visible before
+   pressure scheduling, or bounded allocation regions with explicit state
+   homes; the profile and exact code, not this prior, decide between them.
+5. Test each retained substep separately: focused optimizer/allocator tests,
+   format/check and the common native tests, a complete exact SIR/MIR trace,
+   then the same-process CPU-0 Linux gate.  Use non-LTO builds while iterating
+   and perform a release/LTO qualification only after the complete step wins.
+
+The unchanged Step 23 code was then measured with grouped retired-instruction
+and cycle sampling.  Sampling did not change RTL, SIR, MIR, or emitted code,
+and both sampled executions reached the exact `cy=9ae070 x3=aa pass=1`
+power-down marker.  The uninstrumented Step 23 timing remains the acceptance
+baseline; sampled wall times are not used as throughput results.
+
+The generated Celox function retired approximately 1.794 trillion
+instructions, while the synchronous Veryl AOT functions retired approximately
+0.594 trillion instructions for the same tick count.  Celox therefore executes
+about 3.02 times as many generated instructions.  Its approximate generated
+IPC is higher, not lower (`2.15` versus `1.63`), so front-end starvation from
+the large function is not the dominant explanation.  The uninstrumented
+execution times are `120.989709386 s` for Step 23 and `54.994564647 s` for the
+synchronous Veryl AOT run, a 2.20x wall-time gap which the higher Celox IPC
+partly hides.
+
+Retired-instruction samples were mapped back to the exact Step 23 x86
+disassembly and used only to locate code for inspection.  Stack accesses are
+about 7.3% of Celox generated instructions and 11.6% of Veryl generated
+instructions.  In absolute terms, the excess Celox stack instructions explain
+only about 5% of the complete retired-instruction gap.  Bounded allocation
+regions may still improve the 37,768-byte frame, but regional register
+allocation is not the first dominant fix.
+
+The exact hot SIR and MIR instead expose a state-representation problem.  For
+example, fused block `b9` loads an 839-bit packed state value, extracts
+508-, 82-, and 32-bit fragments, and updates many 1--5-bit fields in other
+packed values.  Native lowering implements narrow reads as containing-word
+loads followed by shift/mask operations, and narrow writes as
+load/and/or/store read-modify-write sequences.  The corresponding Veryl C uses
+independent `uint32_t`/`uint64_t` host slots for most small values, allowing
+GCC's scalar replacement, DSE, and vectorization to remove or combine that
+work.
+
+This representation difference agrees with the complete dynamic instruction
+comparison.  Celox executes approximately 4.4x as many `and` instructions,
+5.7x as many shifts, 16x as many zero-extending loads, and 19x as many
+conditional moves.  Celox and Veryl execute roughly the same absolute number
+of branches; Celox's lower branch percentage is caused by the additional
+scalar packing dataflow, not by a branch-free hot path replacing all Veryl
+control flow.  Veryl SIMD instructions are only about 6.6% of its generated
+instruction stream, so SIMD alone cannot explain the threefold retired-work
+difference either.
+
+Status: **complete; the dominant gap is excess packed-state scalar work caused
+by missing aggregate SROA/mem2reg, while spill/reload is a secondary target**.
+
+### Step 26: Promote packed state through atomized MemorySSA
+
+Implement the missing scalar-replacement layer without changing RTL storage
+semantics at observable boundaries.
+
+1. Canonicalize eligible static packed-state accesses into non-overlapping
+   native-word atoms.  Reject dynamic/indexed accesses, address aliases,
+   commits, four-state storage initially, and stores with trigger or capture
+   effects.  Preserve the original packed memory as the externally visible
+   home.
+2. Build pruned SSA names for those atoms over the complete SIR CFG.  A narrow
+   store updates the affected atom values, a wide load composes the reaching
+   atoms, and joins/loops receive block parameters from dominance-frontier
+   placement.  This extends rather than weakens the existing exact-fragment
+   StateSSA.
+3. Remove intermediate memory stores only after the atom SSA proof succeeds.
+   Materialize dirty atoms before an observable barrier and on every normal or
+   error exit.  An unchanged incoming memory value must not be written back.
+4. Verify the rewritten EU independently: every replaced load has one reaching
+   atom version, every removed store reaches the required writeback, and no
+   dynamic/effectful access was admitted.  Add diamond, loop, partial-overlap,
+   mixed-width, unchanged-edge, and rejection tests before enabling the pass
+   in native fused emission.
+5. For each retained slice, run its focused tests and the common non-LTO gates,
+   regenerate the complete optimized SIR/MIR/assignment/disassembly trace,
+   and run the same-process CPU-0 Linux test.  Retain the implementation only
+   if the exact tick/result is unchanged and generated execution improves
+   substantially.  Use final release/LTO qualification only after the complete
+   step wins.
+6. Re-profile the retained form.  If packed-state normalization removes the
+   dominant shift/mask/RMW excess, proceed to bounded regional allocation and
+   explicit MemorySSA homes for the remaining spill/reload work.  Do not tune
+   allocator heuristics against the pre-SROA instruction stream.
+
+Status: **planned; atomization and CFG writeback correctness are the first
+implementation slice**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -2198,6 +2339,7 @@ the dominant generated-execution gap remains unexplained**.
 | 21a exact block-transition extraction | `e10c9c2e` | allocator 155/155; native MIR 6/6 | format, docs, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR and MIR byte-identical to isolated Step 18 baseline | compile 74.179 s; execute 144.439 s; no timing claim | analysis infrastructure only; remaining throughput cause not established |
 | 22 word32 snapshot propagation | `278f6ecb` plus this step | width regression 1/1; MIR optimization 53/53; allocator 155/155; native MIR 6/6 | lib 768/768; docs, format, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical to Step 21a | compile 70.552 s; execute 123.199 s | concrete redundant work removed; shared-predicate live range and remaining gap open |
 | 23 coupled update short-circuit and dynamic StateSSA placement | this step | BranchifyMux 44/44; placement 12/12; StateSSA 8/8 | lib 774/774; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; exact final SIR/MIR trace retained | compile 77.247 s; execute 120.990 s | exact local defect fixed; execute -1.79%; dominant gap remains open |
+| 24 cross-phase stable-forwarding diagnostic | rejected (no commit) | exact full SIR/MIR comparison | unchanged source and pre/post SIR hashes | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1` | compile 82.193 s; execute 121.003 s | no improvement; switch remains disabled |
 
 ## Related design records
 
