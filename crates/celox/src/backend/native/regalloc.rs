@@ -255,7 +255,7 @@ pub(crate) fn run_regalloc_with_label_and_trace(
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
-    mut trace: Option<&mut RegallocTrace>,
+    trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -322,7 +322,7 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
-    if let Some(trace) = trace.as_deref_mut() {
+    if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
     let cssa_start = timing.then(crate::timing::now);
