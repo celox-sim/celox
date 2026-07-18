@@ -2526,6 +2526,17 @@ Step 26d trace used a different source registration order and consequently
 already differed in pre-optimization SIR, so it was not used to infer a backend
 change.
 
+Step 27c1 adds the physical-register interference matrix used by the
+replacement allocator.  Each register owns an ordered interval union per CFG
+block rather than one layout-linearized range.  Queries touch only blocks
+present in the candidate's sparse segments, so mutually exclusive branch arms
+can share a register while same-block overlaps remain exact.  Assignment and
+removal update a bidirectional bundle/register map transactionally.  The same
+structure computes maximal free segment differences for later region
+splitting, and an independent verifier rebuilds every ordered union from the
+bundle memberships.  This slice supplies allocation mechanism only; it does
+not yet choose registers or alter production MIR.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2574,6 +2585,7 @@ new allocator produces a substantial non-LTO execution win.
 | 26a disjoint bit-range state reload homes | this step | reload 32/32; complete normalized post-RA MIR inspection | lib 776/776; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR unchanged | compile 75.665 s; execute 114.833 s | allocator prerequisite retained; one stack home removed; aggregate promotion remains open |
 | 27a exact sparse live intervals | this step | live-interval construction and independent verification 5/5 | lib 781/781; check and format pass | analysis-only module is not connected to allocation; generated MIR is unchanged | n/a | stable instruction/phi-edge slots, CFG-sparse segments, and an independent liveness verifier complete |
 | 27b live bundles and HomeGraph | this step | HomeGraph 6/6; legacy reload 32/32 | lib 787/787; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | parent/candidate complete pre/post/native SIR and MIR byte-identical; parent exact Linux marker remains applicable | trace-only compile: parent 74.106 s, candidate 72.213 s; no timing claim | version-independent home shapes plus exact per-use MemorySSA recipes represented; production allocator unchanged |
+| 27c1 sparse physical interval unions | this step | interval-union insertion/removal/interference/free-region 4/4 | lib 791/791; check, strict clippy, and format pass | diagnostic allocator structure is not connected to production MIR | n/a | per-register sparse interference matrix and independent rebuild verifier complete |
 
 ## Related design records
 

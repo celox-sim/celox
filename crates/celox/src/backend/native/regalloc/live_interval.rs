@@ -17,8 +17,12 @@ use super::cfg::NormalizedCfg;
 pub(super) struct SlotIndex(u64);
 
 impl SlotIndex {
-    fn next(self) -> Option<Self> {
+    pub(super) fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
+    }
+
+    pub(super) fn distance_to(self, end: Self) -> Option<u64> {
+        end.0.checked_sub(self.0)
     }
 }
 
@@ -115,11 +119,11 @@ pub(super) struct LiveSegment {
 }
 
 impl LiveSegment {
-    fn contains(self, slot: SlotIndex) -> bool {
+    pub(super) fn contains(self, slot: SlotIndex) -> bool {
         self.start <= slot && slot < self.end
     }
 
-    fn overlaps(self, other: Self) -> bool {
+    pub(super) fn overlaps(self, other: Self) -> bool {
         self.block == other.block && self.start < other.end && other.start < self.end
     }
 }
