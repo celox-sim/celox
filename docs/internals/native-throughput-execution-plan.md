@@ -3067,6 +3067,24 @@ problem still walks every active value before the persistent matrix accepts
 its delta. Those all-world operations are the next session-owned indexes; this
 step makes no Linux execution or throughput claim.
 
+Step 27d9d makes target constraints part of that persistent session. Each
+allocation-IR block owns its fixed-use, clobber, copy, and phi-affinity facts.
+A split reports physical blocks whose instruction positions changed separately
+from semantic phi-successor blocks whose source rows changed. Only those fact
+rows are replaced. Fixed constraints are indexed by stable VReg, affinity
+facts are reference-counted across blocks, and allowed-register masks are
+recomputed only for values whose facts or sparse ranges changed. Clobber
+queries walk the changed value's own sparse block segments rather than every
+function value.
+
+The complete machine-fact model is still built independently at initial and
+final publication boundaries. Focused tests shift instruction slots across a
+target clobber and rewrite a phi predecessor source, then require the
+incremental model to equal a fresh complete rebuild. Common candidate gates
+pass. The split loop no longer rebuilds machine facts or target masks globally,
+but joint region/value rows and the transactional expanded-problem clone remain
+all-world operations, so this step again makes no Linux timing claim.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3138,6 +3156,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9a stable block slots and allocation-session identities | this step | stable cross-block slot 1/1; stable dead-materialization identity 1/1; split 5/5; lowering 3/3 | candidate lib 836/836; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | not rerun; this prerequisite does not yet replace whole-problem liveness/recoloring | n/a | block-local coordinates and monotonic synthetic IDs remove global renumbering; persistent region/matrix state remains next |
 | 27d9b persistent physical interval allocation | this step | stable bundle-hole 1/1; retained matrix-membership 1/1; joint allocation 6/6; split 5/5 | candidate lib 838/838; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and all-target strict clippy pass | no result: compile-only candidate timed out with three joint-allocation workers active | 600.292 s timeout; HomeGraph/root/expand phases complete | unchanged values retain matrix membership, but repeated whole-IR liveness remains dominant and is the next architectural boundary |
 | 27d9c differential allocation liveness | this step | incremental instruction/phi-edge liveness 2/2; regalloc 221/221; split 5/5 | candidate lib 840/840; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global constraint/region/joint-row rebuilding remains in the split loop | n/a | changed block facts rebuild only affected sparse SSA ranges; independent whole-program proofs remain at publication; session-owned constraints and semantic rows are next |
+| 27d9d differential target constraints | this step | incremental clobber/phi-affinity constraints 2/2; regalloc 223/223; split 5/5 | candidate lib 842/842; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | not rerun; global joint region/value rebuilding and full transactional clones remain | n/a | fixed/clobber/copy/phi facts are block indexed and masks update only changed VRegs; complete constraints are independently rebuilt at publication |
 
 ## Related design records
 

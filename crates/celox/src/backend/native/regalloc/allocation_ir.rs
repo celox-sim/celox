@@ -820,100 +820,27 @@ impl AllocationIr {
         let mut instructions = Vec::new();
         let mut affinities = BTreeSet::new();
         for block in &self.blocks {
-            for phi in &block.phis {
-                if !phi.register_definition {
-                    continue;
-                }
-                for ((_, source), in_register) in phi.sources.iter().zip(&phi.register_sources) {
-                    if *in_register {
-                        insert_affinity(
-                            &mut affinities,
-                            *source,
-                            phi.destination,
-                            AllocationAffinityKind::Phi,
-                        );
-                    }
-                }
-            }
-            for (position, instruction) in block.instructions.iter().enumerate() {
-                let (fixed_uses, instruction_clobbers, copy) = match instruction.origin {
-                    AllocationInstructionOrigin::Original { .. } => {
-                        let original = instruction.original.as_ref().ok_or_else(|| {
-                            AllocationIrError::new(
-                                "ALLOCATION_IR.CONSTRAINT_SNAPSHOT",
-                                Some(block.id),
-                                Some(position),
-                                instruction.uses.to_vec(),
-                                "original allocation instruction has no target-opcode snapshot",
-                            )
-                        })?;
-                        let constraints = use_constraints(original, shift_encoding);
-                        if constraints.len() != instruction.uses.len() {
-                            return Err(AllocationIrError::new(
-                                "ALLOCATION_IR.CONSTRAINT_ARITY",
-                                Some(block.id),
-                                Some(position),
-                                instruction.uses.to_vec(),
-                                "target operand constraints do not match rewritten MIR arity",
-                            ));
-                        }
-                        let fixed = instruction
-                            .uses
-                            .into_iter()
-                            .zip(constraints)
-                            .filter_map(|(value, constraint)| match constraint {
-                                RegConstraint::Any => None,
-                                RegConstraint::Fixed(register) => Some((value, register)),
-                            })
-                            .collect();
-                        let copy = match original {
-                            MInst::Mov { .. } | MInst::Mov32 { .. } => {
-                                copy_operands(block.id, position, instruction)?
-                            }
-                            _ => None,
-                        };
-                        (fixed, clobbers(original).to_vec(), copy)
-                    }
-                    AllocationInstructionOrigin::Synthetic { operation, .. } => {
-                        let copy = match operation {
-                            SyntheticOperation::RecipeNode { node, .. }
-                                if matches!(
-                                    graph.recipe_nodes.get(node.0 as usize),
-                                    Some(RecipeNode::Unary {
-                                        operation: PureStep::Copy64 | PureStep::Copy32,
-                                        ..
-                                    })
-                                ) =>
-                            {
-                                copy_operands(block.id, position, instruction)?
-                            }
-                            _ => None,
-                        };
-                        (Vec::new(), Vec::new(), copy)
-                    }
-                };
-                if let Some((source, destination)) = copy {
-                    insert_affinity(
-                        &mut affinities,
-                        source,
-                        destination,
-                        AllocationAffinityKind::Copy,
-                    );
-                }
-                if !fixed_uses.is_empty() || !instruction_clobbers.is_empty() {
-                    instructions.push(AllocationInstructionConstraints {
-                        block: block.id,
-                        instruction: position,
-                        fixed_uses,
-                        clobbers: instruction_clobbers,
-                    });
-                }
-            }
+            let facts = machine_block_facts(block, graph, shift_encoding)?;
+            instructions.extend(facts.instructions);
+            affinities.extend(facts.affinities);
         }
         Ok(AllocationMachineFacts {
             instructions,
             affinities: affinities.into_iter().collect(),
         })
+    }
+
+    /// Rebuild target facts for one allocation-IR block. Session-owned
+    /// constraint analysis calls this only for blocks touched by a split; the
+    /// complete independently verified rebuild remains [`Self::machine_facts`].
+    pub(super) fn machine_facts_for_block(
+        &self,
+        block: BlockId,
+        graph: &HomeGraph,
+        shift_encoding: VariableShiftEncoding,
+    ) -> Result<AllocationMachineFacts, AllocationIrError> {
+        let block = self.block(block)?;
+        machine_block_facts(&self.blocks[block], graph, shift_encoding)
     }
 
     /// Export the exact location-level def/use facts needed for stack-home
@@ -1698,6 +1625,108 @@ fn copy_operands(
         ));
     };
     Ok(Some((*source, destination)))
+}
+
+fn machine_block_facts(
+    block: &AllocationBlock,
+    graph: &HomeGraph,
+    shift_encoding: VariableShiftEncoding,
+) -> Result<AllocationMachineFacts, AllocationIrError> {
+    let mut instructions = Vec::new();
+    let mut affinities = BTreeSet::new();
+    for phi in &block.phis {
+        if !phi.register_definition {
+            continue;
+        }
+        for ((_, source), in_register) in phi.sources.iter().zip(&phi.register_sources) {
+            if *in_register {
+                insert_affinity(
+                    &mut affinities,
+                    *source,
+                    phi.destination,
+                    AllocationAffinityKind::Phi,
+                );
+            }
+        }
+    }
+    for (position, instruction) in block.instructions.iter().enumerate() {
+        let (fixed_uses, instruction_clobbers, copy) = match instruction.origin {
+            AllocationInstructionOrigin::Original { .. } => {
+                let original = instruction.original.as_ref().ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.CONSTRAINT_SNAPSHOT",
+                        Some(block.id),
+                        Some(position),
+                        instruction.uses.to_vec(),
+                        "original allocation instruction has no target-opcode snapshot",
+                    )
+                })?;
+                let constraints = use_constraints(original, shift_encoding);
+                if constraints.len() != instruction.uses.len() {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.CONSTRAINT_ARITY",
+                        Some(block.id),
+                        Some(position),
+                        instruction.uses.to_vec(),
+                        "target operand constraints do not match rewritten MIR arity",
+                    ));
+                }
+                let fixed = instruction
+                    .uses
+                    .into_iter()
+                    .zip(constraints)
+                    .filter_map(|(value, constraint)| match constraint {
+                        RegConstraint::Any => None,
+                        RegConstraint::Fixed(register) => Some((value, register)),
+                    })
+                    .collect();
+                let copy = match original {
+                    MInst::Mov { .. } | MInst::Mov32 { .. } => {
+                        copy_operands(block.id, position, instruction)?
+                    }
+                    _ => None,
+                };
+                (fixed, clobbers(original).to_vec(), copy)
+            }
+            AllocationInstructionOrigin::Synthetic { operation, .. } => {
+                let copy = match operation {
+                    SyntheticOperation::RecipeNode { node, .. }
+                        if matches!(
+                            graph.recipe_nodes.get(node.0 as usize),
+                            Some(RecipeNode::Unary {
+                                operation: PureStep::Copy64 | PureStep::Copy32,
+                                ..
+                            })
+                        ) =>
+                    {
+                        copy_operands(block.id, position, instruction)?
+                    }
+                    _ => None,
+                };
+                (Vec::new(), Vec::new(), copy)
+            }
+        };
+        if let Some((source, destination)) = copy {
+            insert_affinity(
+                &mut affinities,
+                source,
+                destination,
+                AllocationAffinityKind::Copy,
+            );
+        }
+        if !fixed_uses.is_empty() || !instruction_clobbers.is_empty() {
+            instructions.push(AllocationInstructionConstraints {
+                block: block.id,
+                instruction: position,
+                fixed_uses,
+                clobbers: instruction_clobbers,
+            });
+        }
+    }
+    Ok(AllocationMachineFacts {
+        instructions,
+        affinities: affinities.into_iter().collect(),
+    })
 }
 
 fn insert_affinity(

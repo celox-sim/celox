@@ -12,7 +12,7 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, VReg};
 
 use super::allocation_expand::ExpandedAllocationProblem;
-use super::allocation_ir::AllocationAffinityKind;
+use super::allocation_ir::{AllocationAffinity, AllocationAffinityKind, AllocationMachineFacts};
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::HomeGraph;
@@ -70,6 +70,28 @@ pub(super) struct AllocationConstraintModel {
     value_count: u32,
     allowed: Vec<RegisterMask>,
     pub affinities: Vec<WeightedAffinity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedConstraintPoint {
+    block: BlockId,
+    instruction: usize,
+    register: PhysReg,
+}
+
+/// Persistent target-constraint facts for one allocation session.
+///
+/// Synthetic insertion can shift every clobber point in one block, while a
+/// rewritten fixed operand or copy changes only that block's semantic facts.
+/// The index replaces those rows and recomputes masks only for values whose
+/// sparse interval or local facts changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IncrementalConstraintModel {
+    registers: Vec<PhysReg>,
+    block_facts: Vec<AllocationMachineFacts>,
+    fixed_by_value: Vec<Vec<FixedConstraintPoint>>,
+    affinity_counts: BTreeMap<AllocationAffinity, u32>,
+    model: AllocationConstraintModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +396,394 @@ impl AllocationConstraintModel {
     }
 }
 
+impl IncrementalConstraintModel {
+    pub(super) fn build(
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+    ) -> Result<Self, AllocationConstraintError> {
+        let model = AllocationConstraintModel::build(expanded, cfg, graph, registers)?;
+        let block_ids = dense_block_ids(cfg)?;
+        let mut block_facts = Vec::with_capacity(block_ids.len());
+        for block in block_ids {
+            block_facts.push(
+                expanded
+                    .ir
+                    .machine_facts_for_block(block, graph, expanded.shift_encoding)
+                    .map_err(machine_fact_error)?,
+            );
+        }
+        let mut result = Self {
+            registers: registers.to_vec(),
+            block_facts,
+            fixed_by_value: vec![Vec::new(); expanded.ir.value_count() as usize],
+            affinity_counts: BTreeMap::new(),
+            model,
+        };
+        for facts in result.block_facts.clone() {
+            result.add_facts(&facts)?;
+        }
+        let rebuilt_affinities = weighted_affinities(&result.affinity_counts)?;
+        if result.model.affinities != rebuilt_affinities {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.BLOCK_FACT_IDENTITY",
+                None,
+                None,
+                Vec::new(),
+                "block-indexed affinities differ from the complete machine-fact rebuild",
+            ));
+        }
+        Ok(result)
+    }
+
+    pub(super) fn model(&self) -> &AllocationConstraintModel {
+        &self.model
+    }
+
+    pub(super) fn update(
+        &mut self,
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        changed_blocks: &BTreeSet<BlockId>,
+        changed_values: &[VReg],
+    ) -> Result<Vec<VReg>, AllocationConstraintError> {
+        if self.registers.is_empty()
+            || self.block_facts.len() != cfg.successors.len()
+            || expanded.ir.value_count() < self.model.value_count
+        {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.SESSION_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                "incremental constraint state is outside its stable allocation session",
+            ));
+        }
+        let target = RegisterMask::from_registers(&self.registers);
+        let value_count = expanded.ir.value_count() as usize;
+        self.fixed_by_value.resize_with(value_count, Vec::new);
+        self.model.allowed.resize(value_count, target);
+        self.model.value_count = expanded.ir.value_count();
+
+        let mut affected = changed_values.iter().copied().collect::<BTreeSet<_>>();
+        for block in changed_blocks {
+            let row = cfg.block_index.get(block).copied().ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.SESSION_BLOCK",
+                    Some(*block),
+                    None,
+                    Vec::new(),
+                    "changed constraint block is outside the normalized CFG",
+                )
+            })?;
+            let old = self.block_facts[row].clone();
+            affected.extend(fact_values(&old));
+            self.remove_facts(&old)?;
+            let next = expanded
+                .ir
+                .machine_facts_for_block(*block, graph, expanded.shift_encoding)
+                .map_err(machine_fact_error)?;
+            affected.extend(fact_values(&next));
+            self.add_facts(&next)?;
+            self.block_facts[row] = next;
+        }
+
+        let mut changed = Vec::new();
+        for value in affected {
+            let index = value.0 as usize;
+            if index >= value_count {
+                return Err(AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.VALUE_RANGE",
+                    None,
+                    None,
+                    vec![value],
+                    "changed target fact references a value outside the allocation session",
+                ));
+            }
+            let next = self.allowed_for_value(expanded, cfg, value)?;
+            if self.model.allowed[index] != next {
+                changed.push(value);
+                self.model.allowed[index] = next;
+            }
+        }
+        self.model.affinities = weighted_affinities(&self.affinity_counts)?;
+        Ok(changed)
+    }
+
+    fn add_facts(
+        &mut self,
+        facts: &AllocationMachineFacts,
+    ) -> Result<(), AllocationConstraintError> {
+        for instruction in &facts.instructions {
+            for &(value, register) in &instruction.fixed_uses {
+                let row = self
+                    .fixed_by_value
+                    .get_mut(value.0 as usize)
+                    .ok_or_else(|| {
+                        AllocationConstraintError::new(
+                            "ALLOCATION_CONSTRAINT.FIXED_VALUE",
+                            Some(instruction.block),
+                            Some(instruction.instruction),
+                            vec![value],
+                            "fixed operand is outside the incremental value domain",
+                        )
+                    })?;
+                row.push(FixedConstraintPoint {
+                    block: instruction.block,
+                    instruction: instruction.instruction,
+                    register,
+                });
+            }
+        }
+        for &affinity in &facts.affinities {
+            let count = self.affinity_counts.entry(affinity).or_default();
+            *count = count.checked_add(1).ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.AFFINITY_COUNT",
+                    None,
+                    None,
+                    vec![affinity.left, affinity.right],
+                    "block affinity reference count exceeds u32",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn remove_facts(
+        &mut self,
+        facts: &AllocationMachineFacts,
+    ) -> Result<(), AllocationConstraintError> {
+        for instruction in &facts.instructions {
+            for &(value, register) in &instruction.fixed_uses {
+                let point = FixedConstraintPoint {
+                    block: instruction.block,
+                    instruction: instruction.instruction,
+                    register,
+                };
+                let row = self
+                    .fixed_by_value
+                    .get_mut(value.0 as usize)
+                    .ok_or_else(|| {
+                        AllocationConstraintError::new(
+                            "ALLOCATION_CONSTRAINT.FIXED_VALUE",
+                            Some(instruction.block),
+                            Some(instruction.instruction),
+                            vec![value],
+                            "removed fixed operand is outside the incremental value domain",
+                        )
+                    })?;
+                let position = row
+                    .iter()
+                    .position(|candidate| *candidate == point)
+                    .ok_or_else(|| {
+                        AllocationConstraintError::new(
+                            "ALLOCATION_CONSTRAINT.FIXED_IDENTITY",
+                            Some(instruction.block),
+                            Some(instruction.instruction),
+                            vec![value],
+                            "cached fixed operand is absent from its value index",
+                        )
+                    })?;
+                row.swap_remove(position);
+            }
+        }
+        for &affinity in &facts.affinities {
+            let count = self.affinity_counts.get_mut(&affinity).ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.AFFINITY_IDENTITY",
+                    None,
+                    None,
+                    vec![affinity.left, affinity.right],
+                    "cached block affinity is absent from the global index",
+                )
+            })?;
+            *count -= 1;
+            if *count == 0 {
+                self.affinity_counts.remove(&affinity);
+            }
+        }
+        Ok(())
+    }
+
+    fn allowed_for_value(
+        &self,
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        value: VReg,
+    ) -> Result<RegisterMask, AllocationConstraintError> {
+        let mut allowed = RegisterMask::from_registers(&self.registers);
+        for point in &self.fixed_by_value[value.0 as usize] {
+            allowed.intersect(if self.registers.contains(&point.register) {
+                RegisterMask(register_bit(point.register))
+            } else {
+                RegisterMask::empty()
+            });
+            if allowed.is_empty() {
+                return Err(AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.FIXED_MASK",
+                    Some(point.block),
+                    Some(point.instruction),
+                    vec![value],
+                    format!(
+                        "fixed operand has no common target color including {}",
+                        point.register
+                    ),
+                ));
+            }
+        }
+        let Some(interval) = expanded
+            .intervals
+            .intervals
+            .get(value.0 as usize)
+            .and_then(Option::as_ref)
+        else {
+            return Ok(allowed);
+        };
+        for segment in &interval.segments {
+            let block = cfg
+                .block_index
+                .get(&segment.block)
+                .copied()
+                .ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.SEGMENT_BLOCK",
+                        Some(segment.block),
+                        None,
+                        vec![value],
+                        "live segment is outside the block constraint index",
+                    )
+                })?;
+            let slots = expanded.intervals.block_slots[block];
+            for point in self.block_facts[block]
+                .instructions
+                .iter()
+                .filter(|point| !point.clobbers.is_empty())
+            {
+                let use_slot = slots.instruction_use(point.instruction).ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
+                        Some(point.block),
+                        Some(point.instruction),
+                        vec![value],
+                        "incremental clobber has no allocation use slot",
+                    )
+                })?;
+                let def_slot = slots.instruction_def(point.instruction).ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.INSTRUCTION_SLOT",
+                        Some(point.block),
+                        Some(point.instruction),
+                        vec![value],
+                        "incremental clobber has no allocation definition slot",
+                    )
+                })?;
+                if segment.contains(use_slot) && segment.contains(def_slot) {
+                    allowed.remove(&point.clobbers);
+                    if allowed.is_empty() {
+                        return Err(AllocationConstraintError::new(
+                            "ALLOCATION_CONSTRAINT.CLOBBER_MASK",
+                            Some(point.block),
+                            Some(point.instruction),
+                            vec![value],
+                            "value live through a target clobber has no remaining register",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(allowed)
+    }
+}
+
+fn dense_block_ids(cfg: &NormalizedCfg) -> Result<Vec<BlockId>, AllocationConstraintError> {
+    let mut result = vec![None; cfg.successors.len()];
+    for (&block, &row) in &cfg.block_index {
+        if row >= result.len() || result[row].replace(block).is_some() {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.BLOCK_INDEX",
+                Some(block),
+                None,
+                Vec::new(),
+                "normalized CFG block index is not a dense bijection",
+            ));
+        }
+    }
+    result
+        .into_iter()
+        .enumerate()
+        .map(|(row, block)| {
+            block.ok_or_else(|| {
+                AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.BLOCK_INDEX",
+                    None,
+                    None,
+                    Vec::new(),
+                    format!("normalized CFG has no block identity for row {row}"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn machine_fact_error(error: super::allocation_ir::AllocationIrError) -> AllocationConstraintError {
+    AllocationConstraintError::new(
+        error.rule,
+        error.block,
+        error.instruction,
+        error.values,
+        error.message,
+    )
+}
+
+fn fact_values(facts: &AllocationMachineFacts) -> impl Iterator<Item = VReg> + '_ {
+    facts
+        .instructions
+        .iter()
+        .flat_map(|instruction| instruction.fixed_uses.iter().map(|(value, _)| *value))
+        .chain(
+            facts
+                .affinities
+                .iter()
+                .flat_map(|affinity| [affinity.left, affinity.right]),
+        )
+}
+
+fn weighted_affinities(
+    counts: &BTreeMap<AllocationAffinity, u32>,
+) -> Result<Vec<WeightedAffinity>, AllocationConstraintError> {
+    let mut weights = BTreeMap::<(VReg, VReg), u32>::new();
+    for (affinity, count) in counts {
+        if *count == 0 {
+            continue;
+        }
+        let weight = match affinity.kind {
+            AllocationAffinityKind::Copy => 2,
+            AllocationAffinityKind::Phi => 1,
+        };
+        let entry = weights.entry((affinity.left, affinity.right)).or_default();
+        *entry = entry.checked_add(weight).ok_or_else(|| {
+            AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.AFFINITY_WEIGHT",
+                None,
+                None,
+                vec![affinity.left, affinity.right],
+                "copy/phi affinity weight exceeds u32",
+            )
+        })?;
+    }
+    Ok(weights
+        .into_iter()
+        .map(|((left, right), weight)| WeightedAffinity {
+            left,
+            right,
+            weight,
+        })
+        .collect())
+}
+
 fn apply_clobber_constraints(
     interval: &LiveInterval,
     clobbers_by_block: &BTreeMap<BlockId, Vec<ClobberPoint>>,
@@ -427,6 +837,7 @@ mod tests {
     };
 
     use super::super::allocation_expand::expand;
+    use super::super::allocation_ir::{StackHomeId, SyntheticOperation};
     use super::super::allocation_reallocate::{JointAllocationOutcome, JointAllocationProblem};
     use super::super::assignment::ALLOCATABLE_REGS;
     use super::super::home_graph;
@@ -617,6 +1028,165 @@ mod tests {
             merged_register == allocation.assignments[source.0 as usize]
                 || merged_register == allocation.assignments[copied.0 as usize],
             "the phi destination should coalesce with one non-interfering edge source"
+        );
+    }
+
+    #[test]
+    fn incremental_constraints_match_a_full_rebuild_after_local_slot_shift() {
+        let mut values = VRegAllocator::new();
+        let lhs = values.alloc();
+        let rhs = values.alloc();
+        let quotient = values.alloc();
+        let live_through = values.alloc();
+        let observed = values.alloc();
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 5]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: lhs, value: 8 });
+        block.push(MInst::LoadImm { dst: rhs, value: 2 });
+        block.push(MInst::LoadImm {
+            dst: live_through,
+            value: 9,
+        });
+        block.push(MInst::UDiv {
+            dst: quotient,
+            lhs,
+            rhs,
+        });
+        block.push(MInst::Add {
+            dst: observed,
+            lhs: quotient,
+            rhs: live_through,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: observed,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        function.push_block(block);
+
+        let (_function, cfg, graph, mut expanded) = expanded(function);
+        let mut incremental =
+            IncrementalConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap();
+        let site = expanded.intervals.intervals[observed.0 as usize]
+            .as_ref()
+            .unwrap()
+            .uses[0];
+        expanded
+            .ir
+            .insert_before_use(
+                site,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                crate::backend::native::mir::Uses::none(),
+                true,
+            )
+            .unwrap();
+        let changed_blocks = BTreeSet::from([site.block()]);
+        let changed_values = expanded
+            .incremental_liveness
+            .update(&expanded.ir, &cfg, &mut expanded.intervals, &changed_blocks)
+            .unwrap();
+        incremental
+            .update(&expanded, &cfg, &graph, &changed_blocks, &changed_values)
+            .unwrap();
+
+        assert_eq!(
+            incremental.model(),
+            &AllocationConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_constraints_rebuild_the_phi_successor_affinity_row() {
+        let mut values = VRegAllocator::new();
+        let source = values.alloc();
+        let copied = values.alloc();
+        let condition = values.alloc();
+        let merged = values.alloc();
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 4]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: source,
+            value: 7,
+        });
+        entry.push(MInst::Mov {
+            dst: copied,
+            src: source,
+        });
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(crate::backend::native::mir::PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), copied), (BlockId(2), source)],
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: merged,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        function.blocks = vec![entry, left, right, join];
+
+        let (_function, cfg, graph, mut expanded) = expanded(function);
+        let mut incremental =
+            IncrementalConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap();
+        let site = expanded.intervals.intervals[source.0 as usize]
+            .as_ref()
+            .unwrap()
+            .uses
+            .iter()
+            .copied()
+            .find(|site| {
+                matches!(
+                    site,
+                    super::super::live_interval::UseSite::PhiEdge {
+                        predecessor: BlockId(2),
+                        successor: BlockId(3),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        expanded.ir.rewrite_use(site, source, copied).unwrap();
+        let liveness_blocks = BTreeSet::from([BlockId(2)]);
+        let changed_values = expanded
+            .incremental_liveness
+            .update(
+                &expanded.ir,
+                &cfg,
+                &mut expanded.intervals,
+                &liveness_blocks,
+            )
+            .unwrap();
+        incremental
+            .update(
+                &expanded,
+                &cfg,
+                &graph,
+                &BTreeSet::from([BlockId(3)]),
+                &changed_values,
+            )
+            .unwrap();
+
+        assert_eq!(
+            incremental.model(),
+            &AllocationConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap()
         );
     }
 }

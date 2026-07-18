@@ -283,6 +283,12 @@ struct SplitProgress {
     register_uses: u128,
 }
 
+#[derive(Debug)]
+struct AppliedSplit {
+    constraint_blocks: BTreeSet<BlockId>,
+    changed_values: Vec<VReg>,
+}
+
 /// Select one exact resident region whose removal at `request.definition` has
 /// minimum proved transition cost.  Physical assignments are deliberately not
 /// considered final here; the returned values re-enter joint allocation.
@@ -415,14 +421,13 @@ pub(super) fn plan_split(
 /// IR checks, differential liveness, region ownership, and monotonic progress
 /// all pass. Independent whole-program stack and liveness proofs run once at
 /// the atomic lowering boundary.
-pub(super) fn apply_split(
+fn apply_split(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
     joint: &JointAllocationProblem,
     plan: &RegionSplitPlan,
     cfg: &NormalizedCfg,
-    registers: &[PhysReg],
-) -> Result<JointAllocationProblem, AllocationSplitError> {
+) -> Result<AppliedSplit, AllocationSplitError> {
     let candidate = candidate_from_plan(joint, plan)?;
     let dominance = Dominance::build(cfg)?;
     verify_plan(expanded, graph, joint, &candidate, plan, cfg, &dominance)?;
@@ -430,6 +435,7 @@ pub(super) fn apply_split(
     let mut next = expanded.clone();
     let graph_root = graph_root(graph, plan.root)?;
     let mut changed_blocks = BTreeSet::new();
+    let mut constraint_blocks = BTreeSet::new();
 
     let needs_stack = plan
         .entries
@@ -439,6 +445,7 @@ pub(super) fn apply_split(
     let stack_home = if needs_stack {
         if existing_stack_home.is_none() {
             changed_blocks.insert(graph_root.definition.block());
+            constraint_blocks.insert(graph_root.definition.block());
         }
         Some(ensure_stack_home(&mut next, graph_root)?)
     } else {
@@ -448,6 +455,10 @@ pub(super) fn apply_split(
     for entry in &plan.entries {
         let entry_use = expanded_use(&next, plan.root, entry.entry)?.clone();
         changed_blocks.insert(entry_use.original_site.block());
+        constraint_blocks.insert(entry_use.original_site.block());
+        if let UseSite::PhiEdge { successor, .. } = entry_use.original_site {
+            constraint_blocks.insert(successor);
+        }
         let lowered = allocation_expand::lower_use_materialization(
             &mut next.ir,
             graph,
@@ -548,11 +559,11 @@ pub(super) fn apply_split(
     }
 
     normalize_register_regions(&mut next)?;
-    changed_blocks.extend(prune_dead_materializations(&mut next)?);
-    allocation_expand::refresh(&mut next, cfg, &changed_blocks)
+    let pruned_blocks = prune_dead_materializations(&mut next)?;
+    changed_blocks.extend(pruned_blocks.iter().copied());
+    constraint_blocks.extend(pruned_blocks);
+    let changed_values = allocation_expand::refresh(&mut next, cfg, &changed_blocks)
         .map_err(AllocationSplitError::expand)?;
-    let next_joint = JointAllocationProblem::build_session(&next, cfg, graph, registers)
-        .map_err(AllocationSplitError::joint)?;
     let after = split_progress(&next);
     if after >= before {
         return Err(AllocationSplitError::new(
@@ -564,7 +575,10 @@ pub(super) fn apply_split(
         ));
     }
     *expanded = next;
-    Ok(next_joint)
+    Ok(AppliedSplit {
+        constraint_blocks,
+        changed_values,
+    })
 }
 
 /// Iterate exact splitting and joint coloring to a fixed point.  The bound is
@@ -602,7 +616,8 @@ pub(super) fn allocate_with_splitting(
     let joint = JointAllocationProblem::build(expanded, cfg, graph, registers)
         .map_err(AllocationSplitError::joint)?;
     let mut session =
-        JointAllocationSession::new(joint, cfg, registers).map_err(AllocationSplitError::joint)?;
+        JointAllocationSession::new_persistent(joint, expanded, cfg, graph, registers)
+            .map_err(AllocationSplitError::joint)?;
     let mut steps = 0u128;
     loop {
         match session
@@ -621,9 +636,16 @@ pub(super) fn allocate_with_splitting(
                     ));
                 }
                 let plan = plan_split(expanded, graph, session.problem(), &request, cfg)?;
-                let next = apply_split(expanded, graph, session.problem(), &plan, cfg, registers)?;
+                let update = apply_split(expanded, graph, session.problem(), &plan, cfg)?;
                 session
-                    .update(next, registers)
+                    .update_from_expanded(
+                        expanded,
+                        cfg,
+                        graph,
+                        registers,
+                        &update.constraint_blocks,
+                        &update.changed_values,
+                    )
                     .map_err(AllocationSplitError::joint)?;
                 steps += 1;
             }
@@ -1908,7 +1930,7 @@ mod tests {
             .map(|use_| (use_.id, use_.value, use_.source.clone()))
             .collect::<Vec<_>>();
 
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
         let root = root_for(&expanded, VReg(0));
         for (use_id, value, source) in right_uses {
             let use_ = &root.uses[use_id.0 as usize];
@@ -1969,7 +1991,7 @@ mod tests {
                 .iter()
                 .all(|entry| entry.kind == SplitEntryKind::Materialized)
         );
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
         assert!(
             root_for(&expanded, VReg(0))
                 .uses
@@ -2033,7 +2055,7 @@ mod tests {
                 .all(|entry| entry.home.kind == HomeKind::Stack)
         );
 
-        apply_split(&mut expanded, &graph, &joint, &plan, &cfg, &registers).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
         let root = root_for(&expanded, VReg(2));
         assert!(matches!(
             root.uses[plan.retained[0].0 as usize].source,
@@ -2086,7 +2108,7 @@ mod tests {
         let first_plan = plan_split(&expanded, &graph, &joint, &first_request, &cfg).unwrap();
         assert_eq!(first_plan.entries.len(), 1);
         assert_eq!(first_plan.entries[0].kind, SplitEntryKind::RegisterRegion);
-        apply_split(&mut expanded, &graph, &joint, &first_plan, &cfg, &registers).unwrap();
+        apply_split(&mut expanded, &graph, &joint, &first_plan, &cfg).unwrap();
 
         let metadata = expanded
             .register_regions
@@ -2108,15 +2130,7 @@ mod tests {
             entry.entry == metadata.entry_use && entry.kind == SplitEntryKind::Materialized
         }));
         let values_before_replacement = expanded.ir.value_count();
-        apply_split(
-            &mut expanded,
-            &graph,
-            &joint,
-            &second_plan,
-            &cfg,
-            &registers,
-        )
-        .unwrap();
+        apply_split(&mut expanded, &graph, &joint, &second_plan, &cfg).unwrap();
         assert_eq!(
             expanded.ir.value_count(),
             values_before_replacement + 2,

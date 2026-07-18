@@ -13,7 +13,8 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, VReg};
 
 use super::allocation_constraints::{
-    AllocationConstraintError, AllocationConstraintModel, RegisterMask, WeightedAffinity,
+    AllocationConstraintError, AllocationConstraintModel, IncrementalConstraintModel, RegisterMask,
+    WeightedAffinity,
 };
 use super::allocation_expand::{
     ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition,
@@ -96,6 +97,7 @@ pub(super) struct JointAllocation {
 #[derive(Debug)]
 pub(super) struct JointAllocationSession {
     problem: JointAllocationProblem,
+    constraints: Option<IncrementalConstraintModel>,
     matrix: LiveIntervalMatrix,
     ranges: Vec<Option<SparseRange>>,
     assignments: Vec<Option<PhysReg>>,
@@ -189,17 +191,13 @@ impl JointAllocationProblem {
         Self::build_internal(expanded, cfg, graph, registers, true)
     }
 
-    /// Rebuild semantic allocation rows inside one persistent allocation
-    /// session. Liveness was already updated transactionally by the producer;
-    /// the independent whole-program proof remains in [`Self::build`] and the
-    /// atomic lowering boundary.
-    pub(super) fn build_session(
+    pub(super) fn build_session_with_constraints(
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
-        graph: &HomeGraph,
         registers: &[PhysReg],
+        constraints: &AllocationConstraintModel,
     ) -> Result<Self, JointAllocationError> {
-        Self::build_internal(expanded, cfg, graph, registers, false)
+        Self::build_from_constraints(expanded, cfg, registers, constraints)
     }
 
     fn build_internal(
@@ -236,6 +234,15 @@ impl JointAllocationProblem {
             }
         }
 
+        Self::build_from_constraints(expanded, cfg, registers, &constraints)
+    }
+
+    fn build_from_constraints(
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        registers: &[PhysReg],
+        constraints: &AllocationConstraintModel,
+    ) -> Result<Self, JointAllocationError> {
         let mut fixed_region_uses = BTreeMap::<VReg, Vec<UseSite>>::new();
         let mut stack_roots = BTreeSet::new();
         for (home_index, home) in expanded.stack_homes.iter().enumerate() {
@@ -544,7 +551,7 @@ impl JointAllocationProblem {
             value_rows,
             definition_order,
             target_registers: registers.to_vec(),
-            affinities: constraints.affinities,
+            affinities: constraints.affinities.clone(),
         })
     }
 
@@ -869,6 +876,7 @@ impl JointAllocationSession {
         let pending = problem.definition_order.iter().copied().collect();
         Ok(Self {
             problem,
+            constraints: None,
             matrix,
             ranges,
             assignments,
@@ -878,6 +886,65 @@ impl JointAllocationSession {
 
     pub(super) fn problem(&self) -> &JointAllocationProblem {
         &self.problem
+    }
+
+    pub(super) fn new_persistent(
+        problem: JointAllocationProblem,
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+    ) -> Result<Self, JointAllocationError> {
+        let constraints = IncrementalConstraintModel::build(expanded, cfg, graph, registers)
+            .map_err(JointAllocationError::constraints)?;
+        let rebuilt = JointAllocationProblem::build_session_with_constraints(
+            expanded,
+            cfg,
+            registers,
+            constraints.model(),
+        )?;
+        if rebuilt != problem {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SESSION_CONSTRAINT_IDENTITY",
+                None,
+                None,
+                "block-indexed target constraints differ from the initial joint problem",
+            ));
+        }
+        let mut result = Self::new(problem, cfg, registers)?;
+        result.constraints = Some(constraints);
+        Ok(result)
+    }
+
+    pub(super) fn update_from_expanded(
+        &mut self,
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        graph: &HomeGraph,
+        registers: &[PhysReg],
+        changed_blocks: &BTreeSet<BlockId>,
+        changed_values: &[VReg],
+    ) -> Result<(), JointAllocationError> {
+        let next = {
+            let constraints = self.constraints.as_mut().ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_CONSTRAINT_STATE",
+                    None,
+                    None,
+                    "persistent joint update has no block-indexed constraint state",
+                )
+            })?;
+            constraints
+                .update(expanded, cfg, graph, changed_blocks, changed_values)
+                .map_err(JointAllocationError::constraints)?;
+            JointAllocationProblem::build_session_with_constraints(
+                expanded,
+                cfg,
+                registers,
+                constraints.model(),
+            )?
+        };
+        self.update(next, registers)
     }
 
     /// Replace the semantic problem while retaining every byte-identical
