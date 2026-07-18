@@ -233,8 +233,21 @@ all-path verifier.  It builds Boolean SSA only for homes with reload demands,
 places AND meets through iterated dominance frontiers, and respects exact
 operation order and normalized edge isolation.  Stores on every join arm
 establish a home; a missing arm or a store after the reload does not.  The next
-slice must make allocator home selection emit operations which satisfy this
-proof and return all resulting machine values to allocation.
+slice must return all resulting machine values to allocation.
+
+Allocator-selected homes now expand into that allocation IR without changing
+production MIR.  A selected stack home has an explicit store and per-use
+reload definitions; state and rematerialization choices become their exact
+recipe DAGs; and the entry of a split register region becomes one synthetic
+SSA definition shared by all uses in that region.  Existing physical-register
+assignments are retained only as preferences.  Expansion then proves every
+stack reload, recomputes exact liveness for every original and synthetic
+machine value, and checks that each rewritten use is owned by its replacement
+interval.  Immutable input-MIR use anchors and their shifted allocation-IR
+positions are stored separately, including phi-edge exit slots.  The next
+slice must enqueue those recomputed intervals together and permit any finite
+number of register regions; the old diagnostic assignments are not yet a
+complete physical allocation.
 
 ## Interim allocator architecture
 

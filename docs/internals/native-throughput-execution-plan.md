@@ -2821,6 +2821,29 @@ cannot move a store or reload onto a sibling path.  This slice still does not
 lower `AllocationPlan` homes or change production MIR; it establishes the
 all-path contract which the next home-expansion slice must satisfy.
 
+Step 27d3 consumes the diagnostic `AllocationPlan` only as a home and split
+placement proposal.  It expands every selected stack, state, rematerialization,
+and register-entry transition into the off-to-the-side allocation IR.  A stack
+root receives an explicit definition-to-store range and each reload defines a
+new reload-to-use value.  Every reachable node of an exact state/rematerialize
+recipe defines its own machine value.  A split register child is represented
+by one synthetic SSA value shared by its complete dominated use cluster.  The
+old physical register is a preference, not an assignment which synthetic
+interference may invalidate.
+
+After all insertions, expansion runs the sparse all-path stack proof and the
+shared exact liveness analysis over original and synthetic values together.
+Input-MIR use anchors are resolved separately from their new allocation-IR
+positions: inserted instructions change both local instruction indexes and
+later global slots, while an inserted phi-edge operation changes the
+predecessor exit slot.  The verifier requires every rewritten exact use to
+appear in its replacement interval and leaves the source `MFunction`
+unchanged.  Focused pressure tests force a real stack home, a point-specific
+state/stack partition, and a dominated split register region.  This slice
+still does not change production MIR or claim a Linux/timing result.  Step
+27d4 must build one allocation queue from all recomputed intervals and remove
+the one-register-child finalization rule.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2882,6 +2905,7 @@ new allocator produces a substantial non-LTO execution win.
 | post-27c conflict discovery-order trial | rejected (no commit) | interval union 6/6; allocator 11/11 | focused check/clippy passed before measurement; full candidate reverted | CPU-0 diagnostic compile-only completed; production MIR unchanged | 135.893 s vs 111.349 s retained baseline | 22.0% compile regression; fully reverted; local container-order tuning closed |
 | 27d1 allocation IR and shared synthetic-value liveness | this step | allocation IR 5/5; live interval 5/5 | lib 809/809; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | analysis/rewrite infrastructure is disconnected from production MIR | n/a | original and synthetic machine values now share exact CFG/phi-edge liveness; explicit home placement remains next |
 | 27d2 sparse all-path stack-home verification | this step | allocation IR 8/8 including both-arm, one-arm, and same-block-order home proofs | lib 812/812; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; strict clippy | stack verifier is not yet connected to `AllocationPlan` or production MIR | n/a | explicit synthetic stack operations now have a sparse reaching-store proof; home expansion remains next |
+| 27d3 allocation-home expansion into machine values | this step | allocation expansion 3/3; allocation IR 8/8 including shifted instruction and phi-edge anchors | lib 815/815; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy | expanded problem remains disconnected from production MIR | n/a | stack/state/remat/register transitions now have exact synthetic ranges; joint reallocation remains next |
 
 ## Related design records
 

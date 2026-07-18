@@ -357,6 +357,88 @@ impl AllocationIr {
         analyze_program(self, cfg).map_err(AllocationIrError::live)
     }
 
+    /// Resolve an immutable original-MIR use anchor to its position in the
+    /// current allocation IR. Synthetic instructions can shift both an
+    /// instruction's local index and every later block's global slot range;
+    /// callers must therefore not compare original [`UseSite`] slots with
+    /// intervals computed after expansion.
+    pub(super) fn resolve_original_use_site(
+        &self,
+        original: UseSite,
+        intervals: &LiveIntervals,
+    ) -> Result<UseSite, AllocationIrError> {
+        if intervals.block_slots.len() != self.blocks.len() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.INTERVAL_SHAPE",
+                Some(original.block()),
+                None,
+                Vec::new(),
+                "live-interval block slots do not cover the allocation IR",
+            ));
+        }
+        match original {
+            UseSite::Instruction {
+                block, instruction, ..
+            } => {
+                let block_index = self.block(block)?;
+                let position = self.original_instruction_position(block_index, instruction)?;
+                let slot = intervals.block_slots[block_index]
+                    .instruction_use(position)
+                    .ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.USE_POSITION",
+                            Some(block),
+                            Some(instruction),
+                            Vec::new(),
+                            "resolved original instruction is outside allocation-IR slots",
+                        )
+                    })?;
+                Ok(UseSite::Instruction {
+                    block,
+                    instruction: position,
+                    slot,
+                })
+            }
+            UseSite::PhiEdge {
+                predecessor,
+                successor,
+                phi,
+                ..
+            } => {
+                let predecessor_index = self.block(predecessor)?;
+                let successor_index = self.block(successor)?;
+                let phi_row = self.blocks[successor_index].phis.get(phi).ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.PHI_RANGE",
+                        Some(successor),
+                        None,
+                        Vec::new(),
+                        "original use anchor references a missing phi",
+                    )
+                })?;
+                if !phi_row
+                    .sources
+                    .iter()
+                    .any(|(block, _)| *block == predecessor)
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.PHI_EDGE",
+                        Some(successor),
+                        None,
+                        Vec::new(),
+                        "original use anchor references a missing phi predecessor",
+                    ));
+                }
+                Ok(UseSite::PhiEdge {
+                    predecessor,
+                    successor,
+                    phi,
+                    slot: intervals.block_slots[predecessor_index].exit,
+                })
+            }
+        }
+    }
+
     /// Independently prove that every synthetic stack reload observes a
     /// same-home store on every path. The proof constructs sparse Boolean SSA
     /// only for homes which are actually reloaded; it never creates a dense
@@ -1182,6 +1264,9 @@ mod tests {
             .rewrite_use(use_site, VReg(0), recipe)
             .unwrap();
         let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let resolved_use = allocation_ir
+            .resolve_original_use_site(use_site, &intervals)
+            .unwrap();
 
         assert!(intervals.intervals[0].as_ref().unwrap().uses.is_empty());
         let reload_interval = intervals.intervals[reload.0 as usize].as_ref().unwrap();
@@ -1191,6 +1276,8 @@ mod tests {
         assert!(reload_interval.definition.slot() < reload_interval.uses[0].slot());
         assert!(recipe_interval.definition.slot() < recipe_interval.uses[0].slot());
         assert!(reload_interval.uses[0].slot() < recipe_interval.uses[0].slot());
+        assert_eq!(recipe_interval.uses, vec![resolved_use]);
+        assert_ne!(resolved_use, use_site);
     }
 
     #[test]
@@ -1250,9 +1337,13 @@ mod tests {
             .unwrap();
         allocation_ir.rewrite_use(edge, VReg(1), reload).unwrap();
         let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let resolved_edge = allocation_ir
+            .resolve_original_use_site(edge, &intervals)
+            .unwrap();
         let reload_interval = intervals.intervals[reload.0 as usize].as_ref().unwrap();
 
-        assert_eq!(reload_interval.uses.len(), 1);
+        assert_eq!(reload_interval.uses, vec![resolved_edge]);
+        assert_ne!(resolved_edge.slot(), edge.slot());
         assert!(matches!(
             reload_interval.uses[0],
             UseSite::PhiEdge {

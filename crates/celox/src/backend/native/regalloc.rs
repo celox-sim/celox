@@ -5,6 +5,8 @@
 //! colors chordal SSA live ranges without an explicit interference graph.
 
 #[allow(dead_code)]
+mod allocation_expand;
+#[allow(dead_code)]
 mod allocation_ir;
 mod analysis;
 pub mod assignment;
