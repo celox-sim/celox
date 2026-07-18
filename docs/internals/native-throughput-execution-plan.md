@@ -2086,6 +2086,80 @@ Status: **one concrete MIR work defect removed and qualified; shared-predicate
 scheduling, state traffic, and the remaining generated-execution gap remain
 open**.
 
+### Step 23: Recover coupled updates and place dynamic state reads in a loop
+
+The Step 22 PLIC trace exposed a defect above MIR scheduling.  One source
+predicate updates both `best_pri` and `best_id`, but optimized SIR represented
+those results as two distant Mux recurrences.  The final predicate was also a
+flattened `eligible && priority_greater` value.  Consequently, recovering only
+the final Mux as control flow still loaded and compared the priority on the
+ineligible path.  The reference AOT disassembly instead branches on eligibility
+before loading and comparing the priority.
+
+Branchification now recovers correlated same-predicate recurrences as one
+conditional tuple update.  For a two-state one-bit `LogicAnd`, it emits the
+eligibility guard first and evaluates the second operand only in the true
+block.  This is done at SIR, where the scheduler can still place the recovered
+dataflow; ISel does not infer source short-circuit semantics.
+
+Two CFG/StateSSA restrictions initially prevented the delayed work from moving
+with that control flow:
+
+- placement pinned every occurrence whose origin was in a cyclic SCC, even
+  when the destination was a dominated block in the same loop iteration.  It
+  now permits ScheduleLate only inside the exact same natural-loop nest of a
+  reducible SCC.  Sibling loops, nested loops, SCC boundaries, and irreducible
+  SCCs remain closed;
+- placement StateSSA previously created versions only for exact static access
+  shapes.  A dynamic indexed load therefore had no state version and was
+  pinned.  Placement-only StateSSA now gives same-width dynamic loads a
+  conservative address-wide version; every static or dynamic store to that
+  address kills it.  Forwarding and GVN retain their narrower exact-access
+  analysis.
+
+With those changes, the exact optimized PLIC SIR checks `pending && enable`
+before the dynamic priority load and `GtU` for 14 of the 15 candidates in each
+recovered loop chunk.  MIR preserves that order.  One dynamic priority load is
+still unconditional because its candidate is scheduled across the recurrence
+boundary, so this step does not claim complete decision-region placement.
+
+The final trace was regenerated from the same source metadata order as Step 22.
+Its pre-optimized SIR hash is identical to the baseline, and its complete
+outputs are:
+
+- pre-optimized SIR:
+  `336d6b7bd66ea0c824293dd69c25fe2c7aa9f862b7a070ab73949db0bf3771d4`;
+- post-optimized SIR:
+  `babcca2ac53a003eaf77dab35ae45faf052802de614b9a660b4d024eeddf5900`;
+- native-optimized SIR:
+  `60b82bc32d0a021dd07f68512b6cb1f874775e34b5945a0927834465f7d97fe4`;
+  and
+- complete native MIR, assignment, and disassembly:
+  `8b04a2d75da3c50d4418b91dbba87f079f16810de431c9ad5f23fb1c70f14636`.
+
+The spill frames for `eval_comb`, `apply_ff`, `eval_apply_ff`, `eval_only_ff`,
+and fused `eval_comb_apply_ff` are respectively 30,552, 0, 7,288, 7,024, and
+37,768 bytes, versus 30,696, 0, 7,288, 7,024, and 37,960 bytes in Step 22.
+
+Focused tests pass 44/44 for BranchifyMux, 12/12 for placement, and 8/8 for
+StateSSA.  The common gate passes `cargo fmt --all -- --check`,
+`cargo check -p celox`, strict Clippy, 774/774 library tests, 60
+native-testbench tests with one documented upstream case ignored, and 9
+native/Cranelift/Wasm counter tests with three Veryl cases ignored.
+
+A same-process CPU-0 non-LTO Linux run reached normal `reboot: Power down` at
+exactly `cy=9ae070 x3=aa pass=1`.  Code generation took 77.247215690 s and
+generated execution took 120.989709386 s.  Step 22 generated execution took
+123.199303086 s, so this isolated run is 2.209593700 s, or 1.79%, faster.  The
+code-generation interval is reported separately and no compile-time
+improvement is claimed.  The measured execution gain proves this defect
+matters, but its size also proves that it is not the complete explanation of
+the 2.536x Veryl generated-code gap.  Cross-phase state promotion and the
+allocator's split/home decisions remain open.
+
+Status: **complete and qualified as one SIR/StateSSA placement improvement;
+the dominant generated-execution gap remains unexplained**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -2123,6 +2197,7 @@ open**.
 | 20 first-use join-cost trial | rejected (no commit) | focused first-use regression 1/1; allocator 155/155; non-LTO runner build | trial reverted before retained common gate | CPU-0 non-LTO A--B--A all pass: `cy=9ae070 x3=aa pass=1`; SIR and pre-RA MIR byte-identical; original `bb1767` path has two extra loads and one extra store | candidate compile 69.352 / 66.218 s vs baseline 66.532 s; candidate execute mean 133.411 s vs baseline 128.487 s | execute +3.83%; fully reverted; complete block-transition pricing required |
 | 21a exact block-transition extraction | `e10c9c2e` | allocator 155/155; native MIR 6/6 | format, docs, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; complete SIR and MIR byte-identical to isolated Step 18 baseline | compile 74.179 s; execute 144.439 s; no timing claim | analysis infrastructure only; remaining throughput cause not established |
 | 22 word32 snapshot propagation | `278f6ecb` plus this step | width regression 1/1; MIR optimization 53/53; allocator 155/155; native MIR 6/6 | lib 768/768; docs, format, and diff checks pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical to Step 21a | compile 70.552 s; execute 123.199 s | concrete redundant work removed; shared-predicate live range and remaining gap open |
+| 23 coupled update short-circuit and dynamic StateSSA placement | this step | BranchifyMux 44/44; placement 12/12; StateSSA 8/8 | lib 774/774; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | CPU-0 non-LTO pass: `cy=9ae070 x3=aa pass=1`; exact final SIR/MIR trace retained | compile 77.247 s; execute 120.990 s | exact local defect fixed; execute -1.79%; dominant gap remains open |
 
 ## Related design records
 

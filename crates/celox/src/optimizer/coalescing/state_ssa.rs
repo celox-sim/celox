@@ -33,13 +33,16 @@ struct StateLocation {
     addr: RegionedAbsoluteAddr,
     bit_offset: usize,
     width: usize,
+    dynamic: bool,
 }
 
 impl StateLocation {
     fn overlaps(self, other: Self) -> bool {
         self.addr == other.addr
-            && self.bit_offset < other.bit_offset.saturating_add(other.width)
-            && other.bit_offset < self.bit_offset.saturating_add(self.width)
+            && (self.dynamic
+                || other.dynamic
+                || (self.bit_offset < other.bit_offset.saturating_add(other.width)
+                    && other.bit_offset < self.bit_offset.saturating_add(self.width)))
     }
 }
 
@@ -49,6 +52,7 @@ pub(super) struct StateFragment {
     pub plane: StatePlane,
     pub bit_offset: usize,
     pub width: usize,
+    pub dynamic: bool,
 }
 
 impl StateFragment {
@@ -63,6 +67,17 @@ impl StateFragment {
             plane: StatePlane::for_type(ty),
             bit_offset,
             width,
+            dynamic: false,
+        }
+    }
+
+    fn from_dynamic_access(addr: RegionedAbsoluteAddr, width: usize, ty: &RegisterType) -> Self {
+        Self {
+            addr,
+            plane: StatePlane::for_type(ty),
+            bit_offset: 0,
+            width,
+            dynamic: true,
         }
     }
 }
@@ -342,6 +357,7 @@ fn overlapping_slots(
                 addr,
                 bit_offset: *bit_offset,
                 width,
+                dynamic: false,
             };
             let end = bit_offset.saturating_add(width);
             let upper = locations.partition_point(|(location, _)| location.bit_offset < end);
@@ -481,6 +497,29 @@ impl StateSsa {
                             addr: *addr,
                             bit_offset: *bit_offset,
                             width: *width,
+                            dynamic: false,
+                        })
+                        .or_default()
+                        .record_type(ty, *width);
+                    }
+                    SIRInstruction::Load(destination, addr, offset, width)
+                        if addr.region == region
+                            && include_read_only
+                            && eligible_loads.is_none()
+                            && matches!(
+                                offset,
+                                SIROffset::Dynamic(_) | SIROffset::Element { .. }
+                            ) =>
+                    {
+                        let ty = eu
+                            .register_map
+                            .get(destination)
+                            .ok_or(StateSsaError::MissingRegister(*destination))?;
+                        raw.entry(StateLocation {
+                            addr: *addr,
+                            bit_offset: 0,
+                            width: *width,
+                            dynamic: true,
                         })
                         .or_default()
                         .record_type(ty, *width);
@@ -501,6 +540,7 @@ impl StateSsa {
                             addr: *addr,
                             bit_offset: *bit_offset,
                             width: *width,
+                            dynamic: false,
                         })
                         .or_default()
                         .record_type(ty, *width);
@@ -536,6 +576,7 @@ impl StateSsa {
                         addr: *addr,
                         bit_offset: *bit_offset,
                         width: *width,
+                        dynamic: false,
                     };
                     let Some(slot) = raw.get_mut(&location) else {
                         continue;
@@ -586,9 +627,17 @@ impl StateSsa {
                                     addr: *addr,
                                     bit_offset: *bit_offset,
                                     width: *width,
+                                    dynamic: false,
                                 })
                                 .copied(),
-                            SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                            SIROffset::Dynamic(_) | SIROffset::Element { .. } => raw_index
+                                .get(&StateLocation {
+                                    addr: *addr,
+                                    bit_offset: 0,
+                                    width: *width,
+                                    dynamic: true,
+                                })
+                                .copied(),
                         };
                         if eligible_load_blocks.is_none_or(|blocks| blocks.contains(&block_id))
                             && eligible_loads.is_none_or(|loads| loads.contains(destination))
@@ -620,6 +669,7 @@ impl StateSsa {
                                     addr: *addr,
                                     bit_offset: *bit_offset,
                                     width: *width,
+                                    dynamic: false,
                                 })
                                 .copied(),
                             SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
@@ -661,6 +711,7 @@ impl StateSsa {
                                         addr: *source,
                                         bit_offset: *bit_offset,
                                         width: *width,
+                                        dynamic: false,
                                     })
                                     .copied(),
                                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
@@ -726,12 +777,16 @@ impl StateSsa {
             let ty = facts[old].ty.clone().ok_or(StateSsaError::InvalidAccess(
                 "exact slot has no register type",
             ))?;
-            let fragment = StateFragment::from_access(
-                locations[old].addr,
-                locations[old].bit_offset,
-                locations[old].width,
-                &ty,
-            );
+            let fragment = if locations[old].dynamic {
+                StateFragment::from_dynamic_access(locations[old].addr, locations[old].width, &ty)
+            } else {
+                StateFragment::from_access(
+                    locations[old].addr,
+                    locations[old].bit_offset,
+                    locations[old].width,
+                    &ty,
+                )
+            };
             let may_need_phi = facts[old]
                 .def_blocks
                 .iter()

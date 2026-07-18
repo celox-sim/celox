@@ -167,6 +167,23 @@ struct CrossBlockGroupBranchifyPlan {
     false_defs: Vec<LocatedInstruction>,
 }
 
+#[derive(Clone)]
+struct CoupledStateUpdatePlan {
+    block_id: BlockId,
+    first_mux_idx: usize,
+    cond: RegisterId,
+    muxes: Vec<PriorityChainMux>,
+    hoisted_defs: Vec<usize>,
+    short_circuit: Option<CoupledShortCircuit>,
+}
+
+#[derive(Clone)]
+struct CoupledShortCircuit {
+    guard: RegisterId,
+    delayed: RegisterId,
+    removed_defs: Vec<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PriorityPlacementSite {
     Decision(usize),
@@ -245,11 +262,26 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .map(RegisterId);
-        let mut use_counts = count_uses(eu);
-        let mut def_blocks = instruction_def_blocks(eu);
         let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
         let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
         let mut applied = 0usize;
+
+        // Recover a source-level conditional state update before treating its
+        // Muxes independently. RTL lowering commonly separates correlated
+        // updates into distant recurrence chains:
+        //
+        //   next_pri = Mux(c, candidate_pri, pri)
+        //   ...
+        //   next_id  = Mux(c, candidate_id, id)
+        //
+        // Keeping those as two selects extends `c` across the intervening
+        // dataflow and prevents the backend from representing the update as
+        // one branch carrying a state tuple. Process each resulting merge as
+        // a worklist item so a sequence is recovered in source order without
+        // repeatedly rescanning the whole execution unit.
+        applied += branchify_coupled_state_updates(eu, &mut next_block_id, &mut reg_counter);
+        let mut use_counts = count_uses(eu);
+        let mut def_blocks = instruction_def_blocks(eu);
 
         // A priority spine is one short-circuit expression, not a collection
         // of independent selects.  Handle the whole spine before the
@@ -376,6 +408,421 @@ impl ExecutionUnitPass for BranchifyMuxPass {
             verify_all_uses_have_defs(eu);
         }
     }
+}
+
+fn branchify_coupled_state_updates(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable_by_key(|block| block.0);
+    let mut worklist = VecDeque::from(block_ids);
+    let mut applied = 0usize;
+
+    while let Some(block_id) = worklist.pop_front() {
+        let Some(plan) = find_coupled_state_update_in_block(eu, block_id) else {
+            continue;
+        };
+        let merge = apply_coupled_state_update(eu, plan, next_block_id, reg_counter);
+        applied += 1;
+        worklist.push_front(merge);
+    }
+
+    applied
+}
+
+fn find_coupled_state_update_in_block(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+) -> Option<CoupledStateUpdatePlan> {
+    let block = eu.blocks.get(&block_id)?;
+    let muxes = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(mux_idx, instruction)| {
+            let SIRInstruction::Mux(dst, cond, true_val, false_val) = instruction else {
+                return None;
+            };
+            Some(PriorityChainMux {
+                mux_idx,
+                dst: *dst,
+                cond: *cond,
+                true_val: *true_val,
+                false_val: *false_val,
+            })
+        })
+        .collect::<Vec<_>>();
+    if muxes.len() < 2 {
+        return None;
+    }
+
+    let mut by_condition = HashMap::<RegisterId, Vec<PriorityChainMux>>::default();
+    let mut false_consumers = HashMap::<RegisterId, Vec<&PriorityChainMux>>::default();
+    for mux in &muxes {
+        by_condition.entry(mux.cond).or_default().push(mux.clone());
+        false_consumers.entry(mux.false_val).or_default().push(mux);
+    }
+    let mut groups = by_condition.into_iter().collect::<Vec<_>>();
+    for (_, muxes) in &mut groups {
+        muxes.sort_unstable_by_key(|mux| mux.mux_idx);
+    }
+    groups.sort_unstable_by_key(|(cond, muxes)| {
+        (
+            muxes.first().map(|mux| mux.mux_idx).unwrap_or(usize::MAX),
+            cond.0,
+        )
+    });
+
+    let def_pos = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| def_reg(instruction).map(|dst| (dst, index)))
+        .collect::<HashMap<_, _>>();
+    let use_locations = register_use_locations(eu);
+    let params = block.params.iter().copied().collect::<HashSet<_>>();
+
+    for (cond, group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+
+        // A non-final update is recognized by at least two state components
+        // flowing to Muxes controlled by the same next predicate. After an
+        // update has been recovered, its merge parameters identify the final
+        // update in the sequence as well.
+        let mut successor_links = HashMap::<RegisterId, HashSet<RegisterId>>::default();
+        for mux in &group {
+            for consumer in false_consumers
+                .get(&mux.dst)
+                .into_iter()
+                .flatten()
+                .filter(|consumer| consumer.mux_idx > mux.mux_idx && consumer.cond != cond)
+            {
+                successor_links
+                    .entry(consumer.cond)
+                    .or_default()
+                    .insert(mux.dst);
+            }
+        }
+        let successor = successor_links
+            .into_iter()
+            .filter(|(_, outputs)| outputs.len() >= 2)
+            .max_by_key(|(next_cond, outputs)| (outputs.len(), Reverse(next_cond.0)));
+        let mut selected = if let Some((_, outputs)) = successor {
+            group
+                .iter()
+                .filter(|mux| outputs.contains(&mux.dst))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            group
+                .iter()
+                .filter(|mux| params.contains(&mux.false_val))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if selected.len() < 2 {
+            continue;
+        }
+        selected.sort_unstable_by_key(|mux| mux.mux_idx);
+        let first_mux_idx = selected[0].mux_idx;
+        let selected_outputs = selected.iter().map(|mux| mux.dst).collect::<HashSet<_>>();
+        let selected_locations = selected
+            .iter()
+            .map(|mux| mux.mux_idx)
+            .collect::<HashSet<_>>();
+        let mut hoisted_defs = HashSet::default();
+        let mut visiting = HashSet::default();
+        let available = selected.iter().all(|mux| {
+            [mux.true_val, mux.false_val].into_iter().all(|root| {
+                collect_coupled_update_hoists(
+                    block,
+                    &def_pos,
+                    first_mux_idx,
+                    &selected_outputs,
+                    &selected_locations,
+                    root,
+                    &mut visiting,
+                    &mut hoisted_defs,
+                )
+            })
+        });
+        if !available {
+            continue;
+        }
+        let mut hoisted_defs = hoisted_defs.into_iter().collect::<Vec<_>>();
+        hoisted_defs.sort_unstable();
+        let short_circuit = find_coupled_short_circuit(
+            eu,
+            block,
+            &def_pos,
+            &use_locations,
+            cond,
+            &selected_locations,
+        );
+
+        return Some(CoupledStateUpdatePlan {
+            block_id,
+            first_mux_idx,
+            cond,
+            muxes: selected,
+            hoisted_defs,
+            short_circuit,
+        });
+    }
+    None
+}
+
+fn find_coupled_short_circuit(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    use_locations: &HashMap<RegisterId, Vec<UseLocation>>,
+    cond: RegisterId,
+    selected_locations: &HashSet<usize>,
+) -> Option<CoupledShortCircuit> {
+    let mut current = cond;
+    let mut removed_defs = Vec::new();
+    let (guard, delayed) = loop {
+        let &index = def_pos.get(&current)?;
+        match &block.instructions[index] {
+            SIRInstruction::Unary(
+                dst,
+                crate::ir::UnaryOp::Ident | crate::ir::UnaryOp::ToTwoState,
+                source,
+            ) if *dst == current => {
+                removed_defs.push(index);
+                current = *source;
+            }
+            SIRInstruction::Unary(dst, crate::ir::UnaryOp::Or, source)
+                if *dst == current
+                    && eu
+                        .register_map
+                        .get(source)
+                        .is_some_and(|register| register.width() == 1) =>
+            {
+                removed_defs.push(index);
+                current = *source;
+            }
+            SIRInstruction::Binary(dst, lhs, crate::ir::BinaryOp::LogicAnd, rhs)
+                if *dst == current =>
+            {
+                removed_defs.push(index);
+                break (*lhs, *rhs);
+            }
+            _ => return None,
+        }
+    };
+
+    let removed_locations = removed_defs.iter().copied().collect::<HashSet<_>>();
+    for &index in &removed_defs {
+        let register = def_reg(&block.instructions[index])?;
+        if use_locations
+            .get(&register)
+            .into_iter()
+            .flatten()
+            .any(|location| {
+                location.block != block.id
+                    || location.instruction.is_none_or(|use_index| {
+                        !removed_locations.contains(&use_index)
+                            && !selected_locations.contains(&use_index)
+                    })
+            })
+        {
+            return None;
+        }
+    }
+    removed_defs.sort_unstable();
+    Some(CoupledShortCircuit {
+        guard,
+        delayed,
+        removed_defs,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_coupled_update_hoists(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    first_mux_idx: usize,
+    selected_outputs: &HashSet<RegisterId>,
+    selected_locations: &HashSet<usize>,
+    register: RegisterId,
+    visiting: &mut HashSet<RegisterId>,
+    hoisted_defs: &mut HashSet<usize>,
+) -> bool {
+    if selected_outputs.contains(&register) {
+        return false;
+    }
+    let Some(&index) = def_pos.get(&register) else {
+        return true;
+    };
+    if index < first_mux_idx || hoisted_defs.contains(&index) {
+        return true;
+    }
+    if selected_locations.contains(&index) || !visiting.insert(register) {
+        return false;
+    }
+    let instruction = &block.instructions[index];
+    let movable = matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+    );
+    let valid = movable
+        && inst_uses(instruction).into_iter().all(|operand| {
+            collect_coupled_update_hoists(
+                block,
+                def_pos,
+                first_mux_idx,
+                selected_outputs,
+                selected_locations,
+                operand,
+                visiting,
+                hoisted_defs,
+            )
+        });
+    visiting.remove(&register);
+    if valid {
+        hoisted_defs.insert(index);
+    }
+    valid
+}
+
+fn apply_coupled_state_update(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: CoupledStateUpdatePlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> BlockId {
+    let guard_block_id = plan.short_circuit.as_ref().map(|_| BlockId(*next_block_id));
+    let edge_base = *next_block_id + usize::from(guard_block_id.is_some());
+    let true_block_id = BlockId(edge_base);
+    let false_block_id = BlockId(edge_base + 1);
+    let merge_block_id = BlockId(edge_base + 2);
+    *next_block_id = merge_block_id.0 + 1;
+
+    let original = eu
+        .blocks
+        .remove(&plan.block_id)
+        .expect("coupled state-update block must exist");
+    let removed = plan
+        .muxes
+        .iter()
+        .map(|mux| mux.mux_idx)
+        .chain(plan.hoisted_defs.iter().copied())
+        .chain(
+            plan.short_circuit
+                .iter()
+                .flat_map(|short| short.removed_defs.iter().copied()),
+        )
+        .collect::<HashSet<_>>();
+    let mut head_instructions = original
+        .instructions
+        .iter()
+        .enumerate()
+        .take(plan.first_mux_idx)
+        .filter(|(index, _)| !removed.contains(index))
+        .map(|(_, instruction)| instruction.clone())
+        .collect::<Vec<_>>();
+    head_instructions.extend(
+        plan.hoisted_defs
+            .iter()
+            .map(|&index| original.instructions[index].clone()),
+    );
+    let head_cond = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_instructions,
+        plan.short_circuit
+            .as_ref()
+            .map_or(plan.cond, |short| short.guard),
+        reg_counter,
+    );
+    eu.blocks.insert(
+        plan.block_id,
+        BasicBlock {
+            id: plan.block_id,
+            params: original.params,
+            instructions: head_instructions,
+            terminator: SIRTerminator::Branch {
+                cond: head_cond,
+                true_block: (guard_block_id.unwrap_or(true_block_id), Vec::new()),
+                false_block: (false_block_id, Vec::new()),
+            },
+        },
+    );
+    if let (Some(guard_block_id), Some(short_circuit)) =
+        (guard_block_id, plan.short_circuit.as_ref())
+    {
+        let mut instructions = Vec::new();
+        let delayed = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut instructions,
+            short_circuit.delayed,
+            reg_counter,
+        );
+        eu.blocks.insert(
+            guard_block_id,
+            BasicBlock {
+                id: guard_block_id,
+                params: Vec::new(),
+                instructions,
+                terminator: SIRTerminator::Branch {
+                    cond: delayed,
+                    true_block: (true_block_id, Vec::new()),
+                    false_block: (false_block_id, Vec::new()),
+                },
+            },
+        );
+    }
+    eu.blocks.insert(
+        true_block_id,
+        BasicBlock {
+            id: true_block_id,
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(
+                merge_block_id,
+                plan.muxes.iter().map(|mux| mux.true_val).collect(),
+            ),
+        },
+    );
+    eu.blocks.insert(
+        false_block_id,
+        BasicBlock {
+            id: false_block_id,
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(
+                merge_block_id,
+                plan.muxes.iter().map(|mux| mux.false_val).collect(),
+            ),
+        },
+    );
+    eu.blocks.insert(
+        merge_block_id,
+        BasicBlock {
+            id: merge_block_id,
+            params: plan.muxes.iter().map(|mux| mux.dst).collect(),
+            instructions: original
+                .instructions
+                .into_iter()
+                .enumerate()
+                .skip(plan.first_mux_idx + 1)
+                .filter(|(index, _)| !removed.contains(index))
+                .map(|(_, instruction)| instruction)
+                .collect(),
+            terminator: original.terminator,
+        },
+    );
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    merge_block_id
 }
 
 fn find_cross_block_priority_chain_plan(
@@ -1189,7 +1636,7 @@ fn find_existing_cfg_placement(
         let target = placement
             .sink_bounds_for_use_blocks(value, use_blocks)
             .map(|bounds| bounds.latest)
-            .filter(|&target| target != origin && !placement.cfg.postdominates(target, origin))
+            .filter(|&target| target != origin)
             .unwrap_or(origin);
         targets.insert(value, target);
     }
@@ -1240,7 +1687,13 @@ fn find_existing_cfg_placement(
                 }
             }
         }
-        if existing_cfg_component_is_profitable(eu, placement, &instruction_values, &component) {
+        if existing_cfg_component_is_profitable(
+            eu,
+            placement,
+            &instruction_values,
+            &targets,
+            &component,
+        ) {
             accepted.extend(component);
         }
     }
@@ -1281,6 +1734,7 @@ fn existing_cfg_component_is_profitable(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     placement: &PlacementAnalysis,
     instruction_values: &HashMap<(BlockId, usize), ValueId>,
+    targets: &HashMap<ValueId, BlockId>,
     component: &BTreeSet<ValueId>,
 ) -> bool {
     let mut inputs = BTreeSet::<ValueId>::new();
@@ -1327,6 +1781,21 @@ fn existing_cfg_component_is_profitable(
     let input_chunks = inputs.into_iter().map(chunks).sum::<u128>();
     let output_chunks = outputs.into_iter().map(chunks).sum::<u128>();
     let added_live_chunks = input_chunks.saturating_sub(output_chunks);
+
+    // ScheduleLate into a post-dominator does not skip dynamic work. It is
+    // still profitable when it replaces at least as much live output state as
+    // the inputs it carries forward. This is the ordinary live-range case,
+    // distinct from control-dependent sinking below; do not use instruction
+    // cost as if the moved operation became conditional.
+    let has_postdominating_move = component.iter().any(|value| {
+        let origin = placement.values[value.0].origin.block();
+        targets
+            .get(value)
+            .is_some_and(|&target| placement.cfg.postdominates(target, origin))
+    });
+    if has_postdominating_move {
+        return input_chunks <= output_chunks;
+    }
 
     // Scale by two: under the same profile-free even prior used by branch
     // selection, moving C units into one arm skips C/2 expected work, while a
@@ -5672,6 +6141,156 @@ mod tests {
     }
 
     #[test]
+    fn branchifies_coupled_state_updates_with_interleaved_conditions() {
+        let mut eu = cfg_unit(
+            23,
+            &[2, 4, 6, 8, 9, 11, 12, 14, 15],
+            vec![BasicBlock {
+                id: BlockId(0),
+                params: (0..=7).map(RegisterId).collect(),
+                instructions: vec![
+                    SIRInstruction::Binary(
+                        RegisterId(8),
+                        RegisterId(3),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(0),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(9),
+                        RegisterId(2),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(8),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(10),
+                        RegisterId(9),
+                        RegisterId(3),
+                        RegisterId(0),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(11),
+                        RegisterId(5),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(10),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(12),
+                        RegisterId(4),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(11),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(13),
+                        RegisterId(12),
+                        RegisterId(5),
+                        RegisterId(10),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(14),
+                        RegisterId(7),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(15),
+                        RegisterId(6),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(14),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(16),
+                        RegisterId(15),
+                        RegisterId(7),
+                        RegisterId(13),
+                    ),
+                    imm(17, 1),
+                    imm(18, 2),
+                    imm(19, 3),
+                    SIRInstruction::Mux(
+                        RegisterId(20),
+                        RegisterId(9),
+                        RegisterId(17),
+                        RegisterId(1),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(21),
+                        RegisterId(12),
+                        RegisterId(18),
+                        RegisterId(20),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(22),
+                        RegisterId(15),
+                        RegisterId(19),
+                        RegisterId(21),
+                    ),
+                    store(0, 16),
+                    store(1, 22),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+        );
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert_eq!(
+            eu.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+                .count(),
+            6
+        );
+        for (guard, delayed) in [(2, 8), (4, 11), (6, 14)] {
+            let guard_block = eu
+                .blocks
+                .values()
+                .find(|block| {
+                    matches!(
+                        block.terminator,
+                        SIRTerminator::Branch {
+                            cond,
+                            ..
+                        } if cond == RegisterId(guard)
+                    )
+                })
+                .expect("eligibility guard must become the first branch");
+            let delayed_block_id = match &guard_block.terminator {
+                SIRTerminator::Branch { true_block, .. } => true_block.0,
+                _ => unreachable!(),
+            };
+            let delayed_block = &eu.blocks[&delayed_block_id];
+            assert!(delayed_block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Binary(dst, _, crate::ir::BinaryOp::GtU, _)
+                        if *dst == RegisterId(delayed)
+                )
+            }));
+            assert!(matches!(
+                delayed_block.terminator,
+                SIRTerminator::Branch {
+                    cond,
+                    ..
+                } if cond == RegisterId(delayed)
+            ));
+        }
+        for outputs in [
+            [RegisterId(10), RegisterId(20)],
+            [RegisterId(13), RegisterId(21)],
+            [RegisterId(16), RegisterId(22)],
+        ] {
+            assert!(eu.blocks.values().any(|block| block.params == outputs));
+        }
+    }
+
+    #[test]
     fn atomic_priority_moves_cross_block_occurrences_with_valid_state_versions() {
         let mut register_map = HashMap::default();
         for reg in 0..24 {
@@ -6782,6 +7401,137 @@ mod tests {
         assert_eq!(definitions(BlockId(0)), vec![RegisterId(7)]);
         assert_eq!(definitions(BlockId(1)), vec![RegisterId(3), RegisterId(4)]);
         assert_eq!(definitions(BlockId(2)), vec![RegisterId(5), RegisterId(6)]);
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_schedules_pure_dags_into_a_postdominating_use_block() {
+        let mut eu = cfg_unit(
+            6,
+            &[1],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: vec![
+                        SIRInstruction::Unary(
+                            RegisterId(2),
+                            crate::ir::UnaryOp::BitNot,
+                            RegisterId(0),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(2),
+                            crate::ir::BinaryOp::Add,
+                            RegisterId(0),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 2);
+        assert!(eu.blocks[&BlockId(0)].instructions.is_empty());
+        assert_eq!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>(),
+            vec![RegisterId(2), RegisterId(3)]
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_sinks_a_dynamic_load_within_the_same_loop_iteration() {
+        let mut eu = cfg_unit(
+            5,
+            &[1, 2],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![imm(0, 0), imm(1, 1), imm(2, 0)],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(3),
+                        addr(0),
+                        SIROffset::Dynamic(RegisterId(0)),
+                        64,
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(2), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(4),
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId(3),
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(2),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(4), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(4),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 1);
+        assert!(eu.blocks[&BlockId(1)].instructions.is_empty());
+        assert!(matches!(
+            eu.blocks[&BlockId(2)].instructions.first(),
+            Some(SIRInstruction::Load(RegisterId(3), _, _, 64))
+        ));
         assert_eq!(eu.verify_result(), Ok(()));
     }
 

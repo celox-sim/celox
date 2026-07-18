@@ -218,6 +218,7 @@ pub(super) struct PlacementAnalysis {
     register_values: HashMap<RegisterId, ValueId>,
     state: BTreeMap<u32, StateSsa>,
     loop_depth: Vec<usize>,
+    loop_membership: Vec<Vec<usize>>,
 }
 
 #[allow(dead_code)]
@@ -292,12 +293,13 @@ impl PlacementAnalysis {
 
         collect_value_uses(eu, &cfg, &register_values, &mut values)?;
         let (effects, effect_phis) = build_effect_ssa(eu, &cfg)?;
-        let mut loop_depth = vec![0usize; cfg.block_ids.len()];
-        for natural_loop in &cfg.loops {
+        let mut loop_membership = vec![Vec::new(); cfg.block_ids.len()];
+        for (loop_index, natural_loop) in cfg.loops.iter().enumerate() {
             for &block in &natural_loop.blocks {
-                loop_depth[block] += 1;
+                loop_membership[block].push(loop_index);
             }
         }
+        let loop_depth = loop_membership.iter().map(Vec::len).collect();
 
         Ok(Self {
             cfg,
@@ -307,6 +309,7 @@ impl PlacementAnalysis {
             register_values,
             state,
             loop_depth,
+            loop_membership,
         })
     }
 
@@ -445,10 +448,14 @@ impl PlacementAnalysis {
         let origin_scc = self.cfg.scc_for_block[origin];
         let candidate_scc = self.cfg.scc_for_block[candidate];
         if self.cfg.sccs[origin_scc].cyclic {
-            // Moving a dynamic SSA occurrence within or out of a loop needs
-            // loop-value semantics, not merely block dominance. Keep it at its
-            // original block until the loop placement proof exists.
-            return candidate == origin;
+            // A dominated block in the same reducible SCC and the exact same
+            // natural-loop nest is a legal ScheduleLate destination: it
+            // cannot enter a sibling or nested loop which repeats at a
+            // different frequency. Irreducible SCCs have no single iteration
+            // boundary, so keep their occurrences pinned.
+            return candidate_scc == origin_scc
+                && self.cfg.sccs[origin_scc].reducible_header.is_some()
+                && self.loop_membership[candidate] == self.loop_membership[origin];
         }
         if self.cfg.sccs[candidate_scc].cyclic {
             return false;
@@ -977,6 +984,137 @@ mod tests {
     }
 
     #[test]
+    fn read_only_state_can_sink_within_the_same_loop_iteration() {
+        let input = address(0);
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                    ],
+                    SIRTerminator::Jump(BlockId(1), vec![]),
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Load(
+                        RegisterId(2),
+                        input,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(2), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                ),
+                block(
+                    2,
+                    vec![SIRInstruction::Unary(
+                        RegisterId(3),
+                        UnaryOp::Ident,
+                        RegisterId(2),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), vec![]),
+                ),
+                block(
+                    3,
+                    vec![],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(4), vec![]),
+                    },
+                ),
+                block(4, vec![], SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(1)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+            ],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let value = analysis.value_for_register(RegisterId(2)).unwrap();
+
+        assert_eq!(
+            analysis.sink_bounds(value).unwrap().legal_blocks,
+            vec![BlockId(1), BlockId(2)]
+        );
+    }
+
+    #[test]
+    fn schedule_late_does_not_move_an_outer_value_into_a_nested_loop() {
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                        SIRInstruction::Imm(RegisterId(2), SIRValue::new(7u8)),
+                    ],
+                    SIRTerminator::Jump(BlockId(1), vec![]),
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Unary(
+                        RegisterId(3),
+                        UnaryOp::BitNot,
+                        RegisterId(2),
+                    )],
+                    SIRTerminator::Jump(BlockId(2), vec![]),
+                ),
+                block(
+                    2,
+                    vec![],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(3), vec![]),
+                        false_block: (BlockId(4), vec![]),
+                    },
+                ),
+                block(
+                    3,
+                    vec![SIRInstruction::Unary(
+                        RegisterId(4),
+                        UnaryOp::Ident,
+                        RegisterId(3),
+                    )],
+                    SIRTerminator::Jump(BlockId(2), vec![]),
+                ),
+                block(
+                    4,
+                    vec![],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(5), vec![]),
+                    },
+                ),
+                block(5, vec![], SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(1)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+                (RegisterId(4), bit(8)),
+            ],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let value = analysis.value_for_register(RegisterId(3)).unwrap();
+
+        assert_eq!(
+            analysis.sink_bounds(value).unwrap().legal_blocks,
+            vec![BlockId(1)]
+        );
+    }
+
+    #[test]
     fn write_after_load_closes_the_state_execution_domain() {
         let state = address(0);
         let eu = unit(
@@ -1261,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_load_is_pinned_without_an_exact_state_version() {
+    fn dynamic_load_uses_an_address_wide_state_version() {
         let eu = unit(
             [block(
                 0,
@@ -1283,9 +1421,69 @@ mod tests {
             .value(analysis.value_for_register(RegisterId(1)).unwrap())
             .unwrap();
 
+        let ValueSafety::StateRead(token) = value.safety else {
+            panic!("dynamic load must receive a conservative state version");
+        };
+        assert!(token.fragment.dynamic);
+    }
+
+    #[test]
+    fn dynamic_load_does_not_sink_across_an_aliasing_store() {
+        let state = address(0);
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(RegisterId(2), SIRValue::new(9u8)),
+                        SIRInstruction::Load(
+                            RegisterId(3),
+                            state,
+                            SIROffset::Dynamic(RegisterId(0)),
+                            8,
+                        ),
+                        SIRInstruction::Store(
+                            state,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(2),
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Unary(
+                        RegisterId(4),
+                        UnaryOp::Ident,
+                        RegisterId(3),
+                    )],
+                    SIRTerminator::Return,
+                ),
+                block(2, vec![], SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(1)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+                (RegisterId(4), bit(8)),
+            ],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let value = analysis.value_for_register(RegisterId(3)).unwrap();
+
         assert_eq!(
-            value.safety,
-            ValueSafety::Pinned(PinReason::UnversionedStateRead)
+            analysis.sink_bounds(value).unwrap().legal_blocks,
+            vec![BlockId(0)]
         );
     }
 }
