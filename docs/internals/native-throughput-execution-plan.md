@@ -2642,6 +2642,43 @@ therefore replace destructive speculative recoloring and repeated
 bundle-by-register range scans.  Retaining the present search and making its
 ordered maps incrementally cheaper is not an acceptable completion path.
 
+Step 27c5c removes both of those operations from unsuccessful allocation
+attempts.  A bundle first asks each register only the early-exit availability
+question.  Complete conflict sets are materialized lazily only after no free
+register exists, and the resulting per-register cache is shared by recolor,
+eviction, and splitting.  Recoloring is planned against the immutable matrix.
+All residents which conflict with one candidate on a target register are
+already pairwise noninterfering, because they coexist in that register's
+verified interval union.  Consequently each resident can choose an available
+alternative independently, including the same alternative as another
+resident.  Recursive search, speculative remove/assign, and failed rollback
+are unnecessary.  The complete move set is committed once; the undo journal
+is retained only to make an unexpected commit error atomic.  The old limit
+which rejected a recolor merely because it contained more residents than
+physical registers was also removed: it belonged to the exponential search,
+not to this linear plan, and retaining it would discard legal allocations.
+
+The retained clean CPU-0 non-LTO run is
+`target/heliodor/results/20260718T145639Z_celox_test_soc_linux_boot.log`.
+It completed with `compile_ns=131862840713`, `execute_ns=0`, and allocation
+times of 26.015 s for `eval_apply_ff`, 30.538 s for `eval_only_ff`, 55.274 s
+for `eval_comb`, and 29.845 s for `eval_comb_apply_ff`.  A bounded intermediate
+build completed in 129.844 s with 20.833 / 25.385 / 52.782 / 26.615 s, but was
+not retained because its physical-register-count cutoff rejected otherwise
+legal linear recolors.  Relative to Step 27c5b, the retained design removes a
+further 47.0 s overall and 43.8 / 49.8 s from the two largest allocation
+phases.  This remains a diagnostic compile-only result; production MIR and
+Linux execution are unchanged.
+
+An unchanged-binary debugger stop after this redesign found three active
+allocation threads in `try_split` (free-region construction, use-to-segment
+lookup, and temporary-region destruction) and one in lazy conflict
+materialization.  The next architectural boundary is therefore an
+allocation-owned split topology: CFG edges and exact use ownership are built
+once per bundle, while each physical register contributes only occupancy cuts.
+Rebuilding a complete free-region graph for every bundle/register pair is the
+next rejected design, not a loop to tune.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -2696,6 +2733,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27c4 dominance/use-cluster region splitting | this step | allocator 8/8 including same-block, cross-block, and sibling-arm splits | lib 799/799; check, strict clippy, and format pass | diagnostic allocator is not connected to production MIR | n/a | exact-use transitions and CFG-connected sparse register children complete |
 | 27c5a use-indexed HomeGraph | this step | HomeGraph 6/6; allocator 8/8 | lib 799/799; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic intentionally stopped after HomeGraph completion; production MIR unchanged | HomeGraph 8.128 / 6.755 / 6.611 s for the three reported large functions | nested full-analysis rebuild and quadratic home lookup removed; allocator core still fails the actual-scale gate |
 | 27c5b allocation-owned sparse ranges and transactional interval unions | this step | interval union 6/6; allocator 10/10 | lib 803/803; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 178.890 s; allocation 21.582 / 25.729 / 99.052 / 79.597 s | cloned matrix and repeated CFG resolution removed; destructive recolor and bundle-by-register scanning remain rejected |
+| 27c5c staged register queries and immutable recolor planning | this step | allocator 10/10 including multi-resident recolor and atomic error rollback | lib 803/803; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, strict clippy, and format pass | CPU-0 diagnostic compile-only completed; production MIR unchanged and no Linux semantic claim | compile-only 131.863 s; allocation 26.015 / 30.538 / 55.274 / 29.845 s | failed speculative recolor removed; per-register split-graph reconstruction remains rejected |
 
 ## Related design records
 

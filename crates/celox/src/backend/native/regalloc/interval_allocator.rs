@@ -589,7 +589,7 @@ struct QueueItem {
 struct RegisterProbe {
     register: PhysReg,
     order: usize,
-    conflicts: Vec<AllocationBundleId>,
+    conflicts: Option<Vec<AllocationBundleId>>,
 }
 
 impl Ord for QueueItem {
@@ -889,11 +889,28 @@ impl<'a> Allocator<'a> {
         Ok(())
     }
 
-    fn probe_registers(
+    fn register_probes(&self) -> Vec<RegisterProbe> {
+        self.registers
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(order, register)| RegisterProbe {
+                register,
+                order,
+                conflicts: None,
+            })
+            .collect()
+    }
+
+    fn materialize_conflicts(
         &mut self,
         id: AllocationBundleId,
-    ) -> Result<Vec<RegisterProbe>, IntervalAllocationError> {
-        let segments = &self
+        probe: &mut RegisterProbe,
+    ) -> Result<(), IntervalAllocationError> {
+        if probe.conflicts.is_some() {
+            return Ok(());
+        }
+        let segments = self
             .bundles
             .get(id.0 as usize)
             .ok_or_else(|| {
@@ -904,40 +921,56 @@ impl<'a> Allocator<'a> {
                     "allocation bundle is outside the stable bundle table",
                 )
             })?
-            .segments;
-        let bundle_count = self.bundles.len();
-        let validated = segments.validated();
-        let mut probes = Vec::with_capacity(self.registers.len());
-        for (order, register) in self.registers.iter().copied().enumerate() {
-            let mut conflicts = Vec::new();
-            self.matrix
-                .collect_conflicts_validated(
-                    register,
-                    validated,
-                    bundle_count,
-                    &mut self.conflict_collector,
-                    &mut conflicts,
-                )
-                .map_err(IntervalAllocationError::union)?;
-            probes.push(RegisterProbe {
-                register,
-                order,
-                conflicts,
-            });
-        }
-        Ok(probes)
+            .segments
+            .validated();
+        let mut conflicts = Vec::new();
+        self.matrix
+            .collect_conflicts_validated(
+                probe.register,
+                segments,
+                self.bundles.len(),
+                &mut self.conflict_collector,
+                &mut conflicts,
+            )
+            .map_err(IntervalAllocationError::union)?;
+        probe.conflicts = Some(conflicts);
+        Ok(())
     }
 
     fn try_free_register(
         &mut self,
         id: AllocationBundleId,
-        probes: &[RegisterProbe],
     ) -> Result<bool, IntervalAllocationError> {
-        for probe in probes {
-            if probe.conflicts.is_empty() {
-                self.assign_register(id, probe.register)?;
-                return Ok(true);
+        let free = {
+            let segments = self
+                .bundles
+                .get(id.0 as usize)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.BUNDLE_RANGE",
+                        None,
+                        Some(id),
+                        "allocation bundle is outside the stable bundle table",
+                    )
+                })?
+                .segments
+                .validated();
+            let mut free = None;
+            for register in self.registers.iter().copied() {
+                if !self
+                    .matrix
+                    .interferes_validated(register, segments)
+                    .map_err(IntervalAllocationError::union)?
+                {
+                    free = Some(register);
+                    break;
+                }
             }
+            free
+        };
+        if let Some(register) = free {
+            self.assign_register(id, register)?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -945,10 +978,19 @@ impl<'a> Allocator<'a> {
     fn try_recolor(
         &mut self,
         id: AllocationBundleId,
-        probes: &[RegisterProbe],
+        probes: &mut [RegisterProbe],
     ) -> Result<bool, IntervalAllocationError> {
         for probe in probes {
-            if probe.conflicts.is_empty() || probe.conflicts.len() > self.registers.len() {
+            self.materialize_conflicts(id, probe)?;
+            let conflicts = probe.conflicts.as_deref().ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.PROBE_STATE",
+                    None,
+                    Some(id),
+                    "materialized register probe has no conflict set",
+                )
+            })?;
+            if conflicts.is_empty() {
                 continue;
             }
             let Some(moves) = recolor_residents(
@@ -957,7 +999,7 @@ impl<'a> Allocator<'a> {
                 &self.registers,
                 id,
                 probe.register,
-                &probe.conflicts,
+                conflicts,
             )?
             else {
                 continue;
@@ -974,23 +1016,34 @@ impl<'a> Allocator<'a> {
     fn try_evict(
         &mut self,
         id: AllocationBundleId,
-        probes: &[RegisterProbe],
+        probes: &mut [RegisterProbe],
     ) -> Result<bool, IntervalAllocationError> {
-        let candidate = self.bundle(id)?;
-        if candidate.stage != AllocationStage::Original {
+        let (candidate_stage, candidate_cost) = {
+            let candidate = self.bundle(id)?;
+            (candidate.stage, candidate.spill_cost)
+        };
+        if candidate_stage != AllocationStage::Original {
             return Ok(false);
         }
-        let candidate_cost = candidate.spill_cost;
         let mut best = None::<(u64, usize, usize)>;
-        for (probe_index, probe) in probes.iter().enumerate() {
-            if probe.conflicts.is_empty()
-                || probe.conflicts.iter().any(|conflict| {
+        for (probe_index, probe) in probes.iter_mut().enumerate() {
+            self.materialize_conflicts(id, probe)?;
+            let conflicts = probe.conflicts.as_deref().ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.PROBE_STATE",
+                    None,
+                    Some(id),
+                    "materialized register probe has no conflict set",
+                )
+            })?;
+            if conflicts.is_empty()
+                || conflicts.iter().any(|conflict| {
                     self.bundles[conflict.0 as usize].stage == AllocationStage::NoEvict
                 })
             {
                 continue;
             }
-            let cost = probe.conflicts.iter().fold(0_u64, |cost, conflict| {
+            let cost = conflicts.iter().fold(0_u64, |cost, conflict| {
                 cost.saturating_add(self.bundles[conflict.0 as usize].spill_cost)
             });
             if candidate_cost <= cost {
@@ -1008,7 +1061,19 @@ impl<'a> Allocator<'a> {
             return Ok(false);
         };
         let register = probes[probe_index].register;
-        for &conflict in &probes[probe_index].conflicts {
+        let conflicts = probes[probe_index]
+            .conflicts
+            .as_deref()
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.PROBE_STATE",
+                    None,
+                    Some(id),
+                    "selected eviction probe has no conflict set",
+                )
+            })?
+            .to_vec();
+        for conflict in conflicts {
             let conflict_segments = self.bundles[conflict.0 as usize].segments.validated();
             let _ = self
                 .matrix
@@ -1552,10 +1617,12 @@ impl<'a> Allocator<'a> {
             ) {
                 continue;
             }
-            let probes = self.probe_registers(item.id)?;
-            if self.try_free_register(item.id, &probes)?
-                || self.try_recolor(item.id, &probes)?
-                || self.try_evict(item.id, &probes)?
+            if self.try_free_register(item.id)? {
+                continue;
+            }
+            let mut probes = self.register_probes();
+            if self.try_recolor(item.id, &mut probes)?
+                || self.try_evict(item.id, &mut probes)?
                 || self.try_split(item.id, &probes)?
             {
                 continue;
@@ -1626,38 +1693,6 @@ impl<'matrix, 'bundles> MatrixTransaction<'matrix, 'bundles> {
         }
     }
 
-    fn segments(
-        &self,
-        bundle: AllocationBundleId,
-    ) -> Result<&SparseRange, IntervalAllocationError> {
-        transaction_segments(self.bundles, bundle)
-    }
-
-    fn register(&self, bundle: AllocationBundleId) -> Option<PhysReg> {
-        self.matrix.register(bundle)
-    }
-
-    fn available_registers(
-        &self,
-        bundle: AllocationBundleId,
-        registers: &[PhysReg],
-        excluded: PhysReg,
-    ) -> Result<Vec<PhysReg>, IntervalAllocationError> {
-        let segments = self.segments(bundle)?.validated();
-        let mut available = Vec::new();
-        for &register in registers {
-            if register != excluded
-                && !self
-                    .matrix
-                    .interferes_validated(register, segments)
-                    .map_err(IntervalAllocationError::union)?
-            {
-                available.push(register);
-            }
-        }
-        Ok(available)
-    }
-
     fn assign(
         &mut self,
         bundle: AllocationBundleId,
@@ -1725,65 +1760,24 @@ fn recolor_residents(
     target: PhysReg,
     conflicts: &[AllocationBundleId],
 ) -> Result<Option<BTreeMap<AllocationBundleId, PhysReg>>, IntervalAllocationError> {
-    // The search neighborhood is bounded by the physical register file, not
-    // by a target-specific tuning constant. Work is additionally capped at
-    // one register probe per neighborhood/register pair.
-    if conflicts.len() > registers.len() {
+    let moves = plan_recolor_residents(matrix, bundles, registers, candidate, target, conflicts)?;
+    let Some(moves) = moves else {
         return Ok(None);
-    }
-    let mut budget = conflicts
-        .len()
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(registers.len().saturating_add(1)))
-        .ok_or_else(|| {
-            IntervalAllocationError::new(
-                "INTERVAL_ALLOC.RECOLOR_BUDGET",
-                None,
-                Some(candidate),
-                "recolor work bound overflows usize",
-            )
-        })?;
+    };
     let mut transaction = MatrixTransaction::new(matrix, bundles);
     let result = (|| {
         for &conflict in conflicts {
-            if transaction.register(conflict) != Some(target) {
-                return Err(IntervalAllocationError::new(
-                    "INTERVAL_ALLOC.RECOLOR_CONFLICT",
-                    None,
-                    Some(conflict),
-                    "recolor set is not resident in the target register",
-                ));
-            }
-            // Validate the canonical segment source before changing the
-            // matrix, including conflicts supplied by a corrupted caller.
-            let _ = transaction.segments(conflict)?;
-        }
-        for &conflict in conflicts {
             let _ = transaction.unassign(conflict)?;
         }
-
-        let mut moves = BTreeMap::new();
-        if !recolor_search(
-            &mut transaction,
-            registers,
-            target,
-            conflicts.to_vec(),
-            &mut budget,
-            &mut moves,
-        )? {
-            return Ok(None);
+        for (&bundle, &register) in &moves {
+            transaction.assign(bundle, register)?;
         }
-        transaction.assign(candidate, target)?;
-        Ok(Some(moves))
+        transaction.assign(candidate, target)
     })();
     match result {
-        Ok(Some(moves)) => {
+        Ok(()) => {
             transaction.commit();
             Ok(Some(moves))
-        }
-        Ok(None) => {
-            transaction.rollback()?;
-            Ok(None)
         }
         Err(error) => match transaction.rollback() {
             Ok(()) => Err(error),
@@ -1792,62 +1786,68 @@ fn recolor_residents(
     }
 }
 
-fn recolor_search(
-    transaction: &mut MatrixTransaction<'_, '_>,
+fn plan_recolor_residents(
+    matrix: &LiveIntervalMatrix,
+    bundles: &[AllocatedBundle],
     registers: &[PhysReg],
+    candidate: AllocationBundleId,
     target: PhysReg,
-    pending: Vec<AllocationBundleId>,
-    budget: &mut usize,
-    moves: &mut BTreeMap<AllocationBundleId, PhysReg>,
-) -> Result<bool, IntervalAllocationError> {
-    if pending.is_empty() {
-        return Ok(true);
+    conflicts: &[AllocationBundleId],
+) -> Result<Option<BTreeMap<AllocationBundleId, PhysReg>>, IntervalAllocationError> {
+    let _ = transaction_segments(bundles, candidate)?;
+    if matrix.register(candidate).is_some() {
+        return Err(IntervalAllocationError::new(
+            "INTERVAL_ALLOC.RECOLOR_CANDIDATE",
+            None,
+            Some(candidate),
+            "recolor candidate already has a physical-register assignment",
+        ));
+    }
+    if conflicts.is_empty() {
+        return Ok(None);
+    }
+    if conflicts.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(IntervalAllocationError::new(
+            "INTERVAL_ALLOC.RECOLOR_CONFLICT_SET",
+            None,
+            Some(candidate),
+            "recolor conflicts are not unique and strictly ordered",
+        ));
     }
 
-    let mut selected = None::<(usize, Vec<PhysReg>)>;
-    for (index, &bundle) in pending.iter().enumerate() {
-        let alternatives = transaction.available_registers(bundle, registers, target)?;
-        if alternatives.is_empty() {
-            return Ok(false);
+    let mut moves = BTreeMap::new();
+    for &conflict in conflicts {
+        if matrix.register(conflict) != Some(target) {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.RECOLOR_CONFLICT",
+                None,
+                Some(conflict),
+                "recolor set is not resident in the target register",
+            ));
         }
-        if selected.as_ref().is_none_or(|(best_index, best)| {
-            (alternatives.len(), bundle) < (best.len(), pending[*best_index])
-        }) {
-            selected = Some((index, alternatives));
+        let segments = transaction_segments(bundles, conflict)?.validated();
+        let mut selected = None;
+        for &register in registers {
+            if register != target
+                && !matrix
+                    .interferes_validated(register, segments)
+                    .map_err(IntervalAllocationError::union)?
+            {
+                selected = Some(register);
+                break;
+            }
         }
+        let Some(register) = selected else {
+            return Ok(None);
+        };
+        moves.insert(conflict, register);
     }
-    let Some((selected_index, alternatives)) = selected else {
-        return Err(IntervalAllocationError::new(
-            "INTERVAL_ALLOC.RECOLOR_SELECTION",
-            None,
-            None,
-            "non-empty recolor set produced no resident selection",
-        ));
-    };
-    let selected_bundle = pending[selected_index];
-    let mut remaining = pending;
-    remaining.remove(selected_index);
-    for register in alternatives {
-        if *budget == 0 {
-            return Ok(false);
-        }
-        *budget -= 1;
-        transaction.assign(selected_bundle, register)?;
-        moves.insert(selected_bundle, register);
-        if recolor_search(
-            transaction,
-            registers,
-            target,
-            remaining.clone(),
-            budget,
-            moves,
-        )? {
-            return Ok(true);
-        }
-        let _ = transaction.unassign(selected_bundle)?;
-        moves.remove(&selected_bundle);
-    }
-    Ok(false)
+
+    // Every conflict is currently resident in one interval union, hence their
+    // ranges are pairwise noninterfering. They may therefore independently
+    // choose the same alternative register. No recursive search or speculative
+    // matrix mutation is needed before the complete move set is known.
+    Ok(Some(moves))
 }
 
 impl AllocationPlan {
@@ -2433,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn transactional_recolor_moves_a_disjoint_resident_before_spilling() {
+    fn recolor_plan_moves_disjoint_target_residents_in_one_commit() {
         let insts = vec![
             MInst::LoadImm {
                 dst: VReg(0),
@@ -2468,10 +2468,10 @@ mod tests {
         let early = bundle_id(&graph, VReg(1));
         let late = bundle_id(&graph, VReg(3));
         allocator.assign_register(early, PhysReg::RAX).unwrap();
-        allocator.assign_register(late, PhysReg::RDX).unwrap();
+        allocator.assign_register(late, PhysReg::RAX).unwrap();
 
-        let probes = allocator.probe_registers(candidate).unwrap();
-        assert!(allocator.try_recolor(candidate, &probes).unwrap());
+        let mut probes = allocator.register_probes();
+        assert!(allocator.try_recolor(candidate, &mut probes).unwrap());
         assert_eq!(allocator.matrix.register(candidate), Some(PhysReg::RAX));
         assert_eq!(allocator.matrix.register(early), Some(PhysReg::RDX));
         assert_eq!(allocator.matrix.register(late), Some(PhysReg::RDX));
@@ -2479,7 +2479,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_transactional_recolor_restores_the_exact_sparse_matrix() {
+    fn failed_recolor_plan_does_not_mutate_the_sparse_matrix() {
         let insts = vec![
             MInst::LoadImm {
                 dst: VReg(0),
@@ -2517,8 +2517,8 @@ mod tests {
         allocator.assign_register(second, PhysReg::RDX).unwrap();
         let before = allocator.matrix.clone();
 
-        let probes = allocator.probe_registers(candidate).unwrap();
-        assert!(!allocator.try_recolor(candidate, &probes).unwrap());
+        let mut probes = allocator.register_probes();
+        assert!(!allocator.try_recolor(candidate, &mut probes).unwrap());
         assert_eq!(allocator.matrix, before);
         assert_eq!(allocator.matrix.register(first), Some(PhysReg::RAX));
         assert_eq!(allocator.matrix.register(second), Some(PhysReg::RDX));
@@ -2526,7 +2526,7 @@ mod tests {
     }
 
     #[test]
-    fn erroneous_recolor_rolls_back_every_journaled_matrix_edit() {
+    fn matrix_transaction_rolls_back_an_error_after_a_journaled_edit() {
         let insts = vec![
             MInst::LoadImm {
                 dst: VReg(0),
@@ -2563,16 +2563,13 @@ mod tests {
         allocator.assign_register(disjoint, PhysReg::RDX).unwrap();
         let before = allocator.matrix.clone();
 
-        let error = recolor_residents(
-            &mut allocator.matrix,
-            &allocator.bundles,
-            &allocator.registers,
-            AllocationBundleId(u32::MAX),
-            PhysReg::RAX,
-            &[resident],
-        )
-        .unwrap_err();
+        let mut transaction = MatrixTransaction::new(&mut allocator.matrix, &allocator.bundles);
+        assert_eq!(transaction.unassign(resident).unwrap(), PhysReg::RAX);
+        let error = transaction
+            .assign(AllocationBundleId(u32::MAX), PhysReg::RDX)
+            .unwrap_err();
         assert_eq!(error.rule, "INTERVAL_ALLOC.BUNDLE_RANGE");
+        transaction.rollback().unwrap();
         assert_eq!(allocator.matrix, before);
         allocator.matrix.verify().unwrap();
     }
@@ -2835,7 +2832,7 @@ mod tests {
         let candidate = bundle_id(&graph, VReg(0));
         let resident = bundle_id(&graph, VReg(1));
         allocator.assign_register(resident, PhysReg::RAX).unwrap();
-        let probes = allocator.probe_registers(candidate).unwrap();
+        let probes = allocator.register_probes();
         assert!(allocator.try_split(candidate, &probes).unwrap());
         let BundleAssignment::Split { children, .. } =
             &allocator.bundles[candidate.0 as usize].assignment
