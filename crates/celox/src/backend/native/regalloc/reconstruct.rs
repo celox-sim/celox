@@ -53,6 +53,20 @@ impl ReconstructError {
     }
 }
 
+fn stack_color_error(error: super::stack_color::StackColorError) -> ReconstructError {
+    let mut values = error.values;
+    values.extend(error.homes.into_iter().map(|home| VReg(home.0)));
+    values.sort_unstable();
+    values.dedup();
+    ReconstructError::new(
+        error.rule,
+        error.block,
+        error.instruction,
+        values,
+        error.message,
+    )
+}
+
 #[derive(Clone)]
 enum MaterializedOp {
     Spill {
@@ -129,7 +143,10 @@ pub(super) fn reconstruct(
     reload_recipes: &ReloadRecipeAnalysis,
 ) -> Result<ReconstructionResult, ReconstructError> {
     let recipe_homes = &plan.recipe_homes;
-    let stack_offsets = stack_layout(func, plan, recipe_homes)?;
+    let stack_coloring =
+        super::stack_color::color_spill_plan(func, cfg, plan).map_err(stack_color_error)?;
+    let stack_offsets = stack_coloring.offsets;
+    let frame_size = stack_coloring.frame_size;
     verify_reload_homes(func, plan, &stack_offsets, recipe_homes)?;
     let original_vregs = func.vregs.count() as usize;
     let mut logical_for_vreg = (0..original_vregs)
@@ -388,18 +405,6 @@ pub(super) fn reconstruct(
     let removed = eliminate_dead_definitions(func, &mut recipe_reloads);
     state_reloads.retain(|reload| !removed.contains(&reload.reload));
 
-    let frame_size = u32::try_from(stack_offsets.len())
-        .ok()
-        .and_then(|homes| homes.checked_mul(8))
-        .ok_or_else(|| {
-            ReconstructError::new(
-                "RECONSTRUCT.FRAME_SIZE_RANGE",
-                None,
-                None,
-                Vec::new(),
-                "spill frame size exceeds u32",
-            )
-        })?;
     Ok(ReconstructionResult {
         frame_size,
         recipe_reloads,
@@ -663,46 +668,6 @@ fn resolve_state_store_ordinals(
                 pending.len()
             ),
         ));
-    }
-    Ok(result)
-}
-
-fn stack_layout(
-    func: &MFunction,
-    plan: &SpillPlan,
-    recipe_homes: &BTreeSet<SpillHome>,
-) -> Result<HashMap<SpillHome, i32>, ReconstructError> {
-    let homes = plan
-        .point_ops
-        .iter()
-        .map(|(_, operation)| *operation)
-        .chain(plan.edge_ops.values().flatten().copied())
-        .filter_map(|operation| match operation {
-            PlannedOp::Spill { home, .. } => (!is_rematerializable(func, plan, home)
-                && !recipe_homes.contains(&home)
-                && !plan.state_homes.contains_key(&home))
-            .then_some(home),
-            PlannedOp::SpillPhi { home, .. } => (!recipe_homes.contains(&home)
-                && !plan.state_homes.contains_key(&home))
-            .then_some(home),
-            PlannedOp::Reload { .. } => None,
-        })
-        .collect::<BTreeSet<_>>();
-    let mut result = HashMap::with_capacity(homes.len());
-    for (index, home) in homes.into_iter().enumerate() {
-        let Some(offset) = index
-            .checked_mul(8)
-            .and_then(|value| i32::try_from(value).ok())
-        else {
-            return Err(ReconstructError::new(
-                "RECONSTRUCT.STACK_OFFSET_RANGE",
-                None,
-                None,
-                Vec::new(),
-                "spill frame exceeds signed 32-bit addressing range",
-            ));
-        };
-        result.insert(home, offset);
     }
     Ok(result)
 }
