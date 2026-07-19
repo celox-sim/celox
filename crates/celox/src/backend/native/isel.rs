@@ -3171,6 +3171,120 @@ fn memory_offset_low_zero_bits(
     }
 }
 
+/// Number of logical bits which can be accessed from `bit_offset` by one
+/// native scalar operation without crossing an element-strided storage gap.
+/// Packed values have no element boundary, while a strided element may need
+/// multiple native accesses when its byte extent is not 1, 2, 4, or 8 bytes.
+fn static_commit_chunk_capacity(
+    ctx: &ISelContext,
+    addr: &RegionedAbsoluteAddr,
+    bit_offset: usize,
+) -> usize {
+    let abs = addr.absolute_addr();
+    let Some(array) = ctx.layout.unpacked_arrays.get(&abs) else {
+        return 64 - bit_offset % 8;
+    };
+
+    let element_bit = bit_offset % array.element_width;
+    let byte_in_element = element_bit / 8;
+    let intra_byte = element_bit % 8;
+    let bytes_left = array.element_stride - byte_in_element;
+    let native_bits = if bytes_left >= 8 {
+        64
+    } else if bytes_left >= 4 {
+        32
+    } else if bytes_left >= 2 {
+        16
+    } else {
+        8
+    };
+    (array.element_width - element_bit).min(native_bits - intra_byte)
+}
+
+/// Copy one static logical bit range between potentially different physical
+/// array layouts.  Source and destination chunks are bounded independently:
+/// for example, `logic<2>[4]` may be byte-strided at an external interface but
+/// packed into one byte in an internal alias.
+fn emit_static_commit_plane(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src_addr: &RegionedAbsoluteAddr,
+    dst_addr: &RegionedAbsoluteAddr,
+    bit_offset: usize,
+    width: usize,
+    mask_plane: bool,
+) {
+    let mut copied = 0usize;
+    while copied < width {
+        let part_bit_offset = bit_offset + copied;
+        let (_, src_intra) = ctx.static_byte_and_intra(src_addr, part_bit_offset);
+        let (_, dst_intra) = ctx.static_byte_and_intra(dst_addr, part_bit_offset);
+        let part_width = (width - copied)
+            .min(static_commit_chunk_capacity(ctx, src_addr, part_bit_offset))
+            .min(static_commit_chunk_capacity(ctx, dst_addr, part_bit_offset));
+        debug_assert!(part_width != 0);
+
+        let src_size = ISelContext::op_size_for_width(src_intra + part_width);
+        let dst_size = ISelContext::op_size_for_width(dst_intra + part_width);
+        let containing_src = if mask_plane {
+            ctx.mask_byte_offset(src_addr, part_bit_offset)
+        } else {
+            ctx.byte_offset(src_addr, part_bit_offset)
+        };
+        let containing_dst = if mask_plane {
+            ctx.mask_byte_offset(dst_addr, part_bit_offset)
+        } else {
+            ctx.byte_offset(dst_addr, part_bit_offset)
+        };
+
+        let raw = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: raw,
+            base: BaseReg::SimState,
+            offset: containing_src,
+            size: src_size,
+        });
+        let shifted = if src_intra == 0 {
+            raw
+        } else {
+            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: shifted,
+                src: raw,
+                imm: src_intra as u8,
+            });
+            shifted
+        };
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
+
+        let old = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: old,
+            base: BaseReg::SimState,
+            offset: containing_dst,
+            size: dst_size,
+        });
+        let new = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_bfi(
+            block,
+            new,
+            old,
+            value,
+            dst_intra as u8,
+            mask_for_width(part_width),
+        );
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: containing_dst,
+            src: new,
+            size: dst_size,
+        });
+
+        copied += part_width;
+    }
+}
+
 fn emit_single_chunk_sparse_insert(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -5600,7 +5714,19 @@ fn lower_instruction(
                         let (src_byte_off, intra) = ctx.static_byte_and_intra(src_addr, *bit_off);
                         let (dst_byte_off, dst_intra) =
                             ctx.static_byte_and_intra(dst_addr, *bit_off);
-                        if intra == 0 && dst_intra == 0 && width_bits % 8 == 0 && *width_bits >= 512
+                        let packed_layouts = !ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&src_addr.absolute_addr())
+                            && !ctx
+                                .layout
+                                .unpacked_arrays
+                                .contains_key(&dst_addr.absolute_addr());
+                        if packed_layouts
+                            && intra == 0
+                            && dst_intra == 0
+                            && width_bits % 8 == 0
+                            && *width_bits >= 512
                         {
                             block.push(MInst::MemCopy {
                                 src_offset: src_byte_off,
@@ -5608,62 +5734,15 @@ fn lower_instruction(
                                 byte_len: width_bits / 8,
                             });
                         } else {
-                            let mut copied = 0usize;
-                            while copied < *width_bits {
-                                let part_bit_off = *bit_off + copied;
-                                let intra = ctx.static_byte_and_intra(src_addr, part_bit_off).1;
-                                let part_width = (*width_bits - copied).min(64 - intra);
-                                let load_size = ISelContext::op_size_for_width(part_width + intra);
-                                let containing_src = ctx.byte_offset(src_addr, part_bit_off);
-                                let containing_dst = ctx.byte_offset(dst_addr, part_bit_off);
-
-                                let raw = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: raw,
-                                    base: BaseReg::SimState,
-                                    offset: containing_src,
-                                    size: load_size,
-                                });
-
-                                let shifted = if intra > 0 {
-                                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::ShrImm {
-                                        dst: shifted,
-                                        src: raw,
-                                        imm: intra as u8,
-                                    });
-                                    shifted
-                                } else {
-                                    raw
-                                };
-                                let value = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
-
-                                let old = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: old,
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    size: load_size,
-                                });
-                                let new = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_bfi(
-                                    block,
-                                    new,
-                                    old,
-                                    value,
-                                    intra as u8,
-                                    mask_for_width(part_width),
-                                );
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    src: new,
-                                    size: load_size,
-                                });
-
-                                copied += part_width;
-                            }
+                            emit_static_commit_plane(
+                                ctx,
+                                block,
+                                src_addr,
+                                dst_addr,
+                                *bit_off,
+                                *width_bits,
+                                false,
+                            );
                         }
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -5735,7 +5814,16 @@ fn lower_instruction(
                                 ctx.static_byte_and_intra(src_addr, *bit_off);
                             let (dst_value_off, dst_intra) =
                                 ctx.static_byte_and_intra(dst_addr, *bit_off);
-                            if intra == 0
+                            let packed_layouts = !ctx
+                                .layout
+                                .unpacked_arrays
+                                .contains_key(&src_addr.absolute_addr())
+                                && !ctx
+                                    .layout
+                                    .unpacked_arrays
+                                    .contains_key(&dst_addr.absolute_addr());
+                            if packed_layouts
+                                && intra == 0
                                 && dst_intra == 0
                                 && width_bits % 8 == 0
                                 && *width_bits >= 512
@@ -5750,69 +5838,15 @@ fn lower_instruction(
                                     byte_len: width_bits / 8,
                                 });
                             } else {
-                                let mut copied = 0usize;
-                                while copied < *width_bits {
-                                    let part_bit_off = *bit_off + copied;
-                                    let intra = ctx.static_byte_and_intra(src_addr, part_bit_off).1;
-                                    let part_width = (*width_bits - copied).min(64 - intra);
-                                    let load_size =
-                                        ISelContext::op_size_for_width(part_width + intra);
-                                    let containing_src =
-                                        ctx.mask_byte_offset(src_addr, part_bit_off);
-                                    let containing_dst =
-                                        ctx.mask_byte_offset(dst_addr, part_bit_off);
-
-                                    let raw = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Load {
-                                        dst: raw,
-                                        base: BaseReg::SimState,
-                                        offset: containing_src,
-                                        size: load_size,
-                                    });
-                                    let shifted = if intra > 0 {
-                                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                        block.push(MInst::ShrImm {
-                                            dst: shifted,
-                                            src: raw,
-                                            imm: intra as u8,
-                                        });
-                                        shifted
-                                    } else {
-                                        raw
-                                    };
-                                    let value = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_and_imm(
-                                        block,
-                                        value,
-                                        shifted,
-                                        mask_for_width(part_width),
-                                    );
-
-                                    let old = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Load {
-                                        dst: old,
-                                        base: BaseReg::SimState,
-                                        offset: containing_dst,
-                                        size: load_size,
-                                    });
-                                    let new = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_bfi(
-                                        block,
-                                        new,
-                                        old,
-                                        value,
-                                        intra as u8,
-                                        mask_for_width(part_width),
-                                    );
-                                    block.push(MInst::Store {
-                                        base: BaseReg::SimState,
-                                        offset: containing_dst,
-                                        src: new,
-                                        size: load_size,
-                                    });
-
-                                    copied += part_width;
-                                }
+                                emit_static_commit_plane(
+                                    ctx,
+                                    block,
+                                    src_addr,
+                                    dst_addr,
+                                    *bit_off,
+                                    *width_bits,
+                                    true,
+                                );
                             }
                         }
                         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -11681,6 +11715,122 @@ mod tests {
             runtime_event_slot_size: 0,
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: vec![],
+        }
+    }
+
+    #[test]
+    fn static_commit_converts_between_strided_and_packed_array_storage() {
+        let source_var = VarId::default();
+        let mut packed_var = source_var;
+        packed_var.inc();
+        let mut destination_var = packed_var;
+        destination_var.inc();
+        let address = |var_id| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id,
+        };
+        let source_abs = address(source_var);
+        let packed_abs = address(packed_var);
+        let destination_abs = address(destination_var);
+        let regioned = |absolute| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Commit(
+                            regioned(source_abs),
+                            regioned(packed_abs),
+                            SIROffset::Static(0),
+                            8,
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(
+                            regioned(packed_abs),
+                            regioned(destination_abs),
+                            SIROffset::Static(0),
+                            8,
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+        eu.verify();
+
+        for four_state in [false, true] {
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.mode = MemoryLayoutMode::ElementStrided;
+            layout.offsets = [(source_abs, 0), (packed_abs, 16), (destination_abs, 24)]
+                .into_iter()
+                .collect();
+            layout.widths = [source_abs, packed_abs, destination_abs]
+                .into_iter()
+                .map(|absolute| (absolute, 8))
+                .collect();
+            layout.is_4states = [source_abs, packed_abs, destination_abs]
+                .into_iter()
+                .map(|absolute| (absolute, four_state))
+                .collect();
+            let array_layout = crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 2,
+                element_count: 4,
+                element_stride: 1,
+                plane_size: 4,
+            };
+            layout.unpacked_arrays.insert(source_abs, array_layout);
+            layout.unpacked_arrays.insert(destination_abs, array_layout);
+            layout.total_size = 40;
+            layout.working_base_offset = 40;
+            layout.sparse_base_offset = 40;
+            layout.sparse_active_count_offset = 40;
+            layout.sparse_active_flags_offset = 40;
+            layout.sparse_active_list_offset = 40;
+            layout.merged_total_size = 40;
+            layout.triggered_bits_offset = 40;
+            layout.scratch_base_offset = 40;
+
+            let mut function = lower_execution_unit(&eu, &layout, four_state);
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+
+            let mut state = vec![0xa8u8; 40];
+            state[0..4].copy_from_slice(&[0xfc, 0xff, 0xfd, 0xfe]);
+            state[24..28].fill(0xa8);
+            if four_state {
+                state[4..8].copy_from_slice(&[0xfd, 0xfe, 0xff, 0xfc]);
+                state[28..32].fill(0x54);
+            }
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+
+            assert_eq!(state[16], 0x9c, "packed value, four_state={four_state}");
+            assert_eq!(
+                &state[24..28],
+                &[0xa8, 0xab, 0xa9, 0xaa],
+                "strided value, four_state={four_state}"
+            );
+            if four_state {
+                assert_eq!(state[17], 0x39, "packed mask");
+                assert_eq!(&state[28..32], &[0x55, 0x56, 0x57, 0x54]);
+            }
         }
     }
 
