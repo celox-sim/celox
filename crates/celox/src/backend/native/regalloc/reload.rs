@@ -1484,7 +1484,7 @@ fn store_home_specs(func: &MFunction, inst: &MInst, canonical_bits: &[u8]) -> Ve
 /// remain 64-bit values and no HDL width is attached to them.  A narrow store
 /// is a reload home only when its source is already exactly the zero-extended
 /// value produced by a load of the same machine width.
-fn canonical_value_bits(func: &MFunction) -> Result<Vec<u8>, ReloadRecipeError> {
+pub(super) fn canonical_value_bits(func: &MFunction) -> Result<Vec<u8>, ReloadRecipeError> {
     #[derive(Clone, Copy)]
     enum Definition {
         Phi { block: usize, phi: usize },

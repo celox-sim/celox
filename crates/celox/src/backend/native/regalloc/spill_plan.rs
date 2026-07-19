@@ -1037,7 +1037,7 @@ fn evict_value(
     if spilled.contains(&value) {
         return Ok(());
     }
-    if let Some((point, recipe_cost)) = final_use_point_recipe(
+    if let Some((point, recipe_cost)) = next_use_point_recipe(
         func,
         next_use,
         planning_recipes,
@@ -1075,7 +1075,14 @@ fn evict_value(
     Ok(())
 }
 
-fn final_use_point_recipe(
+/// Return the exact MemorySSA recipe at the next local use.
+///
+/// One eviction-to-reload interval is an independent residency cluster.  The
+/// value does not need a persistent stack home merely because it has another
+/// use after that reload: once reloaded it is resident again, and a later
+/// eviction makes a fresh home decision against the MemorySSA version at that
+/// later use.
+fn next_use_point_recipe(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
@@ -1085,12 +1092,6 @@ fn final_use_point_recipe(
 ) -> Option<(PointUse, u16)> {
     let value = VReg(value.0);
     let instruction = next_use.next_local_use(block, instruction, value)?;
-    if !next_use
-        .distance_at(func, block, instruction.saturating_add(1), value)
-        .is_dead()
-    {
-        return None;
-    }
     let point = PointUse {
         block: func.blocks[block].id,
         instruction,
@@ -1182,7 +1183,7 @@ fn eviction_cost(
     if has_persistent_home {
         return persistent_cost;
     }
-    final_use_point_recipe(func, next_use, planning_recipes, block, instruction, value)
+    next_use_point_recipe(func, next_use, planning_recipes, block, instruction, value)
         .map_or(persistent_cost, |(_, recipe_cost)| {
             persistent_cost.min(recipe_cost)
         })
@@ -2397,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn point_recipe_does_not_replace_stack_home_before_a_later_use() {
+    fn point_recipe_splits_one_cluster_before_a_later_invalidated_use() {
         let mut vregs = VRegAllocator::new();
         let stored = vregs.alloc();
         let pressure = vregs.alloc();
@@ -2460,8 +2461,19 @@ mod tests {
 
         let plan = plan_with_recipe_costs(&func, &cfg, &next_use, &recipes, 1).unwrap();
 
-        assert!(plan.recipe_reloads.is_empty());
+        assert!(
+            plan.recipe_reloads
+                .contains(&(BlockId(0), 4, LogicalValue(stored.0)))
+        );
         assert!(plan.point_ops.iter().any(|(point, operation)| {
+            point.block == BlockId(0)
+                && point.instruction == 5
+                && matches!(
+                    operation,
+                    PlannedOp::Spill { value, .. } if *value == LogicalValue(stored.0)
+                )
+        }));
+        assert!(!plan.point_ops.iter().any(|(point, operation)| {
             point.block == BlockId(0)
                 && point.instruction == 2
                 && matches!(

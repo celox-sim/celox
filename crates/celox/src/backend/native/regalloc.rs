@@ -48,7 +48,6 @@ mod spiller;
 mod spilling;
 mod ssa;
 mod ssa_state_home;
-#[allow(dead_code)]
 mod stack_color;
 mod state_promote;
 #[cfg(test)]
@@ -416,25 +415,6 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
-    let state_promote_start = timing.then(crate::timing::now);
-    state_promote::promote(func, &normalized_cfg).map_err(|error| {
-        RegallocError::new(
-            "physical state promotion",
-            error.rule,
-            error.block,
-            error.instruction,
-            Vec::new(),
-            error.message,
-        )
-    })?;
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("physical state promotion verification", error))?;
-    if let Some(start) = state_promote_start {
-        eprintln!(
-            "[regalloc-timing] label={label} physical_state_promotion elapsed={:?}",
-            start.elapsed()
-        );
-    }
     let total_start = timing.then(crate::timing::now);
     let stats_start = timing.then(crate::timing::now);
     let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
@@ -481,6 +461,26 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
+    let state_forward_start = timing.then(crate::timing::now);
+    let forwarded =
+        state_promote::forward_exact_round_trips(func, &normalized_cfg).map_err(|error| {
+            RegallocError::new(
+                "late physical-state forwarding",
+                error.rule,
+                error.block,
+                error.instruction,
+                Vec::new(),
+                error.message,
+            )
+        })?;
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("late state-forwarding verification", error))?;
+    if let Some(start) = state_forward_start {
+        eprintln!(
+            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} elapsed={:?}",
+            start.elapsed()
+        );
+    }
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }

@@ -376,6 +376,60 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
         let mut remove = vec![false; block.insts.len()];
         let mut replacements: HashMap<usize, MInst> = HashMap::new();
 
+        // A state-home rematerialization immediately before a forwarded
+        // width-normalizing copy is one machine load, not a load followed by
+        // another normalization.  Keep the copy form while allocating so the
+        // stored value may remain resident; once allocation chose the memory
+        // recipe, retarget the unsigned load directly to the copy result.
+        for idx in 0..block.insts.len().saturating_sub(1) {
+            let MInst::Load {
+                dst: loaded,
+                base,
+                offset,
+                size,
+            } = block.insts[idx]
+            else {
+                continue;
+            };
+            if use_counts.get(&loaded).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let destination = match (size, &block.insts[idx + 1]) {
+                (
+                    OpSize::S8,
+                    MInst::AndImm32 {
+                        dst,
+                        src,
+                        imm: 0xff,
+                    },
+                ) if *src == loaded => Some(*dst),
+                (
+                    OpSize::S16,
+                    MInst::AndImm32 {
+                        dst,
+                        src,
+                        imm: 0xffff,
+                    },
+                ) if *src == loaded => Some(*dst),
+                (OpSize::S32, MInst::Mov32 { dst, src }) if *src == loaded => Some(*dst),
+                (_, MInst::Mov { dst, src }) if *src == loaded => Some(*dst),
+                _ => None,
+            };
+            let Some(destination) = destination else {
+                continue;
+            };
+            replacements.insert(
+                idx,
+                MInst::Load {
+                    dst: destination,
+                    base,
+                    offset,
+                    size,
+                },
+            );
+            remove[idx + 1] = true;
+        }
+
         for (idx, remove_imm) in remove.iter_mut().enumerate() {
             let MInst::LoadImm {
                 dst: imm_vreg,
@@ -4097,6 +4151,168 @@ mod tests {
             }
         ));
         assert_eq!(func.blocks[0].insts.len(), 3);
+    }
+
+    #[test]
+    fn post_regalloc_peephole_folds_width_normalization_into_unsigned_load() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 1,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xff,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 2,
+                    size: OpSize::S16,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(2),
+                    imm: 0xffff,
+                },
+                MInst::Load {
+                    dst: VReg(4),
+                    base: BaseReg::SimState,
+                    offset: 4,
+                    size: OpSize::S32,
+                },
+                MInst::Mov32 {
+                    dst: VReg(5),
+                    src: VReg(4),
+                },
+                MInst::Load {
+                    dst: VReg(6),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::Mov {
+                    dst: VReg(7),
+                    src: VReg(6),
+                },
+                MInst::Return,
+            ],
+            8,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        let expected = [
+            (VReg(1), 1, OpSize::S8),
+            (VReg(3), 2, OpSize::S16),
+            (VReg(5), 4, OpSize::S32),
+            (VReg(7), 8, OpSize::S64),
+        ];
+        assert_eq!(func.blocks[0].insts.len(), expected.len() + 1);
+        for (inst, (dst, offset, size)) in func.blocks[0].insts.iter().zip(expected) {
+            assert!(matches!(
+                inst,
+                MInst::Load {
+                    dst: actual_dst,
+                    base: BaseReg::SimState,
+                    offset: actual_offset,
+                    size: actual_size,
+                } if *actual_dst == dst && *actual_offset == offset && *actual_size == size
+            ));
+        }
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_a_multi_use_loaded_value() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 1,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xff,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 2,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        post_regalloc_peephole(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [
+                MInst::Load { dst: VReg(0), .. },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    ..
+                },
+                MInst::Store { src: VReg(0), .. },
+                MInst::Return
+            ]
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_folds_unsigned_load_copies_at_every_machine_width() {
+        let mut instructions = Vec::new();
+        for (index, size) in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64]
+            .into_iter()
+            .enumerate()
+        {
+            let loaded = VReg((index * 2) as u32);
+            let destination = VReg((index * 2 + 1) as u32);
+            instructions.push(MInst::Load {
+                dst: loaded,
+                base: BaseReg::SimState,
+                offset: index as i32 * 8,
+                size,
+            });
+            instructions.push(MInst::Mov {
+                dst: destination,
+                src: loaded,
+            });
+        }
+        instructions.push(MInst::Return);
+        let mut func = make_func(instructions, 8);
+
+        post_regalloc_peephole(&mut func);
+
+        assert_eq!(func.blocks[0].insts.len(), 5);
+        for (index, (inst, size)) in func.blocks[0]
+            .insts
+            .iter()
+            .zip([OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64])
+            .enumerate()
+        {
+            assert!(matches!(
+                inst,
+                MInst::Load {
+                    dst,
+                    base: BaseReg::SimState,
+                    offset,
+                    size: actual_size,
+                } if *dst == VReg((index * 2 + 1) as u32)
+                    && *offset == index as i32 * 8
+                    && *actual_size == size
+            ));
+        }
     }
 
     #[test]

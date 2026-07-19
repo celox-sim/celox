@@ -1,18 +1,19 @@
-//! Sparse physical-word promotion for direct SimState accesses.
+//! Sparse late forwarding for direct SimState round trips.
 //!
 //! Overlapping 8/16/32/64-bit accesses are partitioned into non-overlapping
-//! machine cells. Stores define cell SSA versions; loads and partial stores
-//! consume the reaching versions. Live-on-entry cells remain symbolic and are
-//! loaded only at an actual use or phi edge, never eagerly at function entry.
+//! machine cells only to prove exact reaching definitions. Executable MIR is
+//! not converted to whole-cell SSA. After pressure scheduling, exact
+//! same-shaped loads reached by one store become copy uses of one canonical
+//! store value. Register allocation can then keep that concrete use cluster
+//! resident or split it back to MemorySSA-proved state reloads at the original
+//! load points. Narrow-store normalization is paid once per store version,
+//! never once per forwarded load.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use crate::backend::native::memory_effect::{self, UnknownMemory};
-use crate::backend::native::mir::{
-    BaseReg, BlockId, MFunction, MInst, OpSize, PackedStateHome, PhiNode, SpillDesc, StateHomeId,
-    VReg,
-};
+use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, OpSize, SpillDesc, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -82,6 +83,7 @@ impl Cell {
 enum RawAccessKind {
     Load { destination: VReg },
     Store { source: VReg },
+    Kill,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +100,6 @@ struct Component {
     start: i64,
     end: i64,
     has_store: bool,
-    rejected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,10 @@ enum VersionKind {
         block: usize,
         instruction: usize,
     },
+    Kill {
+        block: usize,
+        instruction: usize,
+    },
     Phi {
         block: usize,
         incoming: Vec<(usize, VersionId)>,
@@ -139,20 +144,42 @@ struct Version {
     kind: VersionKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Boundary {
-    block: usize,
-    cell: CellId,
-    reaching: VersionId,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PromotionPlan {
     cells: Vec<Cell>,
     versions: Vec<Version>,
     accesses: Vec<Access>,
-    boundaries: Vec<Boundary>,
     phis_by_block: Vec<Vec<(CellId, VersionId)>>,
+    barriers: BarrierSsa,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BarrierVersionId(usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BarrierVersionKind {
+    LiveOnEntry,
+    Kill {
+        block: usize,
+        instruction: usize,
+    },
+    Phi {
+        block: usize,
+        incoming: Vec<(usize, BarrierVersionId)>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BarrierVersion {
+    id: BarrierVersionId,
+    kind: BarrierVersionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct BarrierSsa {
+    versions: Vec<BarrierVersion>,
+    observed: BTreeMap<(usize, usize), BarrierVersionId>,
+    phis_by_block: Vec<Vec<BarrierVersionId>>,
 }
 
 fn direct_state_access(inst: &MInst) -> Option<(i64, i64, RawAccessKind)> {
@@ -194,20 +221,9 @@ fn component_for_range(components: &[Component], start: i64, end: i64) -> Option
         .map(|_| index)
 }
 
-fn mark_overlapping_components(components: &mut [Component], start: i64, end: i64) {
-    let mut index = components.partition_point(|component| component.end <= start);
-    while let Some(component) = components.get_mut(index) {
-        if component.start >= end {
-            break;
-        }
-        component.rejected = true;
-        index += 1;
-    }
-}
-
 fn discover_components(
     func: &MFunction,
-) -> Result<(Vec<Component>, Vec<RawAccess>), StatePromotionError> {
+) -> Result<(Vec<Component>, Vec<RawAccess>, Vec<(usize, usize)>), StatePromotionError> {
     let mut raw = Vec::new();
     let mut intervals = Vec::<(i64, i64, bool)>::new();
     for (block, mir_block) in func.blocks.iter().enumerate() {
@@ -247,41 +263,60 @@ fn discover_components(
                 start,
                 end,
                 has_store: store,
-                rejected: false,
             });
         }
     }
 
-    for mir_block in &func.blocks {
-        for inst in &mir_block.insts {
+    // Non-direct writes are MemorySSA definitions at their real program
+    // points.  They do not blacklist an address range for the whole function:
+    // a preceding or non-reaching indexed write cannot invalidate an exact
+    // store-to-load chain elsewhere in the CFG.
+    let mut unknown_kills = Vec::<(usize, usize)>::new();
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in mir_block.insts.iter().enumerate() {
             if direct_state_access(inst).is_some() {
                 continue;
             }
-            for effects in [memory_effect::reads(inst), memory_effect::writes(inst)] {
-                if matches!(
-                    effects.unknown_memory(),
-                    Some(UnknownMemory::Direct(BaseReg::SimState))
-                ) {
-                    for component in &mut components {
-                        component.rejected = true;
+            let effects = memory_effect::writes(inst);
+            if matches!(
+                effects.unknown_memory(),
+                Some(UnknownMemory::Direct(BaseReg::SimState))
+            ) {
+                unknown_kills.push((block, instruction));
+            }
+            for range in effects
+                .ranges()
+                .filter(|range| range.base == BaseReg::SimState)
+            {
+                let Some(end) = range.end() else {
+                    return Err(StatePromotionError::new(
+                        "STATE_PROMOTE.KILL_RANGE",
+                        Some(mir_block.id),
+                        Some(instruction),
+                        "known SimState write range exceeds the address domain",
+                    ));
+                };
+                let mut component =
+                    components.partition_point(|component| component.end <= range.offset);
+                while let Some(overlap) = components.get(component) {
+                    if overlap.start >= end {
+                        break;
                     }
-                }
-                for range in effects
-                    .ranges()
-                    .filter(|range| range.base == BaseReg::SimState)
-                {
-                    let Some(end) = range.end() else {
-                        for component in &mut components {
-                            component.rejected = true;
-                        }
-                        continue;
-                    };
-                    mark_overlapping_components(&mut components, range.offset, end);
+                    if overlap.has_store {
+                        raw.push(RawAccess {
+                            block,
+                            instruction,
+                            start: overlap.start.max(range.offset),
+                            end: overlap.end.min(end),
+                            kind: RawAccessKind::Kill,
+                        });
+                    }
+                    component += 1;
                 }
             }
         }
     }
-    Ok((components, raw))
+    Ok((components, raw, unknown_kills))
 }
 
 fn build_cells(
@@ -290,7 +325,7 @@ fn build_cells(
     let mut cells = Vec::new();
     let mut by_component = vec![Vec::new(); components.len()];
     for (component_index, component) in components.iter().enumerate() {
-        if !component.has_store || component.rejected {
+        if !component.has_store {
             continue;
         }
         let mut cursor = component.start;
@@ -349,7 +384,7 @@ fn map_accesses(
                 "direct state access is not covered by its overlap component",
             ));
         };
-        if components[component].rejected || !components[component].has_store {
+        if !components[component].has_store {
             continue;
         }
         let mut parts = Vec::new();
@@ -418,7 +453,225 @@ fn map_accesses(
     Ok(accesses)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarrierEventKind {
+    Query,
+    Kill { definition: BarrierVersionId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BarrierEvent {
+    instruction: usize,
+    kind: BarrierEventKind,
+}
+
+/// Build one sparse MemorySSA generation for writes whose concrete SimState
+/// range is unknown.
+///
+/// Expanding such a write into one definition per tracked physical cell would
+/// cost `unknown_writes * cells`.  A direct store and load can instead compare
+/// the single unknown-memory generation observed at their exact points.  If a
+/// write reaches only one arm or a later loop iteration, ordinary phi
+/// placement gives the load a different generation and forwarding is rejected.
+fn analyze_unknown_barriers(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    raw: &[RawAccess],
+    unknown_kills: &[(usize, usize)],
+) -> Result<BarrierSsa, StatePromotionError> {
+    let queries = raw
+        .iter()
+        .filter(|access| {
+            matches!(
+                access.kind,
+                RawAccessKind::Load { .. } | RawAccessKind::Store { .. }
+            )
+        })
+        .map(|access| (access.block, access.instruction))
+        .collect::<BTreeSet<_>>();
+    if queries.is_empty() {
+        return Ok(BarrierSsa {
+            phis_by_block: vec![Vec::new(); func.blocks.len()],
+            ..BarrierSsa::default()
+        });
+    }
+
+    let mut events = vec![Vec::<BarrierEvent>::new(); func.blocks.len()];
+    for &(block, instruction) in &queries {
+        events[block].push(BarrierEvent {
+            instruction,
+            kind: BarrierEventKind::Query,
+        });
+    }
+    let mut versions = vec![BarrierVersion {
+        id: BarrierVersionId(0),
+        kind: BarrierVersionKind::LiveOnEntry,
+    }];
+    let mut definitions = HashSet::<usize>::new();
+    for &(block, instruction) in unknown_kills {
+        let definition = BarrierVersionId(versions.len());
+        versions.push(BarrierVersion {
+            id: definition,
+            kind: BarrierVersionKind::Kill { block, instruction },
+        });
+        definitions.insert(block);
+        events[block].push(BarrierEvent {
+            instruction,
+            kind: BarrierEventKind::Kill { definition },
+        });
+    }
+    for block_events in &mut events {
+        block_events.sort_unstable_by_key(|event| event.instruction);
+    }
+
+    let mut upward_uses = HashSet::<usize>::new();
+    for (block, block_events) in events.iter().enumerate() {
+        let mut defined = false;
+        for event in block_events {
+            match event.kind {
+                BarrierEventKind::Query if !defined => {
+                    upward_uses.insert(block);
+                }
+                BarrierEventKind::Kill { .. } => defined = true,
+                BarrierEventKind::Query => {}
+            }
+        }
+    }
+    let mut live_in = upward_uses.clone();
+    let mut live_work = upward_uses.into_iter().collect::<VecDeque<_>>();
+    while let Some(block) = live_work.pop_front() {
+        for &predecessor in &cfg.predecessors[block] {
+            if !definitions.contains(&predecessor) && live_in.insert(predecessor) {
+                live_work.push_back(predecessor);
+            }
+        }
+    }
+
+    let mut phi_blocks = HashSet::<usize>::new();
+    let mut queued = definitions.clone();
+    let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
+    while let Some(block) = phi_work.pop() {
+        for &frontier in &cfg.dominance_frontier[block] {
+            if frontier == 0 || !live_in.contains(&frontier) || !phi_blocks.insert(frontier) {
+                continue;
+            }
+            if queued.insert(frontier) {
+                phi_work.push(frontier);
+            }
+        }
+    }
+    let mut phis_by_block = vec![Vec::<BarrierVersionId>::new(); func.blocks.len()];
+    let mut ordered_phis = phi_blocks.into_iter().collect::<Vec<_>>();
+    ordered_phis.sort_unstable();
+    for block in ordered_phis {
+        let id = BarrierVersionId(versions.len());
+        versions.push(BarrierVersion {
+            id,
+            kind: BarrierVersionKind::Phi {
+                block,
+                incoming: Vec::with_capacity(cfg.predecessors[block].len()),
+            },
+        });
+        phis_by_block[block].push(id);
+    }
+
+    let mut children = vec![Vec::<usize>::new(); func.blocks.len()];
+    for block in 1..func.blocks.len() {
+        let parent = cfg.idom[block].ok_or_else(|| {
+            StatePromotionError::new(
+                "STATE_PROMOTE.BARRIER_DOMINATOR_TREE",
+                Some(func.blocks[block].id),
+                None,
+                "reachable unknown-memory block has no immediate dominator",
+            )
+        })?;
+        children[parent].push(block);
+    }
+    enum Action {
+        Enter(usize),
+        Exit(BarrierVersionId),
+    }
+    let mut current = BarrierVersionId(0);
+    let mut observed = BTreeMap::<(usize, usize), BarrierVersionId>::new();
+    let mut actions = vec![Action::Enter(0)];
+    while let Some(action) = actions.pop() {
+        let block = match action {
+            Action::Exit(previous) => {
+                current = previous;
+                continue;
+            }
+            Action::Enter(block) => block,
+        };
+        let previous = current;
+        if let Some(&phi) = phis_by_block[block].first() {
+            current = phi;
+        }
+        for event in &events[block] {
+            match event.kind {
+                BarrierEventKind::Query => {
+                    if observed
+                        .insert((block, event.instruction), current)
+                        .is_some()
+                    {
+                        return Err(StatePromotionError::new(
+                            "STATE_PROMOTE.BARRIER_QUERY_IDENTITY",
+                            Some(func.blocks[block].id),
+                            Some(event.instruction),
+                            "one direct state instruction has multiple barrier queries",
+                        ));
+                    }
+                }
+                BarrierEventKind::Kill { definition } => current = definition,
+            }
+        }
+        for &successor in &cfg.successors[block] {
+            for &phi in &phis_by_block[successor] {
+                let BarrierVersionKind::Phi { incoming, .. } = &mut versions[phi.0].kind else {
+                    unreachable!("barrier phi table references a non-phi version");
+                };
+                incoming.push((block, current));
+            }
+        }
+        actions.push(Action::Exit(previous));
+        actions.extend(children[block].iter().rev().copied().map(Action::Enter));
+    }
+
+    for version in &mut versions {
+        if let BarrierVersionKind::Phi { block, incoming } = &mut version.kind {
+            incoming.sort_unstable_by_key(|(predecessor, _)| *predecessor);
+            if incoming.len() != cfg.predecessors[*block].len()
+                || incoming
+                    .iter()
+                    .zip(&cfg.predecessors[*block])
+                    .any(|((actual, _), expected)| actual != expected)
+            {
+                return Err(StatePromotionError::new(
+                    "STATE_PROMOTE.BARRIER_PHI_INPUTS",
+                    Some(func.blocks[*block].id),
+                    None,
+                    "unknown-memory phi does not cover every predecessor exactly once",
+                ));
+            }
+        }
+    }
+    if observed.len() != queries.len() {
+        return Err(StatePromotionError::new(
+            "STATE_PROMOTE.BARRIER_QUERY_COVERAGE",
+            None,
+            None,
+            "unknown-memory SSA did not visit every direct state access",
+        ));
+    }
+    Ok(BarrierSsa {
+        versions,
+        observed,
+        phis_by_block,
+    })
+}
+
 fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, StatePromotionError> {
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     if func.blocks.len() != cfg.predecessors.len()
         || func.blocks.len() != cfg.successors.len()
         || func.blocks.len() != cfg.idom.len()
@@ -430,91 +683,83 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
             "normalized CFG does not cover every MIR block",
         ));
     }
-    let (components, raw) = discover_components(func)?;
+    let phase_start = timing.then(std::time::Instant::now);
+    let (components, raw, unknown_kills) = discover_components(func)?;
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] discover elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let phase_start = timing.then(std::time::Instant::now);
+    let barriers = analyze_unknown_barriers(func, cfg, &raw, &unknown_kills)?;
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] barrier_ssa elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let phase_start = timing.then(std::time::Instant::now);
     let (cells, cells_by_component) = build_cells(&components)?;
     let mut accesses = map_accesses(&components, &raw, &cells, &cells_by_component)?;
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] partition elapsed={:?}",
+            start.elapsed()
+        );
+    }
     if cells.is_empty() {
         return Ok(PromotionPlan {
             cells,
             versions: Vec::new(),
             accesses,
-            boundaries: Vec::new(),
             phis_by_block: vec![Vec::new(); func.blocks.len()],
+            barriers,
         });
     }
 
+    let phase_start = timing.then(std::time::Instant::now);
     let mut accesses_by_block = vec![Vec::<usize>::new(); func.blocks.len()];
     let mut definitions = HashSet::<(CellId, usize)>::new();
-    let mut upward_uses = HashSet::<(CellId, usize)>::new();
     for (index, access) in accesses.iter().enumerate() {
         accesses_by_block[access.block].push(index);
     }
+    for block_accesses in &mut accesses_by_block {
+        block_accesses.sort_unstable_by_key(|&access| accesses[access].instruction);
+    }
     for (block, block_accesses) in accesses_by_block.iter().enumerate() {
-        let mut defined = HashSet::<CellId>::new();
         for &access_index in block_accesses {
             let access = &accesses[access_index];
             match access.kind {
-                RawAccessKind::Load { .. } => {
+                RawAccessKind::Store { .. } | RawAccessKind::Kill => {
                     for part in &access.parts {
-                        if !defined.contains(&part.cell) {
-                            upward_uses.insert((part.cell, block));
-                        }
-                    }
-                }
-                RawAccessKind::Store { .. } => {
-                    for part in &access.parts {
-                        let cell = cells[part.cell.0];
-                        if part.byte_width != cell.size.bytes() as usize
-                            && !defined.contains(&part.cell)
-                        {
-                            upward_uses.insert((part.cell, block));
-                        }
-                        defined.insert(part.cell);
                         definitions.insert((part.cell, block));
                     }
                 }
+                RawAccessKind::Load { .. } => {}
             }
         }
     }
-
-    let mut dirty = definitions.clone();
-    let mut dirty_work = definitions.iter().copied().collect::<VecDeque<_>>();
-    while let Some((cell, block)) = dirty_work.pop_front() {
-        for &successor in &cfg.successors[block] {
-            if dirty.insert((cell, successor)) {
-                dirty_work.push_back((cell, successor));
-            }
-        }
-    }
-    let mut boundary_pairs = dirty
-        .into_iter()
-        .filter(|(_, block)| cfg.successors[*block].is_empty())
-        .collect::<Vec<_>>();
-    boundary_pairs.sort_unstable_by_key(|(cell, block)| (*block, *cell));
-    for &(cell, block) in &boundary_pairs {
-        if !definitions.contains(&(cell, block)) {
-            upward_uses.insert((cell, block));
-        }
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] local_def_use elapsed={:?}",
+            start.elapsed()
+        );
     }
 
-    let mut live_in = upward_uses.clone();
-    let mut live_work = upward_uses.iter().copied().collect::<VecDeque<_>>();
-    while let Some((cell, block)) = live_work.pop_front() {
-        for &predecessor in &cfg.predecessors[block] {
-            let pair = (cell, predecessor);
-            if !definitions.contains(&pair) && live_in.insert(pair) {
-                live_work.push_back(pair);
-            }
-        }
-    }
-
+    // Build minimal SSA directly from definition blocks.  Computing pruned
+    // SSA here requires one backwards liveness problem per physical state
+    // cell; on a large RTL CFG that is O(cells * CFG).  Cytron IDF placement
+    // is independent of uses and remains sparse for the common case where a
+    // state location has one dominating store.
+    let phase_start = timing.then(std::time::Instant::now);
     let mut phi_pairs = HashSet::<(CellId, usize)>::new();
     let mut queued = definitions.clone();
     let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
     while let Some((cell, block)) = phi_work.pop() {
         for &frontier in &cfg.dominance_frontier[block] {
             let pair = (cell, frontier);
-            if frontier == 0 || !live_in.contains(&pair) || !phi_pairs.insert(pair) {
+            if frontier == 0 || !phi_pairs.insert(pair) {
                 continue;
             }
             if queued.insert(pair) {
@@ -522,7 +767,14 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
             }
         }
     }
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] phi_placement elapsed={:?}",
+            start.elapsed()
+        );
+    }
 
+    let phase_start = timing.then(std::time::Instant::now);
     let mut versions = cells
         .iter()
         .map(|cell| Version {
@@ -547,17 +799,27 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
         phis_by_block[block].push((cell, id));
     }
     for access in &mut accesses {
-        if !matches!(access.kind, RawAccessKind::Store { .. }) {
-            continue;
-        }
+        let version_kind = match access.kind {
+            RawAccessKind::Store { .. } => Some(false),
+            RawAccessKind::Kill => Some(true),
+            RawAccessKind::Load { .. } => None,
+        };
+        let Some(kill) = version_kind else { continue };
         for part in &mut access.parts {
             let id = VersionId(versions.len());
             versions.push(Version {
                 id,
                 cell: part.cell,
-                kind: VersionKind::Store {
-                    block: access.block,
-                    instruction: access.instruction,
+                kind: if kill {
+                    VersionKind::Kill {
+                        block: access.block,
+                        instruction: access.instruction,
+                    }
+                } else {
+                    VersionKind::Store {
+                        block: access.block,
+                        instruction: access.instruction,
+                    }
                 },
             });
             part.definition = Some(id);
@@ -624,57 +886,6 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
         actions.extend(children[block].iter().rev().copied().map(Action::Enter));
     }
 
-    let mut boundaries = boundary_pairs
-        .into_iter()
-        .map(|(cell, block)| Boundary {
-            block,
-            cell,
-            reaching: VersionId(cell.0),
-        })
-        .collect::<Vec<_>>();
-    // Reuse a second sparse dominator rename only for exact boundary versions.
-    // Keep the lookup sparse as well: visiting every promoted cell in every
-    // block would turn this pass into O(cells * blocks) on large RTL graphs.
-    let mut boundary_indices_by_block = vec![Vec::<usize>::new(); func.blocks.len()];
-    for (index, boundary) in boundaries.iter().enumerate() {
-        boundary_indices_by_block[boundary.block].push(index);
-    }
-    let mut current = cells
-        .iter()
-        .map(|cell| VersionId(cell.id.0))
-        .collect::<Vec<_>>();
-    let mut actions = vec![Action::Enter(0)];
-    while let Some(action) = actions.pop() {
-        let block = match action {
-            Action::Exit(changes) => {
-                for (cell, previous) in changes.into_iter().rev() {
-                    current[cell.0] = previous;
-                }
-                continue;
-            }
-            Action::Enter(block) => block,
-        };
-        let mut changes = Vec::new();
-        for &(cell, version) in &phis_by_block[block] {
-            changes.push((cell, current[cell.0]));
-            current[cell.0] = version;
-        }
-        for &access_index in &accesses_by_block[block] {
-            for part in &accesses[access_index].parts {
-                if let Some(definition) = part.definition {
-                    changes.push((part.cell, current[part.cell.0]));
-                    current[part.cell.0] = definition;
-                }
-            }
-        }
-        for &boundary in &boundary_indices_by_block[block] {
-            let cell = boundaries[boundary].cell;
-            boundaries[boundary].reaching = current[cell.0];
-        }
-        actions.push(Action::Exit(changes));
-        actions.extend(children[block].iter().rev().copied().map(Action::Enter));
-    }
-
     let version_cells = versions
         .iter()
         .map(|version| version.cell)
@@ -709,34 +920,212 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
             }
         }
     }
+    if let Some(start) = phase_start {
+        eprintln!(
+            "[state-forward-timing] rename_verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
     Ok(PromotionPlan {
         cells,
         versions,
         accesses,
-        boundaries,
         phis_by_block,
+        barriers,
     })
 }
 
-impl PromotionPlan {
-    fn verify(&self, func: &MFunction, cfg: &NormalizedCfg) -> Result<(), StatePromotionError> {
-        let rebuilt = analyze(func, cfg)?;
-        if &rebuilt != self {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.PLAN_MATCH",
-                None,
-                None,
-                "cached physical state SSA differs from an independent MIR rebuild",
-            ));
-        }
-        Ok(())
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForwardCandidate {
+    store_block: usize,
+    store_instruction: usize,
+    block: usize,
+    instruction: usize,
+    destination: VReg,
+    source: VReg,
+    size: OpSize,
 }
 
-fn allocate_value(
-    func: &mut MFunction,
-    descriptor: SpillDesc,
-) -> Result<VReg, StatePromotionError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForwardCluster {
+    store_block: usize,
+    store_instruction: usize,
+    source: VReg,
+    size: OpSize,
+    loads: Vec<ForwardCandidate>,
+}
+
+fn exact_forward_candidates(
+    func: &MFunction,
+    plan: &PromotionPlan,
+) -> Result<Vec<ForwardCandidate>, StatePromotionError> {
+    let accesses = plan
+        .accesses
+        .iter()
+        .filter(|access| matches!(access.kind, RawAccessKind::Store { .. }))
+        .map(|access| ((access.block, access.instruction), access))
+        .collect::<HashMap<_, _>>();
+    let mut candidates = Vec::new();
+    for load in &plan.accesses {
+        let RawAccessKind::Load { destination } = load.kind else {
+            continue;
+        };
+        let mut reaching_store = None::<(usize, usize)>;
+        for part in &load.parts {
+            let VersionKind::Store { block, instruction } = plan.versions[part.reaching.0].kind
+            else {
+                reaching_store = None;
+                break;
+            };
+            let location = (block, instruction);
+            match reaching_store {
+                Some(previous) if previous != location => {
+                    reaching_store = None;
+                    break;
+                }
+                Some(_) => {}
+                None => reaching_store = Some(location),
+            }
+        }
+        let Some(store_location) = reaching_store else {
+            continue;
+        };
+        let Some(store) = accesses.get(&store_location) else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.STORE_ACCESS",
+                func.blocks.get(load.block).map(|block| block.id),
+                Some(load.instruction),
+                "reaching state version has no matching store access",
+            ));
+        };
+        let RawAccessKind::Store { source } = store.kind else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.STORE_ACCESS",
+                func.blocks.get(load.block).map(|block| block.id),
+                Some(load.instruction),
+                "reaching store version points at a non-store access",
+            ));
+        };
+        let load_barrier = plan
+            .barriers
+            .observed
+            .get(&(load.block, load.instruction))
+            .copied()
+            .ok_or_else(|| {
+                StatePromotionError::new(
+                    "STATE_PROMOTE.BARRIER_LOAD",
+                    func.blocks.get(load.block).map(|block| block.id),
+                    Some(load.instruction),
+                    "direct load has no unknown-memory generation",
+                )
+            })?;
+        let store_barrier = plan
+            .barriers
+            .observed
+            .get(&store_location)
+            .copied()
+            .ok_or_else(|| {
+                StatePromotionError::new(
+                    "STATE_PROMOTE.BARRIER_STORE",
+                    func.blocks.get(store_location.0).map(|block| block.id),
+                    Some(store_location.1),
+                    "reaching direct store has no unknown-memory generation",
+                )
+            })?;
+        if load_barrier != store_barrier {
+            continue;
+        }
+        let Some(MInst::Load {
+            base: BaseReg::SimState,
+            offset: load_offset,
+            size: load_size,
+            ..
+        }) = func
+            .blocks
+            .get(load.block)
+            .and_then(|block| block.insts.get(load.instruction))
+        else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.LOAD_ACCESS",
+                func.blocks.get(load.block).map(|block| block.id),
+                Some(load.instruction),
+                "analyzed load no longer matches MIR",
+            ));
+        };
+        let Some(MInst::Store {
+            base: BaseReg::SimState,
+            offset: store_offset,
+            size: store_size,
+            src: store_source,
+        }) = func
+            .blocks
+            .get(store_location.0)
+            .and_then(|block| block.insts.get(store_location.1))
+        else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.STORE_ACCESS",
+                func.blocks.get(store_location.0).map(|block| block.id),
+                Some(store_location.1),
+                "analyzed store no longer matches MIR",
+            ));
+        };
+        if source != *store_source {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.STORE_SOURCE",
+                func.blocks.get(store_location.0).map(|block| block.id),
+                Some(store_location.1),
+                "state-version source differs from the reaching MIR store",
+            ));
+        }
+        if load_offset != store_offset || load_size != store_size || source == destination {
+            continue;
+        }
+        candidates.push(ForwardCandidate {
+            store_block: store_location.0,
+            store_instruction: store_location.1,
+            block: load.block,
+            instruction: load.instruction,
+            destination,
+            source,
+            size: *load_size,
+        });
+    }
+    candidates.sort_unstable_by_key(|candidate| (candidate.block, candidate.instruction));
+    Ok(candidates)
+}
+
+fn cluster_candidates(
+    candidates: Vec<ForwardCandidate>,
+) -> Result<Vec<ForwardCluster>, StatePromotionError> {
+    let mut by_store = BTreeMap::<(usize, usize), ForwardCluster>::new();
+    for candidate in candidates {
+        let key = (candidate.store_block, candidate.store_instruction);
+        let cluster = by_store.entry(key).or_insert_with(|| ForwardCluster {
+            store_block: candidate.store_block,
+            store_instruction: candidate.store_instruction,
+            source: candidate.source,
+            size: candidate.size,
+            loads: Vec::new(),
+        });
+        if cluster.source != candidate.source || cluster.size != candidate.size {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.CLUSTER_STORE",
+                None,
+                None,
+                "one physical store location names incompatible forwarding clusters",
+            ));
+        }
+        cluster.loads.push(candidate);
+    }
+    for cluster in by_store.values_mut() {
+        cluster
+            .loads
+            .sort_unstable_by_key(|candidate| (candidate.block, candidate.instruction));
+    }
+    Ok(by_store.into_values().collect())
+}
+
+fn allocate_cluster_value(func: &mut MFunction) -> Result<VReg, StatePromotionError> {
     let value = func.vregs.alloc();
     if value.0 as usize != func.spill_descs.len() {
         return Err(StatePromotionError::new(
@@ -746,433 +1135,154 @@ fn allocate_value(
             "MIR VReg allocator and spill-descriptor table are not dense",
         ));
     }
-    func.spill_descs.push(descriptor);
+    func.spill_descs.push(SpillDesc::transient());
     Ok(value)
 }
 
-fn allocate_transient(func: &mut MFunction) -> Result<VReg, StatePromotionError> {
-    allocate_value(func, SpillDesc::transient())
-}
-
-fn emit_mask(
+fn canonicalize_store_value(
     func: &mut MFunction,
-    output: &mut Vec<MInst>,
-    destination: VReg,
     source: VReg,
-    mask: u64,
-) -> Result<(), StatePromotionError> {
-    if mask == u64::MAX {
-        output.push(MInst::Mov {
-            dst: destination,
-            src: source,
-        });
-    } else if mask <= u64::from(u32::MAX) {
-        output.push(MInst::AndImm32 {
-            dst: destination,
-            src: source,
-            imm: mask as u32,
-        });
-    } else if (mask as i32 as i64 as u64) == mask {
-        output.push(MInst::AndImm {
-            dst: destination,
-            src: source,
-            imm: mask,
-        });
-    } else {
-        let constant = allocate_value(func, SpillDesc::remat(mask))?;
-        output.push(MInst::LoadImm {
-            dst: constant,
-            value: mask,
-        });
-        output.push(MInst::And {
-            dst: destination,
-            lhs: source,
-            rhs: constant,
-        });
-    }
-    Ok(())
-}
-
-fn emit_extract(
-    func: &mut MFunction,
-    output: &mut Vec<MInst>,
-    destination: VReg,
-    source: VReg,
-    source_bit_offset: usize,
-    width_bits: usize,
-    destination_bit_offset: usize,
-) -> Result<(), StatePromotionError> {
-    if width_bits == 0
-        || width_bits > 64
-        || source_bit_offset >= 64
-        || destination_bit_offset >= 64
-        || destination_bit_offset + width_bits > 64
-    {
-        return Err(StatePromotionError::new(
-            "STATE_PROMOTE.BIT_RANGE",
-            None,
-            None,
-            "machine-cell extraction exceeds one 64-bit register",
-        ));
-    }
-    let mut current = source;
-    if source_bit_offset != 0 {
-        let shifted = allocate_transient(func)?;
-        output.push(MInst::ShrImm {
-            dst: shifted,
-            src: current,
-            imm: source_bit_offset as u8,
-        });
-        current = shifted;
-    }
-    if width_bits < 64 {
-        let masked = if destination_bit_offset == 0 {
-            destination
-        } else {
-            allocate_transient(func)?
-        };
-        let mask = u64::MAX >> (64 - width_bits);
-        emit_mask(func, output, masked, current, mask)?;
-        current = masked;
-    }
-    if destination_bit_offset != 0 {
-        output.push(MInst::ShlImm {
-            dst: destination,
-            src: current,
-            imm: destination_bit_offset as u8,
-        });
-    } else if current != destination {
-        output.push(MInst::Mov {
-            dst: destination,
-            src: current,
-        });
-    }
-    Ok(())
-}
-
-fn version_operand(
-    func: &mut MFunction,
-    output: &mut Vec<MInst>,
-    plan: &PromotionPlan,
-    values: &[Option<VReg>],
-    version: VersionId,
-) -> Result<VReg, StatePromotionError> {
-    let row = plan.versions.get(version.0).ok_or_else(|| {
+    size: OpSize,
+    canonical_bits: &[u8],
+) -> Result<(VReg, Option<MInst>), StatePromotionError> {
+    let stored_bits = u8::try_from(size.bytes() * 8).expect("native store width fits u8");
+    let source_bits = canonical_bits.get(source.0 as usize).ok_or_else(|| {
         StatePromotionError::new(
-            "STATE_PROMOTE.VERSION_RANGE",
+            "STATE_PROMOTE.CANONICAL_VALUE",
             None,
             None,
-            "state use references a missing version",
+            "store source is outside the canonical-value side table",
         )
     })?;
-    if let Some(value) = values[version.0] {
-        return Ok(value);
+    if *source_bits <= stored_bits {
+        return Ok((source, None));
     }
-    if !matches!(row.kind, VersionKind::LiveOnEntry) {
-        return Err(StatePromotionError::new(
-            "STATE_PROMOTE.VERSION_VALUE",
-            None,
-            None,
-            "non-entry state version has no machine value",
-        ));
-    }
-    let cell = plan.cells[row.cell.0];
-    let value = allocate_transient(func)?;
-    output.push(MInst::Load {
-        dst: value,
-        base: BaseReg::SimState,
-        offset: cell.offset,
-        size: cell.size,
-    });
-    Ok(value)
+    let canonical = allocate_cluster_value(func)?;
+    let normalization = match size {
+        OpSize::S8 => MInst::AndImm32 {
+            dst: canonical,
+            src: source,
+            imm: u8::MAX.into(),
+        },
+        OpSize::S16 => MInst::AndImm32 {
+            dst: canonical,
+            src: source,
+            imm: u16::MAX.into(),
+        },
+        OpSize::S32 => MInst::Mov32 {
+            dst: canonical,
+            src: source,
+        },
+        OpSize::S64 => unreachable!("64-bit stores need no canonicalization"),
+    };
+    Ok((canonical, Some(normalization)))
 }
 
-fn lower_load(
-    func: &mut MFunction,
-    output: &mut Vec<MInst>,
-    plan: &PromotionPlan,
-    values: &[Option<VReg>],
-    access: &Access,
-    destination: VReg,
-) -> Result<(), StatePromotionError> {
-    let mut pieces = Vec::with_capacity(access.parts.len());
-    for part in &access.parts {
-        let source = version_operand(func, output, plan, values, part.reaching)?;
-        let piece = allocate_transient(func)?;
-        emit_extract(
-            func,
-            output,
-            piece,
-            source,
-            part.cell_byte_offset * 8,
-            part.byte_width * 8,
-            part.access_byte_offset * 8,
-        )?;
-        pieces.push(piece);
-    }
-    let mut current = pieces[0];
-    for (index, piece) in pieces.iter().copied().enumerate().skip(1) {
-        let combined = if index + 1 == pieces.len() {
-            destination
-        } else {
-            allocate_transient(func)?
-        };
-        output.push(MInst::Or {
-            dst: combined,
-            lhs: current,
-            rhs: piece,
-        });
-        current = combined;
-    }
-    if pieces.len() == 1 {
-        output.push(MInst::Mov {
-            dst: destination,
-            src: current,
-        });
-    }
-    Ok(())
-}
-
-fn lower_store(
-    func: &mut MFunction,
-    output: &mut Vec<MInst>,
-    plan: &PromotionPlan,
-    values: &[Option<VReg>],
-    access: &Access,
-    source: VReg,
-) -> Result<(), StatePromotionError> {
-    for part in &access.parts {
-        let definition = part.definition.ok_or_else(|| {
-            StatePromotionError::new(
-                "STATE_PROMOTE.STORE_VERSION",
-                None,
-                None,
-                "promoted store fragment has no SSA definition",
-            )
-        })?;
-        let destination = values[definition.0].ok_or_else(|| {
-            StatePromotionError::new(
-                "STATE_PROMOTE.VERSION_VALUE",
-                None,
-                None,
-                "store state version has no preallocated machine value",
-            )
-        })?;
-        let cell = plan.cells[part.cell.0];
-        let cell_bits = cell.size.bytes() as usize * 8;
-        if part.cell_byte_offset == 0 && part.byte_width * 8 == cell_bits {
-            emit_extract(
-                func,
-                output,
-                destination,
-                source,
-                part.access_byte_offset * 8,
-                cell_bits,
-                0,
-            )?;
-            continue;
-        }
-        let old = version_operand(func, output, plan, values, part.reaching)?;
-        let fragment_bits = part.byte_width * 8;
-        let insert_shift = part.cell_byte_offset * 8;
-        let fragment_mask = (u64::MAX >> (64 - fragment_bits)) << insert_shift;
-        let cell_mask = if cell_bits == 64 {
-            u64::MAX
-        } else {
-            u64::MAX >> (64 - cell_bits)
-        };
-        let cleared = allocate_transient(func)?;
-        emit_mask(func, output, cleared, old, cell_mask & !fragment_mask)?;
-        let inserted = allocate_transient(func)?;
-        emit_extract(
-            func,
-            output,
-            inserted,
-            source,
-            part.access_byte_offset * 8,
-            fragment_bits,
-            insert_shift,
-        )?;
-        output.push(MInst::Or {
-            dst: destination,
-            lhs: cleared,
-            rhs: inserted,
-        });
-    }
-    Ok(())
-}
-
-fn next_home_id(func: &MFunction) -> Result<u32, StatePromotionError> {
-    func.spill_descs
-        .iter()
-        .filter_map(|descriptor| descriptor.deferred_state_home.map(|home| home.id.0))
-        .max()
-        .map_or(Ok(0), |maximum| {
-            maximum.checked_add(1).ok_or_else(|| {
-                StatePromotionError::new(
-                    "STATE_PROMOTE.HOME_ID_RANGE",
-                    None,
-                    None,
-                    "deferred state-home identity exceeds u32",
-                )
-            })
-        })
-}
-
-fn apply(
+/// Forward exact same-shaped state round trips after pressure scheduling.
+///
+/// Each original store remains the packed-state home. Loads reached by that
+/// exact store share one canonical store value and become ordinary copy
+/// affinities. If the cluster is evicted, point-specific MemorySSA
+/// rematerialization recreates a load at the corresponding use. No state cell,
+/// terminal writeback, or synthetic phi is added here.
+pub(super) fn forward_exact_round_trips(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
-    plan: &PromotionPlan,
-) -> Result<(), StatePromotionError> {
-    if plan.cells.is_empty() {
-        return Ok(());
-    }
-    let mut home_id = next_home_id(func)?;
-    let mut values = vec![None::<VReg>; plan.versions.len()];
-    let mut phi_locations = HashMap::<VersionId, (usize, usize)>::new();
-    for version in &plan.versions {
-        if matches!(version.kind, VersionKind::LiveOnEntry) {
-            continue;
-        }
-        let cell = plan.cells[version.cell.0];
-        let home = PackedStateHome {
-            id: StateHomeId(home_id),
-            offset: cell.offset,
-            size: cell.size,
-            live_on_entry: false,
-        };
-        home_id = home_id.checked_add(1).ok_or_else(|| {
-            StatePromotionError::new(
-                "STATE_PROMOTE.HOME_ID_RANGE",
-                None,
-                None,
-                "deferred state-home identity exceeds u32",
-            )
-        })?;
-        let value = allocate_value(func, SpillDesc::transient().with_deferred_state_home(home))?;
-        values[version.id.0] = Some(value);
-        if let VersionKind::Phi { block, .. } = version.kind {
-            let phi = func.blocks[block].phis.len();
-            func.blocks[block].phis.push(PhiNode {
-                dst: value,
-                sources: Vec::with_capacity(cfg.predecessors[block].len()),
-            });
-            phi_locations.insert(version.id, (block, phi));
-        }
-    }
-
-    let access_index = plan
-        .accesses
-        .iter()
-        .enumerate()
-        .map(|(index, access)| ((access.block, access.instruction), index))
-        .collect::<HashMap<_, _>>();
-    let mut boundaries_by_block = vec![Vec::<Boundary>::new(); func.blocks.len()];
-    for &boundary in &plan.boundaries {
-        boundaries_by_block[boundary.block].push(boundary);
-    }
-    for (block, block_boundaries) in boundaries_by_block.iter().enumerate() {
-        let original = std::mem::take(&mut func.blocks[block].insts);
-        let mut rewritten = Vec::with_capacity(original.len());
-        for (instruction, inst) in original.into_iter().enumerate() {
-            if inst.is_terminator() {
-                for boundary in block_boundaries {
-                    let source = values[boundary.reaching.0].ok_or_else(|| {
-                        StatePromotionError::new(
-                            "STATE_PROMOTE.BOUNDARY_ENTRY",
-                            Some(func.blocks[block].id),
-                            Some(instruction),
-                            "dirty terminal state unexpectedly resolves to live-on-entry memory",
-                        )
-                    })?;
-                    let cell = plan.cells[boundary.cell.0];
-                    rewritten.push(MInst::Store {
-                        base: BaseReg::SimState,
-                        offset: cell.offset,
-                        src: source,
-                        size: cell.size,
-                    });
-                }
-            }
-            let Some(&access) = access_index.get(&(block, instruction)) else {
-                rewritten.push(inst);
-                continue;
-            };
-            let access = &plan.accesses[access];
-            match access.kind {
-                RawAccessKind::Load { destination } => {
-                    lower_load(func, &mut rewritten, plan, &values, access, destination)?;
-                }
-                RawAccessKind::Store { source } => {
-                    lower_store(func, &mut rewritten, plan, &values, access, source)?;
-                }
-            }
-        }
-        func.blocks[block].insts = rewritten;
-    }
-
-    let mut entry_edge_loads = HashMap::<(usize, CellId), VReg>::new();
-    for version in &plan.versions {
-        let VersionKind::Phi { block, incoming } = &version.kind else {
-            continue;
-        };
-        let (phi_block, phi_index) = phi_locations[&version.id];
-        debug_assert_eq!(phi_block, *block);
-        let mut sources = Vec::with_capacity(incoming.len());
-        for &(predecessor, source_version) in incoming {
-            let source = if let Some(value) = values[source_version.0] {
-                value
-            } else {
-                let cell = plan.versions[source_version.0].cell;
-                if let Some(&value) = entry_edge_loads.get(&(predecessor, cell)) {
-                    value
-                } else {
-                    let value = allocate_transient(func)?;
-                    let physical = plan.cells[cell.0];
-                    let load = MInst::Load {
-                        dst: value,
-                        base: BaseReg::SimState,
-                        offset: physical.offset,
-                        size: physical.size,
-                    };
-                    let instructions = &mut func.blocks[predecessor].insts;
-                    let position = instructions
-                        .iter()
-                        .position(MInst::is_terminator)
-                        .unwrap_or(instructions.len());
-                    instructions.insert(position, load);
-                    entry_edge_loads.insert((predecessor, cell), value);
-                    value
-                }
-            };
-            sources.push((func.blocks[predecessor].id, source));
-        }
-        func.blocks[*block].phis[phi_index].sources = sources;
-    }
-    Ok(())
-}
-
-pub(super) fn promote(
-    func: &mut MFunction,
-    cfg: &NormalizedCfg,
-) -> Result<bool, StatePromotionError> {
+) -> Result<usize, StatePromotionError> {
     let plan = analyze(func, cfg)?;
-    plan.verify(func, cfg)?;
-    if plan.cells.is_empty() {
-        return Ok(false);
+    let candidates = exact_forward_candidates(func, &plan)?;
+    if candidates.is_empty() {
+        return Ok(0);
     }
+
     let mut rewritten = func.clone();
-    apply(&mut rewritten, cfg, &plan)?;
+    let clusters = cluster_candidates(candidates)?;
+    let canonical_bits = super::reload::canonical_value_bits(&rewritten).map_err(|error| {
+        StatePromotionError::new(
+            error.rule,
+            error.block,
+            error.instruction,
+            format!("canonical store-value analysis failed: {}", error.message),
+        )
+    })?;
+    let mut stores = BTreeMap::<(usize, usize), (VReg, Option<MInst>)>::new();
+    let mut loads = BTreeMap::<(usize, usize), (VReg, VReg)>::new();
+    let mut forwarded = 0usize;
+    for cluster in clusters {
+        let (canonical, normalization) = canonicalize_store_value(
+            &mut rewritten,
+            cluster.source,
+            cluster.size,
+            &canonical_bits,
+        )?;
+        stores.insert(
+            (cluster.store_block, cluster.store_instruction),
+            (canonical, normalization),
+        );
+        for load in cluster.loads {
+            if loads
+                .insert(
+                    (load.block, load.instruction),
+                    (load.destination, canonical),
+                )
+                .is_some()
+            {
+                return Err(StatePromotionError::new(
+                    "STATE_PROMOTE.CLUSTER_LOAD",
+                    rewritten.blocks.get(load.block).map(|block| block.id),
+                    Some(load.instruction),
+                    "one load location belongs to multiple forwarding clusters",
+                ));
+            }
+            rewritten.spill_descs[load.destination.0 as usize] = SpillDesc::transient();
+            forwarded = forwarded.saturating_add(1);
+        }
+    }
+
+    for block in 0..rewritten.blocks.len() {
+        let original = std::mem::take(&mut rewritten.blocks[block].insts);
+        let mut instructions = Vec::with_capacity(original.len());
+        for (instruction, mut inst) in original.into_iter().enumerate() {
+            if let Some(&(canonical, ref normalization)) = stores.get(&(block, instruction)) {
+                if let Some(normalization) = normalization {
+                    instructions.push(normalization.clone());
+                }
+                let MInst::Store {
+                    base: BaseReg::SimState,
+                    src,
+                    ..
+                } = &mut inst
+                else {
+                    return Err(StatePromotionError::new(
+                        "STATE_PROMOTE.CLUSTER_STORE",
+                        Some(rewritten.blocks[block].id),
+                        Some(instruction),
+                        "forwarding cluster store no longer matches MIR",
+                    ));
+                };
+                *src = canonical;
+            }
+            if let Some(&(destination, canonical)) = loads.get(&(block, instruction)) {
+                instructions.push(MInst::Mov {
+                    dst: destination,
+                    src: canonical,
+                });
+            } else {
+                instructions.push(inst);
+            }
+        }
+        rewritten.blocks[block].insts = instructions;
+    }
     rewritten.verify_result().map_err(|error| {
         StatePromotionError::new(
             "STATE_PROMOTE.MIR_VERIFY",
             None,
             None,
-            format!("promoted MIR failed canonical verification: {error}"),
+            format!("state-forwarded MIR failed canonical verification: {error}"),
         )
     })?;
     *func = rewritten;
-    Ok(true)
+    Ok(forwarded)
 }
 
 #[cfg(test)]
@@ -1198,22 +1308,27 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_mixed_width_round_trips_become_one_lazy_cell_chain() {
+    fn same_store_load_cluster_shares_one_width_normalization() {
         let mut block = MBlock::new(BlockId(0));
         block.insts = vec![
-            MInst::Load {
+            MInst::LoadImm {
                 dst: VReg(0),
-                base: BaseReg::SimState,
-                offset: 0,
-                size: OpSize::S64,
-            },
-            MInst::AndImm {
-                dst: VReg(1),
-                src: VReg(0),
-                imm: 0xff,
+                value: 0x1ff,
             },
             MInst::Store {
                 base: BaseReg::SimState,
+                offset: 7,
+                src: VReg(0),
+                size: OpSize::S8,
+            },
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 7,
+                size: OpSize::S8,
+            },
+            MInst::Store {
+                base: BaseReg::StackFrame,
                 offset: 0,
                 src: VReg(1),
                 size: OpSize::S64,
@@ -1224,62 +1339,147 @@ mod tests {
                 offset: 7,
                 size: OpSize::S8,
             },
-            MInst::OrImm {
-                dst: VReg(3),
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 8,
                 src: VReg(2),
-                imm: 0x40,
+                size: OpSize::S64,
             },
+            MInst::Return,
+        ];
+        let mut function = function(3, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 2);
+        assert!(matches!(
+            function.blocks[0].insts[1],
+            MInst::AndImm32 {
+                dst: VReg(3),
+                src: VReg(0),
+                imm: 0xff,
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[2],
             MInst::Store {
                 base: BaseReg::SimState,
                 offset: 7,
                 src: VReg(3),
                 size: OpSize::S8,
-            },
-            MInst::Return,
-        ];
-        let mut function = function(4, vec![block]);
-        let cfg = normalize(&mut function);
-        assert!(promote(&mut function, &cfg).unwrap());
-        let direct_loads = function.blocks[0]
-            .insts
-            .iter()
-            .filter(|inst| {
-                matches!(
-                    inst,
-                    MInst::Load {
-                        base: BaseReg::SimState,
-                        ..
-                    }
-                )
-            })
-            .count();
-        let direct_stores = function.blocks[0]
-            .insts
-            .iter()
-            .filter(|inst| {
-                matches!(
-                    inst,
-                    MInst::Store {
-                        base: BaseReg::SimState,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(direct_loads, 1);
-        assert_eq!(direct_stores, 1);
-        assert!(
-            function
-                .spill_descs
-                .iter()
-                .filter_map(|descriptor| descriptor.deferred_state_home)
-                .count()
-                >= 2
-        );
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(3),
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[5],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(3),
+            }
+        ));
+        assert_eq!(function.vregs.count(), 4);
     }
 
     #[test]
-    fn one_arm_store_builds_a_phi_and_loads_entry_state_only_on_the_clean_edge() {
+    fn already_canonical_narrow_store_reuses_its_source_value() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 3,
+                size: OpSize::S8,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 7,
+                src: VReg(0),
+                size: OpSize::S8,
+            },
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 7,
+                size: OpSize::S8,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(2, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert_eq!(function.vregs.count(), 2);
+        assert!(matches!(
+            function.blocks[0].insts[1],
+            MInst::Store {
+                src: VReg(0),
+                size: OpSize::S8,
+                ..
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn differently_reaching_overlapping_store_keeps_the_original_load() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 2,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 7,
+                src: VReg(1),
+                size: OpSize::S8,
+            },
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(3, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 0);
+        assert!(matches!(
+            function.blocks[0].insts[4],
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn one_arm_store_keeps_the_join_load_as_memory() {
         let mut entry = MBlock::new(BlockId(0));
         entry.insts = vec![
             MInst::LoadImm {
@@ -1316,46 +1516,27 @@ mod tests {
                 offset: 16,
                 size: OpSize::S64,
             },
-            MInst::Store {
-                base: BaseReg::SimState,
-                offset: 32,
-                src: VReg(2),
-                size: OpSize::S64,
-            },
             MInst::Return,
         ];
         let mut function = function(3, vec![entry, dirty, clean, join]);
         let cfg = normalize(&mut function);
-        assert!(promote(&mut function, &cfg).unwrap());
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 0);
         let join = cfg.block_index[&BlockId(3)];
-        let clean = cfg.block_index[&BlockId(2)];
-        let entry = cfg.block_index[&BlockId(0)];
-        assert_eq!(function.blocks[join].phis.len(), 1);
-        assert!(function.blocks[clean].insts.iter().any(|inst| {
-            matches!(
-                inst,
-                MInst::Load {
-                    base: BaseReg::SimState,
-                    offset: 16,
-                    size: OpSize::S64,
-                    ..
-                }
-            )
-        }));
-        assert!(!function.blocks[entry].insts.iter().any(|inst| {
-            matches!(
-                inst,
-                MInst::Load {
-                    base: BaseReg::SimState,
-                    offset: 16,
-                    ..
-                }
-            )
-        }));
+        assert!(function.blocks[join].phis.is_empty());
+        assert!(matches!(
+            function.blocks[join].insts[0],
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            }
+        ));
     }
 
     #[test]
-    fn indexed_alias_envelope_rejects_only_the_intersecting_component() {
+    fn indexed_reads_do_not_kill_forwardable_state_versions() {
         let mut block = MBlock::new(BlockId(0));
         block.insts = vec![
             MInst::LoadImm {
@@ -1392,6 +1573,212 @@ mod tests {
         let cfg = normalize(&mut function);
         let plan = analyze(&function, &cfg).unwrap();
         assert!(plan.cells.iter().any(|cell| cell.offset == 8));
-        assert!(plan.cells.iter().all(|cell| cell.offset != 64));
+        assert!(plan.cells.iter().any(|cell| cell.offset == 64));
+    }
+
+    #[test]
+    fn bounded_indexed_store_kills_only_the_reaching_component() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 5,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 64,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 64,
+                index: VReg(0),
+                src: VReg(1),
+                size: OpSize::S8,
+                alias_range: MemoryAliasRange::new(64, 8),
+            },
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S64,
+            },
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 64,
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert!(matches!(
+            function.blocks[0].insts[5],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(1),
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[6],
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 64,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_write_on_one_arm_does_not_blacklist_the_clean_arm() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 9,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut dirty = MBlock::new(BlockId(1));
+        dirty.insts = vec![
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 0,
+                index: VReg(0),
+                src: VReg(1),
+                size: OpSize::S64,
+                alias_range: None,
+            },
+            MInst::Jump { target: BlockId(3) },
+        ];
+        let mut clean = MBlock::new(BlockId(2));
+        clean.insts = vec![
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(3) },
+        ];
+        let mut join = MBlock::new(BlockId(3));
+        join.insts = vec![
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, vec![entry, dirty, clean, join]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        let clean = cfg.block_index[&BlockId(2)];
+        let join = cfg.block_index[&BlockId(3)];
+        assert!(matches!(
+            function.blocks[clean].insts[0],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(1),
+            }
+        ));
+        assert!(matches!(
+            function.blocks[join].insts[0],
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_kills_are_one_sparse_generation_not_cells_times_kills() {
+        const CELLS: usize = 512;
+        const KILLS: usize = 32;
+        let mut instructions = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 1,
+            },
+        ];
+        for cell in 0..CELLS {
+            instructions.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: i32::try_from(cell * 16).unwrap(),
+                src: VReg(1),
+                size: OpSize::S64,
+            });
+        }
+        for _ in 0..KILLS {
+            instructions.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 0,
+                index: VReg(0),
+                src: VReg(1),
+                size: OpSize::S64,
+                alias_range: None,
+            });
+        }
+        for cell in 0..CELLS {
+            instructions.push(MInst::Load {
+                dst: VReg(u32::try_from(cell + 2).unwrap()),
+                base: BaseReg::SimState,
+                offset: i32::try_from(cell * 16).unwrap(),
+                size: OpSize::S64,
+            });
+        }
+        instructions.push(MInst::Return);
+        let mut function = function(
+            (CELLS + 2) as u32,
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+        );
+        let cfg = normalize(&mut function);
+        let plan = analyze(&function, &cfg).unwrap();
+
+        assert_eq!(plan.cells.len(), CELLS);
+        assert_eq!(plan.versions.len(), CELLS * 2);
+        assert_eq!(plan.barriers.versions.len(), KILLS + 1);
+        assert_eq!(plan.barriers.observed.len(), CELLS * 2);
     }
 }
