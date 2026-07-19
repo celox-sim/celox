@@ -2344,6 +2344,149 @@ impl JointAllocationSession {
         Ok(available)
     }
 
+    /// Preview child-fragment colors before the source is deferred. If the
+    /// candidate is a resident conflict, only that exact source owner is
+    /// ignored; a blocked unassigned candidate has no source occupancy. Fixed
+    /// ranges, earlier symbolic plans, and every other bundle remain visible.
+    /// This lets split topology and home cost participate in candidate choice.
+    pub(super) fn preview_symbolic_fragment_registers(
+        &self,
+        source: VReg,
+        segments: &[LiveSegment],
+        registers: &[PhysReg],
+    ) -> Result<Vec<PhysReg>, JointAllocationError> {
+        if registers != self.problem.target_registers {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.TARGET_REGISTER_SET",
+                None,
+                Some(source),
+                "symbolic fragment preview uses a different physical register set",
+            ));
+        }
+        let allocation = self.problem.value(source).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                None,
+                Some(source),
+                "symbolic fragment preview source is absent from the allocation problem",
+            )
+        })?;
+        if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_CLASS",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "fixed transition cannot produce a symbolic register fragment",
+            ));
+        }
+        let assigned = self.assignments.get(source.0 as usize).copied().flatten();
+        if self.deferred.contains(&source) || self.matrix.register(allocation.id) != assigned {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "symbolic fragment preview source assignment and matrix residency disagree",
+            ));
+        }
+        if segments.is_empty() {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_RANGE",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "symbolic register fragment preview has an empty sparse range",
+            ));
+        }
+        let range = self
+            .matrix
+            .make_range(segments.to_vec())
+            .map_err(JointAllocationError::union)?;
+        let mut available = Vec::new();
+        for &register in registers {
+            if !allocation.allowed_registers.contains(register)
+                || self
+                    .matrix
+                    .interferes_except_bundle_validated(register, range.validated(), allocation.id)
+                    .map_err(JointAllocationError::union)?
+            {
+                continue;
+            }
+            available.push(register);
+        }
+        available.sort_by_key(|register| {
+            (
+                Some(*register) != allocation.preferred_register,
+                registers
+                    .iter()
+                    .position(|candidate| candidate == register)
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        Ok(available)
+    }
+
+    /// Return every part of a projected child range free in one color while
+    /// ignoring only this source owner when it is resident. The caller may
+    /// form several disconnected child regions from this indexed subtraction.
+    pub(super) fn preview_symbolic_fragment_free_segments(
+        &self,
+        source: VReg,
+        segments: &[LiveSegment],
+        register: PhysReg,
+        registers: &[PhysReg],
+    ) -> Result<Vec<LiveSegment>, JointAllocationError> {
+        if registers != self.problem.target_registers || !registers.contains(&register) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.TARGET_REGISTER_SET",
+                None,
+                Some(source),
+                "symbolic free-region preview uses a different physical register set",
+            ));
+        }
+        let allocation = self.problem.value(source).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                None,
+                Some(source),
+                "symbolic free-region source is absent from the allocation problem",
+            )
+        })?;
+        if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_CLASS",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "fixed transition cannot produce a symbolic register fragment",
+            ));
+        }
+        let assigned = self.assignments.get(source.0 as usize).copied().flatten();
+        if self.deferred.contains(&source) || self.matrix.register(allocation.id) != assigned {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "symbolic free-region source assignment and matrix residency disagree",
+            ));
+        }
+        if !allocation.allowed_registers.contains(register) {
+            return Ok(Vec::new());
+        }
+        if segments.is_empty() {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_RANGE",
+                Some(allocation.interval.definition.block()),
+                Some(source),
+                "symbolic free-region preview has an empty sparse range",
+            ));
+        }
+        let range = self
+            .matrix
+            .make_range(segments.to_vec())
+            .map_err(JointAllocationError::union)?;
+        self.matrix
+            .free_segments_except_bundle_validated(register, range.validated(), allocation.id)
+            .map_err(JointAllocationError::union)
+    }
+
     /// Publish one symbolic fragment into the same physical matrix used by
     /// ordinary allocation. This prevents later queue values from taking a
     /// color already selected for a not-yet-created machine VReg.
@@ -3459,6 +3602,102 @@ mod tests {
             JointAllocationOutcome::DeferredRound
         ));
         assert_eq!(session.assigned_register(VReg(1)), None);
+    }
+
+    #[test]
+    fn symbolic_preview_ignores_only_its_source_bundle() {
+        let mut function = function(
+            2,
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+        );
+        let (cfg, _) = model(&mut function);
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut problem = fixed_problem(&function, &cfg, &registers);
+        let source = problem.value_mut(VReg(0)).unwrap();
+        source.class = AllocationValueClass::Region {
+            root: LiveBundleId(0),
+            uses: vec![BundleUseId(0)],
+        };
+        source.spill_cost = Some(1);
+        source.preferred_register = Some(PhysReg::RAX);
+        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
+        for (value, register) in [(VReg(0), PhysReg::RAX), (VReg(1), PhysReg::RDX)] {
+            let allocation = session.problem.value(value).unwrap();
+            let range = session.ranges[value.0 as usize].as_ref().unwrap();
+            session
+                .matrix
+                .assign_validated(allocation.id, register, range.validated())
+                .unwrap();
+            session.assignments[value.0 as usize] = Some(register);
+        }
+        let segments = session
+            .problem
+            .value(VReg(0))
+            .unwrap()
+            .interval
+            .segments
+            .clone();
+        assert_eq!(
+            session
+                .preview_symbolic_fragment_registers(VReg(0), &segments, &registers)
+                .unwrap(),
+            vec![PhysReg::RAX]
+        );
+        assert_eq!(
+            session
+                .preview_symbolic_fragment_free_segments(
+                    VReg(0),
+                    &segments,
+                    PhysReg::RAX,
+                    &registers,
+                )
+                .unwrap(),
+            segments
+        );
+        assert_ne!(
+            session
+                .preview_symbolic_fragment_free_segments(
+                    VReg(0),
+                    &segments,
+                    PhysReg::RDX,
+                    &registers,
+                )
+                .unwrap(),
+            segments
+        );
+
+        let source_id = session.problem.value(VReg(0)).unwrap().id;
+        session.matrix.unassign(source_id, &segments).unwrap();
+        session.assignments[0] = None;
+        assert_eq!(
+            session
+                .preview_symbolic_fragment_registers(VReg(0), &segments, &registers)
+                .unwrap(),
+            vec![PhysReg::RAX],
+            "an unassigned blocked source has no matrix occupancy to subtract"
+        );
     }
 
     #[test]

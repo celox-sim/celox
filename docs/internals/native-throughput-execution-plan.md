@@ -3611,6 +3611,65 @@ allocation problem, rather than merely sharing home costs among split plans
 already selected by separate pressure requests. Stores, reloads, and copies
 must be published only after those joint alternatives have won.
 
+Step 29e moves that decision boundary ahead of candidate ranking. Previously a
+dominance-maximal moved-use cluster was treated as one child. If its complete
+range had no color, the allocator could publish an uncolored synthetic VReg
+and discover a second split only in a later reactive round. Peeling the first
+use and retrying the remaining cluster inside the current round avoids the
+publication, but repeatedly rebuilds ranges and dominance partitions and is
+quadratic when fixed barriers separate many uses. It also prices a topology
+which was chosen before physical occupancy was known.
+
+Each maximal child range is now built once. For every target color, the
+physical interval union computes its exact free sparse segments while ignoring
+only the source owner when the candidate is a resident conflict; a blocked
+unassigned candidate has no source occupancy to remove. Fixed ranges, other
+bundles, and prior symbolic plans remain visible. A candidate-local
+per-register/per-block index
+then subtracts retained-prefix and sibling reservations. The resulting free
+fragments are connected only across real CFG exit-to-entry liveness edges.
+Dominance-ordered safe instruction uses claim disjoint reachable fragments,
+and each claimed multi-use region is retained only if its exact reconstructed
+range is wholly contained in the free fragments. All unresolved uses become
+exact MemorySSA/rematerialization/stack leaves. Thus every persistent child has
+a physical color before publication and no phantom uncolored VReg is created.
+
+The complete resolved topology and its new entry set are passed to the
+root-wide home accumulator before candidates are compared. The winning plan is
+then deferred and its colors are reserved in the persistent matrix. In debug
+or explicit verification mode, a separate oracle reconstructs all final
+ranges, requires them to stay inside the source range, asks the persistent
+matrix about each complete color, and performs a direct all-pairs same-color
+overlap check; it does not reuse free-fragment ownership.
+
+Focused register-allocation tests pass 250/250. They include a one-register
+straight-line case with two fixed division barriers: the old maximal child
+crossed the second barrier, while the resolved plan now materializes the lone
+pre-barrier use and colors the two post-barrier uses together in RAX before
+the source is deferred. A matrix regression separately proves that preview
+removes exactly the source owner while retaining another resident bundle.
+The complete non-LTO gates pass 870/870 library tests, 60 native-testbench
+tests with 1 ignored, and 9 counter tests with 3 ignored.
+
+The complete trace is at
+`target/heliodor/analysis/step29f-free-cfg-child-round-final-20260718` and took
+60.644 s. Its pre-optimized, post-optimized, and native-optimized SIR plus the
+complete 194,315,959-byte MIR are byte-identical to Step 29d and to the
+independent pre-cleanup candidate dump. The optimized non-LTO Linux run at
+`target/heliodor/results/step29f-free-cfg-child-round-final-20260718/20260719T073218Z_celox_test_soc_linux_boot.log`
+printed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 57.370 s compile and 123.898 s execute. The
+Heliodor allocation did not select a different child topology, so this step
+makes no generated-code or execution-speed claim.
+
+The remaining joint-allocation defect is no longer uncolored publication. The
+free-region projection still greedily visits physical colors and retains every
+available multi-use region before comparing the global benefit of competing
+regions. The next slice must expose those overlapping colored regions and
+exact-home leaves as alternatives in one cost problem, so transition cost,
+executed-use benefit, and interference choose the region set instead of target
+register order.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
