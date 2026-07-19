@@ -660,102 +660,6 @@ struct SymbolicFragmentPlanner {
     live_blocks: Vec<usize>,
 }
 
-struct SymbolicPlanningPreview<'a> {
-    session: &'a JointAllocationSession,
-    planner: &'a mut SymbolicFragmentPlanner,
-    registers: &'a [PhysReg],
-}
-
-/// Sparse candidate-local occupancy. Candidate previews do not mutate the
-/// persistent interval matrix, but sibling fragments still need indexed
-/// interference rather than an all-prior-fragments scan.
-#[derive(Debug, Default)]
-struct SymbolicPreviewMatrix {
-    blocks: BTreeMap<PhysReg, BTreeMap<BlockId, BTreeMap<SlotIndex, SlotIndex>>>,
-}
-
-impl SymbolicPreviewMatrix {
-    fn interferes(&self, register: PhysReg, segments: &[LiveSegment]) -> bool {
-        let Some(blocks) = self.blocks.get(&register) else {
-            return false;
-        };
-        for segment in segments {
-            let Some(entries) = blocks.get(&segment.block) else {
-                continue;
-            };
-            if entries
-                .range(..=segment.start)
-                .next_back()
-                .is_some_and(|(_, &end)| end > segment.start)
-                || entries.range(segment.start..segment.end).next().is_some()
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn reserve(&mut self, register: PhysReg, segments: &[LiveSegment]) -> bool {
-        if segments.is_empty()
-            || segments.windows(2).any(|pair| {
-                (pair[1].block, pair[1].start) <= (pair[0].block, pair[0].start)
-                    || pair[0].overlaps(pair[1])
-            })
-            || self.interferes(register, segments)
-        {
-            return false;
-        }
-        let blocks = self.blocks.entry(register).or_default();
-        for segment in segments {
-            if blocks
-                .entry(segment.block)
-                .or_default()
-                .insert(segment.start, segment.end)
-                .is_some()
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn free_segments(&self, register: PhysReg, segments: &[LiveSegment]) -> Vec<LiveSegment> {
-        let Some(blocks) = self.blocks.get(&register) else {
-            return segments.to_vec();
-        };
-        let mut free = Vec::new();
-        for segment in segments {
-            let mut cursor = segment.start;
-            if let Some(entries) = blocks.get(&segment.block) {
-                for (&occupied_start, &occupied_end) in entries.range(..segment.end) {
-                    if occupied_end <= cursor {
-                        continue;
-                    }
-                    if cursor < occupied_start {
-                        free.push(LiveSegment {
-                            block: segment.block,
-                            start: cursor,
-                            end: occupied_start.min(segment.end),
-                        });
-                    }
-                    cursor = cursor.max(occupied_end.min(segment.end));
-                    if cursor >= segment.end {
-                        break;
-                    }
-                }
-            }
-            if cursor < segment.end {
-                free.push(LiveSegment {
-                    block: segment.block,
-                    start: cursor,
-                    end: segment.end,
-                });
-            }
-        }
-        free
-    }
-}
-
 impl SymbolicFragmentPlanner {
     fn new(cfg: &NormalizedCfg) -> Result<Self, AllocationSplitError> {
         let block_count = cfg.successors.len();
@@ -1031,775 +935,13 @@ impl SymbolicFragmentPlanner {
         Ok(segments)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn project_free_register_regions(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        cfg: &NormalizedCfg,
-        root: &super::allocation_expand::ExpandedRoot,
-        value: VReg,
-        root_id: LiveBundleId,
-        uses: &[BundleUseId],
-        cuts: &[AllocationPressurePoint],
-        dominance: &Dominance,
-        topology: &RootUseTopology,
-        free: &[LiveSegment],
-    ) -> Result<Vec<(EntryCluster, Vec<LiveSegment>)>, AllocationSplitError> {
-        if free.is_empty() || uses.len() < 2 {
-            return Ok(Vec::new());
-        }
-        if root.id != root_id || topology.root != root_id {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.USE_TOPOLOGY_ROOT",
-                None,
-                Some(value),
-                Some(root_id),
-                "symbolic free projection and use topology have different roots",
-            ));
-        }
-        if expanded.intervals.block_slots.len() != self.block_ids.len()
-            || cfg.successors.len() != self.block_ids.len()
-        {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                None,
-                Some(value),
-                Some(root_id),
-                "symbolic free projection has inconsistent CFG and slot rows",
-            ));
-        }
-
-        let mut block_ranges = BTreeMap::<BlockId, (usize, usize)>::new();
-        let mut node_blocks = Vec::with_capacity(free.len());
-        for (node, segment) in free.iter().enumerate() {
-            if segment.start >= segment.end
-                || node
-                    .checked_sub(1)
-                    .and_then(|previous| free.get(previous))
-                    .is_some_and(|previous| {
-                        previous.block > segment.block
-                            || (previous.block == segment.block && previous.end > segment.start)
-                    })
-            {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_FREE_ORDER",
-                    Some(segment.block),
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free segments are empty, overlapping, or not canonical",
-                ));
-            }
-            let block = cfg
-                .block_index
-                .get(&segment.block)
-                .copied()
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                        Some(segment.block),
-                        Some(value),
-                        Some(root_id),
-                        "symbolic free segment is outside the normalized CFG",
-                    )
-                })?;
-            if expanded.intervals.block_slots.get(block).is_none() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                    Some(segment.block),
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free segment has no allocation slot row",
-                ));
-            }
-            node_blocks.push(block);
-            block_ranges
-                .entry(segment.block)
-                .and_modify(|range| range.1 = node + 1)
-                .or_insert((node, node + 1));
-        }
-        let node_at = |site: UseSite| {
-            let (start, end) = block_ranges.get(&site.block()).copied()?;
-            let fragments = &free[start..end];
-            let position = fragments.partition_point(|segment| segment.start <= site.slot());
-            (position != 0)
-                .then(|| start + position - 1)
-                .filter(|&node| free[node].contains(site.slot()))
-        };
-        let contains_segment = |segment: &LiveSegment| {
-            let Some((start, end)) = block_ranges.get(&segment.block).copied() else {
-                return false;
-            };
-            let fragments = &free[start..end];
-            let position = fragments.partition_point(|free| free.start <= segment.start);
-            position != 0 && {
-                let available = fragments[position - 1];
-                available.start <= segment.start && segment.end <= available.end
-            }
-        };
-
-        let mut forward = vec![Vec::<usize>::new(); free.len()];
-        for (&block_id, &(start, end)) in &block_ranges {
-            let block = cfg.block_index.get(&block_id).copied().ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                    Some(block_id),
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free block disappeared from the normalized CFG",
-                )
-            })?;
-            let exit = expanded
-                .intervals
-                .block_slots
-                .get(block)
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                        Some(block_id),
-                        Some(value),
-                        Some(root_id),
-                        "symbolic free block has no allocation slot row",
-                    )
-                })?
-                .exit;
-            let source = (start..end).find(|&node| free[node].contains(exit));
-            let Some(source) = source else {
-                continue;
-            };
-            let successors = cfg.successors.get(block).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                    Some(block_id),
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free block has no CFG successor row",
-                )
-            })?;
-            for &successor in successors {
-                let successor_id = self.block_ids.get(successor).copied().ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                        Some(block_id),
-                        Some(value),
-                        Some(root_id),
-                        "symbolic CFG successor is outside the block identity table",
-                    )
-                })?;
-                let Some(&(target_start, target_end)) = block_ranges.get(&successor_id) else {
-                    continue;
-                };
-                let entry = expanded
-                    .intervals
-                    .block_slots
-                    .get(successor)
-                    .ok_or_else(|| {
-                        AllocationSplitError::new(
-                            "ALLOCATION_SPLIT.SYMBOLIC_FREE_BLOCK",
-                            Some(successor_id),
-                            Some(value),
-                            Some(root_id),
-                            "symbolic CFG successor has no allocation slot row",
-                        )
-                    })?
-                    .entry;
-                if let Some(target) =
-                    (target_start..target_end).find(|&node| free[node].contains(entry))
-                {
-                    forward[source].push(target);
-                }
-            }
-        }
-
-        let ordered = topology.ordered_subset(uses)?;
-        let mut seeds = Vec::<(BundleUseId, UseSite, usize, usize)>::new();
-        for use_id in ordered.iter().copied() {
-            let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.USE_RANGE",
-                    None,
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free-region use is outside its root",
-                )
-            })?;
-            let Some(node) = node_at(use_.site) else {
-                continue;
-            };
-            if !matches!(use_.site, UseSite::Instruction { .. })
-                || cuts
-                    .iter()
-                    .copied()
-                    .any(|cut| dominance.use_dominates_point(cfg, use_.site, cut))
-            {
-                continue;
-            }
-            seeds.push((use_id, use_.site, node, node_blocks[node]));
-        }
-
-        let mut owners = vec![None::<usize>; free.len()];
-        for (owner, &(_, _, seed_node, seed_block)) in seeds.iter().enumerate() {
-            if owners[seed_node].is_some() {
-                continue;
-            }
-            let mut work = vec![seed_node];
-            while let Some(node) = work.pop() {
-                if owners[node].is_some() {
-                    continue;
-                }
-                let block = node_blocks[node];
-                let dominated = if block == seed_block {
-                    node == seed_node
-                } else {
-                    dominance.block_dominates(seed_block, block)
-                };
-                if !dominated {
-                    continue;
-                }
-                owners[node] = Some(owner);
-                work.extend(forward[node].iter().copied());
-            }
-        }
-
-        let mut covered = vec![Vec::<BundleUseId>::new(); seeds.len()];
-        for use_id in ordered {
-            let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.USE_RANGE",
-                    None,
-                    Some(value),
-                    Some(root_id),
-                    "symbolic free-region ownership references an out-of-range use",
-                )
-            })?;
-            let Some(node) = node_at(use_.site) else {
-                continue;
-            };
-            let Some(owner) = owners[node] else {
-                continue;
-            };
-            let (_, seed_site, _, _) = seeds[owner];
-            if dominance.use_dominates_use(cfg, seed_site, use_.site) {
-                covered[owner].push(use_id);
-            }
-        }
-
-        let mut regions = Vec::new();
-        for (owner, &(entry, entry_site, _, _)) in seeds.iter().enumerate() {
-            let mut region_uses = std::mem::take(&mut covered[owner]);
-            region_uses.sort_unstable();
-            if region_uses.len() < 2 || region_uses.binary_search(&entry).is_err() {
-                continue;
-            }
-            let segments = self.build_range(
-                expanded,
-                cfg,
-                root,
-                value,
-                entry_site.block(),
-                expanded
-                    .ir
-                    .earliest_insert_before_use_slot(entry_site)
-                    .map_err(|error| {
-                        AllocationSplitError::new(
-                            error.rule,
-                            error.block,
-                            Some(value),
-                            Some(root_id),
-                            error.message,
-                        )
-                    })?,
-                &region_uses,
-            )?;
-            if !segments.iter().all(contains_segment) {
-                continue;
-            }
-            regions.push((
-                EntryCluster {
-                    entry,
-                    uses: region_uses,
-                    kind: SplitEntryKind::RegisterRegion,
-                },
-                segments,
-            ));
-        }
-        regions.sort_unstable_by_key(|(cluster, _)| cluster.entry);
-        Ok(regions)
-    }
-
-    /// Resolve every moved-use cluster to either currently colorable sparse
-    /// register regions or exact home leaves before candidate ranking. Each
-    /// physical color is projected through the maximal child once; disconnected
-    /// free CFG regions are formed together instead of repeatedly peeling one
-    /// entry and rebuilding the remaining range. No uncolored synthetic VReg is
-    /// published merely to request another reactive split later.
-    #[allow(clippy::too_many_arguments)]
-    fn preview_plan(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        graph: &HomeGraph,
-        cfg: &NormalizedCfg,
-        registers: &[PhysReg],
-        session: &JointAllocationSession,
-        context: &SplitPlanningContext,
-        plan: &mut RegionSplitPlan,
-    ) -> Result<bool, AllocationSplitError> {
-        let source = session.problem().value(plan.value).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_SOURCE",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "symbolic split source disappeared before fragment preview",
-            )
-        })?;
-        let root = expanded_root(expanded, plan.root)?;
-        let topology = context.use_topology(graph, cfg, plan.root)?;
-        let mut staged = SymbolicPreviewMatrix::default();
-
-        if !plan.retained.is_empty() {
-            let segments = self.build_range(
-                expanded,
-                cfg,
-                root,
-                plan.value,
-                source.interval.definition.block(),
-                source.interval.definition.slot(),
-                &plan.retained,
-            )?;
-            let available = session
-                .preview_symbolic_fragment_registers(plan.value, &segments, registers)
-                .map_err(AllocationSplitError::joint)?;
-            if !available.contains(&plan.register) {
-                return Ok(false);
-            }
-            if !staged.reserve(plan.register, &segments) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_PREFIX_COLOR",
-                    Some(plan.primary_cut().block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    "retained prefix overlaps another fragment in its own candidate",
-                ));
-            }
-        }
-
-        let initial_entries = std::mem::take(&mut plan.entries);
-        let mut entry_ids = BTreeSet::new();
-        let mut initial_clusters = Vec::with_capacity(initial_entries.len());
-        for entry in initial_entries {
-            if entry.register.is_some() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
-                    root.uses
-                        .get(entry.entry.0 as usize)
-                        .map(|use_| use_.site.block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    "split entry was colored before symbolic preview",
-                ));
-            }
-            let cluster = EntryCluster {
-                entry: entry.entry,
-                uses: entry.uses,
-                kind: entry.kind,
-            };
-            if !entry_ids.insert(cluster.entry) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "symbolic preview received duplicate entry identities",
-                ));
-            }
-            initial_clusters.push(cluster);
-        }
-
-        let mut resolved = Vec::<(EntryCluster, Option<PhysReg>)>::new();
-        let mut color_order = Vec::with_capacity(registers.len());
-        let preferred = source.preferred_register.filter(|preferred| {
-            source.allowed_registers.contains(*preferred) && registers.contains(preferred)
-        });
-        if let Some(preferred) = preferred {
-            color_order.push(preferred);
-        }
-        color_order.extend(registers.iter().copied().filter(|register| {
-            source.allowed_registers.contains(*register) && Some(*register) != preferred
-        }));
-
-        for cluster in initial_clusters {
-            if cluster.kind == SplitEntryKind::Materialized {
-                if cluster.uses.as_slice() != [cluster.entry] {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_REGION_SHAPE",
-                        root.uses
-                            .get(cluster.entry.0 as usize)
-                            .map(|use_| use_.site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "exact materialization owns more than its entry use",
-                    ));
-                }
-                resolved.push((cluster, None));
-                continue;
-            }
-            if cluster.uses.len() < 2 || cluster.uses.binary_search(&cluster.entry).is_err() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_REGION_SHAPE",
-                    root.uses
-                        .get(cluster.entry.0 as usize)
-                        .map(|use_| use_.site.block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    "symbolic register cluster has no entry or fewer than two uses",
-                ));
-            }
-            let entry_site = root
-                .uses
-                .get(cluster.entry.0 as usize)
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.USE_RANGE",
-                        None,
-                        Some(plan.value),
-                        Some(plan.root),
-                        "symbolic register entry is outside its root",
-                    )
-                })?
-                .site;
-            let full_range = self.build_range(
-                expanded,
-                cfg,
-                root,
-                plan.value,
-                entry_site.block(),
-                expanded
-                    .ir
-                    .earliest_insert_before_use_slot(entry_site)
-                    .map_err(|error| {
-                        AllocationSplitError::new(
-                            error.rule,
-                            error.block,
-                            Some(plan.value),
-                            Some(plan.root),
-                            error.message,
-                        )
-                    })?,
-                &cluster.uses,
-            )?;
-
-            let mut unresolved = cluster.uses;
-            for &register in &color_order {
-                if unresolved.len() < 2 {
-                    break;
-                }
-                let persistent_free = session
-                    .preview_symbolic_fragment_free_segments(
-                        plan.value,
-                        &full_range,
-                        register,
-                        registers,
-                    )
-                    .map_err(AllocationSplitError::joint)?;
-                let free = staged.free_segments(register, &persistent_free);
-                let regions = self.project_free_register_regions(
-                    expanded,
-                    cfg,
-                    root,
-                    plan.value,
-                    plan.root,
-                    &unresolved,
-                    &plan.cuts,
-                    &context.dominance,
-                    topology,
-                    &free,
-                )?;
-                let mut assigned = regions
-                    .iter()
-                    .flat_map(|(region, _)| region.uses.iter().copied())
-                    .collect::<Vec<_>>();
-                assigned.sort_unstable();
-                if assigned.windows(2).any(|pair| pair[0] == pair[1])
-                    || assigned
-                        .iter()
-                        .any(|use_id| unresolved.binary_search(use_id).is_err())
-                {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_REGION_COVERAGE",
-                        Some(entry_site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "free-region projection produced overlapping or foreign uses",
-                    ));
-                }
-                for (region, segments) in regions {
-                    if !staged.reserve(register, &segments) {
-                        return Err(AllocationSplitError::new(
-                            "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_COLOR",
-                            root.uses
-                                .get(region.entry.0 as usize)
-                                .map(|use_| use_.site.block()),
-                            Some(plan.value),
-                            Some(plan.root),
-                            "disjoint free-region projection overlaps candidate-local occupancy",
-                        ));
-                    }
-                    resolved.push((region, Some(register)));
-                }
-                unresolved = sorted_difference(&unresolved, &assigned);
-            }
-
-            resolved.extend(unresolved.into_iter().map(|entry| {
-                (
-                    EntryCluster {
-                        entry,
-                        uses: vec![entry],
-                        kind: SplitEntryKind::Materialized,
-                    },
-                    None,
-                )
-            }));
-        }
-
-        resolved.sort_unstable_by_key(|(cluster, _)| cluster.entry);
-        let mut owned = resolved
-            .iter()
-            .flat_map(|(cluster, _)| cluster.uses.iter().copied())
-            .collect::<Vec<_>>();
-        owned.sort_unstable();
-        if owned != plan.moved || owned.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_REGION_COVERAGE",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "resolved symbolic fragments do not partition the moved uses exactly once",
-            ));
-        }
-
-        let entry_ids = resolved
-            .iter()
-            .map(|(cluster, _)| cluster.entry)
-            .collect::<Vec<_>>();
-        let stack_exists = stack_home(expanded, plan.root)?.is_some();
-        let (mut homes, transition_cost) = entry_selections(
-            context.home_plan(plan.root)?,
-            &entry_ids,
-            stack_exists,
-            plan.root,
-        )?;
-        plan.entries = resolved
-            .into_iter()
-            .map(|(cluster, register)| {
-                let home = homes.remove(&cluster.entry).ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.HOME_COVERAGE",
-                        root.uses
-                            .get(cluster.entry.0 as usize)
-                            .map(|use_| use_.site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "symbolic fragment entry has no exact home selection",
-                    )
-                })?;
-                Ok(SplitEntry {
-                    entry: cluster.entry,
-                    uses: cluster.uses,
-                    kind: cluster.kind,
-                    home,
-                    register,
-                })
-            })
-            .collect::<Result<Vec<_>, AllocationSplitError>>()?;
-        if !homes.is_empty() {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.HOME_COVERAGE",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "symbolic home partition selected an unowned entry",
-            ));
-        }
-        plan.transition_cost = transition_cost;
-
-        if super::exhaustive_verification_enabled() {
-            let candidate = candidate_from_plan(session.problem(), plan)?;
-            verify_plan(
-                expanded,
-                session.problem(),
-                &candidate,
-                plan,
-                cfg,
-                &context.dominance,
-                context.home_plan(plan.root)?,
-            )?;
-            self.verify_preview_colors(expanded, cfg, registers, session, plan)?;
-        }
-        Ok(true)
-    }
-
-    /// Exhaustive oracle for candidate-local coloring. The production
-    /// projection uses indexed free-region ownership; this verifier instead
-    /// rebuilds every final range, asks the persistent matrix about the whole
-    /// range, and compares all same-color pairs directly.
-    fn verify_preview_colors(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        cfg: &NormalizedCfg,
-        registers: &[PhysReg],
-        session: &JointAllocationSession,
-        plan: &RegionSplitPlan,
-    ) -> Result<(), AllocationSplitError> {
-        let source = session.problem().value(plan.value).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_SOURCE",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "symbolic color verifier cannot find its source region",
-            )
-        })?;
-        let root = expanded_root(expanded, plan.root)?;
-        let mut colored = Vec::<(PhysReg, Vec<LiveSegment>, Option<BundleUseId>)>::new();
-
-        if !plan.retained.is_empty() {
-            let segments = self.build_range(
-                expanded,
-                cfg,
-                root,
-                plan.value,
-                source.interval.definition.block(),
-                source.interval.definition.slot(),
-                &plan.retained,
-            )?;
-            colored.push((plan.register, segments, None));
-        }
-        for entry in &plan.entries {
-            match entry.kind {
-                SplitEntryKind::Materialized => {
-                    if entry.register.is_some() {
-                        return Err(AllocationSplitError::new(
-                            "ALLOCATION_SPLIT.SYMBOLIC_SINGLETON",
-                            root.uses
-                                .get(entry.entry.0 as usize)
-                                .map(|use_| use_.site.block()),
-                            Some(plan.value),
-                            Some(plan.root),
-                            "symbolic color verifier found a colored exact-home leaf",
-                        ));
-                    }
-                }
-                SplitEntryKind::RegisterRegion => {
-                    let register = entry.register.ok_or_else(|| {
-                        AllocationSplitError::new(
-                            "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
-                            root.uses
-                                .get(entry.entry.0 as usize)
-                                .map(|use_| use_.site.block()),
-                            Some(plan.value),
-                            Some(plan.root),
-                            "symbolic color verifier found an uncolored register child",
-                        )
-                    })?;
-                    let entry_site = root
-                        .uses
-                        .get(entry.entry.0 as usize)
-                        .ok_or_else(|| {
-                            AllocationSplitError::new(
-                                "ALLOCATION_SPLIT.USE_RANGE",
-                                None,
-                                Some(plan.value),
-                                Some(plan.root),
-                                "symbolic color verifier entry is outside its root",
-                            )
-                        })?
-                        .site;
-                    let definition_slot = expanded
-                        .ir
-                        .earliest_insert_before_use_slot(entry_site)
-                        .map_err(|error| {
-                        AllocationSplitError::new(
-                            error.rule,
-                            error.block,
-                            Some(plan.value),
-                            Some(plan.root),
-                            error.message,
-                        )
-                    })?;
-                    let segments = self.build_range(
-                        expanded,
-                        cfg,
-                        root,
-                        plan.value,
-                        entry_site.block(),
-                        definition_slot,
-                        &entry.uses,
-                    )?;
-                    colored.push((register, segments, Some(entry.entry)));
-                }
-            }
-        }
-
-        for (register, segments, entry) in &colored {
-            let block = entry
-                .and_then(|entry| root.uses.get(entry.0 as usize))
-                .map(|use_| use_.site.block())
-                .or_else(|| Some(source.interval.definition.block()));
-            if segments.iter().any(|segment| {
-                !source.interval.segments.iter().any(|source| {
-                    source.block == segment.block
-                        && source.start <= segment.start
-                        && segment.end <= source.end
-                })
-            }) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_SOURCE_RANGE",
-                    block,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "symbolic child range extends outside its source region",
-                ));
-            }
-            let available = session
-                .preview_symbolic_fragment_registers(plan.value, segments, registers)
-                .map_err(AllocationSplitError::joint)?;
-            if !available.contains(register) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_COLOR",
-                    block,
-                    Some(plan.value),
-                    Some(plan.root),
-                    format!("symbolic color verifier found {register} occupied"),
-                ));
-            }
-        }
-        for (left_index, (left_register, left_segments, _)) in colored.iter().enumerate() {
-            for (right_register, right_segments, _) in &colored[left_index + 1..] {
-                if left_register == right_register
-                    && left_segments
-                        .iter()
-                        .any(|left| right_segments.iter().any(|right| left.overlaps(*right)))
-                {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_LOCAL_INTERFERENCE",
-                        None,
-                        Some(plan.value),
-                        Some(plan.root),
-                        format!("two symbolic children overlap in {left_register}"),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn reserve_plan(
         &mut self,
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
         session: &mut JointAllocationSession,
-        plan: &RegionSplitPlan,
+        plan: &mut RegionSplitPlan,
     ) -> Result<(), AllocationSplitError> {
         let source = session.problem().value(plan.value).ok_or_else(|| {
             AllocationSplitError::new(
@@ -1844,32 +986,21 @@ impl SymbolicFragmentPlanner {
                 .map_err(AllocationSplitError::joint)?;
         }
 
-        for entry in &plan.entries {
-            if entry.kind == SplitEntryKind::Materialized {
-                if entry.register.is_some() {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
-                        root.uses
-                            .get(entry.entry.0 as usize)
-                            .map(|use_| use_.site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "exact materialization carries a symbolic register color",
-                    ));
-                }
-                continue;
-            }
-            let register = entry.register.ok_or_else(|| {
-                AllocationSplitError::new(
+        for entry in &mut plan.entries {
+            if entry.register.is_some() {
+                return Err(AllocationSplitError::new(
                     "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
                     root.uses
                         .get(entry.entry.0 as usize)
                         .map(|use_| use_.site.block()),
                     Some(plan.value),
                     Some(plan.root),
-                    "register fragment reached reservation without a previewed color",
-                )
-            })?;
+                    "split entry was colored more than once",
+                ));
+            }
+            if entry.kind == SplitEntryKind::Materialized {
+                continue;
+            }
             let entry_site = root
                 .uses
                 .get(entry.entry.0 as usize)
@@ -1906,28 +1037,22 @@ impl SymbolicFragmentPlanner {
             let available = session
                 .available_symbolic_fragment_registers(plan.value, &segments, registers)
                 .map_err(AllocationSplitError::joint)?;
-            if !available.contains(&register) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_COLOR",
-                    Some(entry_site.block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    format!("previewed register {register} is no longer available"),
-                ));
-            }
+            let Some(register) = available.first().copied() else {
+                continue;
+            };
             session
                 .reserve_symbolic_fragment(plan.value, register, &segments)
                 .map_err(AllocationSplitError::joint)?;
+            entry.register = Some(register);
         }
         Ok(())
     }
 }
 
 /// Select one exact resident region and one owner-qualified occupancy cut with
-/// minimum proved transition cost. Production preview resolves every child to
-/// a physical color or exact-home leaf while ignoring only its still-resident
-/// source. Exact ranges are reserved after the winner is deferred and are
-/// revalidated when the allocation-IR transaction is published.
+/// minimum proved transition cost. The returned topology is colored only
+/// after the source is removed from the current matrix; exact materialized
+/// ranges are revalidated when the allocation-IR transaction is published.
 pub(super) fn plan_split(
     expanded: &ExpandedAllocationProblem,
     graph: &HomeGraph,
@@ -1937,7 +1062,7 @@ pub(super) fn plan_split(
 ) -> Result<RegionSplitPlan, AllocationSplitError> {
     let context = SplitPlanningContext::build(graph, cfg)?;
     let round = SplitRoundPlanningState::default();
-    plan_split_with_context(expanded, graph, joint, request, cfg, &context, &round, None)
+    plan_split_with_context(expanded, graph, joint, request, cfg, &context, &round)
 }
 
 fn plan_split_with_context(
@@ -1948,7 +1073,6 @@ fn plan_split_with_context(
     cfg: &NormalizedCfg,
     context: &SplitPlanningContext,
     round: &SplitRoundPlanningState,
-    mut preview: Option<&mut SymbolicPlanningPreview<'_>>,
 ) -> Result<RegionSplitPlan, AllocationSplitError> {
     let blocked = joint.value(request.blocked_value).ok_or_else(|| {
         AllocationSplitError::new(
@@ -1997,7 +1121,7 @@ fn plan_split_with_context(
     for candidate in &request.candidates {
         let home_plan = context.home_plan(candidate.root)?;
         let use_topology = context.use_topology(graph, cfg, candidate.root)?;
-        for mut plan in plan_candidate_frontiers(
+        for plan in plan_candidate_frontiers(
             expanded,
             joint,
             request.blocked_value,
@@ -2007,19 +1131,6 @@ fn plan_split_with_context(
             home_plan,
             use_topology,
         )? {
-            if let Some(preview) = preview.as_deref_mut()
-                && !preview.planner.preview_plan(
-                    expanded,
-                    graph,
-                    cfg,
-                    preview.registers,
-                    preview.session,
-                    context,
-                    &mut plan,
-                )?
-            {
-                continue;
-            }
             let home_delta = round.home_cost_delta(expanded, context, &plan)?;
             let key = (
                 home_delta,
@@ -2795,27 +1906,25 @@ pub(super) fn allocate_with_splitting(
                         "monotonic split sequence exceeded its ownership-derived bound",
                     ));
                 }
-                let plan = {
-                    let mut preview = SymbolicPlanningPreview {
-                        session: &session,
-                        planner: &mut symbolic_fragments,
-                        registers,
-                    };
-                    plan_split_with_context(
-                        expanded,
-                        graph,
-                        session.problem(),
-                        &request,
-                        cfg,
-                        &planning,
-                        &round,
-                        Some(&mut preview),
-                    )?
-                };
+                let mut plan = plan_split_with_context(
+                    expanded,
+                    graph,
+                    session.problem(),
+                    &request,
+                    cfg,
+                    &planning,
+                    &round,
+                )?;
                 session
                     .defer_split(plan.value)
                     .map_err(AllocationSplitError::joint)?;
-                symbolic_fragments.reserve_plan(expanded, cfg, registers, &mut session, &plan)?;
+                symbolic_fragments.reserve_plan(
+                    expanded,
+                    cfg,
+                    registers,
+                    &mut session,
+                    &mut plan,
+                )?;
                 round.commit(expanded, &planning, &plan)?;
                 plans.push(plan);
                 steps += 1;
@@ -3449,58 +2558,8 @@ fn partition_moved_uses(
             "split candidate and function-lifetime use topology have different roots",
         ));
     }
+    let ordered = topology.ordered_subset(moved)?;
     let full_existing_region = previous_entry.is_some() && moved == candidate.uses;
-    let repeated_entry = full_existing_region.then_some(previous_entry).flatten();
-    let clusters = partition_use_subset(
-        root,
-        candidate.value,
-        candidate.root,
-        moved,
-        repeated_entry,
-        cuts,
-        cfg,
-        dominance,
-        topology,
-    )?;
-    let clustered_use_count = clusters
-        .iter()
-        .map(|cluster| cluster.uses.len())
-        .sum::<usize>();
-    if clustered_use_count != moved.len() {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.CLUSTER_COVERAGE",
-            Some(cut.block()),
-            Some(candidate.value),
-            Some(candidate.root),
-            "dominance partition did not cover every reachable moved use",
-        ));
-    }
-    Ok(clusters)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn partition_use_subset(
-    root: &super::allocation_expand::ExpandedRoot,
-    value: VReg,
-    root_id: LiveBundleId,
-    uses: &[BundleUseId],
-    repeated_entry: Option<BundleUseId>,
-    cuts: &[AllocationPressurePoint],
-    cfg: &NormalizedCfg,
-    dominance: &Dominance,
-    topology: &RootUseTopology,
-) -> Result<Vec<EntryCluster>, AllocationSplitError> {
-    let cut = cuts[0];
-    if topology.root != root_id || root.id != root_id {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.USE_TOPOLOGY_ROOT",
-            Some(cut.block()),
-            Some(value),
-            Some(root_id),
-            "use subset and function-lifetime topology have different roots",
-        ));
-    }
-    let ordered = topology.ordered_subset(uses)?;
     let mut clusters = Vec::new();
     let mut cursor = 0usize;
     while cursor < ordered.len() {
@@ -3510,7 +2569,7 @@ fn partition_use_subset(
             .iter()
             .copied()
             .any(|cut| dominance.use_dominates_point(cfg, seed_site, cut));
-        let repeats_same_boundary = repeated_entry == Some(seed);
+        let repeats_same_boundary = full_existing_region && previous_entry == Some(seed);
         let end = if matches!(seed_site, UseSite::PhiEdge { .. })
             || unsafe_loop_entry
             || repeats_same_boundary
@@ -3535,8 +2594,8 @@ fn partition_use_subset(
             return Err(AllocationSplitError::new(
                 "ALLOCATION_SPLIT.CLUSTER_ENTRY",
                 Some(seed_site.block()),
-                Some(value),
-                Some(root_id),
+                Some(candidate.value),
+                Some(candidate.root),
                 "dominance cluster does not contain its own entry use",
             ));
         }
@@ -3551,6 +2610,19 @@ fn partition_use_subset(
             kind,
         });
         cursor = end;
+    }
+    let clustered_use_count = clusters
+        .iter()
+        .map(|cluster| cluster.uses.len())
+        .sum::<usize>();
+    if clustered_use_count != moved.len() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.CLUSTER_COVERAGE",
+            Some(cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "dominance partition did not cover every reachable moved use",
+        ));
     }
     clusters.sort_unstable_by_key(|cluster| cluster.entry);
     Ok(clusters)
@@ -4970,18 +4042,10 @@ mod tests {
         let mut session =
             JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
                 .unwrap();
-        let planning = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        let mut symbolic = SymbolicFragmentPlanner::new(&cfg).unwrap();
-        assert!(
-            symbolic
-                .preview_plan(
-                    &expanded, &graph, &cfg, &registers, &session, &planning, &mut plan,
-                )
-                .unwrap()
-        );
         session.defer_split(plan.value).unwrap();
+        let mut symbolic = SymbolicFragmentPlanner::new(&cfg).unwrap();
         symbolic
-            .reserve_plan(&expanded, &cfg, &registers, &mut session, &plan)
+            .reserve_plan(&expanded, &cfg, &registers, &mut session, &mut plan)
             .unwrap();
         assert!(session.has_symbolic_fragments());
         let child_colors = plan
@@ -5023,6 +4087,7 @@ mod tests {
             ));
         }
 
+        let planning = SplitPlanningContext::build(&graph, &cfg).unwrap();
         apply_and_refresh_split_round(
             &mut expanded,
             &graph,
@@ -5076,131 +4141,6 @@ mod tests {
             .problem()
             .verify(&cfg, &registers, &allocation)
             .unwrap();
-    }
-
-    #[test]
-    fn uncolorable_maximal_child_is_partitioned_before_publication() {
-        let mut function = function(
-            9,
-            vec![
-                MInst::LoadImm {
-                    dst: VReg(0),
-                    value: 7,
-                },
-                MInst::LoadImm {
-                    dst: VReg(1),
-                    value: 100,
-                },
-                MInst::LoadImm {
-                    dst: VReg(2),
-                    value: 3,
-                },
-                MInst::Mov {
-                    dst: VReg(3),
-                    src: VReg(0),
-                },
-                MInst::UDiv {
-                    dst: VReg(4),
-                    lhs: VReg(1),
-                    rhs: VReg(2),
-                },
-                MInst::Mov {
-                    dst: VReg(5),
-                    src: VReg(0),
-                },
-                MInst::UDiv {
-                    dst: VReg(6),
-                    lhs: VReg(1),
-                    rhs: VReg(2),
-                },
-                MInst::Mov {
-                    dst: VReg(7),
-                    src: VReg(0),
-                },
-                MInst::Mov {
-                    dst: VReg(8),
-                    src: VReg(0),
-                },
-                MInst::Return,
-            ],
-        );
-        let registers = [PhysReg::RAX];
-        let cfg = super::super::cfg::normalize(&mut function).unwrap();
-        let graph = home_graph::build(&function, &cfg).unwrap();
-        let expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
-        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        let mut source = candidate(&joint, VReg(0));
-        let first_barrier = expanded.intervals.block_slots[0]
-            .instruction_clobber(4)
-            .unwrap();
-        source.frontiers = vec![RegisterPressureFrontier {
-            register: PhysReg::RAX,
-            points: vec![AllocationPressurePoint {
-                register: PhysReg::RAX,
-                block: BlockId(0),
-                slot: first_barrier,
-            }],
-        }];
-        let request = RegionSplitRequest {
-            blocked_value: VReg(4),
-            definition: joint.value(VReg(4)).unwrap().interval.definition,
-            conflicts: Vec::new(),
-            candidates: vec![source],
-        };
-        let mut plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
-        assert_eq!(plan.retained.len(), 1);
-        assert_eq!(plan.moved.len(), 3);
-        assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries[0].kind, SplitEntryKind::RegisterRegion);
-        assert_eq!(plan.entries[0].uses.len(), 3);
-
-        let mut session =
-            JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
-                .unwrap();
-        let planning = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        let mut symbolic = SymbolicFragmentPlanner::new(&cfg).unwrap();
-        assert!(
-            symbolic
-                .preview_plan(
-                    &expanded, &graph, &cfg, &registers, &session, &planning, &mut plan,
-                )
-                .unwrap()
-        );
-        assert_eq!(plan.entries.len(), 2);
-        assert!(plan.entries.iter().any(|entry| {
-            entry.kind == SplitEntryKind::Materialized
-                && entry.uses.as_slice() == [entry.entry]
-                && entry.register.is_none()
-        }));
-        assert!(plan.entries.iter().any(|entry| {
-            entry.kind == SplitEntryKind::RegisterRegion
-                && entry.uses.len() == 2
-                && entry.register == Some(PhysReg::RAX)
-        }));
-        assert!(plan.entries.iter().all(|entry| match entry.kind {
-            SplitEntryKind::Materialized => entry.register.is_none(),
-            SplitEntryKind::RegisterRegion => entry.register.is_some(),
-        }));
-        let second_barrier = expanded.intervals.block_slots[0]
-            .instruction_clobber(6)
-            .unwrap();
-        let colored = plan
-            .entries
-            .iter()
-            .find(|entry| entry.kind == SplitEntryKind::RegisterRegion)
-            .unwrap();
-        assert!(colored.uses.iter().all(|use_id| {
-            expanded.roots[plan.root.0 as usize].uses[use_id.0 as usize]
-                .site
-                .slot()
-                > second_barrier
-        }));
-
-        session.defer_split(plan.value).unwrap();
-        symbolic
-            .reserve_plan(&expanded, &cfg, &registers, &mut session, &plan)
-            .unwrap();
-        assert!(session.has_symbolic_fragments());
     }
 
     #[test]

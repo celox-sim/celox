@@ -208,33 +208,17 @@ without mutating MIR:
    unassigned and returns to ordinary coloring rather than overlapping the
    matrix.
 
-   The first dominance partition is not assumed to be physically colorable.
-   Before candidate ranking, an epoch-marked sparse liveness projector builds
-   each maximal child's range once. For every allowed physical color, the
-   indexed interval union subtracts fixed ranges, other bundles, and earlier
-   planned fragments while ignoring only the source bundle when that candidate
-   is a resident conflict. A blocked unassigned region has no source occupancy
-   to remove.
-   Candidate-local reservations are subtracted by a second sparse block index.
-   The remaining fragments form a free CFG: an edge exists only when the
-   predecessor fragment contains block exit and the successor fragment
-   contains block entry. Earliest safe instruction uses claim disjoint
-   reachable fragments in dominance order. A claimed region with at least two
-   uses is rebuilt at its exact insert-before-use anchor and retained only when
-   its complete sparse range is contained in that free region. Uses not owned
-   by a colored region become exact home leaves.
-
-   This is one projection per target color and maximal child, not recursive
-   entry peeling. A child never reaches publication as an uncolored synthetic
-   VReg merely to trigger another pressure split. The final child entry set is
-   fed to the root-wide MemorySSA/rematerialization/stack cost accumulator
-   before frontier candidates are ranked. A debug oracle independently
-   rebuilds every final child range, queries whole-range persistent occupancy,
-   requires it to remain inside the source range, and compares all same-color
-   child pairs directly. Only after a candidate wins is its source deferred and
-   its already selected child topology reserved in the persistent matrix as
-   immutable planned occupancy. Mutually exclusive child regions may reserve
-   the same color because their CFG-sparse ranges do not overlap.
+   The moved multi-use regions are colored in the same round even though their
+   synthetic VRegs do not exist yet. An epoch-marked sparse liveness projector
+   maps each planned definition and exact use subset through the normalized
+   CFG. Synthetic definitions reserve from the first unused sequence in their
+   immutable insertion-anchor zone, so the later exact range is contained by
+   the symbolic range without predicting how many recipe instructions will be
+   emitted. The selected colors are inserted in the ordinary interval matrix
+   as immutable planned occupancy. Subsequent original values and sibling
+   split plans therefore see those ranges; mutually exclusive child regions
+   may still reserve the same color because their CFG-sparse ranges do not
+   overlap.
 
    At the publication boundary, planned occupancy is removed before fixed
    reservations and exact liveness change. Split mutation creates the real

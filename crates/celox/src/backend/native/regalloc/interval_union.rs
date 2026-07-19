@@ -388,27 +388,6 @@ impl IntervalUnion {
         false
     }
 
-    fn interferes_indexed_except_bundle(
-        &self,
-        segments: ValidatedSegments<'_>,
-        ignored: AllocationBundleId,
-    ) -> bool {
-        for (segment, block) in segments.iter() {
-            let Some(entries) = self.blocks.get(&block) else {
-                continue;
-            };
-            for (&start, entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
-                if entry.end <= segment.start {
-                    break;
-                }
-                if start < segment.end && entry.owner != OccupancyOwner::Bundle(ignored) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Return one exact earliest overlap in canonical sparse-segment order.
     ///
     /// Register allocation needs a bounded split frontier, not every resident
@@ -683,21 +662,10 @@ impl IntervalUnion {
     /// block identity. These are the maximal regions available for splitting
     /// a bundle onto this register.
     fn free_segments_indexed(&self, segments: ValidatedSegments<'_>) -> Vec<LiveSegment> {
-        self.free_segments_indexed_except(segments, None)
-    }
-
-    fn free_segments_indexed_except(
-        &self,
-        segments: ValidatedSegments<'_>,
-        ignored: Option<AllocationBundleId>,
-    ) -> Vec<LiveSegment> {
         let mut free = Vec::new();
         for (segment, block) in segments.iter() {
             let mut cursor = segment.start;
             for (occupied_start, entry) in self.overlapping_entries_at(segment, block) {
-                if ignored.is_some_and(|bundle| entry.owner == OccupancyOwner::Bundle(bundle)) {
-                    continue;
-                }
                 let occupied_start = occupied_start.max(segment.start);
                 let occupied_end = entry.end.min(segment.end);
                 if cursor < occupied_start {
@@ -1080,20 +1048,6 @@ impl LiveIntervalMatrix {
         Ok(self.union(register)?.interferes_indexed(segments))
     }
 
-    /// Query projected occupancy before removing the source bundle of a split.
-    /// Every other movable, fixed, and planned owner remains visible.
-    pub(super) fn interferes_except_bundle_validated(
-        &self,
-        register: PhysReg,
-        segments: ValidatedSegments<'_>,
-        ignored: AllocationBundleId,
-    ) -> Result<bool, IntervalUnionError> {
-        self.validate_token(segments)?;
-        Ok(self
-            .union(register)?
-            .interferes_indexed_except_bundle(segments, ignored))
-    }
-
     pub(super) fn first_interference_validated(
         &self,
         register: PhysReg,
@@ -1213,18 +1167,6 @@ impl LiveIntervalMatrix {
     ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
         self.validate_token(segments)?;
         Ok(self.union(register)?.free_segments_indexed(segments))
-    }
-
-    pub(super) fn free_segments_except_bundle_validated(
-        &self,
-        register: PhysReg,
-        segments: ValidatedSegments<'_>,
-        ignored: AllocationBundleId,
-    ) -> Result<Vec<LiveSegment>, IntervalUnionError> {
-        self.validate_token(segments)?;
-        Ok(self
-            .union(register)?
-            .free_segments_indexed_except(segments, Some(ignored)))
     }
 
     pub(super) fn assign(
