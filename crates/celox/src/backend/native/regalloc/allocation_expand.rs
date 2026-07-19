@@ -94,11 +94,27 @@ pub(super) struct ExpandedRegisterRegion {
     pub root: LiveBundleId,
     pub value: VReg,
     pub preferred_register: Option<PhysReg>,
-    /// Exact immutable root use before which this region is materialized.
-    /// Keeping the boundary identity separate from shifted allocation-IR slots
-    /// makes repeated splitting provably monotonic.
-    pub entry_use: BundleUseId,
-    pub entry: ExpandedMaterialization,
+    /// Exact immutable root use before which a home-created region is
+    /// materialized. Split-copy and merge-phi representatives have no
+    /// semantic-use entry: their real machine definition is the boundary.
+    pub entry_use: Option<BundleUseId>,
+    pub entry: ExpandedRegisterEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ExpandedRegisterEntry {
+    /// The immutable source-MIR definition remains a live representative only
+    /// through split-copy/phi transition uses.
+    Original,
+    Materialized(ExpandedMaterialization),
+    SplitCopy {
+        instruction: SyntheticInstructionId,
+        source: VReg,
+    },
+    SplitPhi {
+        block: BlockId,
+        phi: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +144,10 @@ pub(super) enum ExpandedStackHomeKind {
     Root,
     /// Edge-local recipe result consumed directly by one phi row from memory.
     EdgeRecipe { use_id: BundleUseId },
+    /// Conventional spill slot for one allocation-IR machine representative.
+    /// This is distinct from the logical root home used by HDL-specific
+    /// MemorySSA/rematerialization planning.
+    Machine { value: VReg },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,8 +410,8 @@ pub(super) fn expand(
                         root: root.id,
                         value: region_value,
                         preferred_register: Some(*register),
-                        entry_use: entry_use.id,
-                        entry: lowered.source,
+                        entry_use: Some(entry_use.id),
+                        entry: ExpandedRegisterEntry::Materialized(lowered.source),
                     });
                     for &use_id in &leaf.uses {
                         let use_ = root_use(root, use_id)?;
@@ -1519,10 +1539,10 @@ mod tests {
         );
         assert!(matches!(
             region.entry,
-            ExpandedMaterialization::Recipe {
+            ExpandedRegisterEntry::Materialized(ExpandedMaterialization::Recipe {
                 kind: HomeKind::Rematerialize(_),
                 ..
-            }
+            })
         ));
     }
 }

@@ -36,9 +36,10 @@ pub(super) struct LiveRangeEditResult {
     pub source: VReg,
     pub copies: Vec<InsertedSplitCopy>,
     pub phis: Vec<InsertedSyntheticPhi>,
-    /// New owner of every semantic use from the source interval.  Transition
-    /// copy/phi uses are intentionally excluded from this map.
-    pub semantic_uses: Vec<EditedUse>,
+    /// New owner of every pre-edit machine use from the source interval.
+    /// Callers map the semantic subset back to immutable HomeGraph use IDs;
+    /// stack stores and older split transitions remain ordinary machine uses.
+    pub rewritten_uses: Vec<EditedUse>,
     pub representatives: Vec<VReg>,
     pub changed_blocks: BTreeSet<BlockId>,
 }
@@ -157,7 +158,7 @@ pub(super) fn edit_live_range(
         .map_err(LiveRangeEditError::ir)?;
 
     let phis_by_block = place_merge_phis(ir, cfg, intervals, &interval, &copies)?;
-    let (semantic_uses, mut changed_blocks) =
+    let (rewritten_uses, mut changed_blocks) =
         rename_representatives(ir, cfg, &interval, &copies, &phis_by_block)?;
     changed_blocks.extend(copies.iter().map(|copy| copy.definition_site.block()));
     changed_blocks.extend(phis_by_block.values().map(|phi| phi.block));
@@ -179,7 +180,7 @@ pub(super) fn edit_live_range(
         source,
         copies,
         phis,
-        semantic_uses,
+        rewritten_uses,
         representatives,
         changed_blocks,
     })
@@ -405,7 +406,7 @@ fn rename_representatives(
         children[parent].push(block);
     }
 
-    let mut semantic_uses = Vec::with_capacity(source.uses.len());
+    let mut rewritten_uses = Vec::with_capacity(source.uses.len());
     let mut changed_blocks = BTreeSet::new();
     let mut phi_sources = BTreeMap::<usize, Vec<(BlockId, VReg)>>::new();
     let mut visited = vec![false; blocks];
@@ -457,7 +458,7 @@ fn rename_representatives(
                     changed_blocks.insert(use_.site.block());
                 }
                 if use_.semantic {
-                    semantic_uses.push(EditedUse {
+                    rewritten_uses.push(EditedUse {
                         site: use_.site,
                         value: replacement,
                     });
@@ -512,8 +513,8 @@ fn rename_representatives(
             "rename produced sources for a merge phi that was not placed",
         ));
     }
-    semantic_uses.sort_unstable_by_key(|use_| use_.site);
-    if semantic_uses.len() != source.uses.len() {
+    rewritten_uses.sort_unstable_by_key(|use_| use_.site);
+    if rewritten_uses.len() != source.uses.len() {
         return Err(LiveRangeEditError::new(
             "LIVE_RANGE_EDIT.SEMANTIC_USE_COVERAGE",
             None,
@@ -521,7 +522,7 @@ fn rename_representatives(
             "dominator rename did not map every source semantic use exactly once",
         ));
     }
-    Ok((semantic_uses, changed_blocks))
+    Ok((rewritten_uses, changed_blocks))
 }
 
 #[cfg(test)]
@@ -591,8 +592,8 @@ mod tests {
         assert_eq!(edit.copies.len(), 2);
         assert_eq!(edit.phis.len(), 1);
         assert_eq!(edit.phis[0].block, BlockId(3));
-        assert_eq!(edit.semantic_uses.len(), 1);
-        assert_eq!(edit.semantic_uses[0].value, edit.phis[0].definition);
+        assert_eq!(edit.rewritten_uses.len(), 1);
+        assert_eq!(edit.rewritten_uses[0].value, edit.phis[0].definition);
 
         let delta = ir.take_liveness_delta();
         incremental
@@ -663,7 +664,7 @@ mod tests {
         assert_eq!(edit.phis[0].block, BlockId(1));
         let header_phi = edit.phis[0].definition;
         assert!(
-            edit.semantic_uses
+            edit.rewritten_uses
                 .iter()
                 .all(|use_| use_.value == header_phi)
         );

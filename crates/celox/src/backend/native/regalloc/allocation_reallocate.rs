@@ -18,8 +18,8 @@ use super::allocation_constraints::{
     WeightedAffinity,
 };
 use super::allocation_expand::{
-    ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition,
-    ExpandedStackHomeKind, ExpandedUseSource,
+    ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedRegisterEntry,
+    ExpandedStackDefinition, ExpandedStackHomeKind, ExpandedUseSource,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -511,6 +511,7 @@ struct RegionBuilder {
     uses: Vec<BundleUseId>,
     sites: Vec<UseSite>,
     preferred_register: Option<PhysReg>,
+    allows_empty_semantic_uses: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,6 +519,7 @@ struct IndexedRegion {
     root: LiveBundleId,
     uses: Vec<BundleUseId>,
     preferred_register: Option<PhysReg>,
+    allows_empty_semantic_uses: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,7 +607,6 @@ impl JointAllocationProblem {
             .ir
             .index_synthetic_instructions()
             .map_err(JointAllocationError::ir)?;
-        let mut fixed_region_uses = BTreeMap::<VReg, Vec<UseSite>>::new();
         let mut stack_roots = BTreeSet::new();
         for (home_index, home) in expanded.stack_homes.iter().enumerate() {
             if home.id.0 as usize != home_index {
@@ -646,7 +647,7 @@ impl JointAllocationProblem {
                         ExpandedStackDefinition::Store { instruction, value }
                             if value == root.origin =>
                         {
-                            let site = expanded
+                            expanded
                                 .ir
                                 .resolve_stack_store_use_site_indexed(
                                     instruction,
@@ -656,7 +657,6 @@ impl JointAllocationProblem {
                                     &synthetic_instruction_index,
                                 )
                                 .map_err(JointAllocationError::ir)?;
-                            fixed_region_uses.entry(root.origin).or_default().push(site);
                         }
                         ExpandedStackDefinition::Phi {
                             block,
@@ -741,6 +741,41 @@ impl JointAllocationProblem {
                         ));
                     }
                 }
+                ExpandedStackHomeKind::Machine { value } => match home.definition {
+                    ExpandedStackDefinition::Store {
+                        instruction,
+                        value: stored,
+                    } if stored == value => {
+                        expanded
+                            .ir
+                            .resolve_stack_store_use_site_indexed(
+                                instruction,
+                                home.id,
+                                value,
+                                &expanded.intervals,
+                                &synthetic_instruction_index,
+                            )
+                            .map_err(JointAllocationError::ir)?;
+                    }
+                    ExpandedStackDefinition::Phi {
+                        block,
+                        phi,
+                        destination,
+                    } if destination == value => {
+                        expanded
+                            .ir
+                            .verify_phi_stack_definition(block, phi, destination, home.id)
+                            .map_err(JointAllocationError::ir)?;
+                    }
+                    _ => {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.MACHINE_HOME_DEFINITION",
+                            None,
+                            Some(value),
+                            "machine spill home has an incompatible definition",
+                        ));
+                    }
+                },
             }
         }
 
@@ -776,7 +811,70 @@ impl JointAllocationProblem {
         }
 
         let mut regions = BTreeMap::<VReg, RegionBuilder>::new();
-        let mut referenced_regions = BTreeSet::new();
+        for metadata in expanded.register_regions.iter() {
+            let root = expanded
+                .roots
+                .get(metadata.root.0 as usize)
+                .filter(|root| root.id == metadata.root)
+                .ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.REGION_ROOT",
+                        None,
+                        Some(metadata.value),
+                        "register-region metadata references a missing logical root",
+                    )
+                })?;
+            let valid_entry = matches!(
+                (&metadata.entry, metadata.entry_use),
+                (ExpandedRegisterEntry::Materialized(_), Some(_))
+                    | (
+                        ExpandedRegisterEntry::Original
+                            | ExpandedRegisterEntry::SplitCopy { .. }
+                            | ExpandedRegisterEntry::SplitPhi { .. },
+                        None
+                    )
+            );
+            if !valid_entry {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.REGION_ENTRY",
+                    None,
+                    Some(metadata.value),
+                    "register-region definition kind and semantic entry-use shape disagree",
+                ));
+            }
+            if matches!(metadata.entry, ExpandedRegisterEntry::Original)
+                && metadata.value != root.origin
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.ORIGINAL_REGION",
+                    None,
+                    Some(metadata.value),
+                    "original representative metadata does not name the root origin",
+                ));
+            }
+            if regions
+                .insert(
+                    metadata.value,
+                    RegionBuilder {
+                        root: metadata.root,
+                        uses: Vec::new(),
+                        sites: Vec::new(),
+                        preferred_register: metadata.preferred_register,
+                        // Once a representative is live-range edited, its
+                        // remaining uses may all be copy/phi transitions.
+                        allows_empty_semantic_uses: true,
+                    },
+                )
+                .is_some()
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.REGION_VALUE_IDENTITY",
+                    None,
+                    Some(metadata.value),
+                    "two register-region metadata rows name one machine value",
+                ));
+            }
+        }
         for root in &expanded.roots {
             for use_ in &root.uses {
                 let preferred_register = match use_.source {
@@ -814,7 +912,6 @@ impl JointAllocationProblem {
                                 "register use and expanded-region metadata disagree",
                             ));
                         }
-                        referenced_regions.insert(region);
                         preferred_register
                     }
                     ExpandedUseSource::Materialized(_) => continue,
@@ -825,6 +922,7 @@ impl JointAllocationProblem {
                     uses: Vec::new(),
                     sites: Vec::new(),
                     preferred_register,
+                    allows_empty_semantic_uses: false,
                 });
                 if region.root != root.id || region.preferred_register != preferred_register {
                     return Err(JointAllocationError::new(
@@ -838,15 +936,6 @@ impl JointAllocationProblem {
                 region.sites.push(use_.site);
             }
         }
-        if referenced_regions != region_metadata.keys().copied().collect() {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.REGION_COVERAGE",
-                None,
-                None,
-                "expanded register-region metadata is not referenced by its region uses",
-            ));
-        }
-
         let mut values = Vec::new();
         let mut value_rows = vec![None; expanded.ir.value_count() as usize];
         for (value_index, interval) in expanded.intervals.intervals.iter().enumerate() {
@@ -875,14 +964,10 @@ impl JointAllocationProblem {
                 region.uses.sort_unstable();
                 region.sites.sort_unstable();
                 region.sites.dedup();
-                let mut owned_sites = region.sites.clone();
-                owned_sites.extend(fixed_region_uses.get(&value).into_iter().flatten().copied());
-                owned_sites.sort_unstable();
-                owned_sites.dedup();
-                if region.uses.is_empty()
+                if (!region.allows_empty_semantic_uses && region.uses.is_empty())
                     || region.uses.windows(2).any(|pair| pair[0] >= pair[1])
-                    || interval.uses.len() != owned_sites.len()
-                    || owned_sites
+                    || region
+                        .sites
                         .iter()
                         .any(|site| !interval.contains_use_coordinate(*site))
                 {
@@ -890,7 +975,7 @@ impl JointAllocationProblem {
                         "JOINT_ALLOC.REGION_USES",
                         Some(interval.definition.block()),
                         Some(value),
-                        "register region plus its identified fixed stack-store use do not own the exact expanded interval uses",
+                        "register region does not own its exact semantic uses in the machine live interval",
                     ));
                 }
                 let home_plan = home_plans.get(region.root.0 as usize).ok_or_else(|| {
@@ -901,9 +986,13 @@ impl JointAllocationProblem {
                         "register region has no physical-allocation home-cost row",
                     )
                 })?;
-                let spill_cost = home_plan
-                    .spill_cost(&region.uses, stack_roots.contains(&region.root))
-                    .map_err(JointAllocationError::home)?;
+                let spill_cost = if region.uses.is_empty() {
+                    machine_transition_spill_cost(interval)
+                } else {
+                    home_plan
+                        .spill_cost(&region.uses, stack_roots.contains(&region.root))
+                        .map_err(JointAllocationError::home)?
+                };
                 (
                     AllocationValueClass::Region {
                         root: region.root,
@@ -1405,7 +1494,40 @@ impl RegionOwnershipIndex {
             affected.insert(value);
         }
 
-        let mut grouped = BTreeMap::<VReg, (Option<PhysReg>, Vec<BundleUseId>)>::new();
+        let mut grouped = BTreeMap::<VReg, (Option<PhysReg>, Vec<BundleUseId>, bool)>::new();
+        for metadata in expanded
+            .register_regions
+            .iter()
+            .filter(|metadata| metadata.root == root_id)
+        {
+            let valid_entry = matches!(
+                (&metadata.entry, metadata.entry_use),
+                (ExpandedRegisterEntry::Materialized(_), Some(_))
+                    | (
+                        ExpandedRegisterEntry::Original
+                            | ExpandedRegisterEntry::SplitCopy { .. }
+                            | ExpandedRegisterEntry::SplitPhi { .. },
+                        None
+                    )
+            );
+            if !valid_entry
+                || (matches!(metadata.entry, ExpandedRegisterEntry::Original)
+                    && metadata.value != root.origin)
+                || grouped
+                    .insert(
+                        metadata.value,
+                        (metadata.preferred_register, Vec::new(), true),
+                    )
+                    .is_some()
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_REGION_METADATA",
+                    None,
+                    Some(metadata.value),
+                    "root has malformed or duplicate register-representative metadata",
+                ));
+            }
+        }
         for (use_index, use_) in root.uses.iter().enumerate() {
             if use_.id.0 as usize != use_index {
                 return Err(JointAllocationError::new(
@@ -1428,13 +1550,39 @@ impl RegionOwnershipIndex {
                     preferred_register
                 }
                 ExpandedUseSource::RegisterRegion {
-                    preferred_register, ..
-                } => preferred_register,
+                    region,
+                    preferred_register,
+                } => {
+                    let metadata = expanded
+                        .region_rows
+                        .get(&region)
+                        .and_then(|row| expanded.register_regions.get(*row))
+                        .ok_or_else(|| {
+                            JointAllocationError::new(
+                                "JOINT_ALLOC.SESSION_REGION_METADATA",
+                                Some(use_.site.block()),
+                                Some(use_.value),
+                                "register use references missing representative metadata",
+                            )
+                        })?;
+                    if metadata.root != root_id
+                        || metadata.value != use_.value
+                        || metadata.preferred_register != preferred_register
+                    {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.SESSION_REGION_METADATA",
+                            Some(use_.site.block()),
+                            Some(use_.value),
+                            "register use and representative metadata disagree",
+                        ));
+                    }
+                    preferred_register
+                }
                 ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_) => continue,
             };
             let entry = grouped
                 .entry(use_.value)
-                .or_insert_with(|| (preferred_register, Vec::new()));
+                .or_insert_with(|| (preferred_register, Vec::new(), false));
             if entry.0 != preferred_register {
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.SESSION_REGION_PREFERENCE",
@@ -1445,7 +1593,7 @@ impl RegionOwnershipIndex {
             }
             entry.1.push(use_.id);
         }
-        for (value, (preferred_register, mut uses)) in grouped {
+        for (value, (preferred_register, mut uses, allows_empty_semantic_uses)) in grouped {
             uses.sort_unstable();
             uses.dedup();
             let row = self.owners.get_mut(value.0 as usize).ok_or_else(|| {
@@ -1471,6 +1619,7 @@ impl RegionOwnershipIndex {
                 root: root_id,
                 uses,
                 preferred_register,
+                allows_empty_semantic_uses,
             });
             self.values_by_root[root_id.0 as usize].push(value);
             affected.insert(value);
@@ -2897,12 +3046,14 @@ fn session_allocation_value(
         ));
     }
     let (class, spill_cost, preferred_register) = if let Some(owner) = ownership.owner(value) {
-        if owner.uses.is_empty() || owner.uses.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if (!owner.allows_empty_semantic_uses && owner.uses.is_empty())
+            || owner.uses.windows(2).any(|pair| pair[0] >= pair[1])
+        {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.SESSION_REGION_USES",
                 Some(interval.definition.block()),
                 Some(value),
-                "changed register region has no strictly ordered root uses",
+                "changed register region has an invalid semantic-use set",
             ));
         }
         let root = expanded.roots.get(owner.root.0 as usize).ok_or_else(|| {
@@ -2963,9 +3114,13 @@ fn session_allocation_value(
             .stack_homes
             .iter()
             .any(|home| home.root == owner.root && home.kind == ExpandedStackHomeKind::Root);
-        let spill_cost = home_plan
-            .spill_cost(&owner.uses, stack_exists)
-            .map_err(JointAllocationError::home)?;
+        let spill_cost = if owner.uses.is_empty() {
+            machine_transition_spill_cost(interval)
+        } else {
+            home_plan
+                .spill_cost(&owner.uses, stack_exists)
+                .map_err(JointAllocationError::home)?
+        };
         (
             AllocationValueClass::Region {
                 root: owner.root,
@@ -2996,6 +3151,17 @@ fn session_allocation_value(
     };
     validate_allocatable_value(&result, registers)?;
     Ok(Some(result))
+}
+
+/// Baseline stack cost for a split-copy/merge representative which currently
+/// owns no direct HomeGraph use.  Its exact machine use row is still a normal
+/// spillable live interval; the generic spiller pays one store plus one reload
+/// per use.  HDL-specific root recipes are considered only for representatives
+/// that own concrete semantic uses.
+fn machine_transition_spill_cost(interval: &LiveInterval) -> u64 {
+    u64::try_from(interval.uses.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 fn cached_program_order_length(

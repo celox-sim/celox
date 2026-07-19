@@ -3722,6 +3722,22 @@ make the returned representatives own exact root uses and transition uses,
 requeue their exact intervals, and leave the complement unmaterialized until
 that interval itself reaches the `Spill` stage.
 
+Step 30e connects SplitEditor output to allocation ownership while keeping the
+production selector on the preceding path.  Exact `LiveInterval` machine uses
+are canonical; immutable HomeGraph use IDs are only annotations for
+HDL-specific home pricing.  Source, copy, and merge representatives receive
+stable metadata and ordinary spillable `Region` rows even when their direct
+semantic-use subset is empty.  A focused two-arm edit rebuilds the complete
+joint problem independently and requires all four representatives to have
+exact sparse intervals and spill costs, while only the merge representative
+owns the downstream logical-root use.
+
+The next prerequisite for the production switch is generic machine spilling.
+A transition-only representative may use another value at a synthetic copy or
+merge boundary; reloading it requires stable insertion before that synthetic
+instruction.  The order-maintenance model and spiller must implement that
+operation before the old partial-home split path can be removed safely.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3803,6 +3819,7 @@ that interval itself reaches the `Spill` stage.
 | 30b dedicated spiller boundary | `ce398251` | regalloc 253/253 including concrete Spill-stage and topology-only child regressions | lib 873/873; non-LTO build, format, and diff checks pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 28b | trace 58.203 s; full code generation 57.321 s; simulation 124.955 s | split topology and spill policy are separated; partial spill remainder and base-driver replacement remain open |
 | 30c strict-SSA live-range-edit substrate | this step | split-copy/merge-phi incremental-versus-full liveness and atomic-materialization regression | lib 874/874; non-LTO build and allocation-IR 12/12 pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30b | trace 58.254 s; full code generation 56.754 s; simulation 119.546 s | real copy and merge-phi values are representable; production cut editing and child ownership remain open |
 | 30d strict-SSA SplitEditor topology | this step | diamond and loop pruned-IDF/dominator-rename regressions 2/2; regalloc 256/256 | lib 876/876; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | legal copy cuts, loop phis, and exact child ranges are constructed; ownership/work-queue connection remains open |
+| 30e machine-interval representative ownership | this step | empty-semantic-use split representative rebuild; regalloc 257/257 | lib 877/877; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | machine uses, not root-use subsets, own live ranges; generic machine spilling remains before production switch |
 
 ## Related design records
 

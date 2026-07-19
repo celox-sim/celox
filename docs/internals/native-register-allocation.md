@@ -291,6 +291,24 @@ ownership to all returned representatives, insert every exact child interval
 into the work queue, and make the unmaterialized complement enter `Spill` only
 after its own assignment and split stages fail.
 
+Step 30e establishes that ownership boundary without switching production
+selection yet.  `LiveInterval` remains the canonical owner of every machine
+use; a HomeGraph `BundleUseId` is now only the HDL-specific annotation used to
+price State-MemorySSA, rematerialization, and logical-root stack alternatives.
+Split copies and merge phis receive stable representative metadata even when
+they own no direct root use.  They therefore build ordinary `Region`
+allocation rows, exact spill costs, constraints, affinities, and sparse matrix
+ranges instead of becoming unspillable fixed glue.  The source, both arm
+copies, and merge result in the focused diamond all survive an independent
+joint-problem rebuild; only the merge result owns the downstream root use.
+
+The retained production path still calls the old home-producing split edit.
+Before switching it, generic machine spilling must support representatives
+whose exact uses include older copy/phi transitions, including insertion before
+synthetic instructions.  That is a machine-IR order-maintenance and spiller
+requirement, not a reason to restore root-use ownership as the live-range
+model.
+
 ### Legacy allocation algorithm
 
 The implementation below records the joint allocator being removed.  It is

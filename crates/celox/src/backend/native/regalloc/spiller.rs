@@ -12,8 +12,8 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, Uses, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedRegisterRegion, ExpandedStackHome, ExpandedUseSource,
-    RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedRegisterEntry, ExpandedRegisterRegion,
+    ExpandedStackHome, ExpandedUseSource, RegisterRegionId,
 };
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::assignment::PhysReg;
@@ -473,8 +473,8 @@ impl Spiller {
                         root,
                         value: lowered.value,
                         preferred_register: entry.preferred_register,
-                        entry_use: entry.entry,
-                        entry: lowered.source,
+                        entry_use: Some(entry.entry),
+                        entry: ExpandedRegisterEntry::Materialized(lowered.source),
                     });
                     for &use_id in &entry.uses {
                         rewrite_expanded_use(

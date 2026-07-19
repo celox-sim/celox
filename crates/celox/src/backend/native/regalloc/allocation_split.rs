@@ -17,7 +17,8 @@ use std::ops::Deref;
 use crate::backend::native::mir::{BlockId, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedUseSource, RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedRegisterEntry, ExpandedRegisterRegion,
+    ExpandedUseSource, RegisterRegionId,
 };
 use super::allocation_reallocate::{
     AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
@@ -28,6 +29,7 @@ use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
 use super::home_graph::{BundleUseId, HomeGraph, LiveBundle, LiveBundleId};
 use super::live_interval::{IncrementalLivenessUpdate, LiveSegment, SlotIndex, UseSite};
+use super::live_range_edit::{LiveRangeCut, LiveRangeEditError, edit_live_range};
 use super::spiller::{SpillEdit, SpillEntry, SpillEntryKind, SpillPlan, Spiller, SpillerError};
 
 type SplitEntry = SpillEntry;
@@ -110,6 +112,16 @@ impl AllocationSplitError {
             error.block,
             error.value,
             error.root,
+            error.message,
+        )
+    }
+
+    fn edit(error: LiveRangeEditError, root: LiveBundleId) -> Self {
+        Self::new(
+            error.rule,
+            error.block,
+            error.value,
+            Some(root),
             error.message,
         )
     }
@@ -794,6 +806,259 @@ fn apply_split_with_context(
         range_changed_values: liveness.range_changed_values,
         live_lengths: liveness.live_lengths,
     })
+}
+
+/// Apply one conventional SplitEditor transaction without selecting a home.
+/// Every resulting strict-SSA representative remains an ordinary allocatable
+/// interval. HomeGraph use IDs are retained only as annotations on the exact
+/// machine representatives that now consume those semantic uses.
+fn apply_live_range_edit(
+    expanded: &mut ExpandedAllocationProblem,
+    joint: &JointAllocationProblem,
+    candidate: &RegionSplitCandidate,
+    frontier: &RegisterPressureFrontier,
+    cfg: &NormalizedCfg,
+) -> Result<AppliedSplit, AllocationSplitError> {
+    let first_cut = frontier.points.first().copied().ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPLIT.EMPTY_FRONTIER",
+            None,
+            Some(candidate.value),
+            Some(candidate.root),
+            "SplitEditor requires a non-empty physical-register frontier",
+        )
+    })?;
+    let value = verify_candidate(joint, candidate, first_cut)?;
+    for &cut in &frontier.points[1..] {
+        verify_pressure_point(value, candidate, cut)?;
+    }
+    if frontier.register != first_cut.register() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PRESSURE_REGISTER",
+            Some(first_cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "frontier register differs from its first exact pressure point",
+        ));
+    }
+    let source_preference = value.preferred_register;
+    let cuts = frontier
+        .points
+        .iter()
+        .map(|cut| LiveRangeCut {
+            block: cut.block(),
+            slot: cut.slot(),
+        })
+        .collect::<Vec<_>>();
+    let edit = edit_live_range(
+        &mut expanded.ir,
+        cfg,
+        &expanded.intervals,
+        candidate.value,
+        &cuts,
+    )
+    .map_err(|error| AllocationSplitError::edit(error, candidate.root))?;
+
+    let root_origin = expanded_root(expanded, candidate.root)?.origin;
+    let mut regions = BTreeMap::<VReg, RegisterRegionId>::new();
+    if let Some(metadata) = expanded
+        .register_regions
+        .iter()
+        .find(|metadata| metadata.root == candidate.root && metadata.value == candidate.value)
+    {
+        regions.insert(candidate.value, metadata.id);
+    } else if candidate.value == root_origin {
+        let region = insert_register_representative(
+            expanded,
+            candidate.root,
+            candidate.value,
+            source_preference,
+            ExpandedRegisterEntry::Original,
+        )?;
+        regions.insert(candidate.value, region);
+    } else {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_METADATA",
+            Some(value.interval.definition.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "non-origin SplitEditor source has no representative metadata",
+        ));
+    }
+    for copy in &edit.copies {
+        let region = insert_register_representative(
+            expanded,
+            candidate.root,
+            copy.definition,
+            source_preference,
+            ExpandedRegisterEntry::SplitCopy {
+                instruction: copy.instruction,
+                source: candidate.value,
+            },
+        )?;
+        regions.insert(copy.definition, region);
+    }
+    for phi in &edit.phis {
+        let region = insert_register_representative(
+            expanded,
+            candidate.root,
+            phi.definition,
+            source_preference,
+            ExpandedRegisterEntry::SplitPhi {
+                block: phi.block,
+                phi: phi.phi,
+            },
+        )?;
+        regions.insert(phi.definition, region);
+    }
+
+    let rewritten = edit
+        .rewritten_uses
+        .iter()
+        .map(|use_| (use_.site, use_.value))
+        .collect::<BTreeMap<_, _>>();
+    let root_index = candidate.root.0 as usize;
+    for &use_id in &candidate.uses {
+        let use_ = expanded
+            .roots
+            .get_mut(root_index)
+            .and_then(|root| root.uses.get_mut(use_id.0 as usize))
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.USE_RANGE",
+                    None,
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "SplitEditor semantic use is outside its expanded root",
+                )
+            })?;
+        if use_.value != candidate.value {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.USE_OWNERSHIP",
+                Some(use_.site.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "SplitEditor source no longer owns one requested semantic use",
+            ));
+        }
+        let replacement = rewritten.get(&use_.site).copied().ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.EDIT_USE_COVERAGE",
+                Some(use_.site.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "strict-SSA rename omitted one exact semantic root use",
+            )
+        })?;
+        use_.value = replacement;
+        if replacement == root_origin {
+            use_.source = ExpandedUseSource::OriginalRegister {
+                preferred_register: source_preference,
+            };
+        } else {
+            let region = regions.get(&replacement).copied().ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.REGION_METADATA",
+                    Some(use_.site.block()),
+                    Some(replacement),
+                    Some(candidate.root),
+                    "renamed semantic use has no register-representative metadata",
+                )
+            })?;
+            use_.source = ExpandedUseSource::RegisterRegion {
+                region,
+                preferred_register: source_preference,
+            };
+        }
+    }
+
+    let mut constraint_blocks = edit.changed_blocks.clone();
+    for rewritten in &edit.rewritten_uses {
+        if let UseSite::PhiEdge { successor, .. } = rewritten.site {
+            constraint_blocks.insert(successor);
+        }
+    }
+    let liveness = allocation_expand::refresh(expanded, cfg, &edit.changed_blocks)
+        .map_err(AllocationSplitError::expand)?;
+    for representative in edit.representatives {
+        if expanded
+            .intervals
+            .intervals
+            .get(representative.0 as usize)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.DEAD_REPRESENTATIVE",
+                None,
+                Some(representative),
+                Some(candidate.root),
+                "SplitEditor returned a representative without a live machine interval",
+            ));
+        }
+    }
+    Ok(AppliedSplit {
+        root: candidate.root,
+        constraint_blocks,
+        changed_values: liveness.changed_values,
+        range_changed_values: liveness.range_changed_values,
+        live_lengths: liveness.live_lengths,
+    })
+}
+
+fn insert_register_representative(
+    expanded: &mut ExpandedAllocationProblem,
+    root: LiveBundleId,
+    value: VReg,
+    preferred_register: Option<PhysReg>,
+    entry: ExpandedRegisterEntry,
+) -> Result<RegisterRegionId, AllocationSplitError> {
+    if expanded
+        .register_regions
+        .iter()
+        .any(|metadata| metadata.value == value)
+    {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_VALUE_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "machine representative already has register-region metadata",
+        ));
+    }
+    let id = RegisterRegionId(expanded.next_register_region);
+    expanded.next_register_region =
+        expanded
+            .next_register_region
+            .checked_add(1)
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.REGION_ID_RANGE",
+                    None,
+                    Some(value),
+                    Some(root),
+                    "register-representative identity exceeds u32",
+                )
+            })?;
+    let row = expanded.register_regions.len();
+    if expanded.region_rows.insert(id, row).is_some() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "fresh register-representative identity already exists",
+        ));
+    }
+    expanded.register_regions.push(ExpandedRegisterRegion {
+        id,
+        root,
+        value,
+        preferred_register,
+        entry_use: None,
+        entry,
+    });
+    Ok(id)
 }
 
 /// Rewrite one interval only after both split stages have failed to produce a
@@ -1593,7 +1858,9 @@ fn region_source(
         if metadata.root != candidate.root
             || metadata.value != candidate.value
             || metadata.preferred_register != preferred_register
-            || !candidate.uses.contains(&metadata.entry_use)
+            || metadata
+                .entry_use
+                .is_some_and(|entry_use| !candidate.uses.contains(&entry_use))
         {
             return Err(AllocationSplitError::new(
                 "ALLOCATION_SPLIT.REGION_METADATA",
@@ -1603,7 +1870,7 @@ fn region_source(
                 "expanded-region metadata disagrees with candidate ownership",
             ));
         }
-        Some(metadata.entry_use)
+        metadata.entry_use
     } else {
         None
     };
@@ -2382,6 +2649,102 @@ mod tests {
     }
 
     #[test]
+    fn split_editor_children_own_machine_intervals_even_without_direct_root_uses() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        merge.push(MInst::Return);
+        let mut function = function(3, Vec::new());
+        function.blocks = vec![entry, left, right, merge];
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = home_graph::build(&function, &cfg).unwrap();
+        let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX];
+        let mut expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let mut candidate = candidate(&joint, VReg(0));
+        let points = [BlockId(1), BlockId(2)]
+            .into_iter()
+            .map(|block| {
+                let row = cfg.block_index[&block];
+                AllocationPressurePoint {
+                    register: PhysReg::RAX,
+                    block,
+                    slot: expanded.intervals.block_slots[row]
+                        .instruction_use(0)
+                        .unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        candidate.frontiers = vec![RegisterPressureFrontier {
+            register: PhysReg::RAX,
+            points: points.clone(),
+        }];
+
+        let applied = apply_live_range_edit(
+            &mut expanded,
+            &joint,
+            &candidate,
+            &candidate.frontiers[0],
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(applied.root, candidate.root);
+        assert_eq!(expanded.register_regions.len(), 4);
+        assert_eq!(
+            expanded
+                .register_regions
+                .iter()
+                .filter(|region| matches!(region.entry, ExpandedRegisterEntry::SplitCopy { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            expanded
+                .register_regions
+                .iter()
+                .filter(|region| matches!(region.entry, ExpandedRegisterEntry::SplitPhi { .. }))
+                .count(),
+            1
+        );
+
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let semantic_owner = root_for(&expanded, VReg(0)).uses[0].value;
+        for metadata in &expanded.register_regions {
+            let value = rebuilt.value(metadata.value).unwrap();
+            let AllocationValueClass::Region { root, uses } = &value.class else {
+                panic!("SplitEditor representative is not an allocatable region");
+            };
+            assert_eq!(*root, candidate.root);
+            if metadata.value == semantic_owner {
+                assert_eq!(uses.as_slice(), candidate.uses.as_slice());
+            } else {
+                assert!(uses.is_empty());
+            }
+            assert!(value.spill_cost.is_some());
+        }
+    }
+
+    #[test]
     fn unallocated_ssa_pressure_drives_split_and_materialization_in_one_session() {
         let instructions = vec![
             MInst::Load {
@@ -2875,7 +3238,7 @@ mod tests {
             let region = expanded
                 .register_regions
                 .iter()
-                .find(|region| region.root == plan.root && region.entry_use == entry.entry)
+                .find(|region| region.root == plan.root && region.entry_use == Some(entry.entry))
                 .unwrap();
             assert_eq!(region.preferred_register, Some(PhysReg::RAX));
             assert_eq!(session.assigned_register(region.value), None);
@@ -3363,10 +3726,10 @@ mod tests {
         assert!(second_plan.entries.iter().all(|entry| {
             entry.kind != SplitEntryKind::RegisterRegion
                 || entry.uses != second_candidate.uses
-                || entry.entry != metadata.entry_use
+                || Some(entry.entry) != metadata.entry_use
         }));
         assert!(second_plan.entries.iter().any(|entry| {
-            entry.entry == metadata.entry_use && entry.kind == SplitEntryKind::Materialized
+            Some(entry.entry) == metadata.entry_use && entry.kind == SplitEntryKind::Materialized
         }));
         let values_before_replacement = expanded.ir.value_count();
         apply_split(&mut expanded, &graph, &joint, &second_plan, &cfg).unwrap();
