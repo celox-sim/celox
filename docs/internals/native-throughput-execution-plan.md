@@ -3559,13 +3559,57 @@ library passes 867/867, native testbench passes 60 with 1 ignored, counter
 passes 9 with 3 ignored, and all-target strict clippy passes.
 
 This completes atomic coloring of already-selected register fragments; it is
-not yet integrated spill placement. Home kind, transition placement, and the
-register-region partition are still selected before all child alternatives
-are visible together, and a second plan for the same semantic root still
-forces a publication boundary. The next architectural slice must represent
-all child fragments and MemorySSA/stack/rematerialization alternatives in one
-allocation problem, then publish stores, reloads, and copies only after the
-winning colors and homes are known.
+not yet integrated spill placement. At this point home kind, transition
+placement, and the register-region partition were still selected before all
+child alternatives were visible together, and a second plan for the same
+semantic root still forced a publication boundary.
+
+Step 29d removes that forced boundary without introducing a repeated whole-
+round cost scan. Different machine regions of one semantic root own disjoint
+immutable root uses, so their split plans can remain private in the same
+allocation-IR transaction. The round keeps one additive `RootHomePlan` cost
+accumulator and one reserved-entry set per root. Evaluating a candidate extends
+a copy of only that accumulator with the candidate's new entries; accepting it
+adds only those entries. This lets stack creation be amortized across same-root
+regions and lets a later entry change the cheapest policy for earlier entries
+without concretely rewriting every prior plan after each decision.
+
+Concrete MemorySSA, rematerialization, and stack homes are selected once when
+the physical-color round closes. Publication groups all entries in one pass,
+computes one exact root-wide partition, charges stack creation to exactly one
+entry, and distributes the resulting homes to the deferred plans. Before any
+allocation-IR mutation, an independent rebuild requires the incremental root,
+entry, stack-existence, and additive-cost state to equal the deferred plans.
+The mutation boundary separately rejects duplicate machine sources and
+overlapping same-root use ownership. Candidate work is proportional to its new
+entry count plus indexed ownership lookup; publication sorts and visits the
+round entries once instead of filtering all plans once per root or reallocating
+all earlier home choices after every accepted split.
+
+The focused same-root fixture first creates two disjoint machine regions, then
+forces both next entries to the implicit stack alternative. Independent plans
+cost `2 + 2`; the incremental second-entry cost is `1`, the root-wide
+partition costs `3`, one entry owns stack creation, both plans publish in one
+transaction, and the rebuilt joint problem remains valid. Focused register-
+allocator tests pass 248/248, the complete library passes 868/868, native
+testbench passes 60 with 1 ignored, and counter passes 9 with 3 ignored.
+
+This boundary did not fire on the retained Heliodor allocation. The complete
+pre-optimized, post-optimized, and native-optimized SIR plus every MIR stage in
+`target/heliodor/analysis/step29e-root-wide-home-round-20260718` are byte-
+identical to Step 29c. The trace-only compile took 57.599 s. The optimized
+non-LTO full run at
+`target/heliodor/results/step29e-root-wide-home-round-20260718/20260719T064111Z_celox_test_soc_linux_boot.log`
+printed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 56.025 s compile and 130.024 s execute. Because
+the complete generated MIR is identical, Step 29d makes no generated-code or
+execution-speed claim.
+
+The next architectural slice must represent all child fragment topology,
+physical colors, and MemorySSA/stack/rematerialization alternatives in one
+allocation problem, rather than merely sharing home costs among split plans
+already selected by separate pressure requests. Stores, reloads, and copies
+must be published only after those joint alternatives have won.
 
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
@@ -3649,6 +3693,7 @@ new allocator produces a substantial non-LTO execution win.
 | 29a register-specific multi-cut frontiers | this step | interval suffix query; two-arm free-prefix frontier; one-transaction multi-cut split; regalloc 244/244 | interval lib 864/864; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, and complete IR dump pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 98.538 s; full compile 94.492 s; execute 138.064 s | joint allocator completes at scale without mixing colors; no execution-speed claim; integrated multi-fragment spill placement remains open |
 | 29b retained-fragment color ownership | this step | retained original/region affinity; rebuilt-row/matrix assignment; occupied-color fallback; regalloc 245/245 | interval lib 865/865; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and SIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 100.486 s; full compile 95.104 s; execute 133.710 s | selected frontier color now survives split publication and shortens both large emitted bodies; integrated symbolic fragment/home selection remains open |
 | 29c symbolic child-fragment coloring | this step | planned matrix occupancy; round-boundary blocking; disjoint child-color reuse; conservative-to-exact range/color transfer; regalloc 247/247 | interval lib 867/867; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and pre-RA identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 60.819 s; full compile 55.871 s; execute 129.836 s | every selected register child participates in the current physical matrix before its VReg exists; integrated MemorySSA/home selection remains open |
+| 29d root-wide deferred home partition | this step | same-root disjoint ownership; incremental home-cost identity; shared stack creation; one-transaction publication; regalloc 248/248 | interval lib 868/868; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and exact MIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 57.599 s; full compile 56.025 s; execute 130.024 s | duplicate-root publication boundary removed with incremental root costs; Heliodor MIR unchanged; joint topology/color/home alternatives remain open |
 
 ## Related design records
 

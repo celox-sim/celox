@@ -230,6 +230,20 @@ without mutating MIR:
    live is a state-machine error. A value may consequently own any finite
    number of disjoint register regions without a side table that ordinary
    allocation can ignore.
+
+   Multiple machine regions of that value may also remain deferred in one
+   transaction. Their immutable root-use ownership must be disjoint. One
+   root-round accumulator prices the union of their entry uses under the exact
+   per-use MemorySSA/rematerialization alternatives and one shared stack-home
+   creation cost. Candidate evaluation extends the additive accumulator only
+   with its own entries; it does not repartition earlier plans. When the round
+   closes, all root entries are grouped once and concrete homes are selected
+   once, so a later entry may legitimately switch an earlier entry between a
+   recipe and the now-amortized stack home. Publication independently rebuilds
+   the accumulator from the deferred plans and unconditionally requires exact
+   entry ownership, stack existence, and additive totals before mutation. The
+   exact partition constructor then requires complete home coverage and cost
+   identity; exhaustive verification also compares every concrete home.
 4. Solve stack availability as sparse SSA dataflow over the selected home
    demands.  Place explicit stores at the latest legal dominating points or
    predecessor edges while the source location is available.  Materialize

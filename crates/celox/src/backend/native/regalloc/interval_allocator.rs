@@ -391,6 +391,16 @@ pub(super) struct RootHomePlan {
     totals: HomeCostTotals,
 }
 
+/// Incremental cost state for one allocation round. Split planning can add a
+/// new root-use frontier and compare its marginal home cost without rescanning
+/// every earlier fragment of the same semantic root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RootHomeCostAccumulator {
+    root: LiveBundleId,
+    totals: HomeCostTotals,
+    stack_exists: bool,
+}
+
 impl RootHomePlan {
     pub(super) fn build(
         graph: &HomeGraph,
@@ -480,6 +490,54 @@ impl RootHomePlan {
                 format!("bundle use {use_id:?} is outside root {:?}", self.root),
             )
         })
+    }
+
+    pub(super) fn cost_accumulator(&self, stack_exists: bool) -> RootHomeCostAccumulator {
+        RootHomeCostAccumulator {
+            root: self.root,
+            totals: HomeCostTotals::default(),
+            stack_exists,
+        }
+    }
+
+    pub(super) fn extend_cost_accumulator(
+        &self,
+        accumulator: &mut RootHomeCostAccumulator,
+        uses: &[BundleUseId],
+    ) -> Result<(), IntervalAllocationError> {
+        if accumulator.root != self.root {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_ROOT",
+                None,
+                None,
+                format!(
+                    "root bundle {:?} received accumulator for {:?}",
+                    self.root, accumulator.root
+                ),
+            ));
+        }
+        self.visit_uses(uses, |row| accumulator.totals.add(self.root, row))
+    }
+
+    pub(super) fn accumulator_total(
+        &self,
+        accumulator: RootHomeCostAccumulator,
+    ) -> Result<u64, IntervalAllocationError> {
+        if accumulator.root != self.root {
+            return Err(IntervalAllocationError::new(
+                "INTERVAL_ALLOC.HOME_COST_ROOT",
+                None,
+                None,
+                format!(
+                    "root bundle {:?} received accumulator for {:?}",
+                    self.root, accumulator.root
+                ),
+            ));
+        }
+        Ok(accumulator
+            .totals
+            .finish_with_existing_stack(self.root, accumulator.stack_exists)?
+            .total)
     }
 
     fn visit_uses(
