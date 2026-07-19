@@ -246,6 +246,16 @@ pub(super) struct JointAllocation {
     pub assignments: Vec<Option<PhysReg>>,
 }
 
+/// A register prefix whose exact color was selected together with its split
+/// frontier.  The split planner proves this color free before materializing
+/// the suffix homes; the persistent session revalidates the resulting live
+/// range before restoring that assignment after the allocation-IR update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct PlannedFragmentAssignment {
+    pub value: VReg,
+    pub register: PhysReg,
+}
+
 /// Persistent physical allocation state across exact region splits.
 /// Unchanged session VRegs retain both their sparse-range token and matrix
 /// membership; only dead, rewritten, or newly materialized values re-enter
@@ -2232,6 +2242,124 @@ impl JointAllocationSession {
         Ok(())
     }
 
+    /// Restore colors chosen as part of exact split planning after the whole
+    /// symbolic round has been materialized.  Fixed reservations and another
+    /// planned fragment can change while the round is being published, so the
+    /// final sparse range is checked against the updated matrix.  A newly
+    /// blocked fragment remains pending for ordinary allocation; it is never
+    /// inserted with an overlap.
+    pub(super) fn assign_planned_fragments(
+        &mut self,
+        fragments: &[PlannedFragmentAssignment],
+    ) -> Result<(), JointAllocationError> {
+        if fragments
+            .windows(2)
+            .any(|pair| pair[0].value >= pair[1].value)
+        {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.PLANNED_FRAGMENT_ORDER",
+                None,
+                fragments.first().map(|fragment| fragment.value),
+                "planned fragment assignments are duplicated or out of value order",
+            ));
+        }
+        for &fragment in fragments {
+            let allocation = self.problem.value(fragment.value).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_VALUE",
+                    None,
+                    Some(fragment.value),
+                    "planned retained fragment is absent after the split round",
+                )
+            })?;
+            if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_CLASS",
+                    Some(allocation.interval.definition.block()),
+                    Some(fragment.value),
+                    "planned retained fragment is no longer a splittable register region",
+                ));
+            }
+            if allocation.preferred_register != Some(fragment.register) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_PREFERENCE",
+                    Some(allocation.interval.definition.block()),
+                    Some(fragment.value),
+                    format!(
+                        "retained fragment preference {:?} differs from planned color {}",
+                        allocation.preferred_register, fragment.register
+                    ),
+                ));
+            }
+            if !allocation.allowed_registers.contains(fragment.register) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_CONSTRAINT",
+                    Some(allocation.interval.definition.block()),
+                    Some(fragment.value),
+                    format!(
+                        "planned color {} is forbidden by the updated target constraints",
+                        fragment.register
+                    ),
+                ));
+            }
+            let index = fragment.value.0 as usize;
+            if let Some(current) = self.assignments[index] {
+                if current != fragment.register
+                    || self.matrix.register(allocation.id) != Some(fragment.register)
+                {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.PLANNED_FRAGMENT_ASSIGNMENT",
+                        Some(allocation.interval.definition.block()),
+                        Some(fragment.value),
+                        "retained fragment has an inconsistent pre-existing assignment",
+                    ));
+                }
+                continue;
+            }
+            if self.matrix.register(allocation.id).is_some() {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_ASSIGNMENT",
+                    Some(allocation.interval.definition.block()),
+                    Some(fragment.value),
+                    "matrix retained an assignment absent from the session table",
+                ));
+            }
+            let range = self.ranges[index].as_ref().ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.PLANNED_FRAGMENT_RANGE",
+                    Some(allocation.interval.definition.block()),
+                    Some(fragment.value),
+                    "planned retained fragment has no validated sparse range",
+                )
+            })?;
+            if self
+                .matrix
+                .first_interference_validated(fragment.register, range.validated())
+                .map_err(JointAllocationError::union)?
+                .is_some()
+            {
+                continue;
+            }
+            self.matrix
+                .assign_validated(allocation.id, fragment.register, range.validated())
+                .map_err(JointAllocationError::union)?;
+            self.assignments[index] = Some(fragment.register);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn assigned_register(&self, value: VReg) -> Option<PhysReg> {
+        let assignment = self.assignments.get(value.0 as usize).copied().flatten();
+        debug_assert_eq!(
+            assignment,
+            self.problem
+                .value(value)
+                .and_then(|allocation| self.matrix.register(allocation.id))
+        );
+        assignment
+    }
+
     pub(super) fn allocate(
         &mut self,
         cfg: &NormalizedCfg,
@@ -3034,6 +3162,64 @@ mod tests {
         reprioritized.live_length += 3;
 
         assert!(same_allocation_geometry(original, &reprioritized));
+    }
+
+    #[test]
+    fn planned_fragment_stays_pending_when_the_updated_matrix_blocks_its_color() {
+        let mut function = function(
+            2,
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+        );
+        let (cfg, _) = model(&mut function);
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut problem = fixed_problem(&function, &cfg, &registers);
+        let planned = problem.value_mut(VReg(0)).unwrap();
+        planned.class = AllocationValueClass::Region {
+            root: LiveBundleId(0),
+            uses: vec![BundleUseId(0)],
+        };
+        planned.spill_cost = Some(1);
+        planned.preferred_register = Some(PhysReg::RAX);
+        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
+        let blocker = session.problem.value(VReg(1)).unwrap().clone();
+        let blocker_range = session.ranges[VReg(1).0 as usize].as_ref().unwrap();
+        session
+            .matrix
+            .assign_validated(blocker.id, PhysReg::RAX, blocker_range.validated())
+            .unwrap();
+        session.assignments[VReg(1).0 as usize] = Some(PhysReg::RAX);
+
+        session
+            .assign_planned_fragments(&[PlannedFragmentAssignment {
+                value: VReg(0),
+                register: PhysReg::RAX,
+            }])
+            .unwrap();
+
+        assert_eq!(session.assigned_register(VReg(0)), None);
+        assert_eq!(session.assigned_register(VReg(1)), Some(PhysReg::RAX));
     }
 
     #[test]

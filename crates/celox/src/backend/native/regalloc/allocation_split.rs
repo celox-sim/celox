@@ -23,7 +23,7 @@ use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
     AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
     JointAllocationError, JointAllocationOutcome, JointAllocationProblem, JointAllocationSession,
-    RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
+    PlannedFragmentAssignment, RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -499,6 +499,7 @@ struct AppliedSplit {
 #[derive(Debug)]
 struct AppliedSplitRound {
     roots: Vec<LiveBundleId>,
+    retained_fragments: Vec<PlannedFragmentAssignment>,
     constraint_blocks: BTreeSet<BlockId>,
     changed_values: Vec<VReg>,
     range_changed_values: Vec<VReg>,
@@ -985,6 +986,7 @@ fn mutate_verified_split(
         }
     }
 
+    retarget_retained_fragment(expanded, plan)?;
     prune_replaced_register_region(expanded, plan.root, plan.value, plan.source_region)?;
     let after = root_split_progress(expanded_root(expanded, plan.root)?);
     if after >= before {
@@ -995,6 +997,108 @@ fn mutate_verified_split(
             Some(plan.root),
             format!("split progress {before:?} did not decrease: {after:?}"),
         ));
+    }
+    Ok(())
+}
+
+/// Preserve the color decision made together with the split frontier.  Use
+/// ownership and register-region metadata are one fact and must be changed
+/// together; otherwise the rebuilt allocation row silently loses the
+/// planner's proved prefix color.
+fn retarget_retained_fragment(
+    expanded: &mut ExpandedAllocationProblem,
+    plan: &RegionSplitPlan,
+) -> Result<(), AllocationSplitError> {
+    if plan.retained.is_empty() {
+        return Ok(());
+    }
+    let root_index = plan.root.0 as usize;
+    let root_origin = expanded
+        .roots
+        .get(root_index)
+        .ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.ROOT_RANGE",
+                None,
+                Some(plan.value),
+                Some(plan.root),
+                "retained split fragment references a missing expanded root",
+            )
+        })?
+        .origin;
+    for &use_id in &plan.retained {
+        let use_ = expanded
+            .roots
+            .get_mut(root_index)
+            .and_then(|root| root.uses.get_mut(use_id.0 as usize))
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.USE_RANGE",
+                    None,
+                    Some(plan.value),
+                    Some(plan.root),
+                    format!("retained split use {use_id:?} is outside its root"),
+                )
+            })?;
+        if use_.value != plan.value {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.RETAINED_OWNERSHIP",
+                Some(use_.site.block()),
+                Some(plan.value),
+                Some(plan.root),
+                "retained use was rewritten while materializing the moved suffix",
+            ));
+        }
+        match (&mut use_.source, plan.source_region) {
+            (ExpandedUseSource::OriginalRegister { preferred_register }, None)
+                if plan.value == root_origin =>
+            {
+                *preferred_register = Some(plan.register);
+            }
+            (
+                ExpandedUseSource::RegisterRegion {
+                    region,
+                    preferred_register,
+                },
+                Some(source_region),
+            ) if *region == source_region => {
+                *preferred_register = Some(plan.register);
+            }
+            _ => {
+                return Err(AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.RETAINED_SOURCE",
+                    Some(use_.site.block()),
+                    Some(plan.value),
+                    Some(plan.root),
+                    "retained use no longer belongs to the planned source region",
+                ));
+            }
+        }
+    }
+    if let Some(region) = plan.source_region {
+        let metadata = expanded
+            .region_rows
+            .get(&region)
+            .and_then(|row| expanded.register_regions.get_mut(*row))
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.REGION_METADATA",
+                    None,
+                    Some(plan.value),
+                    Some(plan.root),
+                    "retained fragment references missing register-region metadata",
+                )
+            })?;
+        if metadata.root != plan.root || metadata.value != plan.value {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.REGION_METADATA",
+                None,
+                Some(plan.value),
+                Some(plan.root),
+                "retained register-region metadata has incompatible ownership",
+            ));
+        }
+        metadata.preferred_register = Some(plan.register);
     }
     Ok(())
 }
@@ -1056,6 +1160,7 @@ fn apply_split_round(
         ));
     }
     let mut roots = BTreeSet::new();
+    let mut retained_fragments = Vec::new();
     for plan in plans {
         if !roots.insert(plan.root) {
             return Err(AllocationSplitError::new(
@@ -1078,6 +1183,25 @@ fn apply_split_round(
                 context.home_plan(plan.root)?,
             )?;
         }
+        if !plan.retained.is_empty() {
+            retained_fragments.push(PlannedFragmentAssignment {
+                value: plan.value,
+                register: plan.register,
+            });
+        }
+    }
+    retained_fragments.sort_unstable();
+    if retained_fragments
+        .windows(2)
+        .any(|pair| pair[0].value == pair[1].value)
+    {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.ROUND_FRAGMENT_IDENTITY",
+            None,
+            retained_fragments.first().map(|fragment| fragment.value),
+            None,
+            "one allocation round assigns two retained fragments of the same machine value",
+        ));
     }
 
     expanded
@@ -1099,11 +1223,42 @@ fn apply_split_round(
     let liveness = finish_split_mutations(expanded, cfg, &mut journal, plans)?;
     Ok(AppliedSplitRound {
         roots: roots.into_iter().collect(),
+        retained_fragments,
         constraint_blocks: journal.constraint_blocks,
         changed_values: liveness.changed_values,
         range_changed_values: liveness.range_changed_values,
         live_lengths: liveness.live_lengths,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_and_refresh_split_round(
+    expanded: &mut ExpandedAllocationProblem,
+    graph: &HomeGraph,
+    cfg: &NormalizedCfg,
+    registers: &[PhysReg],
+    planning: &SplitPlanningContext,
+    session: &mut JointAllocationSession,
+    plans: &[RegionSplitPlan],
+) -> Result<(), AllocationSplitError> {
+    let applied = apply_split_round(expanded, graph, session.problem(), plans, cfg, planning)?;
+    session
+        .update_from_expanded_round(
+            expanded,
+            cfg,
+            graph,
+            registers,
+            &applied.constraint_blocks,
+            &applied.changed_values,
+            &applied.range_changed_values,
+            &applied.live_lengths,
+            &applied.roots,
+            &planning.home_plans,
+        )
+        .map_err(AllocationSplitError::joint)?;
+    session
+        .assign_planned_fragments(&applied.retained_fragments)
+        .map_err(AllocationSplitError::joint)
 }
 
 /// Iterate exact splitting and joint coloring to a fixed point.  The bound is
@@ -1168,22 +1323,15 @@ pub(super) fn allocate_with_splitting(
                 return Ok(allocation);
             }
             JointAllocationOutcome::DeferredRound => {
-                let applied =
-                    apply_split_round(expanded, graph, session.problem(), &plans, cfg, &planning)?;
-                session
-                    .update_from_expanded_round(
-                        expanded,
-                        cfg,
-                        graph,
-                        registers,
-                        &applied.constraint_blocks,
-                        &applied.changed_values,
-                        &applied.range_changed_values,
-                        &applied.live_lengths,
-                        &applied.roots,
-                        &planning.home_plans,
-                    )
-                    .map_err(AllocationSplitError::joint)?;
+                apply_and_refresh_split_round(
+                    expanded,
+                    graph,
+                    cfg,
+                    registers,
+                    &planning,
+                    &mut session,
+                    &plans,
+                )?;
                 plans.clear();
                 planned_roots.clear();
             }
@@ -1215,28 +1363,15 @@ pub(super) fn allocate_with_splitting(
                             "duplicate-root round boundary has no prior symbolic plan",
                         ));
                     }
-                    let applied = apply_split_round(
+                    apply_and_refresh_split_round(
                         expanded,
                         graph,
-                        session.problem(),
-                        &plans,
                         cfg,
+                        registers,
                         &planning,
+                        &mut session,
+                        &plans,
                     )?;
-                    session
-                        .update_from_expanded_round(
-                            expanded,
-                            cfg,
-                            graph,
-                            registers,
-                            &applied.constraint_blocks,
-                            &applied.changed_values,
-                            &applied.range_changed_values,
-                            &applied.live_lengths,
-                            &applied.roots,
-                            &planning.home_plans,
-                        )
-                        .map_err(AllocationSplitError::joint)?;
                     plans.clear();
                     planned_roots.clear();
                     continue;
@@ -2850,7 +2985,7 @@ mod tests {
         let mut function = function(3, instructions);
         let cfg = super::super::cfg::normalize(&mut function).unwrap();
         let graph = home_graph::build(&function, &cfg).unwrap();
-        let expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let mut expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
         let mut joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         for value in &mut joint.values {
             match value.value {
@@ -2889,6 +3024,24 @@ mod tests {
         assert!(!plan.retained.is_empty());
         assert!(!plan.moved.is_empty());
         assert_eq!(plan.retained.len() + plan.moved.len(), 2);
+
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        let root = expanded_root(&expanded, plan.root).unwrap();
+        for &use_id in &plan.retained {
+            let use_ = &root.uses[use_id.0 as usize];
+            assert_eq!(use_.value, plan.value);
+            assert_eq!(
+                use_.source,
+                ExpandedUseSource::OriginalRegister {
+                    preferred_register: Some(plan.register),
+                }
+            );
+        }
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert_eq!(
+            rebuilt.value(plan.value).unwrap().preferred_register,
+            Some(plan.register)
+        );
     }
 
     #[test]
@@ -3109,14 +3262,20 @@ mod tests {
             .uses
             .iter()
             .filter(|use_| use_.site.block() == BlockId(2))
-            .map(|use_| (use_.id, use_.value, use_.source.clone()))
+            .map(|use_| (use_.id, use_.value))
             .collect::<Vec<_>>();
 
         apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
         let root = root_for(&expanded, VReg(0));
-        for (use_id, value, source) in right_uses {
+        for (use_id, value) in right_uses {
             let use_ = &root.uses[use_id.0 as usize];
-            assert_eq!((use_.value, &use_.source), (value, &source));
+            assert_eq!(use_.value, value);
+            assert_eq!(
+                use_.source,
+                ExpandedUseSource::OriginalRegister {
+                    preferred_register: Some(plan.register),
+                }
+            );
         }
         assert!(plan.entries.iter().any(|entry| {
             entry.kind == SplitEntryKind::RegisterRegion && entry.uses.len() == 2
@@ -3183,6 +3342,7 @@ mod tests {
         let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         let request = request(&joint, VReg(3), candidate(&joint, VReg(0)));
         let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        assert!(!plan.retained.is_empty());
         assert!(plan.entries.iter().any(|entry| {
             entry.kind == SplitEntryKind::RegisterRegion
                 && entry
@@ -3216,9 +3376,16 @@ mod tests {
                 update.root,
             )
             .unwrap();
+        session
+            .assign_planned_fragments(&[PlannedFragmentAssignment {
+                value: plan.value,
+                register: plan.register,
+            }])
+            .unwrap();
 
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert_eq!(session.problem(), &rebuilt);
+        assert_eq!(session.assigned_register(plan.value), Some(plan.register));
     }
 
     #[test]

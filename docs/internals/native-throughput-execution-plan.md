@@ -3465,6 +3465,45 @@ and one-transaction multi-cut splitting. The complete library passes 864/864,
 native testbench 60 passed with 1 ignored, counter 9 passed with 3 ignored, and
 all-target strict clippy and formatting pass.
 
+Step 29b connects that frontier decision to physical allocation. Step 29a
+proved a retained prefix free in a particular register, but stored the register
+only in `RegionSplitPlan`. Split publication kept the source region's previous
+preference, rebuilt the shortened allocation row as unassigned, and asked the
+generic color loop to rediscover a decision whose proof had just been thrown
+away. The selected color therefore affected where the suffix was split but not
+where the retained fragment was allocated.
+
+Split mutation now changes every retained use and its stable register-region
+metadata to the selected color as one ownership fact. After the whole symbolic
+round updates liveness, constraints, fixed reservations, and semantic rows, the
+persistent allocation session checks the final shortened sparse range against
+the updated physical matrix and inserts it in that exact color. A sibling
+fragment or new fixed reservation may have occupied the range while the round
+was published; in that case the fragment remains pending for normal coloring
+and no overlapping assignment is installed. Focused tests cover original and
+synthetic region metadata, the rebuilt semantic row, the actual matrix
+membership, and the newly-blocked fallback.
+
+The complete optimized non-LTO trace is at
+`target/heliodor/analysis/step29c-retained-color-interval-20260718`. Its
+pre-optimized, post-optimized, and native-optimized SIR files are byte-identical
+to Step 29a, while the MIR differs only after register allocation. The emitted
+`eval_comb` endpoint falls from `0x1d70f6` to `0x1d6ceb` (`0x40b` bytes), and
+the fused `eval_comb_apply_ff` endpoint falls from `0x310b1f` to `0x3106be`
+(`0x461` bytes); both retain the same `0x4000`-byte frame. The dump compile took
+100.486 s. The full run at
+`target/heliodor/results/step29c-retained-color-interval-linux-20260718.log`
+printed through `reboot: Power down` and the exact
+`cy=9ae070 x3=aa pass=1` marker, with 95.104 s compile and 133.710 s execute.
+That execution sample is 3.2% below Step 29a but is not a substantial or
+repeat-qualified speed claim. Eager suffix home expansion still prevents one
+solver from comparing all register fragments and spill placements together;
+that remains Step 29's next architectural boundary.
+
+Focused regalloc tests now pass 245/245. The complete library passes 865/865,
+native testbench 60 passed with 1 ignored, counter 9 passed with 3 ignored, and
+all-target strict clippy and formatting pass.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3545,6 +3584,7 @@ new allocator produces a substantial non-LTO execution win.
 | 28c stable allocation-session deltas | this step | stable original/synthetic coordinates; exact block-fact diff; affinity/reservation revisions; regalloc 239/239 | interval lib 859/859; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, format, and diff checks pass | non-LTO full run passes once through kernel power-down with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 163.886 s; full compile 163.766 s; execute 149.306 s | rejected updater compile time reduced 29.7%; still far above committed Step 28b and 5--7 GiB RSS, so persistent interval/session indexing remains open |
 | 28d block-transaction allocation publication | this step | exact producer journal vs changed-block oracle; staged dense-row publication; anchor-local stable sequences; shared immutable use rows; regalloc 240/240 | interval lib 860/860; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | non-LTO full run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | final full compile 56.294 s; execute 127.017 s | per-insertion dense shifts and duplicate fact/use-row reconstruction removed; compile interval returns to the Step 28b range; integrated fragment allocation remains next |
 | 29a register-specific multi-cut frontiers | this step | interval suffix query; two-arm free-prefix frontier; one-transaction multi-cut split; regalloc 244/244 | interval lib 864/864; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, and complete IR dump pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 98.538 s; full compile 94.492 s; execute 138.064 s | joint allocator completes at scale without mixing colors; no execution-speed claim; integrated multi-fragment spill placement remains open |
+| 29b retained-fragment color ownership | this step | retained original/region affinity; rebuilt-row/matrix assignment; occupied-color fallback; regalloc 245/245 | interval lib 865/865; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and SIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 100.486 s; full compile 95.104 s; execute 133.710 s | selected frontier color now survives split publication and shortens both large emitted bodies; integrated symbolic fragment/home selection remains open |
 
 ## Related design records
 

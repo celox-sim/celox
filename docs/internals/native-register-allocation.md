@@ -199,8 +199,15 @@ without mutating MIR:
    moved uses among earliest dominating instruction uses; phi-edge entries and
    loop-reentry uses which dominate any cut become exact materializations.
    Select the minimum proved home cost and return every resulting machine
-   value to the same joint allocator. A value may consequently own any finite
-   number of disjoint register regions.
+   value to the same joint allocator. The selected frontier color is part of
+   the retained fragment decision, not a disposable affinity: split mutation
+   changes the retained use ownership and register-region metadata together,
+   and the persistent session revalidates the shortened sparse range against
+   the updated matrix before restoring that exact color. If another fragment
+   published in the same round now occupies it, the retained fragment stays
+   unassigned and returns to ordinary coloring rather than overlapping the
+   matrix. A value may consequently own any finite number of disjoint register
+   regions.
 4. Solve stack availability as sparse SSA dataflow over the selected home
    demands.  Place explicit stores at the latest legal dominating points or
    predecessor edges while the source location is available.  Materialize
