@@ -10,7 +10,11 @@ use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
+#[cfg(test)]
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -2269,6 +2273,325 @@ fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     result
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct PathScheduleWork {
+    ready_insertions: usize,
+    ready_pops: usize,
+    priority_updates: usize,
+    priority_value_visits: usize,
+}
+
+/// Reusable path-to-local-index storage.  One table is shared by every DAG
+/// run, so a function containing many loop barriers does not allocate or clear
+/// an `O(all paths)` membership vector once per run.
+#[cfg(test)]
+struct PathScheduleWorkspace {
+    local_by_path: Vec<usize>,
+}
+
+#[cfg(test)]
+impl PathScheduleWorkspace {
+    fn new(path_count: usize) -> Self {
+        Self {
+            local_by_path: vec![usize::MAX; path_count],
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        paths: &[usize],
+        dependencies: &[Vec<usize>],
+        data_dependencies: &[Vec<usize>],
+        value_weights: &[usize],
+        register_capacity: usize,
+        work: &mut PathScheduleWork,
+    ) -> Option<Vec<usize>> {
+        if dependencies.len() != self.local_by_path.len()
+            || data_dependencies.len() != dependencies.len()
+            || value_weights.len() != dependencies.len()
+        {
+            return None;
+        }
+        for (local, &path) in paths.iter().enumerate() {
+            if path >= self.local_by_path.len() || self.local_by_path[path] != usize::MAX {
+                for &mapped in &paths[..local] {
+                    self.local_by_path[mapped] = usize::MAX;
+                }
+                return None;
+            }
+            self.local_by_path[path] = local;
+        }
+
+        let result = self.schedule_mapped(
+            paths,
+            dependencies,
+            data_dependencies,
+            value_weights,
+            register_capacity,
+            work,
+        );
+        for &path in paths {
+            self.local_by_path[path] = usize::MAX;
+        }
+        result
+    }
+
+    fn schedule_mapped(
+        &self,
+        paths: &[usize],
+        dependencies: &[Vec<usize>],
+        data_dependencies: &[Vec<usize>],
+        value_weights: &[usize],
+        register_capacity: usize,
+        work: &mut PathScheduleWork,
+    ) -> Option<Vec<usize>> {
+        if paths.len() < 2 {
+            return Some(paths.to_vec());
+        }
+
+        let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
+        let mut local_data_dependencies = vec![Vec::<usize>::new(); paths.len()];
+        for (definition, &path) in paths.iter().enumerate() {
+            for &user_path in &dependencies[path] {
+                let user = *self.local_by_path.get(user_path)?;
+                if user != usize::MAX && definition != user {
+                    local_dependencies[user].push(definition);
+                }
+            }
+            for &user_path in &data_dependencies[path] {
+                let user = *self.local_by_path.get(user_path)?;
+                if user != usize::MAX && definition != user {
+                    local_data_dependencies[user].push(definition);
+                }
+            }
+        }
+        for entries in &mut local_dependencies {
+            entries.sort_unstable();
+            entries.dedup();
+        }
+        for entries in &mut local_data_dependencies {
+            entries.sort_unstable();
+            entries.dedup();
+        }
+        if local_data_dependencies
+            .iter()
+            .zip(&local_dependencies)
+            .any(|(data, all)| data.iter().any(|dependency| !all.contains(dependency)))
+        {
+            return None;
+        }
+
+        let mut unscheduled_users = vec![0usize; paths.len()];
+        let mut data_users = vec![Vec::<usize>::new(); paths.len()];
+        for (user, entries) in local_dependencies.iter().enumerate() {
+            for &definition in entries {
+                if definition >= user {
+                    return None;
+                }
+                unscheduled_users[definition] = unscheduled_users[definition].checked_add(1)?;
+            }
+        }
+        for (user, entries) in local_data_dependencies.iter().enumerate() {
+            for &definition in entries {
+                data_users[definition].push(user);
+            }
+        }
+
+        let priorities = path_dependency_priorities(&local_dependencies)?;
+        let local_weights = paths
+            .iter()
+            .map(|path| value_weights[*path])
+            .collect::<Vec<_>>();
+        let mut live = vec![false; paths.len()];
+        let mut pressure = 0usize;
+        let mut ready = PathReadyQueue::new(priorities);
+        for (path, &users) in unscheduled_users.iter().enumerate() {
+            if users == 0 {
+                let delta =
+                    path_pressure_delta(path, &local_data_dependencies, &local_weights, &live);
+                ready.insert(path, delta, work);
+            }
+        }
+
+        let mut reverse = Vec::with_capacity(paths.len());
+        while reverse.len() != paths.len() {
+            let selected = ready.pop_best(pressure, register_capacity, work)?;
+            if live[selected] {
+                live[selected] = false;
+                pressure = pressure.checked_sub(local_weights[selected])?;
+            }
+            for &definition in &local_data_dependencies[selected] {
+                if live[definition] {
+                    continue;
+                }
+                live[definition] = true;
+                pressure = pressure.checked_add(local_weights[definition])?;
+                let adjustment = -(local_weights[definition] as i128);
+                for &candidate in &data_users[definition] {
+                    work.priority_value_visits += 1;
+                    if ready.contains(candidate) {
+                        ready.adjust(candidate, adjustment, work);
+                    }
+                }
+                work.priority_value_visits += 1;
+                if ready.contains(definition) {
+                    ready.adjust(definition, adjustment, work);
+                }
+            }
+            for &definition in &local_dependencies[selected] {
+                unscheduled_users[definition] -= 1;
+                if unscheduled_users[definition] == 0 {
+                    let delta = path_pressure_delta(
+                        definition,
+                        &local_data_dependencies,
+                        &local_weights,
+                        &live,
+                    );
+                    ready.insert(definition, delta, work);
+                }
+            }
+            reverse.push(selected);
+        }
+
+        reverse.reverse();
+        Some(reverse.into_iter().map(|local| paths[local]).collect())
+    }
+}
+
+#[cfg(test)]
+fn path_dependency_priorities(dependencies: &[Vec<usize>]) -> Option<Vec<(usize, usize)>> {
+    let mut entry_depths = vec![1usize; dependencies.len()];
+    for (path, inputs) in dependencies.iter().enumerate() {
+        let mut depth = 1usize;
+        for &input in inputs {
+            if input >= path {
+                return None;
+            }
+            depth = depth.max(entry_depths[input].checked_add(1)?);
+        }
+        entry_depths[path] = depth;
+    }
+    let mut exit_depths = vec![1usize; dependencies.len()];
+    for (path, inputs) in dependencies.iter().enumerate().rev() {
+        let successor_depth = exit_depths[path].checked_add(1)?;
+        for &input in inputs {
+            exit_depths[input] = exit_depths[input].max(successor_depth);
+        }
+    }
+    Some(exit_depths.into_iter().zip(entry_depths).collect())
+}
+
+#[cfg(test)]
+fn path_pressure_delta(
+    path: usize,
+    data_dependencies: &[Vec<usize>],
+    weights: &[usize],
+    live: &[bool],
+) -> i128 {
+    let missing = data_dependencies[path]
+        .iter()
+        .filter(|&&input| !live[input])
+        .fold(0i128, |total, &input| total + weights[input] as i128);
+    let removed = if live[path] { weights[path] as i128 } else { 0 };
+    missing - removed
+}
+
+#[cfg(test)]
+struct PathReadyQueue {
+    pressure_order: BTreeSet<(i128, Reverse<usize>, Reverse<usize>, usize)>,
+    dependency_order: BTreeSet<(usize, usize, Reverse<usize>)>,
+    priorities: Vec<(usize, usize)>,
+    deltas: Vec<i128>,
+    present: Vec<bool>,
+}
+
+#[cfg(test)]
+impl PathReadyQueue {
+    fn new(priorities: Vec<(usize, usize)>) -> Self {
+        let paths = priorities.len();
+        Self {
+            pressure_order: BTreeSet::new(),
+            dependency_order: BTreeSet::new(),
+            priorities,
+            deltas: vec![0; paths],
+            present: vec![false; paths],
+        }
+    }
+
+    fn contains(&self, path: usize) -> bool {
+        self.present[path]
+    }
+
+    fn insert(&mut self, path: usize, delta: i128, work: &mut PathScheduleWork) {
+        debug_assert!(!self.present[path]);
+        let (exit_depth, entry_depth) = self.priorities[path];
+        self.pressure_order
+            .insert((delta, Reverse(exit_depth), Reverse(entry_depth), path));
+        self.dependency_order
+            .insert((exit_depth, entry_depth, Reverse(path)));
+        self.deltas[path] = delta;
+        self.present[path] = true;
+        work.ready_insertions += 1;
+    }
+
+    fn adjust(&mut self, path: usize, adjustment: i128, work: &mut PathScheduleWork) {
+        debug_assert!(self.present[path]);
+        let (exit_depth, entry_depth) = self.priorities[path];
+        self.pressure_order.remove(&(
+            self.deltas[path],
+            Reverse(exit_depth),
+            Reverse(entry_depth),
+            path,
+        ));
+        self.deltas[path] += adjustment;
+        self.pressure_order.insert((
+            self.deltas[path],
+            Reverse(exit_depth),
+            Reverse(entry_depth),
+            path,
+        ));
+        work.priority_updates += 1;
+    }
+
+    fn pop_best(
+        &mut self,
+        pressure: usize,
+        register_capacity: usize,
+        work: &mut PathScheduleWork,
+    ) -> Option<usize> {
+        let dependency_path = self.dependency_order.iter().next_back()?.2.0;
+        let dependency_pressure = apply_path_pressure_delta(pressure, self.deltas[dependency_path]);
+        let selected = if pressure <= register_capacity && dependency_pressure <= register_capacity
+        {
+            dependency_path
+        } else {
+            self.pressure_order.iter().next()?.3
+        };
+        let (exit_depth, entry_depth) = self.priorities[selected];
+        self.pressure_order.remove(&(
+            self.deltas[selected],
+            Reverse(exit_depth),
+            Reverse(entry_depth),
+            selected,
+        ));
+        self.dependency_order
+            .remove(&(exit_depth, entry_depth, Reverse(selected)));
+        self.present[selected] = false;
+        work.ready_pops += 1;
+        Some(selected)
+    }
+}
+
+#[cfg(test)]
+fn apply_path_pressure_delta(pressure: usize, delta: i128) -> usize {
+    if delta >= 0 {
+        pressure.saturating_add(delta.min(usize::MAX as i128) as usize)
+    } else {
+        pressure.saturating_sub(delta.unsigned_abs().min(usize::MAX as u128) as usize)
+    }
+}
+
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
 ///
 /// This process performs:
@@ -2762,13 +3085,137 @@ mod tests {
 
     use super::{
         ExactFoldGroup, ExactIndexedLoadKey, FoldGroupReadFacts, NormalizedIndexExpr,
-        best_weighted_fold_family, build_fold_group_schedule_index, collect_node_input_deps,
+        PathScheduleWork, PathScheduleWorkspace, best_weighted_fold_family,
+        build_fold_group_schedule_index, collect_node_input_deps,
         prepare_atomic_fold_group_results, sort,
     };
     use crate::ir::{BinaryOp, BitAccess, SIRBuilder, SIRInstruction, SIRTerminator, VarAtomBase};
     use crate::logic_tree::{
         LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTNode, SLTNodeArena, SLTToSIRLowerer,
     };
+
+    fn schedule_path_graph(
+        dependencies: Vec<Vec<usize>>,
+        data_dependencies: Vec<Vec<usize>>,
+        weights: Vec<usize>,
+        capacity: usize,
+    ) -> (Vec<usize>, PathScheduleWork) {
+        let paths = (0..dependencies.len()).collect::<Vec<_>>();
+        let mut workspace = PathScheduleWorkspace::new(paths.len());
+        let mut work = PathScheduleWork::default();
+        let scheduled = workspace
+            .schedule(
+                &paths,
+                &dependencies,
+                &data_dependencies,
+                &weights,
+                capacity,
+                &mut work,
+            )
+            .expect("synthetic path DAG must schedule");
+        (scheduled, work)
+    }
+
+    fn path_graph_pressure(
+        order: &[usize],
+        data_dependencies: &[Vec<usize>],
+        weights: &[usize],
+    ) -> usize {
+        let mut remaining_users = data_dependencies.iter().map(Vec::len).collect::<Vec<_>>();
+        let mut inputs_by_user = vec![Vec::new(); data_dependencies.len()];
+        for (definition, users) in data_dependencies.iter().enumerate() {
+            for &user in users {
+                inputs_by_user[user].push(definition);
+            }
+        }
+        let mut pressure = 0usize;
+        let mut maximum = 0usize;
+        for &path in order {
+            if remaining_users[path] != 0 {
+                pressure += weights[path];
+                maximum = maximum.max(pressure);
+            }
+            for &definition in &inputs_by_user[path] {
+                remaining_users[definition] -= 1;
+                if remaining_users[definition] == 0 {
+                    pressure -= weights[definition];
+                }
+            }
+        }
+        maximum
+    }
+
+    #[test]
+    fn path_scheduler_keeps_independent_dependency_chains_contiguous() {
+        // 0 -> 2 -> 4 and 1 -> 3 -> 5.  The old layer order keeps one
+        // result from each chain live together at every depth.
+        let dependencies = vec![vec![2], vec![3], vec![4], vec![5], vec![], vec![]];
+        let data_dependencies = dependencies.clone();
+        let weights = vec![1; dependencies.len()];
+        let (scheduled, _) =
+            schedule_path_graph(dependencies, data_dependencies.clone(), weights.clone(), 14);
+
+        assert_eq!(
+            path_graph_pressure(&[0, 1, 2, 3, 4, 5], &data_dependencies, &weights),
+            3
+        );
+        assert_eq!(
+            path_graph_pressure(&scheduled, &data_dependencies, &weights),
+            2
+        );
+        for chain in [[0, 2, 4], [1, 3, 5]] {
+            let positions =
+                chain.map(|path| scheduled.iter().position(|item| *item == path).unwrap());
+            assert_eq!(positions[1], positions[0] + 1);
+            assert_eq!(positions[2], positions[1] + 1);
+        }
+    }
+
+    #[test]
+    fn path_scheduler_respects_order_only_edges_without_inventing_liveness() {
+        let dependencies = vec![vec![1], vec![2], vec![]];
+        let data_dependencies = vec![vec![], vec![], vec![]];
+        let (scheduled, work) =
+            schedule_path_graph(dependencies, data_dependencies.clone(), vec![8, 8, 8], 14);
+
+        assert_eq!(scheduled, vec![0, 1, 2]);
+        assert_eq!(
+            path_graph_pressure(&scheduled, &data_dependencies, &[8, 8, 8]),
+            0
+        );
+        assert_eq!(work.priority_updates, 0);
+    }
+
+    #[test]
+    fn path_scheduler_accounts_for_wide_values_at_the_capacity_boundary() {
+        // The two chains are structurally equal. A layer order materializes
+        // both eight-register values before either consumer, exceeding K=14.
+        let dependencies = vec![vec![2], vec![3], vec![], vec![]];
+        let data_dependencies = dependencies.clone();
+        let weights = vec![8, 8, 0, 0];
+        let (scheduled, _) =
+            schedule_path_graph(dependencies, data_dependencies.clone(), weights.clone(), 14);
+
+        assert_eq!(
+            path_graph_pressure(&[0, 1, 2, 3], &data_dependencies, &weights),
+            16
+        );
+        assert!(path_graph_pressure(&scheduled, &data_dependencies, &weights) <= 14);
+    }
+
+    #[test]
+    fn path_scheduler_does_linear_queue_work_for_a_wide_ready_set() {
+        const PATHS: usize = 4096;
+        let dependencies = vec![Vec::new(); PATHS];
+        let (scheduled, work) =
+            schedule_path_graph(dependencies.clone(), dependencies, vec![1; PATHS], 14);
+
+        assert_eq!(scheduled.len(), PATHS);
+        assert_eq!(work.ready_insertions, PATHS);
+        assert_eq!(work.ready_pops, PATHS);
+        assert_eq!(work.priority_updates, 0);
+        assert_eq!(work.priority_value_visits, 0);
+    }
 
     fn fixed_group_path(
         arena: &mut SLTNodeArena<u32>,

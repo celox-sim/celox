@@ -3792,6 +3792,69 @@ completed through `reboot: Power down` and exactly one
 131.346 s (182.479 s reported total).  This is a qualification run, not a
 speed comparison: it is one noisy sample and the generated MIR is unchanged.
 
+### Step 31: Replace layer lowering with pressure-scheduled dependency regions
+
+The source scheduler currently assigns every acyclic logic path a longest-path
+layer, gathers all paths in that layer, and materializes grouped results before
+their stores.  Equal layer says only that the paths are unordered.  It says
+nothing about a profitable order, and a wide layer keeps unrelated results and
+shared lowering-cache entries live until the whole layer is flushed.  Renaming
+that layer to a ready frontier, target transaction, or output cone would retain
+the same defect if the complete group were still materialized at once.
+
+This step removes the layer as a lowering unit.  A maximal acyclic run between
+loop SCCs and explicit observable-order barriers is a *scheduling region*, not
+a batch.  Individual logic paths remain the scheduling nodes.  The scheduler
+works bottom-up from region exits, exactly as the native MIR pressure scheduler:
+
+1. data edges are register-value uses; explicit order edges are hard
+   dependencies but do not invent a live value;
+2. selecting a reverse-ready path removes its result if that result is live and
+   makes each not-yet-scheduled data input live;
+3. below the x86-64 allocatable capacity, dependency depth selects work which
+   preserves instruction-level parallelism; a candidate which would exceed
+   that capacity loses to the smallest live-pressure delta;
+4. indexed ready buckets are updated only for paths incident to a value whose
+   liveness changed; no selection scans the complete ready set; and
+5. lowering follows the resulting forward order.  A store or event is emitted
+   when its path is lowered.  Cross-region SLT cache entries are not retained
+   merely because two paths happened to share a former layer.
+
+This order makes every single-use producer/consumer chain contiguous.  Values
+at a real fanout boundary can still have a long range; that is an actual
+multi-use value and is left to live-range splitting, rematerialization, and the
+spiller rather than hidden by a source-order heuristic.  Exact multi-output
+folds remain atomic, but their packed result is retained while projections are
+consumed and stored one at a time.  Optional store coalescing may combine only
+consecutive paths whose projected temporary pressure fits the same physical
+capacity; it cannot turn a complete ready frontier back into one batch.
+
+For `N` logic paths and `E` deduplicated dependency/order edges, SCC analysis
+and region construction use `O(N + E)` time and space.  Indexed bottom-up list
+scheduling uses `O((N + E) log N)` time and `O(N + E)` space: every path enters
+and leaves a ready bucket once, and every edge causes at most one liveness or
+priority update.  The implementation must not retain a path-by-cone reachability
+set, clone a graph per output, construct a dense candidate matrix, or use an
+all-pairs cone merge.  A 4,096-node independent-region regression records queue
+work and rejects a shrinking-ready-set scan even if wall-clock timing happens
+to pass.
+
+The implementation is split at correctness boundaries:
+
+1. add the path scheduler and its dependency-order, fanout, order-only, wide-
+   value, and linear-work regressions without changing production lowering;
+2. replace `layer`, `reorder_dag_runs`, and `pending_layer` with the scheduled
+   order, then run focused scheduler/observer/false-loop tests and the complete
+   non-LTO `celox` suite;
+3. make cache lifetime and exact-fold projection consumption agree with the
+   scheduled regions, verify complete SIR/MIR, and run the non-LTO Linux boot
+   through `cy=9ae070 x3=aa pass=1`; and
+4. compare code generation and execution intervals against the accepted
+   Step 30 input.  No compile-only, frame-size, or partial-kernel result accepts
+   the step, and release/LTO remains a final gate only.
+
+Status: **design fixed; implementation in progress**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
