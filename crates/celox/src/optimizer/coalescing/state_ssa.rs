@@ -20,7 +20,7 @@ pub(super) enum StatePlane {
 }
 
 impl StatePlane {
-    fn for_type(ty: &RegisterType) -> Self {
+    pub(super) fn for_type(ty: &RegisterType) -> Self {
         match ty {
             RegisterType::Bit { .. } => Self::TwoStateValue,
             RegisterType::Logic { .. } => Self::FourStateValueAndMask,

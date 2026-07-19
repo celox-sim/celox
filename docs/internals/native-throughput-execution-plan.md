@@ -3907,6 +3907,52 @@ greedy allocator before eliminating broad memory round trips.
 Status: **complete as the no-layer lowering checkpoint; no throughput gain is
 claimed**.
 
+### Step 32: Connect range StateSSA to allocation-owned lazy writeback
+
+Step 25 identified overlapping aggregate state round trips, not stack traffic
+alone, as the dominant remaining generated-work difference.  The failed Step
+26 trials also established the ordering constraint: replacing loads before
+packed state is an optional allocator home creates long register/stack live
+ranges, while deleting stores before writeback placement loses that home.  The
+next implementation therefore exposes range versions and home alternatives
+before changing executable SIR.
+
+Step 32a adds a disconnected sparse range-StateSSA analysis.  For each eligible
+static two-state object it sweeps all access endpoints into non-overlapping
+atoms; a differently shaped overlap is now a use/definition of the same atoms,
+not a kill.  Each store records the exact source projection defining every
+atom, and each load records the atom versions and destination offsets required
+to compose its value.  Dynamic/element accesses, commits with unresolved phase
+semantics, eventful stores, four-state storage, and externally rejected aliases
+reject the complete object rather than permitting a partial rewrite.
+
+Pruned liveness uses one shared worklist of actual `(atom, block)` pairs, and
+phi placement visits only the corresponding dominance-frontier pairs.  There
+is no per-byte table, independent whole-CFG traversal per atom, or dense
+`atoms * blocks` matrix.  For `A` accesses, `P` endpoint atoms, and `L` sparse
+live pairs, construction uses `O(A log A + P + L + incident CFG/DF edges)` time
+and `O(A + P + L)` storage.  An independent verifier rebuilds reaching
+versions along the dominator tree, predecessor phi inputs, and exact
+load/store coverage from the published rows.
+
+Focused tests pass 6/6 for mixed-width composition, two independently defined
+diamond atoms, a loop phi only for the backedge-written atom, object-local
+dynamic rejection, event/four-state rejection, and a 4,096-access sparse
+object whose storage remains proportional to endpoints rather than address
+span.  The complete library passes 897/897, native testbench passes 60 with 1
+ignored, counter passes 9 with 3 ignored, and strict all-target clippy, format,
+and check gates pass.  The analysis is not called by production yet, so this
+slice deliberately has no generated-code or Linux timing claim.
+
+The next slice constructs a verified lazy-writeback plan over these versions:
+dirty atoms retain their packed MemorySSA home until an observer, aliasing
+barrier, phase boundary, or exit requires materialization.  Only after those
+state homes and exact use clusters are visible to `HomeGraph`/`Spiller` may a
+single atomic rewrite remove loads or stores.
+
+Status: **32a complete; lazy-writeback planning and allocator connection are
+in progress**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
