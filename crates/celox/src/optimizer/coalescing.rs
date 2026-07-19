@@ -38,6 +38,8 @@ mod pass_xor_chain_folding;
 mod placement_analysis;
 #[allow(dead_code)]
 mod range_state_ssa;
+#[allow(dead_code)]
+mod range_writeback;
 mod shared;
 mod state_ssa;
 

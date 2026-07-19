@@ -3935,23 +3935,54 @@ and `O(A + P + L)` storage.  An independent verifier rebuilds reaching
 versions along the dominator tree, predecessor phi inputs, and exact
 load/store coverage from the published rows.
 
-Focused tests pass 6/6 for mixed-width composition, two independently defined
+Focused tests pass 8/8 for mixed-width composition, two independently defined
 diamond atoms, a loop phi only for the backedge-written atom, object-local
 dynamic rejection, event/four-state rejection, and a 4,096-access sparse
 object whose storage remains proportional to endpoints rather than address
-span.  The complete library passes 897/897, native testbench passes 60 with 1
-ignored, counter passes 9 with 3 ignored, and strict all-target clippy, format,
-and check gates pass.  The analysis is not called by production yet, so this
-slice deliberately has no generated-code or Linux timing claim.
+span.  Terminal state visibility is now an explicit sparse use: forward
+propagation visits only dirty `(atom, block)` pairs, adds liveness only at
+reachable terminal blocks, and consequently places required join/loop phis
+even when no ordinary SIR `Load` follows a store.  The verifier independently
+reconstructs both the reachable dirty boundary and its reaching versions.
 
-The next slice constructs a verified lazy-writeback plan over these versions:
-dirty atoms retain their packed MemorySSA home until an observer, aliasing
-barrier, phase boundary, or exit requires materialization.  Only after those
-state homes and exact use clusters are visible to `HomeGraph`/`Spiller` may a
-single atomic rewrite remove loads or stores.
+Step 32b builds the disconnected allocation-facing residency graph.  Every
+load fragment is one optional packed-state use and every terminal boundary is
+one mandatory packed-state use of its exact range version.  A version offers
+pre-existing state, deferred writeback, or phi-inherited state as applicable;
+it is never promoted as one mandatory whole-function register range.  Phi
+inheritance is condensed by an iterative SCC analysis.  Internal loop edges
+preserve an already established state home, while every external incoming edge
+remains an explicit dependency, so a self-cycle cannot vacuously prove that
+state is current.
 
-Status: **32a complete; lazy-writeback planning and allocator connection are
-in progress**.
+The graph does not enumerate possible use subsets.  Instead the allocator may
+submit one selected use cluster, for which the planner computes a writeback at
+the deepest common dominator, before the first same-block use or at the block
+exit.  Splitting that set naturally yields independent branch-local homes;
+keeping it together yields one shared writeback.  The verifier checks the
+definition/order/dominance proof for every concrete cluster.  Construction is
+`O(V + U + E)` time and storage for range versions, actual uses, and phi inputs,
+in addition to the sparse StateSSA facts; there is no candidate-cluster power
+set or atom-by-block matrix.
+
+Focused range tests pass 14/14, including load-free terminal phis, path-local
+dirty exits, straight-line shared homes, branch-local versus shared clusters,
+diamond inheritance, loop self-edge condensation, cross-version rejection,
+and verifier corruption.  The complete optimized non-LTO library passes
+905/905, native testbench passes 60 with 1 ignored, counter passes 9 with 3
+ignored, and check, strict all-target clippy, format, and diff gates pass.  Both
+analyses remain disconnected from executable SIR, so this slice deliberately
+has no generated-code or Linux timing claim.
+
+The next slice gives the allocation IR an explicit packed-state home creation
+operation.  Instruction-defined versions become short definition-to-writeback
+ranges; phi-defined versions can choose edge inheritance or a local home.
+Only after those state homes participate in the same split/reallocation loop
+as stack and rematerialized homes may one atomic publication replace loads and
+stores.
+
+Status: **32a--32b complete; allocation-IR packed-home connection is in
+progress**.
 
 ## Execution record
 
@@ -4038,6 +4069,7 @@ in progress**.
 | 30f production strict-SSA splitting and machine spilling | this step | production split-to-machine-spill lowering regression; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 29e | trace 53.926 s; full code generation 52.491 s; simulation 116.325 s | every useful split product re-enters the queue and only `Spill` materializes it; `JointAllocationSession` removal remains |
 | 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy/docs gates pass | release/LTO pass through `reboot: Power down` and exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30f | trace 56.072 s; release code generation 51.122 s; simulation 131.346 s | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
 | 31 no-layer effect stream and sparse MIR memory dependencies | this step | parser scheduler 18/18; memory effects 6/6; MIR scheduler 16/16 | lib 891/891; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check gates pass | normal testbench passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | trace 57.512 s; full code generation 57.777 s; simulation 133.430 s | layer/frontier batches removed; path-width pressure and unconditional block-local constants rejected; no throughput gain claimed; range StateSSA/lazy writeback remains next |
+| 32a--32b sparse terminal StateSSA and lazy residency graph | this step | range StateSSA 8/8; residency/writeback 6/6 | lib 905/905; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/strict clippy/format/diff gates pass | production remains disconnected; no Linux semantic or timing claim | n/a | terminal visibility now creates exact phis; phi SCC inheritance and allocator-selected branch/shared writeback clusters are represented without eagerly changing SIR |
 
 ## Related design records
 

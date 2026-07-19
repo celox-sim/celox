@@ -95,6 +95,21 @@ pub(super) struct RangeStore {
     pub parts: Vec<RangeDefPart>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RangeBoundaryPart {
+    pub atom: RangeAtomId,
+    pub reaching: RangeVersionId,
+}
+
+/// Dirty logical ranges which must be reflected in packed state when control
+/// leaves this execution unit.  Live-on-entry atoms are deliberately absent:
+/// leaving an untouched range in its existing packed home needs no writeback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RangeBoundary {
+    pub block: BlockId,
+    pub parts: Vec<RangeBoundaryPart>,
+}
+
 /// State range versions for one SIR region.  The representation is sparse in
 /// both address and CFG space: there is no byte table and no block-by-atom
 /// matrix.
@@ -104,6 +119,7 @@ pub(super) struct RangeStateSsa {
     pub versions: Vec<RangeVersion>,
     pub loads: Vec<RangeLoad>,
     pub stores: Vec<RangeStore>,
+    pub boundaries: Vec<RangeBoundary>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -371,6 +387,7 @@ impl RangeStateSsa {
                 versions: Vec::new(),
                 loads: Vec::new(),
                 stores: Vec::new(),
+                boundaries: Vec::new(),
             });
         }
 
@@ -397,6 +414,35 @@ impl RangeStateSsa {
                             definitions.insert((atom, block));
                         }
                     }
+                }
+            }
+        }
+
+        // A terminal boundary observes every atom which may have become dirty
+        // on a path reaching it. Propagate only actual `(atom, block)` pairs;
+        // do not seed an `atoms * terminal_blocks` product or build a dense
+        // block-state matrix.
+        let mut dirty_blocks = definitions.clone();
+        let mut dirty_work = definitions.iter().copied().collect::<VecDeque<_>>();
+        while let Some((atom, block)) = dirty_work.pop_front() {
+            for &successor in &cfg.successors[block] {
+                if dirty_blocks.insert((atom, successor)) {
+                    dirty_work.push_back((atom, successor));
+                }
+            }
+        }
+        let mut boundary_atoms_by_block = vec![Vec::<RangeAtomId>::new(); cfg.block_ids.len()];
+        for (atom, block) in dirty_blocks {
+            if cfg.successors[block].is_empty() {
+                boundary_atoms_by_block[block].push(atom);
+            }
+        }
+        for (block, atoms) in boundary_atoms_by_block.iter_mut().enumerate() {
+            atoms.sort_unstable();
+            atoms.dedup();
+            for &atom in atoms.iter() {
+                if !definitions.contains(&(atom, block)) {
+                    upward_uses.insert((atom, block));
                 }
             }
         }
@@ -493,6 +539,7 @@ impl RangeStateSsa {
             .collect::<Vec<_>>();
         let mut loads = Vec::new();
         let mut stores = Vec::new();
+        let mut boundaries = Vec::new();
         let mut visits = vec![Visit::Enter(0)];
         while let Some(visit) = visits.pop() {
             match visit {
@@ -566,6 +613,23 @@ impl RangeStateSsa {
                             }
                         }
                     }
+                    if !boundary_atoms_by_block[block].is_empty() {
+                        let parts = boundary_atoms_by_block[block]
+                            .iter()
+                            .map(|&atom| {
+                                Ok(RangeBoundaryPart {
+                                    atom,
+                                    reaching: *stacks[atom.0]
+                                        .last()
+                                        .ok_or("range boundary has no reaching version")?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, &'static str>>()?;
+                        boundaries.push(RangeBoundary {
+                            block: cfg.block_ids[block],
+                            parts,
+                        });
+                    }
                     for &successor in &cfg.successors[block] {
                         for &(atom, phi) in &phis_by_block[successor] {
                             let reaching = *stacks[atom.0]
@@ -590,12 +654,14 @@ impl RangeStateSsa {
                 incoming.sort_unstable_by_key(|(block, _)| *block);
             }
         }
+        boundaries.sort_unstable_by_key(|boundary| cfg.index[&boundary.block]);
 
         let result = Self {
             atoms,
             versions,
             loads,
             stores,
+            boundaries,
         };
         result.verify(cfg)?;
         Ok(result)
@@ -626,6 +692,8 @@ impl RangeStateSsa {
             vec![Vec::<(RangeAtomId, RangeVersionId)>::new(); cfg.block_ids.len()];
         let mut stores_by_block = vec![Vec::<&RangeStore>::new(); cfg.block_ids.len()];
         let mut loads_by_block = vec![Vec::<&RangeLoad>::new(); cfg.block_ids.len()];
+        let mut boundaries_by_block = vec![None::<&RangeBoundary>; cfg.block_ids.len()];
+        let mut actual_boundary_pairs = HashSet::<(RangeAtomId, usize)>::default();
         for version in &self.versions {
             match &version.kind {
                 RangeVersionKind::LiveOnEntry => {
@@ -679,6 +747,64 @@ impl RangeStateSsa {
             };
             verify_load_parts(load, &self.atoms, &self.versions)?;
             loads_by_block[block].push(load);
+        }
+        for boundary in &self.boundaries {
+            let Some(block) = cfg.block_index(boundary.block) else {
+                return Err("range boundary block is outside the CFG");
+            };
+            if !cfg.successors[block].is_empty()
+                || boundaries_by_block[block].replace(boundary).is_some()
+            {
+                return Err("range boundary is duplicated or not terminal");
+            }
+            let mut previous = None;
+            for part in &boundary.parts {
+                let version = self
+                    .versions
+                    .get(part.reaching.0)
+                    .ok_or("range boundary version is absent")?;
+                if part.atom.0 >= self.atoms.len()
+                    || version.atom != part.atom
+                    || previous.is_some_and(|atom| atom >= part.atom)
+                    || !actual_boundary_pairs.insert((part.atom, block))
+                {
+                    return Err("range boundary parts are unordered or inconsistent");
+                }
+                previous = Some(part.atom);
+            }
+            if boundary.parts.is_empty() {
+                return Err("range boundary has no dirty parts");
+            }
+        }
+
+        // Independently reconstruct which dirty atoms can reach each terminal
+        // from the public store rows. This checks that boundary publication is
+        // sparse by reachability rather than a blanket all-atoms exit table.
+        let mut dirty_blocks = HashSet::<(RangeAtomId, usize)>::default();
+        let mut dirty_work = VecDeque::new();
+        for (block, stores) in stores_by_block.iter().enumerate() {
+            for store in stores {
+                for part in &store.parts {
+                    if dirty_blocks.insert((part.atom, block)) {
+                        dirty_work.push_back((part.atom, block));
+                    }
+                }
+            }
+        }
+        while let Some((atom, block)) = dirty_work.pop_front() {
+            for &successor in &cfg.successors[block] {
+                if dirty_blocks.insert((atom, successor)) {
+                    dirty_work.push_back((atom, successor));
+                }
+            }
+        }
+        let expected_boundary_pairs = dirty_blocks
+            .iter()
+            .copied()
+            .filter(|(_, block)| cfg.successors[*block].is_empty())
+            .collect::<HashSet<_>>();
+        if expected_boundary_pairs != actual_boundary_pairs {
+            return Err("range boundary does not cover exactly the reachable dirty atoms");
         }
         for stores in &mut stores_by_block {
             stores.sort_unstable_by_key(|store| store.instruction);
@@ -746,6 +872,15 @@ impl RangeStateSsa {
                                 }
                             }
                             load += 1;
+                        }
+                    }
+                    if let Some(boundary) = boundaries_by_block[block] {
+                        for part in &boundary.parts {
+                            if stacks[part.atom.0].last().copied() != Some(part.reaching) {
+                                return Err(
+                                    "range boundary does not name the terminal reaching version",
+                                );
+                            }
                         }
                     }
                     for &successor in &cfg.successors[block] {
@@ -1168,6 +1303,121 @@ mod tests {
         assert!(state.atoms.is_empty());
         assert!(state.loads.is_empty());
         assert!(state.stores.is_empty());
+    }
+
+    #[test]
+    fn terminal_observation_places_phi_without_an_explicit_load() {
+        let addr = address(0);
+        let eu = unit(
+            vec![
+                block(
+                    0,
+                    Vec::new(),
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(0),
+                        32,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), Vec::new()),
+                ),
+                block(
+                    2,
+                    vec![SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(0),
+                        32,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), Vec::new()),
+                ),
+                block(3, Vec::new(), SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(32)),
+                (RegisterId(2), bit(32)),
+            ],
+        );
+
+        let state = analyze(&eu);
+        let phi = state
+            .versions
+            .iter()
+            .find(|version| {
+                matches!(
+                    version.kind,
+                    RangeVersionKind::Phi {
+                        block: BlockId(3),
+                        ..
+                    }
+                )
+            })
+            .expect("the implicit terminal use needs a join phi");
+
+        assert!(state.loads.is_empty());
+        assert_eq!(state.boundaries.len(), 1);
+        assert_eq!(state.boundaries[0].block, BlockId(3));
+        assert_eq!(
+            state.boundaries[0].parts,
+            vec![RangeBoundaryPart {
+                atom: RangeAtomId(0),
+                reaching: phi.id,
+            }]
+        );
+    }
+
+    #[test]
+    fn terminal_observations_follow_only_reachable_dirty_paths() {
+        let addr = address(0);
+        let eu = unit(
+            vec![
+                block(
+                    0,
+                    Vec::new(),
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(0),
+                        32,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Return,
+                ),
+                block(2, Vec::new(), SIRTerminator::Return),
+            ],
+            [(RegisterId(0), bit(1)), (RegisterId(1), bit(32))],
+        );
+
+        let state = analyze(&eu);
+
+        assert_eq!(state.boundaries.len(), 1);
+        assert_eq!(state.boundaries[0].block, BlockId(1));
+        assert_eq!(
+            state.boundaries[0].parts[0].reaching,
+            state.stores[0].parts[0].version
+        );
     }
 
     #[test]
