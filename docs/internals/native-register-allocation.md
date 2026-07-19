@@ -191,13 +191,16 @@ without mutating MIR:
    against CFG-sparse interval unions, so branch-exclusive ranges can share a
    register without becoming adjacent in one layout-linear interval.
 3. A coloring failure names the blocked definition and every resident region
-   covering it.  For each candidate, traverse only the exact live-range edges
-   reachable from that definition, retain the prefix, and partition the moved
-   uses among earliest dominating instruction uses.  Sibling arms become
-   separate regions; phi-edge entries and loop-reentry uses which dominate the
-   cut become exact materializations.  Select the minimum proved home cost and
-   return every resulting machine value to the same joint allocator.  A value
-   may consequently own any finite number of disjoint register regions.
+   covering it. For each candidate and physical register, grow the maximal
+   definition-connected free prefix over exact live-range CFG edges. Sibling
+   paths may end at different occupancy cuts; those cuts form one register-
+   specific frontier and are split in one transaction. Frontiers from
+   different colors are never flattened together. Partition the union of
+   moved uses among earliest dominating instruction uses; phi-edge entries and
+   loop-reentry uses which dominate any cut become exact materializations.
+   Select the minimum proved home cost and return every resulting machine
+   value to the same joint allocator. A value may consequently own any finite
+   number of disjoint register regions.
 4. Solve stack availability as sparse SSA dataflow over the selected home
    demands.  Place explicit stores at the latest legal dominating points or
    predecessor edges while the source location is available.  Materialize

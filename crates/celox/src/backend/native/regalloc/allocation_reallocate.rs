@@ -8,7 +8,7 @@
 //! silently finalizes a value to memory.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use crate::backend::native::mir::{BlockId, VReg};
@@ -26,8 +26,8 @@ use super::cfg::NormalizedCfg;
 use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_allocator::{IntervalAllocationError, RootHomePlan};
 use super::interval_union::{
-    AllocationBundleId, ConflictCollector, FixedRegisterReservation, IntervalUnionError,
-    LiveIntervalMatrix, OccupancyCut, OccupancyOwner, SparseRange,
+    AllocationBundleId, FixedRegisterReservation, IntervalUnionError, LiveIntervalMatrix,
+    OccupancyCut, OccupancyOwner, SparseRange,
 };
 use super::live_interval::{DefinitionSite, LiveInterval, SlotIndex, UseSite};
 
@@ -76,6 +76,15 @@ pub(super) struct JointAllocationProblem {
     /// makes allocation quadratic on large RTL dataflow graphs.
     affinity_index: AffinityIndex,
     fixed_reservations: Vec<FixedRegisterReservation>,
+    /// Stable liveness entry/exit coordinates indexed by normalized CFG row.
+    /// Split insertion never needs the per-instruction slot vectors here.
+    block_boundaries: Vec<BlockBoundarySlots>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockBoundarySlots {
+    entry: SlotIndex,
+    exit: SlotIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,11 +197,25 @@ pub(super) struct RegisterConflicts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct AllocationPressurePoint {
+    pub register: PhysReg,
     pub block: BlockId,
     pub slot: SlotIndex,
 }
 
+/// Every first occupancy reached while growing one candidate from its
+/// definition through the free portion of a single physical register.
+/// Branches may contribute independent cuts, but colors are never mixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RegisterPressureFrontier {
+    pub register: PhysReg,
+    pub points: Vec<AllocationPressurePoint>,
+}
+
 impl AllocationPressurePoint {
+    pub(super) fn register(self) -> PhysReg {
+        self.register
+    }
+
     pub(super) fn block(self) -> BlockId {
         self.block
     }
@@ -207,7 +230,7 @@ pub(super) struct RegionSplitCandidate {
     pub value: VReg,
     pub root: LiveBundleId,
     pub uses: Vec<BundleUseId>,
-    pub pressure_points: Vec<AllocationPressurePoint>,
+    pub frontiers: Vec<RegisterPressureFrontier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,10 +239,6 @@ pub(super) struct RegionSplitRequest {
     pub definition: DefinitionSite,
     pub conflicts: Vec<RegisterConflicts>,
     pub candidates: Vec<RegionSplitCandidate>,
-    /// For pure movable pressure, split the lowest-priority blocked region at
-    /// its definition into earliest dominating-use fragments in one
-    /// transaction. Fixed reservations never set this frontier.
-    pub preferred_frontier: Option<(VReg, AllocationPressurePoint)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +265,89 @@ pub(super) struct JointAllocationSession {
     pending: Vec<AllocationQueueItem>,
     home_plans: Option<Vec<RootHomePlan>>,
     deferred: BTreeSet<VReg>,
+    frontier_workspace: FreePrefixWorkspace,
+}
+
+/// Epoch-indexed scratch for CFG free-prefix discovery. A large RTL function
+/// pays O(live blocks) to index a failed value and O(reached blocks) per color;
+/// it never clears or reallocates a function-sized table between probes.
+#[derive(Debug)]
+struct FreePrefixWorkspace {
+    segment_epoch: u32,
+    segment_marks: Vec<u32>,
+    segment_indices: Vec<usize>,
+    entry_epoch: u32,
+    entry_marks: Vec<u32>,
+    queue: VecDeque<(usize, SlotIndex)>,
+}
+
+impl FreePrefixWorkspace {
+    fn new(block_count: usize) -> Self {
+        Self {
+            segment_epoch: 0,
+            segment_marks: vec![0; block_count],
+            segment_indices: vec![0; block_count],
+            entry_epoch: 0,
+            entry_marks: vec![0; block_count],
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn next_segment_epoch(&mut self) {
+        self.segment_epoch = self.segment_epoch.wrapping_add(1);
+        if self.segment_epoch == 0 {
+            self.segment_marks.fill(0);
+            self.segment_epoch = 1;
+        }
+    }
+
+    fn next_entry_epoch(&mut self) {
+        self.entry_epoch = self.entry_epoch.wrapping_add(1);
+        if self.entry_epoch == 0 {
+            self.entry_marks.fill(0);
+            self.entry_epoch = 1;
+        }
+        self.queue.clear();
+    }
+
+    fn index_range(&mut self, range: &SparseRange) -> Result<(), JointAllocationError> {
+        self.next_segment_epoch();
+        for (segment_index, (segment, block)) in range.validated().iter().enumerate() {
+            let Some(mark) = self.segment_marks.get_mut(block) else {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.FRONTIER_CFG",
+                    Some(segment.block),
+                    None,
+                    "candidate sparse range references a CFG row outside frontier scratch",
+                ));
+            };
+            if *mark == self.segment_epoch {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.FRONTIER_SEGMENT",
+                    Some(segment.block),
+                    None,
+                    "candidate has more than one sparse segment in a CFG block",
+                ));
+            }
+            *mark = self.segment_epoch;
+            self.segment_indices[block] = segment_index;
+        }
+        Ok(())
+    }
+
+    fn segment(&self, block: usize) -> Option<usize> {
+        (self.segment_marks.get(block).copied() == Some(self.segment_epoch))
+            .then(|| self.segment_indices[block])
+    }
+
+    fn enqueue_entry(&mut self, block: usize, slot: SlotIndex) -> bool {
+        if self.entry_marks[block] == self.entry_epoch {
+            return false;
+        }
+        self.entry_marks[block] = self.entry_epoch;
+        self.queue.push_back((block, slot));
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -823,6 +925,7 @@ impl JointAllocationProblem {
         let definition_order = definition_order(&values, cfg)?;
         let affinities = constraints.affinities.clone();
         let affinity_index = AffinityIndex::build(expanded.ir.value_count(), &affinities)?;
+        let block_boundaries = block_boundaries(expanded, cfg)?;
         Ok(Self {
             value_count: expanded.ir.value_count(),
             values,
@@ -832,7 +935,42 @@ impl JointAllocationProblem {
             affinities,
             affinity_index,
             fixed_reservations: constraints.fixed_reservations.clone(),
+            block_boundaries,
         })
+    }
+
+    fn update_block_boundaries(
+        &mut self,
+        expanded: &ExpandedAllocationProblem,
+        cfg: &NormalizedCfg,
+        changed_blocks: &BTreeSet<BlockId>,
+    ) -> Result<(), JointAllocationError> {
+        if self.block_boundaries.len() != cfg.successors.len()
+            || expanded.intervals.block_slots.len() != cfg.successors.len()
+        {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.BLOCK_BOUNDARIES",
+                None,
+                None,
+                "incremental block-slot rows do not cover the normalized CFG",
+            ));
+        }
+        for &block in changed_blocks {
+            let row = cfg.block_index.get(&block).copied().ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.BLOCK_BOUNDARIES",
+                    Some(block),
+                    None,
+                    "changed block is outside the normalized CFG",
+                )
+            })?;
+            let slots = &expanded.intervals.block_slots[row];
+            self.block_boundaries[row] = BlockBoundarySlots {
+                entry: slots.entry,
+                exit: slots.exit,
+            };
+        }
+        Ok(())
     }
 
     pub(super) fn value(&self, value: VReg) -> Option<&AllocationValue> {
@@ -1338,6 +1476,150 @@ fn allocation_queue_item(
     })
 }
 
+fn block_boundaries(
+    expanded: &ExpandedAllocationProblem,
+    cfg: &NormalizedCfg,
+) -> Result<Vec<BlockBoundarySlots>, JointAllocationError> {
+    if expanded.intervals.block_slots.len() != cfg.successors.len()
+        || cfg.block_index.len() != cfg.successors.len()
+    {
+        return Err(JointAllocationError::new(
+            "JOINT_ALLOC.BLOCK_BOUNDARIES",
+            None,
+            None,
+            "expanded block-slot rows do not cover the normalized CFG",
+        ));
+    }
+    expanded
+        .intervals
+        .block_slots
+        .iter()
+        .map(|slots| {
+            if slots.entry >= slots.exit {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.BLOCK_BOUNDARIES",
+                    None,
+                    None,
+                    "block entry is not ordered before its exit",
+                ));
+            }
+            Ok(BlockBoundarySlots {
+                entry: slots.entry,
+                exit: slots.exit,
+            })
+        })
+        .collect()
+}
+
+/// Grow the candidate through one physical register until each reachable CFG
+/// path meets its first occupied span. The result is the complete boundary of
+/// the maximal definition-connected free fragment for that color.
+fn register_free_prefix_frontier(
+    matrix: &LiveIntervalMatrix,
+    problem: &JointAllocationProblem,
+    cfg: &NormalizedCfg,
+    range: &SparseRange,
+    value: &AllocationValue,
+    register: PhysReg,
+    workspace: &mut FreePrefixWorkspace,
+) -> Result<Vec<OccupancyCut>, JointAllocationError> {
+    if problem.block_boundaries.len() != cfg.successors.len() {
+        return Err(JointAllocationError::new(
+            "JOINT_ALLOC.FRONTIER_CFG",
+            Some(value.interval.definition.block()),
+            Some(value.value),
+            "allocation block boundaries do not cover the normalized CFG",
+        ));
+    }
+    let definition_block = cfg
+        .block_index
+        .get(&value.interval.definition.block())
+        .copied()
+        .ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.FRONTIER_DEFINITION",
+                Some(value.interval.definition.block()),
+                Some(value.value),
+                "candidate definition is outside the normalized CFG",
+            )
+        })?;
+    let definition_segment = workspace.segment(definition_block).ok_or_else(|| {
+        JointAllocationError::new(
+            "JOINT_ALLOC.FRONTIER_DEFINITION",
+            Some(value.interval.definition.block()),
+            Some(value.value),
+            "candidate definition block has no sparse live segment",
+        )
+    })?;
+    let segment = range.as_slice()[definition_segment];
+    let definition_slot = value.interval.definition.slot();
+    if !segment.contains(definition_slot) {
+        return Err(JointAllocationError::new(
+            "JOINT_ALLOC.FRONTIER_DEFINITION",
+            Some(segment.block),
+            Some(value.value),
+            "candidate sparse range does not contain its definition",
+        ));
+    }
+
+    workspace.next_entry_epoch();
+    if definition_slot == problem.block_boundaries[definition_block].entry {
+        workspace.entry_marks[definition_block] = workspace.entry_epoch;
+    }
+    workspace
+        .queue
+        .push_back((definition_block, definition_slot));
+    let mut cuts = Vec::new();
+    while let Some((block, start)) = workspace.queue.pop_front() {
+        let segment_index = workspace.segment(block).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.FRONTIER_SEGMENT",
+                None,
+                Some(value.value),
+                "free-prefix traversal reached a block without candidate liveness",
+            )
+        })?;
+        let segment = range.as_slice()[segment_index];
+        if !segment.contains(start) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.FRONTIER_ENTRY",
+                Some(segment.block),
+                Some(value.value),
+                "free-prefix traversal entered outside the candidate segment",
+            ));
+        }
+        if let Some(cut) = matrix
+            .first_interference_in_segment_validated(
+                register,
+                range.validated(),
+                segment_index,
+                start,
+            )
+            .map_err(JointAllocationError::union)?
+        {
+            cuts.push(cut);
+            continue;
+        }
+
+        let boundary = problem.block_boundaries[block];
+        if !segment.contains(boundary.exit) {
+            continue;
+        }
+        for &successor in &cfg.successors[block] {
+            let Some(successor_segment) = workspace.segment(successor) else {
+                continue;
+            };
+            let entry = problem.block_boundaries[successor].entry;
+            if range.as_slice()[successor_segment].contains(entry) {
+                workspace.enqueue_entry(successor, entry);
+            }
+        }
+    }
+    cuts.sort_unstable_by_key(|cut| (cut.segment, cut.start, cut.end, cut.owner));
+    cuts.dedup();
+    Ok(cuts)
+}
+
 impl JointAllocationSession {
     pub(super) fn new(
         problem: JointAllocationProblem,
@@ -1387,6 +1669,7 @@ impl JointAllocationSession {
             pending,
             home_plans: None,
             deferred: BTreeSet::new(),
+            frontier_workspace: FreePrefixWorkspace::new(cfg.successors.len()),
         })
     }
 
@@ -1584,6 +1867,8 @@ impl JointAllocationSession {
             registers,
         )?;
         self.relabel_intervals(expanded, changed_values)?;
+        self.problem
+            .update_block_boundaries(expanded, cfg, changed_blocks)?;
         self.deferred.clear();
         Ok(())
     }
@@ -2020,14 +2305,18 @@ impl JointAllocationSession {
                 },
             );
             let mut selected = None;
+            let mut blocked_registers = Vec::with_capacity(register_order.len());
             for (_, register, _) in register_order {
-                if !self
+                let interference = self
                     .matrix
-                    .interferes_validated(register, range.validated())
-                    .map_err(JointAllocationError::union)?
-                {
-                    selected = Some(register);
-                    break;
+                    .first_interference_validated(register, range.validated())
+                    .map_err(JointAllocationError::union)?;
+                match interference {
+                    Some(_) => blocked_registers.push(register),
+                    None => {
+                        selected = Some(register);
+                        break;
+                    }
                 }
             }
             if let Some(register) = selected {
@@ -2038,139 +2327,100 @@ impl JointAllocationSession {
                 continue;
             }
 
-            // The priority worklist has already established that this blocked
-            // region is cheaper to displace than every previously colored
-            // region. For ordinary movable pressure, no resident identities
-            // or occupancy cuts are needed: split once at the SSA definition
-            // into earliest dominating-use fragments. Materialize exact cuts
-            // only when immutable fixed occupancy is the sole blocker.
-            if let AllocationValueClass::Region { root, uses } = &value.class {
-                let movable_pressure = registers
-                    .iter()
-                    .filter(|register| value.allowed_registers.contains(**register))
-                    .try_fold(false, |found, &register| {
-                        if found {
-                            Ok(true)
-                        } else {
-                            self.matrix
-                                .interferes_bundle_validated(register, range.validated())
-                                .map_err(JointAllocationError::union)
-                        }
-                    })?;
-                if movable_pressure {
-                    let frontier = AllocationPressurePoint {
-                        block: value.interval.definition.block(),
-                        slot: value.interval.definition.slot(),
-                    };
-                    self.pending.push(allocation_queue_item(&value)?);
-                    return Ok(JointAllocationOutcome::NeedsSplit(RegionSplitRequest {
-                        blocked_value: value.value,
-                        definition: value.interval.definition,
-                        conflicts: Vec::new(),
-                        candidates: vec![RegionSplitCandidate {
-                            value: value.value,
-                            root: *root,
-                            uses: uses.clone(),
-                            pressure_points: vec![frontier],
-                        }],
-                        preferred_frontier: Some((value.value, frontier)),
-                    }));
+            self.frontier_workspace.index_range(range)?;
+            let mut conflicts = Vec::with_capacity(blocked_registers.len());
+            let mut split_frontiers =
+                BTreeMap::<VReg, BTreeMap<PhysReg, BTreeSet<AllocationPressurePoint>>>::new();
+            let blocked_is_region = matches!(value.class, AllocationValueClass::Region { .. });
+            for register in blocked_registers {
+                let cuts = register_free_prefix_frontier(
+                    &self.matrix,
+                    &self.problem,
+                    cfg,
+                    range,
+                    &value,
+                    register,
+                    &mut self.frontier_workspace,
+                )?;
+                if cuts.is_empty() {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.FRONTIER_COVERAGE",
+                        Some(value.interval.definition.block()),
+                        Some(value.value),
+                        format!(
+                            "{register:?} interferes with a sparse segment disconnected from the candidate definition"
+                        ),
+                    ));
                 }
-            }
-
-            let mut conflicts = Vec::with_capacity(registers.len());
-            let mut split_points = BTreeMap::<VReg, BTreeSet<AllocationPressurePoint>>::new();
-            let mut has_movable_cut = false;
-            let mut has_fixed_cut = false;
-            let mut collector = ConflictCollector::default();
-            for &register in registers
-                .iter()
-                .filter(|register| value.allowed_registers.contains(**register))
-            {
-                let mut residents = Vec::new();
-                let mut cuts = Vec::new();
-                self.matrix
-                    .collect_interference_validated(
-                        register,
-                        range.validated(),
-                        self.problem.value_count as usize,
-                        &mut collector,
-                        &mut residents,
-                        &mut cuts,
-                    )
-                    .map_err(JointAllocationError::union)?;
-                let mut resident_values = Vec::with_capacity(residents.len());
-                for &resident_id in &residents {
-                    let resident = self.problem.bundle(resident_id).ok_or_else(|| {
-                        JointAllocationError::new(
-                            "JOINT_ALLOC.CONFLICT_RANGE",
-                            Some(value.interval.definition.block()),
-                            Some(value.value),
-                            "interval matrix references a missing resident value",
-                        )
-                    })?;
-                    resident_values.push(resident.value);
-                }
-                for cut in &cuts {
+                let mut resident_values = BTreeSet::new();
+                let mut resident_points = Vec::new();
+                let mut fixed_frontier = false;
+                for &cut in &cuts {
                     let segment = value.interval.segments.get(cut.segment).ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.OCCUPANCY_CUT_RANGE",
                             Some(value.interval.definition.block()),
                             Some(value.value),
-                            "interval union returned a cut outside the blocked sparse range",
+                            "interval union returned a frontier outside the blocked sparse range",
                         )
                     })?;
                     let point = AllocationPressurePoint {
+                        register,
                         block: segment.block,
                         slot: cut.start,
                     };
-                    if matches!(value.class, AllocationValueClass::Region { .. }) {
-                        split_points.entry(value.value).or_default().insert(point);
-                    }
                     match cut.owner {
                         OccupancyOwner::Bundle(resident_id) => {
-                            has_movable_cut = true;
                             let resident = self.problem.bundle(resident_id).ok_or_else(|| {
                                 JointAllocationError::new(
                                     "JOINT_ALLOC.CONFLICT_RANGE",
                                     Some(segment.block),
                                     Some(value.value),
-                                    "occupancy cut references a missing resident value",
+                                    "occupancy frontier references a missing resident value",
                                 )
                             })?;
+                            resident_values.insert(resident.value);
                             if matches!(resident.class, AllocationValueClass::Region { .. }) {
-                                split_points
-                                    .entry(resident.value)
-                                    .or_default()
-                                    .insert(point);
+                                resident_points.push((resident.value, point));
                             }
                         }
-                        OccupancyOwner::Fixed(_) => has_fixed_cut = true,
+                        OccupancyOwner::Fixed(_) => fixed_frontier = true,
+                    }
+                }
+                if blocked_is_region {
+                    let points = split_frontiers
+                        .entry(value.value)
+                        .or_default()
+                        .entry(register)
+                        .or_default();
+                    points.extend(cuts.iter().map(|cut| {
+                        let segment = value.interval.segments[cut.segment];
+                        AllocationPressurePoint {
+                            register,
+                            block: segment.block,
+                            slot: cut.start,
+                        }
+                    }));
+                } else if !fixed_frontier {
+                    // A fixed blocker makes this color impossible for the
+                    // unsplittable value regardless of movable residents on
+                    // other arms. Do not spill those residents pointlessly.
+                    for (resident, point) in resident_points {
+                        split_frontiers
+                            .entry(resident)
+                            .or_default()
+                            .entry(register)
+                            .or_default()
+                            .insert(point);
                     }
                 }
                 conflicts.push(RegisterConflicts {
                     register,
-                    values: resident_values,
+                    values: resident_values.into_iter().collect(),
                     cuts,
                 });
             }
-            let preferred_frontier = if has_movable_cut
-                && !has_fixed_cut
-                && matches!(value.class, AllocationValueClass::Region { .. })
-            {
-                let frontier = AllocationPressurePoint {
-                    block: value.interval.definition.block(),
-                    slot: value.interval.definition.slot(),
-                };
-                split_points
-                    .entry(value.value)
-                    .or_default()
-                    .insert(frontier);
-                Some((value.value, frontier))
-            } else {
-                None
-            };
-            if split_points.is_empty() {
+            if split_frontiers.is_empty() {
                 let resident_summary = conflicts
                     .iter()
                     .map(|conflict| {
@@ -2195,9 +2445,9 @@ impl JointAllocationSession {
                     ),
                 ));
             }
-            let candidates = split_points
+            let candidates = split_frontiers
                 .into_iter()
-                .map(|(candidate, pressure_points)| {
+                .map(|(candidate, frontiers)| {
                     let candidate = self.problem.value(candidate).ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.SPLIT_RANGE",
@@ -2218,7 +2468,13 @@ impl JointAllocationSession {
                         value: candidate.value,
                         root: *root,
                         uses: uses.clone(),
-                        pressure_points: pressure_points.into_iter().collect(),
+                        frontiers: frontiers
+                            .into_iter()
+                            .map(|(register, points)| RegisterPressureFrontier {
+                                register,
+                                points: points.into_iter().collect(),
+                            })
+                            .collect(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2228,7 +2484,6 @@ impl JointAllocationSession {
                 definition: value.interval.definition,
                 conflicts,
                 candidates,
-                preferred_frontier,
             }));
         }
 
@@ -2692,6 +2947,14 @@ mod tests {
             affinities: Vec::new(),
             affinity_index: AffinityIndex::build(value_count, &[]).unwrap(),
             fixed_reservations: Vec::new(),
+            block_boundaries: intervals
+                .block_slots
+                .iter()
+                .map(|slots| BlockBoundarySlots {
+                    entry: slots.entry,
+                    exit: slots.exit,
+                })
+                .collect(),
         }
     }
 
@@ -2818,7 +3081,13 @@ mod tests {
         else {
             panic!("three overlapping roots should require one deferred region");
         };
-        let deferred = request.preferred_frontier.unwrap().0;
+        let deferred = request.blocked_value;
+        assert!(
+            request
+                .candidates
+                .iter()
+                .any(|candidate| candidate.value == deferred)
+        );
         let pending_before = session.pending.len();
         assert!(
             session
@@ -2901,10 +3170,14 @@ mod tests {
             }]
         );
         assert_eq!(
-            request.candidates[0].pressure_points,
-            vec![AllocationPressurePoint {
-                block: BlockId(0),
-                slot: reservation.segment.start,
+            request.candidates[0].frontiers,
+            vec![RegisterPressureFrontier {
+                register: PhysReg::RAX,
+                points: vec![AllocationPressurePoint {
+                    register: PhysReg::RAX,
+                    block: BlockId(0),
+                    slot: reservation.segment.start,
+                }],
             }]
         );
     }
@@ -2976,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn movable_pressure_requests_one_blocked_definition_frontier_without_cut_materialization() {
+    fn movable_pressure_returns_exact_owner_qualified_cuts() {
         let instructions = vec![
             MInst::Load {
                 dst: VReg(0),
@@ -3048,20 +3321,47 @@ mod tests {
         else {
             panic!("the explicit state transition should expose retained-root pressure");
         };
-        assert!(request.conflicts.is_empty());
-        let [candidate] = request.candidates.as_slice() else {
-            panic!("movable pressure should request exactly the blocked region");
-        };
-        assert_eq!(candidate.value, request.blocked_value);
-        let frontier = AllocationPressurePoint {
-            block: request.definition.block(),
-            slot: request.definition.slot(),
-        };
-        assert_eq!(candidate.pressure_points, vec![frontier]);
-        assert_eq!(
-            request.preferred_frontier,
-            Some((candidate.value, frontier))
-        );
+        assert!(!request.conflicts.is_empty());
+        let blocked = problem.value(request.blocked_value).unwrap();
+        let exact_points = request
+            .conflicts
+            .iter()
+            .flat_map(|conflict| {
+                conflict
+                    .cuts
+                    .iter()
+                    .map(move |cut| (conflict.register, cut))
+            })
+            .map(|(register, cut)| {
+                assert!(matches!(cut.owner, OccupancyOwner::Bundle(_)));
+                let segment = blocked.interval.segments[cut.segment];
+                AllocationPressurePoint {
+                    register,
+                    block: segment.block,
+                    slot: cut.start,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!exact_points.is_empty());
+        let blocked_candidate = request
+            .candidates
+            .iter()
+            .find(|candidate| candidate.value == request.blocked_value)
+            .unwrap();
+        let candidate_points = blocked_candidate
+            .frontiers
+            .iter()
+            .flat_map(|frontier| {
+                assert!(
+                    frontier
+                        .points
+                        .iter()
+                        .all(|point| point.register() == frontier.register)
+                );
+                frontier.points.iter().copied()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(candidate_points, exact_points);
     }
 
     #[test]
@@ -3257,6 +3557,102 @@ mod tests {
                 .iter()
                 .flatten()
                 .all(|register| *register == PhysReg::RAX)
+        );
+    }
+
+    #[test]
+    fn one_register_frontier_contains_the_first_conflict_on_every_cfg_arm() {
+        let mut values = VRegAllocator::new();
+        for _ in 0..2 {
+            values.alloc();
+        }
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 2]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.push(MInst::Return);
+        function.blocks = vec![entry, left, right, merge];
+
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let registers = [PhysReg::RAX];
+        let problem = fixed_problem(&function, &cfg, &registers);
+        let left_row = cfg.block_index[&BlockId(1)];
+        let right_row = cfg.block_index[&BlockId(2)];
+        let left_start = problem.block_boundaries[left_row].entry;
+        let right_start = problem.block_boundaries[right_row].entry;
+        let reservations = vec![
+            FixedRegisterReservation {
+                register: PhysReg::RAX,
+                segment: super::super::live_interval::LiveSegment {
+                    block: BlockId(1),
+                    start: left_start,
+                    end: left_start.next().unwrap(),
+                },
+            },
+            FixedRegisterReservation {
+                register: PhysReg::RAX,
+                segment: super::super::live_interval::LiveSegment {
+                    block: BlockId(2),
+                    start: right_start,
+                    end: right_start.next().unwrap(),
+                },
+            },
+        ];
+        let mut matrix = LiveIntervalMatrix::new(&cfg, &registers).unwrap();
+        matrix.replace_fixed_reservations(&reservations).unwrap();
+        let value = problem.value(VReg(0)).unwrap();
+        let range = matrix.make_range(value.interval.segments.clone()).unwrap();
+        let mut workspace = FreePrefixWorkspace::new(cfg.successors.len());
+        workspace.index_range(&range).unwrap();
+
+        let cuts = register_free_prefix_frontier(
+            &matrix,
+            &problem,
+            &cfg,
+            &range,
+            value,
+            PhysReg::RAX,
+            &mut workspace,
+        )
+        .unwrap();
+        let cut_points = cuts
+            .iter()
+            .map(|cut| {
+                let segment = value.interval.segments[cut.segment];
+                (segment.block, cut.start)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            cut_points,
+            BTreeSet::from([(BlockId(1), left_start), (BlockId(2), right_start)])
         );
     }
 }

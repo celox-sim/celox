@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -72,12 +72,19 @@ impl<'a> ValidatedSegments<'a> {
         self.segments
     }
 
-    fn iter(self) -> impl Iterator<Item = (LiveSegment, usize)> + 'a {
+    pub(super) fn iter(self) -> impl Iterator<Item = (LiveSegment, usize)> + 'a {
         debug_assert_eq!(self.segments.len(), self.block_indices.len());
         self.segments
             .iter()
             .copied()
             .zip(self.block_indices.iter().copied())
+    }
+
+    pub(super) fn get(self, segment: usize) -> Option<(LiveSegment, usize)> {
+        self.segments
+            .get(segment)
+            .copied()
+            .zip(self.block_indices.get(segment).copied())
     }
 }
 
@@ -372,6 +379,60 @@ impl IntervalUnion {
             }
         }
         false
+    }
+
+    /// Return one exact earliest overlap in canonical sparse-segment order.
+    ///
+    /// Register allocation needs a bounded split frontier, not every resident
+    /// interval covered by a large RTL live range. Union entries in one block
+    /// are non-overlapping, so the first overlap is either the predecessor of
+    /// the candidate start or the first entry starting inside the candidate.
+    /// Both probes are logarithmic and do not scan the covered union suffix.
+    fn first_interference_indexed(&self, segments: ValidatedSegments<'_>) -> Option<OccupancyCut> {
+        for (segment_index, (segment, block)) in segments.iter().enumerate() {
+            if let Some(cut) =
+                self.first_interference_in_segment(segment, block, segment_index, segment.start)
+            {
+                return Some(cut);
+            }
+        }
+        None
+    }
+
+    /// Return the first occupied span at or after `start` in one already
+    /// validated candidate segment.  CFG free-prefix discovery calls this for
+    /// only the blocks it can reach; it must not rescan unrelated sparse
+    /// segments for every branch frontier.
+    fn first_interference_in_segment(
+        &self,
+        segment: LiveSegment,
+        block: usize,
+        segment_index: usize,
+        start: SlotIndex,
+    ) -> Option<OccupancyCut> {
+        debug_assert!(segment.start <= start && start < segment.end);
+        let entries = self.blocks.get(&block)?;
+        if let Some((&occupied_start, entry)) = entries
+            .range((Unbounded, Included(start)))
+            .next_back()
+            .filter(|(_, entry)| entry.end > start)
+        {
+            return Some(OccupancyCut {
+                segment: segment_index,
+                start: occupied_start.max(start),
+                end: entry.end.min(segment.end),
+                owner: entry.owner,
+            });
+        }
+        let (&occupied_start, entry) = entries
+            .range((Included(start), Excluded(segment.end)))
+            .next()?;
+        Some(OccupancyCut {
+            segment: segment_index,
+            start: occupied_start,
+            end: entry.end.min(segment.end),
+            owner: entry.owner,
+        })
     }
 
     fn interferes_bundle_indexed(&self, segments: ValidatedSegments<'_>) -> bool {
@@ -924,6 +985,50 @@ impl LiveIntervalMatrix {
     ) -> Result<bool, IntervalUnionError> {
         self.validate_token(segments)?;
         Ok(self.union(register)?.interferes_indexed(segments))
+    }
+
+    pub(super) fn first_interference_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<Option<OccupancyCut>, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self.union(register)?.first_interference_indexed(segments))
+    }
+
+    /// Query one suffix of a canonical sparse range without constructing a
+    /// temporary one-segment token. The returned segment index remains in the
+    /// caller's full range, so all frontier diagnostics retain exact ownership.
+    pub(super) fn first_interference_in_segment_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+        segment_index: usize,
+        start: SlotIndex,
+    ) -> Result<Option<OccupancyCut>, IntervalUnionError> {
+        self.validate_token(segments)?;
+        let (segment, block) = segments.get(segment_index).ok_or_else(|| {
+            IntervalUnionError::new(
+                "INTERVAL_UNION.SEGMENT_INDEX",
+                None,
+                [],
+                "sparse-range suffix query references a missing segment",
+            )
+        })?;
+        if start < segment.start || start >= segment.end {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.SEGMENT_SUFFIX",
+                Some(segment.block),
+                [],
+                "sparse-range suffix start is outside its canonical segment",
+            ));
+        }
+        Ok(self.union(register)?.first_interference_in_segment(
+            segment,
+            block,
+            segment_index,
+            start,
+        ))
     }
 
     pub(super) fn interferes_bundle_validated(
@@ -1527,6 +1632,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(projected_conflicts, indexed_conflicts);
+        assert_eq!(
+            matrix
+                .first_interference_validated(PhysReg::RAX, outer_range.validated())
+                .unwrap(),
+            cuts.first().copied()
+        );
+        assert_eq!(
+            matrix
+                .first_interference_in_segment_validated(
+                    PhysReg::RAX,
+                    outer_range.validated(),
+                    0,
+                    outer.segments[0].start,
+                )
+                .unwrap(),
+            cuts.first().copied()
+        );
+        assert_eq!(
+            matrix
+                .first_interference_in_segment_validated(
+                    PhysReg::RAX,
+                    outer_range.validated(),
+                    0,
+                    inner.segments[0].end,
+                )
+                .unwrap(),
+            None
+        );
         assert_eq!(
             cuts,
             vec![OccupancyCut {

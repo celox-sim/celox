@@ -3420,6 +3420,51 @@ frontier, and adjacent register fragments receive a move only when their final
 colors differ. Local spill-weight or copy-order tuning is not an acceptable
 substitute.
 
+Step 29a first removes a scalability bug at that boundary. A coloring failure
+previously reduced each physical register to one occupancy cut. Splitting one
+cut, publishing the changed allocation IR, and then discovering another cut on
+a sibling CFG arm made the number of liveness/constraint publications depend
+on branch count. Conversely, collecting every occupied interval and treating
+all cuts as interchangeable loses the physical color: an early conflict in
+one register must not erase a long free prefix in another.
+
+The joint allocator now grows the candidate from its SSA definition through
+the free part of each physical register independently. A block suffix query in
+the interval union finds its first exact occupancy in logarithmic time. A free
+block propagates to live CFG successors; every occupied successor path adds a
+cut to that register's frontier. The definition block is visited separately at
+its definition and at a loop re-entry, so a backedge cannot hide a pre-
+definition conflict. Epoch-indexed block/segment tables are retained by the
+allocation session and block entry/exit slots are stored without cloning the
+per-instruction slot vectors.
+
+Split planning compares at most one plan per candidate and physical register.
+All cuts in that register frontier seed one sparse CFG traversal, and the union
+of reachable owned uses is materialized in one allocation-IR transaction. A
+debug verifier independently recomputes the moved set from every individual
+cut and requires the same union. Frontiers from different registers are never
+combined. Fixed blocked values also avoid spilling movable residents on a
+register whose frontier already contains an immutable blocker.
+
+The optimized non-LTO `interval-diagnostic` compile-only gate now completes in
+98.538 s; the complete `interval` trace is at
+`target/heliodor/analysis/step29b-multicut-interval-publish-20260718` and took
+97.362 s. The full run at
+`target/heliodor/results/step29b-multicut-interval-linux-20260718.log` printed
+through `reboot: Power down` and the exact
+`cy=9ae070 x3=aa pass=1` marker, with 94.492 s compile and 138.064 s execute.
+The generated fused function's spill frame is `0x4000` bytes versus `0x93b0`
+in the inspected established-allocator trace, but its emitted body is larger
+(`0x310b1f` versus `0x2ec15e`). The execution sample is also above Step 28d,
+so Step 29a claims allocation completion and exact CFG semantics, not a runtime
+speedup. Integrated multi-fragment coloring and final spill/reload placement
+remain Step 29's code-quality boundary.
+
+Focused regalloc tests pass 244/244, including two-arm frontier construction
+and one-transaction multi-cut splitting. The complete library passes 864/864,
+native testbench 60 passed with 1 ignored, counter 9 passed with 3 ignored, and
+all-target strict clippy and formatting pass.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3499,6 +3544,7 @@ new allocator produces a substantial non-LTO execution win.
 | 28b immutable fixed intervals and exact pressure cuts | this step | live interval 9/9; interval union 7/7; constraints 4/4; joint allocation 7/7; split 6/6; regalloc 232/232 | candidate lib 852/852; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | three CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; complete Step 28a/final-28b SIR, MIR, assignments, and disassembly are byte-identical | adjacent compile-only 53.619 s (28a) / 52.540 s (28b); final-source compile 56.282 s; execute 141.988 / 118.501 / final 122.963 s | clobbers are exact immutable `[barrier, def)` occupancy and split requests carry owner-qualified cuts; no generated-code or speed claim; integrated fragment allocation/spill placement remains next |
 | 28c stable allocation-session deltas | this step | stable original/synthetic coordinates; exact block-fact diff; affinity/reservation revisions; regalloc 239/239 | interval lib 859/859; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, format, and diff checks pass | non-LTO full run passes once through kernel power-down with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 163.886 s; full compile 163.766 s; execute 149.306 s | rejected updater compile time reduced 29.7%; still far above committed Step 28b and 5--7 GiB RSS, so persistent interval/session indexing remains open |
 | 28d block-transaction allocation publication | this step | exact producer journal vs changed-block oracle; staged dense-row publication; anchor-local stable sequences; shared immutable use rows; regalloc 240/240 | interval lib 860/860; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | non-LTO full run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | final full compile 56.294 s; execute 127.017 s | per-insertion dense shifts and duplicate fact/use-row reconstruction removed; compile interval returns to the Step 28b range; integrated fragment allocation remains next |
+| 29a register-specific multi-cut frontiers | this step | interval suffix query; two-arm free-prefix frontier; one-transaction multi-cut split; regalloc 244/244 | interval lib 864/864; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, and complete IR dump pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 98.538 s; full compile 94.492 s; execute 138.064 s | joint allocator completes at scale without mixing colors; no execution-speed claim; integrated multi-fragment spill placement remains open |
 
 ## Related design records
 

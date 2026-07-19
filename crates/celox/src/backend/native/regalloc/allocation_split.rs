@@ -9,6 +9,7 @@
 //! back into joint allocation instead of being assigned scratch registers.
 
 use std::cell::OnceCell;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
@@ -22,7 +23,7 @@ use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
     AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
     JointAllocationError, JointAllocationOutcome, JointAllocationProblem, JointAllocationSession,
-    RegionSplitCandidate, RegionSplitRequest,
+    RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -31,7 +32,9 @@ use super::home_graph::{
     STACK_HOME_MATERIALIZATION_COST,
 };
 use super::interval_allocator::{HomeSelection, IntervalAllocationError, RootHomePlan};
-use super::live_interval::{DefinitionSite, IncrementalLivenessUpdate, LiveSegment, UseSite};
+use super::live_interval::{
+    DefinitionSite, IncrementalLivenessUpdate, LiveSegment, SlotIndex, UseSite,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SplitEntryKind {
@@ -50,7 +53,8 @@ pub(super) struct SplitEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RegionSplitPlan {
     pub blocked_value: VReg,
-    pub cut: AllocationPressurePoint,
+    pub register: PhysReg,
+    pub cuts: Vec<AllocationPressurePoint>,
     pub value: VReg,
     pub root: LiveBundleId,
     pub source_region: Option<RegisterRegionId>,
@@ -59,6 +63,12 @@ pub(super) struct RegionSplitPlan {
     pub moved: Vec<BundleUseId>,
     pub entries: Vec<SplitEntry>,
     pub transition_cost: u64,
+}
+
+impl RegionSplitPlan {
+    fn primary_cut(&self) -> AllocationPressurePoint {
+        self.cuts[0]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,8 +363,8 @@ impl RootUseTopology {
             ));
         }
 
-        // A large frontier (notably a definition-frontier spill) is cheaper to
-        // project by one dense root scan. Small later fragments retain their
+        // A large frontier is cheaper to project by one dense root scan.
+        // Small later fragments retain their
         // asymptotic locality by sorting only their own precomputed ranks.
         if moved.len() > self.dominance_order.len() / 8 {
             let mut member = vec![false; self.rank_by_use.len()];
@@ -562,101 +572,63 @@ fn plan_split_with_context(
             "split request has a stale definition or no splittable resident region",
         ));
     }
-    if request.preferred_frontier.is_some_and(|(value, frontier)| {
-        !request.candidates.iter().any(|candidate| {
-            candidate.value == value && candidate.pressure_points.contains(&frontier)
-        })
-    }) {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.PREFERRED_FRONTIER",
-            Some(request.definition.block()),
-            Some(request.blocked_value),
-            None,
-            "preferred use-frontier split is absent from the candidate cut set",
-        ));
-    }
-
     for candidate in &request.candidates {
-        if candidate.pressure_points.is_empty()
+        if candidate.frontiers.is_empty()
             || candidate
-                .pressure_points
+                .frontiers
                 .windows(2)
-                .any(|pair| pair[0] >= pair[1])
+                .any(|pair| pair[0].register >= pair[1].register)
+            || candidate.frontiers.iter().any(|frontier| {
+                frontier.points.is_empty()
+                    || frontier.points.windows(2).any(|pair| pair[0] >= pair[1])
+                    || frontier
+                        .points
+                        .iter()
+                        .any(|point| point.register() != frontier.register)
+            })
         {
             return Err(AllocationSplitError::new(
                 "ALLOCATION_SPLIT.PRESSURE_POINTS",
                 Some(request.definition.block()),
                 Some(candidate.value),
                 Some(candidate.root),
-                "candidate pressure points are empty, duplicated, or unordered",
+                "candidate register frontiers are empty, mixed, duplicated, or unordered",
             ));
         }
-    }
-
-    if let Some((preferred_value, preferred_cut)) = request.preferred_frontier {
-        let candidate = request
-            .candidates
-            .iter()
-            .find(|candidate| candidate.value == preferred_value)
-            .ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.PREFERRED_FRONTIER",
-                    Some(preferred_cut.block()),
-                    Some(preferred_value),
-                    None,
-                    "preferred use-frontier value is absent from the split request",
-                )
-            })?;
-        let home_plan = context.home_plan(candidate.root)?;
-        let use_topology = context.use_topology(graph, cfg, candidate.root)?;
-        return plan_candidate_at(
-            expanded,
-            joint,
-            request.blocked_value,
-            candidate,
-            preferred_cut,
-            cfg,
-            &context.dominance,
-            home_plan,
-            use_topology,
-        )?
-        .ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.PREFERRED_FRONTIER_PROGRESS",
-                Some(preferred_cut.block()),
-                Some(preferred_value),
-                Some(candidate.root),
-                "preferred definition-to-use frontier cannot shorten its blocked region",
-            )
-        });
     }
 
     let mut best = None::<RegionSplitPlan>;
     for candidate in &request.candidates {
         let home_plan = context.home_plan(candidate.root)?;
         let use_topology = context.use_topology(graph, cfg, candidate.root)?;
-        for &cut in &candidate.pressure_points {
-            let Some(plan) = plan_candidate_at(
-                expanded,
-                joint,
-                request.blocked_value,
-                candidate,
-                cut,
-                cfg,
-                &context.dominance,
-                home_plan,
-                use_topology,
-            )?
-            else {
-                continue;
-            };
-            let key = (plan.transition_cost, plan.value, plan.root, plan.cut);
+        for plan in plan_candidate_frontiers(
+            expanded,
+            joint,
+            request.blocked_value,
+            candidate,
+            cfg,
+            &context.dominance,
+            home_plan,
+            use_topology,
+        )? {
+            let key = (
+                plan.transition_cost,
+                plan.moved.len(),
+                Reverse(plan.retained.len()),
+                plan.value,
+                plan.root,
+                plan.register,
+                &plan.cuts,
+            );
             if best.as_ref().is_none_or(|current| {
                 key < (
                     current.transition_cost,
+                    current.moved.len(),
+                    Reverse(current.retained.len()),
                     current.value,
                     current.root,
-                    current.cut,
+                    current.register,
+                    &current.cuts,
                 )
             }) {
                 best = Some(plan);
@@ -675,31 +647,81 @@ fn plan_split_with_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plan_candidate_at(
+fn plan_candidate_frontiers(
     expanded: &ExpandedAllocationProblem,
     joint: &JointAllocationProblem,
     blocked_value: VReg,
     candidate: &RegionSplitCandidate,
-    cut: AllocationPressurePoint,
     cfg: &NormalizedCfg,
     dominance: &Dominance,
     home_plan: &RootHomePlan,
     use_topology: &RootUseTopology,
-) -> Result<Option<RegionSplitPlan>, AllocationSplitError> {
-    let value = verify_candidate(joint, candidate, cut)?;
+) -> Result<Vec<RegionSplitPlan>, AllocationSplitError> {
+    let first_frontier = candidate.frontiers.first().ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PRESSURE_POINTS",
+            None,
+            Some(candidate.value),
+            Some(candidate.root),
+            "candidate has no pressure frontier",
+        )
+    })?;
+    let first_cut = first_frontier.points[0];
+    let value = verify_candidate(joint, candidate, first_cut)?;
+    for frontier in &candidate.frontiers {
+        for &cut in &frontier.points {
+            verify_pressure_point(value, candidate, cut)?;
+        }
+    }
     let root = expanded_root(expanded, candidate.root)?;
     let source = region_source(expanded, root, candidate, value)?;
-    let moved = match reachable_uses(expanded, root, candidate, value, cut, cfg) {
-        Ok(moved) => moved,
-        Err(error) if error.rule == "ALLOCATION_SPLIT.NO_REACHABLE_USE" => return Ok(None),
-        Err(error) => return Err(error),
-    };
+    let mut plans = Vec::with_capacity(candidate.frontiers.len());
+    for frontier in &candidate.frontiers {
+        let moved =
+            reachable_uses_at_frontier(expanded, root, candidate, value, &frontier.points, cfg)?;
+        let Some(moved) = moved else {
+            continue;
+        };
+        plans.push(plan_candidate_from_moved(
+            expanded,
+            joint,
+            blocked_value,
+            candidate,
+            frontier,
+            cfg,
+            dominance,
+            home_plan,
+            use_topology,
+            root,
+            source,
+            moved,
+        )?);
+    }
+    Ok(plans)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_candidate_from_moved(
+    expanded: &ExpandedAllocationProblem,
+    joint: &JointAllocationProblem,
+    blocked_value: VReg,
+    candidate: &RegionSplitCandidate,
+    frontier: &RegisterPressureFrontier,
+    cfg: &NormalizedCfg,
+    dominance: &Dominance,
+    home_plan: &RootHomePlan,
+    use_topology: &RootUseTopology,
+    root: &super::allocation_expand::ExpandedRoot,
+    source: RegionSource,
+    moved: Vec<BundleUseId>,
+) -> Result<RegionSplitPlan, AllocationSplitError> {
+    let cut = frontier.points[0];
     let clusters = partition_moved_uses(
         root,
         candidate,
         &moved,
         source.entry_use,
-        cut,
+        &frontier.points,
         cfg,
         dominance,
         use_topology,
@@ -745,7 +767,8 @@ fn plan_candidate_at(
     let retained = sorted_difference(&candidate.uses, &moved);
     let plan = RegionSplitPlan {
         blocked_value,
-        cut,
+        register: frontier.register,
+        cuts: frontier.points.clone(),
         value: candidate.value,
         root: candidate.root,
         source_region: source.region,
@@ -758,7 +781,7 @@ fn plan_candidate_at(
     if super::exhaustive_verification_enabled() {
         verify_plan(expanded, joint, candidate, &plan, cfg, dominance, home_plan)?;
     }
-    Ok(Some(plan))
+    Ok(plan)
 }
 
 /// Apply a verified split inside the private allocation session. Every
@@ -967,7 +990,7 @@ fn mutate_verified_split(
     if after >= before {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.NON_MONOTONIC",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             format!("split progress {before:?} did not decrease: {after:?}"),
@@ -1037,7 +1060,7 @@ fn apply_split_round(
         if !roots.insert(plan.root) {
             return Err(AllocationSplitError::new(
                 "ALLOCATION_SPLIT.ROUND_ROOT_IDENTITY",
-                Some(plan.cut.block()),
+                Some(plan.primary_cut().block()),
                 Some(plan.value),
                 Some(plan.root),
                 "one allocation round contains two plans for the same semantic root",
@@ -1186,7 +1209,7 @@ pub(super) fn allocate_with_splitting(
                     if plans.is_empty() {
                         return Err(AllocationSplitError::new(
                             "ALLOCATION_SPLIT.ROUND_ROOT_PROGRESS",
-                            Some(plan.cut.block()),
+                            Some(plan.primary_cut().block()),
                             Some(plan.value),
                             Some(plan.root),
                             "duplicate-root round boundary has no prior symbolic plan",
@@ -1261,13 +1284,44 @@ fn verify_candidate<'a>(
             "split request and joint region ownership disagree",
         ));
     }
-    if candidate.pressure_points.binary_search(&cut).is_err() {
+    verify_pressure_point(value, candidate, cut)?;
+    Ok(value)
+}
+
+fn verify_pressure_point(
+    value: &AllocationValue,
+    candidate: &RegionSplitCandidate,
+    cut: AllocationPressurePoint,
+) -> Result<(), AllocationSplitError> {
+    let Some(frontier) = candidate
+        .frontiers
+        .iter()
+        .find(|frontier| frontier.register == cut.register())
+    else {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PRESSURE_REGISTER",
+            Some(cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "split cut register has no candidate frontier",
+        ));
+    };
+    if frontier.points.binary_search(&cut).is_err() {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.PRESSURE_POINT_IDENTITY",
             Some(cut.block()),
             Some(candidate.value),
             Some(candidate.root),
             "split cut is not one of the owner-qualified interference points",
+        ));
+    }
+    if !value.allowed_registers.contains(cut.register()) {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PRESSURE_REGISTER",
+            Some(cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "split cut names a register forbidden to the candidate value",
         ));
     }
     if !value.interval.covers(cut.block(), cut.slot()) {
@@ -1279,7 +1333,7 @@ fn verify_candidate<'a>(
             "candidate live range does not cover the exact pressure point",
         ));
     }
-    Ok(value)
+    Ok(())
 }
 
 fn candidate_from_plan(
@@ -1289,7 +1343,7 @@ fn candidate_from_plan(
     let value = joint.value(plan.value).ok_or_else(|| {
         AllocationSplitError::new(
             "ALLOCATION_SPLIT.CANDIDATE_RANGE",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan references a value outside joint allocation",
@@ -1298,7 +1352,7 @@ fn candidate_from_plan(
     let AllocationValueClass::Region { root, uses } = &value.class else {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.CANDIDATE_CLASS",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan no longer references a register region",
@@ -1307,7 +1361,7 @@ fn candidate_from_plan(
     if *root != plan.root {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.CANDIDATE_IDENTITY",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan root differs from current joint allocation",
@@ -1317,7 +1371,10 @@ fn candidate_from_plan(
         value: plan.value,
         root: plan.root,
         uses: uses.clone(),
-        pressure_points: vec![plan.cut],
+        frontiers: vec![RegisterPressureFrontier {
+            register: plan.register,
+            points: plan.cuts.clone(),
+        }],
     })
 }
 
@@ -1503,6 +1560,163 @@ fn region_source(
     })
 }
 
+/// Project every branch cut of one physical-register frontier through a
+/// single sparse live-graph traversal. We need the union of displaced uses,
+/// not one independent result per cut; a block therefore carries only a
+/// reached bit and the earliest local cut slot.
+fn reachable_uses_at_frontier(
+    expanded: &ExpandedAllocationProblem,
+    root: &super::allocation_expand::ExpandedRoot,
+    candidate: &RegionSplitCandidate,
+    value: &AllocationValue,
+    cuts: &[AllocationPressurePoint],
+    cfg: &NormalizedCfg,
+) -> Result<Option<Vec<BundleUseId>>, AllocationSplitError> {
+    let block_count = cfg.idom.len();
+    if cuts.is_empty() || expanded.intervals.block_slots.len() != block_count {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.LIVE_GRAPH",
+            cuts.first().map(|cut| cut.block()),
+            Some(candidate.value),
+            Some(candidate.root),
+            "register-frontier projection requires cuts and complete block slots",
+        ));
+    }
+    let mut segments = vec![None::<LiveSegment>; block_count];
+    for &segment in &value.interval.segments {
+        let block = cfg
+            .block_index
+            .get(&segment.block)
+            .copied()
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.LIVE_GRAPH",
+                    Some(segment.block),
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "candidate segment references a block outside the CFG",
+                )
+            })?;
+        if segments[block].replace(segment).is_some() {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.LIVE_GRAPH",
+                Some(segment.block),
+                Some(candidate.value),
+                Some(candidate.root),
+                "candidate has more than one canonical segment in a CFG block",
+            ));
+        }
+    }
+
+    let register = cuts[0].register();
+    let mut reached = vec![false; block_count];
+    let mut starts = vec![None::<SlotIndex>; block_count];
+    let mut reentered = vec![false; block_count];
+    let mut queue = VecDeque::new();
+    for &cut in cuts {
+        if cut.register() != register {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.PRESSURE_REGISTER",
+                Some(cut.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "one split frontier mixes physical registers",
+            ));
+        }
+        let block = cfg.block_index.get(&cut.block()).copied().ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.PRESSURE_POINT",
+                Some(cut.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "exact pressure point is outside the normalized CFG",
+            )
+        })?;
+        if !segments[block].is_some_and(|segment| segment.contains(cut.slot())) {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.PRESSURE_POINT",
+                Some(cut.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "candidate segment does not contain an exact pressure slot",
+            ));
+        }
+        starts[block] = Some(starts[block].map_or(cut.slot(), |slot| slot.min(cut.slot())));
+        if !reached[block] {
+            reached[block] = true;
+            queue.push_back(block);
+        }
+    }
+
+    while let Some(block) = queue.pop_front() {
+        let Some(source) = segments[block] else {
+            continue;
+        };
+        if !source.contains(expanded.intervals.block_slots[block].exit) {
+            continue;
+        }
+        for &successor in &cfg.successors[block] {
+            let Some(target) = segments[successor] else {
+                continue;
+            };
+            if !target.contains(expanded.intervals.block_slots[successor].entry) {
+                continue;
+            }
+            if starts[successor].is_some() {
+                reentered[successor] = true;
+            }
+            if !reached[successor] {
+                reached[successor] = true;
+                queue.push_back(successor);
+            }
+        }
+    }
+
+    let mut moved = Vec::new();
+    for &use_id in &candidate.uses {
+        let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.USE_RANGE",
+                cuts.first().map(|cut| cut.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                format!("candidate use {use_id:?} is outside its expanded root"),
+            )
+        })?;
+        if use_.value != candidate.value || !value.interval.contains_use_coordinate(use_.site) {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.USE_OWNERSHIP",
+                Some(use_.site.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "candidate interval does not own an exact expanded use",
+            ));
+        }
+        let block = cfg
+            .block_index
+            .get(&use_.site.block())
+            .copied()
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.USE_BLOCK",
+                    Some(use_.site.block()),
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "candidate use is outside the normalized CFG",
+                )
+            })?;
+        if reached[block]
+            && (starts[block].is_none()
+                || reentered[block]
+                || use_.site.slot() >= starts[block].unwrap())
+        {
+            moved.push(use_id);
+        }
+    }
+    moved.sort_unstable();
+    Ok((!moved.is_empty()).then_some(moved))
+}
+
 fn reachable_uses(
     expanded: &ExpandedAllocationProblem,
     root: &super::allocation_expand::ExpandedRoot,
@@ -1648,11 +1862,12 @@ fn partition_moved_uses(
     candidate: &RegionSplitCandidate,
     moved: &[BundleUseId],
     previous_entry: Option<BundleUseId>,
-    cut: AllocationPressurePoint,
+    cuts: &[AllocationPressurePoint],
     cfg: &NormalizedCfg,
     dominance: &Dominance,
     topology: &RootUseTopology,
 ) -> Result<Vec<EntryCluster>, AllocationSplitError> {
+    let cut = cuts[0];
     if topology.root != candidate.root || root.id != candidate.root {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.USE_TOPOLOGY_ROOT",
@@ -1669,7 +1884,10 @@ fn partition_moved_uses(
     while cursor < ordered.len() {
         let seed = ordered[cursor];
         let seed_site = root.uses[seed.0 as usize].site;
-        let unsafe_loop_entry = dominance.use_dominates_point(cfg, seed_site, cut);
+        let unsafe_loop_entry = cuts
+            .iter()
+            .copied()
+            .any(|cut| dominance.use_dominates_point(cfg, seed_site, cut));
         let repeats_same_boundary = full_existing_region && previous_entry == Some(seed);
         let end = if matches!(seed_site, UseSite::PhiEdge { .. })
             || unsafe_loop_entry
@@ -1865,29 +2083,49 @@ fn verify_plan(
     if plan.value != candidate.value || plan.root != candidate.root {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.PLAN_IDENTITY",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan and candidate identities differ",
         ));
     }
-    let value = verify_candidate(joint, candidate, plan.cut)?;
+    if plan.cuts.is_empty()
+        || plan.cuts.iter().any(|cut| cut.register() != plan.register)
+        || plan.cuts.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.PLAN_FRONTIER",
+            None,
+            Some(plan.value),
+            Some(plan.root),
+            "split plan has an empty, mixed, duplicated, or unordered register frontier",
+        ));
+    }
+    let value = verify_candidate(joint, candidate, plan.primary_cut())?;
+    for &cut in &plan.cuts[1..] {
+        verify_pressure_point(value, candidate, cut)?;
+    }
     let root = expanded_root(expanded, plan.root)?;
     let source = region_source(expanded, root, candidate, value)?;
     if source.preferred_register != plan.preferred_register || source.region != plan.source_region {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.PLAN_PREFERENCE",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan changed the candidate's register affinity",
         ));
     }
-    let expected_moved = reachable_uses(expanded, root, candidate, value, plan.cut, cfg)?;
+    let mut expected_moved = Vec::new();
+    for &cut in &plan.cuts {
+        expected_moved.extend(reachable_uses(expanded, root, candidate, value, cut, cfg)?);
+    }
+    expected_moved.sort_unstable();
+    expected_moved.dedup();
     if expected_moved != plan.moved {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.MOVED_SET",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split plan does not move exactly the uses reachable across the pressure point",
@@ -1898,7 +2136,7 @@ fn verify_plan(
         if entry.uses.is_empty() || !entry.uses.contains(&entry.entry) {
             return Err(AllocationSplitError::new(
                 "ALLOCATION_SPLIT.CLUSTER_ENTRY",
-                Some(plan.cut.block()),
+                Some(plan.primary_cut().block()),
                 Some(plan.value),
                 Some(plan.root),
                 "split entry does not own its entry use",
@@ -1908,7 +2146,7 @@ fn verify_plan(
             SplitEntryKind::Materialized if entry.uses.as_slice() != [entry.entry] => {
                 return Err(AllocationSplitError::new(
                     "ALLOCATION_SPLIT.SINGLETON_SHAPE",
-                    Some(plan.cut.block()),
+                    Some(plan.primary_cut().block()),
                     Some(plan.value),
                     Some(plan.root),
                     "materialized entry is not an exact singleton",
@@ -1918,7 +2156,7 @@ fn verify_plan(
                 if entry.uses.len() < 2 {
                     return Err(AllocationSplitError::new(
                         "ALLOCATION_SPLIT.REGION_SHAPE",
-                        Some(plan.cut.block()),
+                        Some(plan.primary_cut().block()),
                         Some(plan.value),
                         Some(plan.root),
                         "register region has fewer than two uses",
@@ -1966,7 +2204,7 @@ fn verify_plan(
     {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.CLUSTER_COVERAGE",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split entries do not partition the moved use set exactly once",
@@ -1982,7 +2220,7 @@ fn verify_plan(
     if plan.retained != expected_retained {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.RETAINED_SET",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "retained and moved uses do not partition the candidate region",
@@ -2005,7 +2243,7 @@ fn verify_plan(
     {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.HOME_IDENTITY",
-            Some(plan.cut.block()),
+            Some(plan.primary_cut().block()),
             Some(plan.value),
             Some(plan.root),
             "split transitions differ from the exact HomeGraph partition",
@@ -2329,7 +2567,7 @@ mod tests {
             value: value.value,
             root: *root,
             uses: uses.clone(),
-            pressure_points: Vec::new(),
+            frontiers: Vec::new(),
         }
     }
 
@@ -2339,16 +2577,19 @@ mod tests {
         mut candidate: RegionSplitCandidate,
     ) -> RegionSplitRequest {
         let definition = joint.value(blocked).unwrap().interval.definition;
-        candidate.pressure_points = vec![AllocationPressurePoint {
-            block: definition.block(),
-            slot: definition.slot(),
+        candidate.frontiers = vec![RegisterPressureFrontier {
+            register: PhysReg::RAX,
+            points: vec![AllocationPressurePoint {
+                register: PhysReg::RAX,
+                block: definition.block(),
+                slot: definition.slot(),
+            }],
         }];
         RegionSplitRequest {
             blocked_value: blocked,
             definition,
             conflicts: Vec::new(),
             candidates: vec![candidate],
-            preferred_frontier: None,
         }
     }
 
@@ -2410,18 +2651,20 @@ mod tests {
         else {
             panic!("unallocated root pressure should request a use-frontier split");
         };
-        let (preferred_value, preferred_frontier) = request.preferred_frontier.unwrap();
-        assert_eq!(preferred_value, request.blocked_value);
-        assert_eq!(preferred_frontier.block(), request.definition.block());
-        assert_eq!(preferred_frontier.slot(), request.definition.slot());
-        let blocked = request
+        assert!(!request.conflicts.is_empty());
+        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        let candidate = request
             .candidates
             .iter()
-            .find(|candidate| candidate.value == request.blocked_value)
+            .find(|candidate| candidate.value == plan.value)
             .unwrap();
-        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
-        assert_eq!(plan.cut, preferred_frontier);
-        assert_eq!(plan.moved, blocked.uses);
+        let frontier = candidate
+            .frontiers
+            .iter()
+            .find(|frontier| frontier.register == plan.register)
+            .unwrap();
+        assert_eq!(frontier.points, plan.cuts);
+        assert!(!plan.moved.is_empty());
 
         let allocation = allocate_with_splitting(&mut expanded, &graph, &cfg, &registers).unwrap();
         JointAllocationProblem::build(&expanded, &cfg, &graph, &registers)
@@ -2528,6 +2771,272 @@ mod tests {
                 ExpandedUseSource::Materialized(_) | ExpandedUseSource::RegisterRegion { .. }
             )
         }));
+    }
+
+    #[test]
+    fn exact_movable_cut_retains_the_noninterfering_prefix() {
+        let instructions = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 11,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 13,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 32,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 40,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 48,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 56,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 64,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 72,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 80,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 88,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut function = function(3, instructions);
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = home_graph::build(&function, &cfg).unwrap();
+        let expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let mut joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        for value in &mut joint.values {
+            match value.value {
+                VReg(0) => value.spill_cost = Some(0),
+                VReg(1) | VReg(2) => value.spill_cost = Some(1_000),
+                _ => {}
+            }
+        }
+        let JointAllocationOutcome::NeedsSplit(request) = joint.allocate(&cfg, &registers).unwrap()
+        else {
+            panic!("two long-lived residents should block the lower-priority root");
+        };
+        assert_eq!(request.blocked_value, VReg(0));
+        let candidate = request
+            .candidates
+            .iter()
+            .find(|candidate| candidate.value == VReg(0))
+            .unwrap()
+            .clone();
+        let candidate_definition = joint.value(candidate.value).unwrap().interval.definition;
+        assert!(
+            candidate
+                .frontiers
+                .iter()
+                .flat_map(|frontier| &frontier.points)
+                .all(|point| point.block() != candidate_definition.block()
+                    || point.slot() != candidate_definition.slot())
+        );
+        let restricted = RegionSplitRequest {
+            blocked_value: request.blocked_value,
+            definition: request.definition,
+            conflicts: request.conflicts,
+            candidates: vec![candidate],
+        };
+        let plan = plan_split(&expanded, &graph, &joint, &restricted, &cfg).unwrap();
+        assert!(!plan.retained.is_empty());
+        assert!(!plan.moved.is_empty());
+        assert_eq!(plan.retained.len() + plan.moved.len(), 2);
+    }
+
+    #[test]
+    fn equal_cost_frontiers_keep_the_largest_register_prefix() {
+        let instructions = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 7,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut function = function(1, instructions);
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = home_graph::build(&function, &cfg).unwrap();
+        let expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let mut candidate = candidate(&joint, VReg(0));
+        let slots = &expanded.intervals.block_slots[0];
+        let earlier = AllocationPressurePoint {
+            register: PhysReg::RDX,
+            block: BlockId(0),
+            slot: slots.instruction_use(2).unwrap(),
+        };
+        let later = AllocationPressurePoint {
+            register: PhysReg::RAX,
+            block: BlockId(0),
+            slot: slots.instruction_use(3).unwrap(),
+        };
+        candidate.frontiers = vec![
+            RegisterPressureFrontier {
+                register: earlier.register(),
+                points: vec![earlier],
+            },
+            RegisterPressureFrontier {
+                register: later.register(),
+                points: vec![later],
+            },
+        ];
+        candidate
+            .frontiers
+            .sort_unstable_by_key(|frontier| frontier.register);
+        let request = RegionSplitRequest {
+            blocked_value: VReg(0),
+            definition: joint.value(VReg(0)).unwrap().interval.definition,
+            conflicts: Vec::new(),
+            candidates: vec![candidate],
+        };
+
+        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        assert_eq!(plan.cuts, vec![later]);
+        assert_eq!(plan.retained.len(), 2);
+        assert_eq!(plan.moved.len(), 1);
+    }
+
+    #[test]
+    fn one_register_multi_cut_frontier_splits_all_cfg_arms_in_one_plan() {
+        let mut values = VRegAllocator::new();
+        for _ in 0..4 {
+            values.alloc();
+        }
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 4]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Mov {
+            dst: VReg(3),
+            src: VReg(0),
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.push(MInst::Return);
+        function.blocks = vec![entry, left, right, merge];
+
+        let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX, PhysReg::RBX];
+        let (cfg, graph, mut expanded) = model(&mut function, &registers);
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let mut candidate = candidate(&joint, VReg(0));
+        let root = root_for(&expanded, VReg(0));
+        let mut points = candidate
+            .uses
+            .iter()
+            .map(|use_id| AllocationPressurePoint {
+                register: PhysReg::RAX,
+                block: root.uses[use_id.0 as usize].site.block(),
+                slot: root.uses[use_id.0 as usize].site.slot(),
+            })
+            .collect::<Vec<_>>();
+        points.sort_unstable();
+        candidate.frontiers = vec![RegisterPressureFrontier {
+            register: PhysReg::RAX,
+            points: points.clone(),
+        }];
+        let request = RegionSplitRequest {
+            blocked_value: VReg(2),
+            definition: joint.value(VReg(2)).unwrap().interval.definition,
+            conflicts: Vec::new(),
+            candidates: vec![candidate.clone()],
+        };
+
+        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        assert_eq!(plan.register, PhysReg::RAX);
+        assert_eq!(plan.cuts, points);
+        assert_eq!(plan.moved, candidate.uses);
+        assert!(plan.retained.is_empty());
+        apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
+        assert!(
+            root_for(&expanded, VReg(0))
+                .uses
+                .iter()
+                .all(|use_| use_.value != VReg(0))
+        );
     }
 
     #[test]
