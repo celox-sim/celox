@@ -3853,7 +3853,59 @@ The implementation is split at correctness boundaries:
    Step 30 input.  No compile-only, frame-size, or partial-kernel result accepts
    the step, and release/LTO remains a final gate only.
 
-Status: **design fixed; implementation in progress**.
+The production implementation deliberately stops one level below the proposed
+source pressure model.  A `LogicPath` target width is not the number or shape
+of machine temporaries produced while lowering its SLT expression, so using it
+as register pressure produced a valid path order but a worse Heliodor
+allocation.  That scheduler and its bounded-work regressions remain test-only.
+Production instead drains the SCC condensation graph as a deterministic stream
+of individually ready components.  An effect domain is only a ready-queue
+preference; it never contracts a ready frontier into a lowering batch and
+never pulls a path across a dependency.  Ordinary paths are lowered and stored
+immediately.  Exact grouped folds alone use a fixed 16-root window: the packed
+result is computed once, then each projection is created immediately before
+its store rather than keeping every projection live.
+
+The real machine scheduling unit is the MIR instruction DAG inside each legal
+basic-block region.  Its memory dependence builder now consumes shared MIR
+read/write effects and uses a sparse interval partition.  RAW, WAR, and WAW
+edges are exact for known ranges, while unknown aliases remain conservative;
+space is proportional to effect endpoints rather than the byte length of a
+sparse RTL state region.  Moving large commit/worklist pseudos into the same
+region was separately evaluated and not retained: it worsened all affected
+Heliodor spill frames.  Those pseudos remain barriers until their machine
+expansion and pressure are represented directly.
+
+An additional trial gave every cross-block constant one block-local
+`LoadImm`.  It reduced `eval_comb`'s spill frame from 31,040 to 30,096 bytes but
+grew MIR and executed an immediate materialization in every using block.  The
+normal Linux test still reached the exact marker, but execution took 122.119 s
+against the accepted Step 30f 116.325 s sample.  The trial was removed.  This
+confirms that constant splitting/rematerialization belongs in operand
+selection and the allocator's use-cluster decision, not an unconditional MIR
+rewrite.
+
+The retained complete non-LTO trace is
+`target/heliodor/analysis/step31-effect-stream-range-core-v1-20260719`.  It
+contains 58,885,451-byte pre-optimized SIR, 19,645,576-byte post-optimized SIR,
+19,951,730-byte native-optimized SIR, and 196,224,214-byte complete MIR.  Spill
+frames are 31,032 bytes for `eval_comb`, 0 for `apply_ff`, 7,288 for
+`eval_apply_ff`, 7,024 for `eval_only_ff`, and 38,152 for the fused function.
+Focused parser, memory-effect, and MIR-scheduler tests pass 18/18, 6/6, and
+16/16.  The complete library passes 891/891, native testbench passes 60 with 1
+ignored, and counter passes 9 with 3 ignored.
+
+The matching ordinary, trace-free testbench run reached `reboot: Power down`
+and exactly one `cy=9ae070 x3=aa pass=1`.  Code generation took 57.777 s and
+execution took 133.430 s.  This is a correctness and complexity checkpoint,
+not a speed claim: it removes the invalid layer-lowering architecture but does
+not close the aggregate-memory execution gap identified in Step 25.  The next
+throughput boundary remains Step 26/27e: range StateSSA with lazy packed
+writeback must expose its state/rematerialization/stack alternatives to the
+greedy allocator before eliminating broad memory round trips.
+
+Status: **complete as the no-layer lowering checkpoint; no throughput gain is
+claimed**.
 
 ## Execution record
 
@@ -3939,6 +3991,7 @@ Status: **design fixed; implementation in progress**.
 | 30e machine-interval representative ownership | this step | empty-semantic-use split representative rebuild; regalloc 257/257 | lib 877/877; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | machine uses, not root-use subsets, own live ranges; generic machine spilling remains before production switch |
 | 30f production strict-SSA splitting and machine spilling | this step | production split-to-machine-spill lowering regression; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 29e | trace 53.926 s; full code generation 52.491 s; simulation 116.325 s | every useful split product re-enters the queue and only `Spill` materializes it; `JointAllocationSession` removal remains |
 | 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy/docs gates pass | release/LTO pass through `reboot: Power down` and exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30f | trace 56.072 s; release code generation 51.122 s; simulation 131.346 s | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
+| 31 no-layer effect stream and sparse MIR memory dependencies | this step | parser scheduler 18/18; memory effects 6/6; MIR scheduler 16/16 | lib 891/891; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check gates pass | normal testbench passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | trace 57.512 s; full code generation 57.777 s; simulation 133.430 s | layer/frontier batches removed; path-width pressure and unconditional block-local constants rejected; no throughput gain claimed; range StateSSA/lazy writeback remains next |
 
 ## Related design records
 

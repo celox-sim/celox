@@ -1,4 +1,4 @@
-//! Physical MIR memory-write effects shared by optimization and allocation.
+//! Physical MIR memory effects shared by optimization and allocation.
 //!
 //! A pseudo instruction is not automatically an unknown SimState clobber.
 //! Sparse operations carry the concrete metadata ranges they mutate; keeping
@@ -38,13 +38,13 @@ pub(crate) enum UnknownMemory {
 /// Static effects contain at most the three ranges required by a sparse
 /// pseudo and allocate no temporary vector while scanning MIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MemoryWrites {
+pub(crate) struct MemoryEffects {
     ranges: [MemoryRange; MAX_STATIC_RANGES],
     range_count: u8,
     unknown: Option<UnknownMemory>,
 }
 
-impl MemoryWrites {
+impl MemoryEffects {
     const NONE: Self = Self {
         ranges: [EMPTY_RANGE; MAX_STATIC_RANGES],
         range_count: 0,
@@ -124,6 +124,40 @@ fn sparse_commit_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
     ])
 }
 
+fn sparse_commit_read_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
+    let MInst::SparseCommit {
+        src_offset,
+        byte_size,
+        dirty_words_offset,
+        dirty_word_count,
+        summary_words_offset,
+        summary_word_count,
+        four_state,
+        ..
+    } = inst
+    else {
+        return None;
+    };
+    let planes = if *four_state { 2 } else { 1 };
+    Some([
+        checked_range(
+            BaseReg::SimState,
+            *src_offset,
+            byte_size.checked_mul(planes)?,
+        )?,
+        checked_range(
+            BaseReg::SimState,
+            *dirty_words_offset,
+            dirty_word_count.checked_mul(8)?,
+        )?,
+        checked_range(
+            BaseReg::SimState,
+            *summary_words_offset,
+            summary_word_count.checked_mul(8)?,
+        )?,
+    ])
+}
+
 fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
     let MInst::SparseMarkActive {
         active_index,
@@ -149,43 +183,77 @@ fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
     ])
 }
 
-pub(crate) fn writes(inst: &MInst) -> MemoryWrites {
+pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
+    match inst {
+        MInst::Load {
+            base, offset, size, ..
+        } => checked_range(*base, *offset, size.bytes() as usize)
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
+        MInst::LoadIndexed { base, .. } => MemoryEffects::unknown(UnknownMemory::Direct(*base)),
+        MInst::LoadPtr { .. } | MInst::LoadPtrIndexed { .. } => {
+            MemoryEffects::unknown(UnknownMemory::Indirect)
+        }
+        MInst::MemCopy {
+            src_offset,
+            byte_len,
+            ..
+        } => checked_range(BaseReg::SimState, *src_offset, *byte_len)
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::SparseCommit { .. } => sparse_commit_read_ranges(inst)
+            .map(|ranges| MemoryEffects::static_ranges(&ranges))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        // Both sparse pseudos perform read-modify-write operations over their
+        // metadata. The worklist descriptor does not carry every concrete
+        // region, so its SimState read remains conservatively unknown.
+        MInst::SparseMarkActive { .. } => sparse_mark_ranges(inst)
+            .map(|ranges| MemoryEffects::static_ranges(&ranges))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::SparseCommitWorklist { .. } => {
+            MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
+        }
+        _ => MemoryEffects::NONE,
+    }
+}
+
+pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
     match inst {
         MInst::Store {
             base, offset, size, ..
         } => checked_range(*base, *offset, size.bytes() as usize)
-            .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(*base))),
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
         MInst::MemCopy {
             dst_offset,
             byte_len,
             ..
         } => checked_range(BaseReg::SimState, *dst_offset, *byte_len)
-            .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         MInst::SparseCommit { .. } => sparse_commit_ranges(inst)
-            .map(|ranges| MemoryWrites::static_ranges(&ranges))
-            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+            .map(|ranges| MemoryEffects::static_ranges(&ranges))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         MInst::SparseMarkActive { .. } => sparse_mark_ranges(inst)
-            .map(|ranges| MemoryWrites::static_ranges(&ranges))
-            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+            .map(|ranges| MemoryEffects::static_ranges(&ranges))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         // Descriptor rows name several sparse regions which are not carried by
         // this MIR instruction. Keep this one conservative until the table is
         // part of the shared effect model.
         MInst::SparseCommitWorklist { .. } => {
-            MemoryWrites::unknown(UnknownMemory::Direct(BaseReg::SimState))
+            MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
         }
         MInst::StoreIndexed {
             base, alias_range, ..
         } => alias_range
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
-            .map(|range| MemoryWrites::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryWrites::unknown(UnknownMemory::Direct(*base))),
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
         MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StorePtrIndexed { .. }
-        | MInst::ReleaseStorePtrIndexed { .. } => MemoryWrites::unknown(UnknownMemory::Indirect),
-        _ => MemoryWrites::NONE,
+        | MInst::ReleaseStorePtrIndexed { .. } => MemoryEffects::unknown(UnknownMemory::Indirect),
+        _ => MemoryEffects::NONE,
     }
 }
 
@@ -261,6 +329,69 @@ mod tests {
                     byte_len: 8,
                 },
             ]
+        );
+        assert_eq!(
+            reads(&inst).ranges().collect::<Vec<_>>(),
+            vec![
+                MemoryRange {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    byte_len: 34,
+                },
+                MemoryRange {
+                    base: BaseReg::SimState,
+                    offset: 200,
+                    byte_len: 16,
+                },
+                MemoryRange {
+                    base: BaseReg::SimState,
+                    offset: 300,
+                    byte_len: 8,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_mark_active_reads_the_metadata_it_updates() {
+        let inst = MInst::SparseMarkActive {
+            scratch: VReg(0),
+            active_index: 3,
+            active_count_offset: 100,
+            active_flags_offset: 200,
+            active_list_offset: 300,
+            active_capacity: 16,
+        };
+
+        assert_eq!(
+            reads(&inst).ranges().collect::<Vec<_>>(),
+            writes(&inst).ranges().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn memcopy_separates_source_reads_from_destination_writes() {
+        let inst = MInst::MemCopy {
+            src_offset: 100,
+            dst_offset: 1000,
+            byte_len: 4096,
+        };
+
+        assert_eq!(
+            reads(&inst).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 100,
+                byte_len: 4096,
+            }]
+        );
+        assert_eq!(
+            writes(&inst).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 1000,
+                byte_len: 4096,
+            }]
         );
     }
 

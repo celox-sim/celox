@@ -2317,6 +2317,7 @@ impl SLTToSIRLowerer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn lower_region_slice<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -2331,6 +2332,24 @@ impl SLTToSIRLowerer {
             return self.lower(builder, node, arena, cache);
         }
         self.lower_region_slice_inner(builder, node, &access, arena, cache)
+    }
+
+    /// Project a value which has already been lowered without retaining every
+    /// projection at once.  Grouped folds use this after the packed result has
+    /// been computed, immediately before the corresponding state Store.
+    pub(crate) fn project_materialized<A>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        value: RegisterId,
+        access: BitAccess,
+    ) -> RegisterId {
+        let source_width = builder.register(&value).width();
+        debug_assert!(access.msb < source_width);
+        if access.lsb == 0 && access.msb + 1 == source_width {
+            value
+        } else {
+            self.slice_reg(builder, value, &access)
+        }
     }
 
     fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(

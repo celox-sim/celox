@@ -12,9 +12,7 @@ use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
 #[cfg(test)]
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -1211,7 +1209,7 @@ fn discover_exact_fold_groups<Addr: Clone + Eq + Ord + Hash + Copy>(
     indices: &[usize],
     schedule_index: &FoldGroupScheduleIndex<Addr>,
 ) -> Vec<ExactFoldGroup<Addr>> {
-    let layer_indices = indices.iter().copied().collect::<HashSet<_>>();
+    let scheduled_indices = indices.iter().copied().collect::<HashSet<_>>();
     let mut roots = indices
         .iter()
         .filter_map(|&index| schedule_index.direct_group_by_path[index])
@@ -1227,7 +1225,7 @@ fn discover_exact_fold_groups<Addr: Clone + Eq + Ord + Hash + Copy>(
                 || info
                     .projection_paths
                     .iter()
-                    .any(|index| !layer_indices.contains(index))
+                    .any(|index| !scheduled_indices.contains(index))
             {
                 return None;
             }
@@ -1685,10 +1683,9 @@ fn jointly_lower_fold_group_families<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     lower_cache: &mut HashMap<NodeId, RegisterId>,
     four_state: bool,
 ) -> HashSet<NodeId> {
-    // `indices` is one buffered DAG layer from the complete source/order graph.
-    // Every dependency path strictly increases that layer, so roots found here
-    // are an antichain. Event paths split the buffer into smaller segments and
-    // therefore also prevent joint lowering across an observable ordering point.
+    // `indices` is one bounded run of exact-fold roots. Direct dependencies
+    // split runs before this point, and the fixed root window bounds the
+    // pairwise compatibility matrix independently of design size.
     let candidates = discover_exact_fold_groups(indices, schedule_index);
     let mut compatible = vec![vec![false; candidates.len()]; candidates.len()];
     let mut shared_load = vec![vec![false; candidates.len()]; candidates.len()];
@@ -1737,10 +1734,17 @@ fn jointly_lower_fold_group_families<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     lowered
 }
 
-/// Materialize every direct output projection of a shared grouped fold before
-/// emitting any of their Stores. A Store may invalidate the ordinary lowering
-/// cache; keeping the registers here preserves the fold's simultaneous-state
-/// semantics and avoids rerunning the counted loop for each projection.
+#[derive(Clone, Copy)]
+struct PreparedFoldProjection {
+    packed_result: RegisterId,
+    access: BitAccess,
+}
+
+/// Materialize each shared grouped fold once, but leave its projections
+/// deferred.  A target Store may invalidate the ordinary lowering cache, so
+/// the packed result is retained explicitly until every projection has been
+/// consumed.  Each narrow projection is created immediately before its Store
+/// instead of keeping all projected registers live simultaneously.
 fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     indices: &[usize],
     input: &[LogicPath<Addr>],
@@ -1752,7 +1756,7 @@ fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
     four_state: bool,
-) -> HashMap<usize, RegisterId> {
+) -> HashMap<usize, PreparedFoldProjection> {
     let jointly_lowered = jointly_lower_fold_group_families(
         indices,
         fold_group_schedule_index,
@@ -1788,114 +1792,23 @@ fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Cop
         if counts.get(&group).copied().unwrap_or(0) < 2 && !jointly_lowered.contains(&group) {
             continue;
         }
+        let Some(access) = fold_group_projection_access(path.expr, group, arena) else {
+            continue;
+        };
         collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-        let result = lower_logic_path_expr(lowerer, builder, path, arena, lower_cache);
-        prepared.insert(idx, result);
+        let packed_result = lower_cache
+            .get(&group)
+            .copied()
+            .unwrap_or_else(|| lowerer.lower(builder, group, arena, lower_cache));
+        prepared.insert(
+            idx,
+            PreparedFoldProjection {
+                packed_result,
+                access,
+            },
+        );
     }
     prepared
-}
-
-fn slice_source<Addr: Clone + Eq + Hash>(
-    node: NodeId,
-    target_width: usize,
-    arena: &SLTNodeArena<Addr>,
-) -> Option<(NodeId, BitAccess)> {
-    if target_width == 0 {
-        return None;
-    }
-    match arena.get(node) {
-        SLTNode::Slice { expr, access } => Some((*expr, *access)),
-        _ if crate::logic_tree::get_width(node, arena) == target_width => {
-            Some((node, BitAccess::new(0, target_width - 1)))
-        }
-        _ => None,
-    }
-}
-
-fn try_emit_common_slice_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    sorted_by_lsb: &[usize],
-    input: &[LogicPath<Addr>],
-    lowerer: &crate::logic_tree::SLTToSIRLowerer,
-    builder: &mut SIRBuilder<Addr>,
-    arena: &SLTNodeArena<Addr>,
-    lower_cache: &mut HashMap<NodeId, RegisterId>,
-    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
-    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
-    target_addr: Addr,
-    merged_lsb: usize,
-    merged_width: usize,
-) -> bool {
-    let Some((&first_idx, rest)) = sorted_by_lsb.split_first() else {
-        return false;
-    };
-    let first_path = &input[first_idx];
-    if !first_path.local_inputs.is_empty() || !first_path.pre_lower_nodes.is_empty() {
-        return false;
-    }
-    let first_target = first_path.target.var().unwrap();
-    let first_width = first_target.access.msb - first_target.access.lsb + 1;
-    let Some((common_expr, first_access)) = slice_source(first_path.expr, first_width, arena)
-    else {
-        return false;
-    };
-    let source_lsb = first_access.lsb;
-    let mut source_msb = first_access.msb;
-    for &idx in rest {
-        let path = &input[idx];
-        if !path.local_inputs.is_empty() || !path.pre_lower_nodes.is_empty() {
-            return false;
-        }
-        let target = path.target.var().unwrap();
-        let target_width = target.access.msb - target.access.lsb + 1;
-        let Some((expr, access)) = slice_source(path.expr, target_width, arena) else {
-            return false;
-        };
-        if expr != common_expr {
-            return false;
-        }
-        if access.msb - access.lsb + 1 != target_width {
-            return false;
-        }
-        let Some(lhs) = target.access.lsb.checked_add(first_access.lsb) else {
-            return false;
-        };
-        let Some(rhs) = first_target.access.lsb.checked_add(access.lsb) else {
-            return false;
-        };
-        if lhs != rhs {
-            return false;
-        }
-        if access.lsb != source_msb + 1 {
-            return false;
-        }
-        source_msb = access.msb;
-    }
-
-    let source_width = crate::logic_tree::get_width(common_expr, arena);
-    if source_msb >= source_width || source_msb - source_lsb + 1 != merged_width {
-        return false;
-    }
-
-    for &idx in sorted_by_lsb {
-        collect_logic_path_input_deps(&input[idx], arena, dep_memo, inverse_dep_memo);
-    }
-
-    let value_reg = lowerer.lower_region_slice(
-        builder,
-        common_expr,
-        BitAccess::new(source_lsb, source_msb),
-        arena,
-        lower_cache,
-    );
-    builder.emit(SIRInstruction::Store(
-        target_addr,
-        SIROffset::Static(merged_lsb),
-        merged_width,
-        value_reg,
-        Vec::new(),
-        Vec::new(),
-    ));
-    true
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -1904,6 +1817,8 @@ pub enum SchedulerError<A: Display + Debug + Eq + Hash + Clone> {
     CombinationalLoop { blocks: Vec<LogicPath<A>> },
     #[error("Multiple driver detected: {}", .blocks.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(","))]
     MultipleDriver { blocks: Vec<LogicPath<A>> },
+    #[error("internal logic-path SCC condensation graph is invalid")]
+    InvalidDependencyGraph,
 }
 
 impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
@@ -1930,6 +1845,7 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
                     .map(|b| b.map_addr(arena, target_arena, &mut cache, f))
                     .collect::<Result<Vec<_>, _>>()?,
             },
+            SchedulerError::InvalidDependencyGraph => SchedulerError::InvalidDependencyGraph,
         })
     }
 }
@@ -1939,338 +1855,108 @@ pub struct ScheduleResult<Addr> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>>,
 }
 
-/// Flush pending DAG nodes, optionally coalescing contiguous stores to the
-/// same variable into a single `Concat` + `Store`.
-fn flush_pending_coalesce<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+/// Lower a consecutive set of exact grouped-fold paths.  The packed fold
+/// results are computed atomically, then each projection is created and stored
+/// in topological order.  Ordinary paths bypass this buffer entirely.
+fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     pending: &mut Vec<usize>,
     input: &[LogicPath<Addr>],
-    _atoms_map: &HashMap<Addr, Vec<(BitAccess, usize)>>,
+    fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
     lowerer: &crate::logic_tree::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
-    prepared_results: &HashMap<usize, RegisterId>,
     four_state: bool,
-    var_widths: &HashMap<Addr, usize>,
 ) {
     if pending.is_empty() {
         return;
     }
 
-    // Only attempt coalescing when we have multiple paths AND not in four_state mode.
-    let can_coalesce = pending.len() > 1 && !four_state;
-
-    if can_coalesce {
-        if pending
-            .iter()
-            .any(|&idx| !matches!(input[idx].target, LogicPathTarget::Var(_)))
-        {
-            // Observer storage paths are standalone stores. They are ordered by
-            // scheduler edges, not coalesced with variable writes.
-        } else {
-            // Sort a COPY by lsb to check contiguity — don't mutate pending (preserve topo order).
-            let mut sorted_by_lsb: Vec<usize> = pending.clone();
-            sorted_by_lsb.sort_by_key(|&idx| input[idx].target.var().unwrap().access.lsb);
-
-            // Check contiguity: every next path's lsb == previous path's msb + 1
-            let contiguous = sorted_by_lsb.windows(2).all(|w| {
-                input[w[1]].target.var().unwrap().access.lsb
-                    == input[w[0]].target.var().unwrap().access.msb + 1
-            });
-
-            // Check total merged width doesn't exceed variable's declared width.
-            let target_addr = input[sorted_by_lsb[0]].target.var().unwrap().id;
-            let merged_lsb = input[sorted_by_lsb[0]].target.var().unwrap().access.lsb;
-            let merged_msb = input[*sorted_by_lsb.last().unwrap()]
-                .target
-                .var()
-                .unwrap()
-                .access
-                .msb;
-            let merged_width = merged_msb - merged_lsb + 1;
-            let within_var_width = var_widths
-                .get(&target_addr)
-                .is_some_and(|&vw| merged_width <= vw);
-
-            // Don't coalesce if any path has a self-reference (source reads from same var as target).
-            let has_self_ref = sorted_by_lsb.iter().any(|&idx| {
-                let path = &input[idx];
-                path.target
-                    .var()
-                    .is_some_and(|target| path.sources.iter().any(|s| s.id == target.id))
-            });
-            let no_comb_capture_enable_sites = sorted_by_lsb
-                .iter()
-                .all(|idx| input[*idx].comb_capture_enable_sites.is_empty());
-
-            if contiguous && within_var_width && !has_self_ref && no_comb_capture_enable_sites {
-                if sorted_by_lsb
-                    .iter()
-                    .all(|idx| !prepared_results.contains_key(idx))
-                    && try_emit_common_slice_store(
-                        &sorted_by_lsb,
-                        input,
-                        lowerer,
-                        builder,
-                        arena,
-                        lower_cache,
-                        dep_memo,
-                        inverse_dep_memo,
-                        target_addr,
-                        merged_lsb,
-                        merged_width,
-                    )
-                {
-                    if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
-                        for node in to_remove {
-                            lower_cache.remove(node);
-                        }
-                    }
-
-                    pending.clear();
-                    return;
-                }
-
-                // Coalesce: lower each path expression, then concat + single wide store.
-                // SIR Concat order is [MSB, ..., LSB], so reverse after lsb sort.
-                let mut regs: Vec<(RegisterId, usize)> = Vec::with_capacity(sorted_by_lsb.len());
-                for &idx in &sorted_by_lsb {
-                    let path = &input[idx];
-                    collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-                    for node in &path.pre_lower_nodes {
-                        pre_lower_logic_path_node(
-                            lowerer,
-                            builder,
-                            path,
-                            *node,
-                            arena,
-                            lower_cache,
-                        );
-                    }
-                    let reg = prepared_results.get(&idx).copied().unwrap_or_else(|| {
-                        lower_logic_path_expr(lowerer, builder, path, arena, lower_cache)
-                    });
-                    let target = path.target.var().unwrap();
-                    let w = 1 + target.access.msb - target.access.lsb;
-                    regs.push((reg, w));
-                }
-
-                // Reverse so that MSB comes first (Concat order).
-                regs.reverse();
-
-                let concat_reg = builder.alloc_bit(merged_width, false);
-                builder.emit(SIRInstruction::Concat(
-                    concat_reg,
-                    regs.iter().map(|(r, _)| *r).collect(),
-                ));
-
-                builder.emit(SIRInstruction::Store(
-                    target_addr,
-                    SIROffset::Static(merged_lsb),
-                    merged_width,
-                    concat_reg,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-
-                // Invalidate cache for the target variable.
-                if let Some(to_remove) = inverse_dep_memo.get(&target_addr) {
-                    for node in to_remove {
-                        lower_cache.remove(node);
-                    }
-                }
-
-                pending.clear();
-                return;
-            }
-        }
-    }
-
-    // Fallback: emit in original topological order (don't sort pending).
-    for &idx in pending.iter() {
+    let prepared_results = prepare_atomic_fold_group_results(
+        pending,
+        input,
+        fold_group_schedule_index,
+        lowerer,
+        builder,
+        arena,
+        lower_cache,
+        dep_memo,
+        inverse_dep_memo,
+        four_state,
+    );
+    for idx in pending.drain(..) {
         let path = &input[idx];
         collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
+        let prepared_result = prepared_results.get(&idx).map(|projection| {
+            lowerer.project_materialized(builder, projection.packed_result, projection.access)
+        });
         emit_logic_path_store_with_result(
             lowerer,
             builder,
             path,
             arena,
             lower_cache,
-            prepared_results.get(&idx).copied(),
+            prepared_result,
         );
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     }
-
-    pending.clear();
 }
 
-fn flush_pending_layer<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    pending: &mut Vec<usize>,
-    input: &[LogicPath<Addr>],
-    fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
-    atoms_map: &HashMap<Addr, Vec<(BitAccess, usize)>>,
-    lowerer: &crate::logic_tree::SLTToSIRLowerer,
-    builder: &mut SIRBuilder<Addr>,
-    arena: &SLTNodeArena<Addr>,
-    lower_cache: &mut HashMap<NodeId, RegisterId>,
-    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
-    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
-    four_state: bool,
-    var_widths: &HashMap<Addr, usize>,
-) {
-    if pending.is_empty() {
-        return;
+fn is_exact_fold_path<Addr: Clone + Eq + Hash + Copy>(
+    path: usize,
+    fold_groups: &FoldGroupScheduleIndex<Addr>,
+) -> bool {
+    if let Some(root) = fold_groups.direct_group_by_path[path]
+        && fold_groups
+            .groups
+            .get(&root)
+            .is_some_and(|info| info.exact_and_exclusive)
+    {
+        return true;
     }
+    false
+}
 
-    let mut segment = Vec::new();
-    let flush_var_segment = |segment: &mut Vec<usize>,
-                             lower_cache: &mut HashMap<NodeId, RegisterId>,
-                             dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
-                             inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
-                             builder: &mut SIRBuilder<Addr>| {
-        if segment.is_empty() {
-            return;
-        }
-        let prepared_results = prepare_atomic_fold_group_results(
-            segment,
-            input,
-            fold_group_schedule_index,
-            lowerer,
-            builder,
-            arena,
-            lower_cache,
-            dep_memo,
-            inverse_dep_memo,
-            four_state,
-        );
-        let mut groups: Vec<(Addr, Vec<usize>)> = Vec::new();
-        for &idx in segment.iter() {
-            let target = input[idx].target.var().unwrap().id;
-            if let Some((_, group)) = groups
-                .iter_mut()
-                .find(|(group_target, _)| *group_target == target)
-            {
-                group.push(idx);
-            } else {
-                groups.push((target, vec![idx]));
-            }
-        }
-        for (_, mut group) in groups {
-            flush_pending_coalesce(
-                &mut group,
-                input,
-                atoms_map,
-                lowerer,
-                builder,
-                arena,
-                lower_cache,
-                dep_memo,
-                inverse_dep_memo,
-                &prepared_results,
-                four_state,
-                var_widths,
-            );
-        }
-        segment.clear();
-    };
+/// Assign a scheduling domain to paths whose memory effects or packed fold
+/// result benefit from staying adjacent.  A domain is only a ready-queue
+/// preference: it never contracts paths into one graph node and therefore
+/// cannot make a not-yet-ready path execute early.
+fn logic_path_scheduling_domains<Addr: Clone + Eq + Ord + Hash + Copy>(
+    input: &[LogicPath<Addr>],
+    fold_groups: &FoldGroupScheduleIndex<Addr>,
+) -> Vec<Option<usize>> {
+    let mut next_domain = 0usize;
+    let mut fold_domains = BTreeMap::<NodeId, usize>::new();
+    let mut target_domains = BTreeMap::<Addr, usize>::new();
+    let mut domains = Vec::with_capacity(input.len());
 
-    for idx in pending.drain(..) {
-        if input[idx].target.var().is_some() {
-            segment.push(idx);
+    for (path, logic_path) in input.iter().enumerate() {
+        let exact_fold_root = fold_groups.direct_group_by_path[path].filter(|root| {
+            fold_groups
+                .groups
+                .get(root)
+                .is_some_and(|info| info.exact_and_exclusive)
+        });
+        let domain = if let Some(root) = exact_fold_root {
+            Some(*fold_domains.entry(root).or_insert_with(|| {
+                let domain = next_domain;
+                next_domain += 1;
+                domain
+            }))
         } else {
-            flush_var_segment(
-                &mut segment,
-                lower_cache,
-                dep_memo,
-                inverse_dep_memo,
-                builder,
-            );
-            let mut singleton = vec![idx];
-            flush_pending_coalesce(
-                &mut singleton,
-                input,
-                atoms_map,
-                lowerer,
-                builder,
-                arena,
-                lower_cache,
-                dep_memo,
-                inverse_dep_memo,
-                &HashMap::default(),
-                four_state,
-                var_widths,
-            );
-        }
-    }
-    flush_var_segment(
-        &mut segment,
-        lower_cache,
-        dep_memo,
-        inverse_dep_memo,
-        builder,
-    );
-}
-
-/// Reorders consecutive runs of DAG SCCs (single-node, no self-loop) so that
-/// paths targeting the same variable at the same topological layer are adjacent.
-/// This enables `flush_pending_coalesce` to merge them into wide Concat + Store.
-fn reorder_dag_runs<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    sccs: &[Vec<usize>],
-    adj: &[Vec<usize>],
-    layer: &[usize],
-    input: &[LogicPath<Addr>],
-) -> Vec<Vec<usize>> {
-    let is_dag_scc = |scc: &[usize]| scc.len() == 1 && !adj[scc[0]].contains(&scc[0]);
-
-    let mut result: Vec<Vec<usize>> = Vec::with_capacity(sccs.len());
-    let mut run_start: Option<usize> = None;
-
-    let flush_run =
-        |result: &mut Vec<Vec<usize>>, sccs: &[Vec<usize>], start: usize, end: usize| {
-            if end - start <= 1 {
-                // Single SCC, no reordering needed
-                result.extend(sccs[start..end].iter().cloned());
-                return;
-            }
-            // Collect indices, stable sort by (layer, target_id)
-            let mut indices: Vec<usize> = (start..end).collect();
-            indices.sort_by(|&a, &b| {
-                let na = sccs[a][0];
-                let nb = sccs[b][0];
-                (
-                    layer[na],
-                    input[na].target.var().map(|target| target.id),
-                    matches!(input[na].target, LogicPathTarget::CombCaptureEvent { .. }),
-                )
-                    .cmp(&(
-                        layer[nb],
-                        input[nb].target.var().map(|target| target.id),
-                        matches!(input[nb].target, LogicPathTarget::CombCaptureEvent { .. }),
-                    ))
-            });
-            for i in indices {
-                result.push(sccs[i].clone());
-            }
+            logic_path.target.var().map(|target| {
+                *target_domains.entry(target.id).or_insert_with(|| {
+                    let domain = next_domain;
+                    next_domain += 1;
+                    domain
+                })
+            })
         };
-
-    for (i, scc) in sccs.iter().enumerate() {
-        if is_dag_scc(scc) {
-            if run_start.is_none() {
-                run_start = Some(i);
-            }
-        } else {
-            if let Some(start) = run_start.take() {
-                flush_run(&mut result, sccs, start, i);
-            }
-            result.push(scc.clone());
-        }
+        domains.push(domain);
     }
-    if let Some(start) = run_start {
-        flush_run(&mut result, sccs, start, sccs.len());
-    }
-    result
+    domains
 }
 
 #[cfg(test)]
@@ -2282,9 +1968,9 @@ struct PathScheduleWork {
     priority_value_visits: usize,
 }
 
-/// Reusable path-to-local-index storage.  One table is shared by every DAG
-/// run, so a function containing many loop barriers does not allocate or clear
-/// an `O(all paths)` membership vector once per run.
+/// Reusable path-to-region-index storage. One table is shared by every
+/// scheduling region, so loop/event barriers do not cause repeated O(N)
+/// allocation or clearing.
 #[cfg(test)]
 struct PathScheduleWorkspace {
     local_by_path: Vec<usize>,
@@ -2350,6 +2036,8 @@ impl PathScheduleWorkspace {
             return Some(paths.to_vec());
         }
 
+        // Store predecessor rows in local topological coordinates. Every
+        // global edge is visited only in the region containing its source.
         let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
         let mut local_data_dependencies = vec![Vec::<usize>::new(); paths.len()];
         for (definition, &path) in paths.iter().enumerate() {
@@ -2386,6 +2074,7 @@ impl PathScheduleWorkspace {
         let mut data_users = vec![Vec::<usize>::new(); paths.len()];
         for (user, entries) in local_dependencies.iter().enumerate() {
             for &definition in entries {
+                // `paths` arrived in a valid forward topological order.
                 if definition >= user {
                     return None;
                 }
@@ -2440,7 +2129,7 @@ impl PathScheduleWorkspace {
                 }
             }
             for &definition in &local_dependencies[selected] {
-                unscheduled_users[definition] -= 1;
+                unscheduled_users[definition] = unscheduled_users[definition].checked_sub(1)?;
                 if unscheduled_users[definition] == 0 {
                     let delta = path_pressure_delta(
                         definition,
@@ -2499,8 +2188,8 @@ fn path_pressure_delta(
 
 #[cfg(test)]
 struct PathReadyQueue {
-    pressure_order: BTreeSet<(i128, Reverse<usize>, Reverse<usize>, usize)>,
-    dependency_order: BTreeSet<(usize, usize, Reverse<usize>)>,
+    pressure_order: BTreeSet<(i128, Reverse<usize>, Reverse<usize>, Reverse<usize>)>,
+    dependency_order: BTreeSet<(usize, usize, usize)>,
     priorities: Vec<(usize, usize)>,
     deltas: Vec<i128>,
     present: Vec<bool>,
@@ -2526,10 +2215,14 @@ impl PathReadyQueue {
     fn insert(&mut self, path: usize, delta: i128, work: &mut PathScheduleWork) {
         debug_assert!(!self.present[path]);
         let (exit_depth, entry_depth) = self.priorities[path];
-        self.pressure_order
-            .insert((delta, Reverse(exit_depth), Reverse(entry_depth), path));
+        self.pressure_order.insert((
+            delta,
+            Reverse(exit_depth),
+            Reverse(entry_depth),
+            Reverse(path),
+        ));
         self.dependency_order
-            .insert((exit_depth, entry_depth, Reverse(path)));
+            .insert((exit_depth, entry_depth, path));
         self.deltas[path] = delta;
         self.present[path] = true;
         work.ready_insertions += 1;
@@ -2542,14 +2235,14 @@ impl PathReadyQueue {
             self.deltas[path],
             Reverse(exit_depth),
             Reverse(entry_depth),
-            path,
+            Reverse(path),
         ));
         self.deltas[path] += adjustment;
         self.pressure_order.insert((
             self.deltas[path],
             Reverse(exit_depth),
             Reverse(entry_depth),
-            path,
+            Reverse(path),
         ));
         work.priority_updates += 1;
     }
@@ -2560,23 +2253,23 @@ impl PathReadyQueue {
         register_capacity: usize,
         work: &mut PathScheduleWork,
     ) -> Option<usize> {
-        let dependency_path = self.dependency_order.iter().next_back()?.2.0;
+        let dependency_path = self.dependency_order.iter().next_back()?.2;
         let dependency_pressure = apply_path_pressure_delta(pressure, self.deltas[dependency_path]);
         let selected = if pressure <= register_capacity && dependency_pressure <= register_capacity
         {
             dependency_path
         } else {
-            self.pressure_order.iter().next()?.3
+            self.pressure_order.iter().next()?.3.0
         };
         let (exit_depth, entry_depth) = self.priorities[selected];
         self.pressure_order.remove(&(
             self.deltas[selected],
             Reverse(exit_depth),
             Reverse(entry_depth),
-            selected,
+            Reverse(selected),
         ));
         self.dependency_order
-            .remove(&(exit_depth, entry_depth, Reverse(selected)));
+            .remove(&(exit_depth, entry_depth, selected));
         self.present[selected] = false;
         work.ready_pops += 1;
         Some(selected)
@@ -2590,6 +2283,183 @@ fn apply_path_pressure_delta(pressure: usize, delta: i128) -> usize {
     } else {
         pressure.saturating_sub(delta.unsigned_abs().min(usize::MAX as u128) as usize)
     }
+}
+
+#[cfg(test)]
+struct ScheduledComponent {
+    paths: Vec<usize>,
+    region: usize,
+}
+
+/// Schedule every maximal acyclic run independently. Cyclic SCCs and explicit
+/// event paths each form their own region and therefore remain hard cache and
+/// code-motion barriers.
+#[cfg(test)]
+fn pressure_schedule_regions(
+    topological_sccs: Vec<Vec<usize>>,
+    dependencies: &[Vec<usize>],
+    data_dependencies: &[Vec<usize>],
+    value_weights: &[usize],
+    barriers: &[bool],
+    register_capacity: usize,
+    work: &mut PathScheduleWork,
+) -> Option<Vec<ScheduledComponent>> {
+    if barriers.len() != dependencies.len() {
+        return None;
+    }
+    let mut workspace = PathScheduleWorkspace::new(dependencies.len());
+    let mut result = Vec::with_capacity(topological_sccs.len());
+    let mut pending = Vec::new();
+    let mut next_region = 0usize;
+
+    let flush = |pending: &mut Vec<usize>,
+                 result: &mut Vec<ScheduledComponent>,
+                 next_region: &mut usize,
+                 workspace: &mut PathScheduleWorkspace,
+                 work: &mut PathScheduleWork|
+     -> Option<()> {
+        if pending.is_empty() {
+            return Some(());
+        }
+        let scheduled = workspace.schedule(
+            pending,
+            dependencies,
+            data_dependencies,
+            value_weights,
+            register_capacity,
+            work,
+        )?;
+        let region = *next_region;
+        *next_region = next_region.checked_add(1)?;
+        result.extend(scheduled.into_iter().map(|path| ScheduledComponent {
+            paths: vec![path],
+            region,
+        }));
+        pending.clear();
+        Some(())
+    };
+
+    for scc in topological_sccs {
+        let acyclic = scc.len() == 1 && !dependencies[scc[0]].contains(&scc[0]);
+        if acyclic && !barriers[scc[0]] {
+            pending.push(scc[0]);
+            continue;
+        }
+        flush(
+            &mut pending,
+            &mut result,
+            &mut next_region,
+            &mut workspace,
+            work,
+        )?;
+        let region = next_region;
+        next_region = next_region.checked_add(1)?;
+        result.push(ScheduledComponent { paths: scc, region });
+    }
+    flush(
+        &mut pending,
+        &mut result,
+        &mut next_region,
+        &mut workspace,
+        work,
+    )?;
+    Some(result)
+}
+
+/// Produce a deterministic topological order of the SCC condensation graph.
+/// A ready effect domain is drained while possible, but each component remains
+/// an independent queue item.  This preserves target/fold locality without
+/// treating a layer or a complete ready frontier as a lowering batch.  Actual
+/// register-pressure scheduling is performed later on MIR instructions and
+/// their real VRegs.
+fn stable_topological_sccs(
+    sccs: Vec<Vec<usize>>,
+    adj: &[Vec<usize>],
+    path_domains: &[Option<usize>],
+) -> Option<(Vec<Vec<usize>>, Vec<usize>)> {
+    if path_domains.len() != adj.len() {
+        return None;
+    }
+    let component_count = sccs.len();
+    let mut component_by_path = vec![usize::MAX; adj.len()];
+    let mut keys = Vec::with_capacity(component_count);
+    let mut component_domains = Vec::with_capacity(component_count);
+    for (component, scc) in sccs.iter().enumerate() {
+        keys.push(*scc.iter().min()?);
+        for &path in scc {
+            if path >= adj.len() || component_by_path[path] != usize::MAX {
+                return None;
+            }
+            component_by_path[path] = component;
+        }
+        let singleton = (scc.len() == 1).then_some(scc[0]);
+        let acyclic = singleton.is_some_and(|path| !adj[path].contains(&path));
+        component_domains.push(
+            acyclic
+                .then(|| path_domains[singleton.expect("acyclic SCC is a singleton")])
+                .flatten(),
+        );
+    }
+    if component_by_path.contains(&usize::MAX) {
+        return None;
+    }
+
+    let mut outgoing = vec![Vec::<usize>::new(); component_count];
+    for (definition, users) in adj.iter().enumerate() {
+        let source = component_by_path[definition];
+        for &user in users {
+            let target = *component_by_path.get(user)?;
+            if source != target {
+                outgoing[source].push(target);
+            }
+        }
+    }
+    let mut indegree = vec![0usize; component_count];
+    for edges in &mut outgoing {
+        edges.sort_unstable();
+        edges.dedup();
+        for &target in edges.iter() {
+            indegree[target] = indegree[target].checked_add(1)?;
+        }
+    }
+
+    let mut ready = BTreeSet::new();
+    let mut ready_by_domain = HashMap::<usize, BTreeSet<(usize, usize)>>::default();
+    for (component, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            let entry = (keys[component], component);
+            ready.insert(entry);
+            if let Some(domain) = component_domains[component] {
+                ready_by_domain.entry(domain).or_default().insert(entry);
+            }
+        }
+    }
+    let mut components = sccs.into_iter().map(Some).collect::<Vec<_>>();
+    let mut ordered = Vec::with_capacity(component_count);
+    let mut active_domain = None;
+    while !ready.is_empty() {
+        let selected = active_domain
+            .and_then(|domain| ready_by_domain.get(&domain)?.iter().next().copied())
+            .or_else(|| ready.iter().next().copied())?;
+        let (_, component) = selected;
+        ready.remove(&selected);
+        if let Some(domain) = component_domains[component] {
+            ready_by_domain.get_mut(&domain)?.remove(&selected);
+        }
+        active_domain = component_domains[component];
+        ordered.push(components[component].take()?);
+        for &target in &outgoing[component] {
+            indegree[target] = indegree[target].checked_sub(1)?;
+            if indegree[target] == 0 {
+                let entry = (keys[target], target);
+                ready.insert(entry);
+                if let Some(domain) = component_domains[target] {
+                    ready_by_domain.entry(domain).or_default().insert(entry);
+                }
+            }
+        }
+    }
+    (ordered.len() == component_count).then_some((ordered, component_by_path))
 }
 
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
@@ -2607,7 +2477,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     ignored_loops: &HashSet<(Addr, Addr)>,
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
-    var_widths: &HashMap<Addr, usize>,
+    _var_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     // 1. Build Atom Map & Multiple Driver Check
@@ -2649,6 +2519,10 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
         }
     }
+    for edges in &mut adj {
+        edges.sort_unstable();
+        edges.dedup();
+    }
     // 3. SCC Extraction (Tarjan)
     let mut ctx = TarjanContext {
         index: 0,
@@ -2663,50 +2537,16 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             strong_connect(i, &adj, &mut ctx);
         }
     }
-    ctx.sccs.reverse();
-
-    // ── Layer computation + DAG reordering ──
-    // Compute topological layers so that same-target paths at the same layer
-    // are adjacent, enabling flush_pending_coalesce to merge them.
-    let (sccs, layer) = {
-        // Build reverse adjacency: rev_adj[u] = predecessors of u
-        let mut rev_adj = vec![Vec::new(); n];
-        for (v, neighbors) in adj.iter().enumerate() {
-            for &u in neighbors {
-                rev_adj[u].push(v);
-            }
-        }
-
-        // Compute layer[node] = 1 + max(layer[pred]) in topo order
-        let mut layer = vec![0usize; n];
-        for scc in &ctx.sccs {
-            let is_dag = scc.len() == 1 && !adj[scc[0]].contains(&scc[0]);
-            if is_dag {
-                let node = scc[0];
-                for &pred in &rev_adj[node] {
-                    layer[node] = layer[node].max(layer[pred] + 1);
-                }
-            } else {
-                let mut max_layer = 0usize;
-                for &node in scc {
-                    for &pred in &rev_adj[node] {
-                        if !scc.contains(&pred) {
-                            max_layer = max_layer.max(layer[pred] + 1);
-                        }
-                    }
-                }
-                for &node in scc {
-                    layer[node] = max_layer;
-                }
-            }
-        }
-
-        // Reorder consecutive DAG SCCs by (layer, target_id) so that
-        // same-target paths at the same layer become adjacent.
-        (reorder_dag_runs(&ctx.sccs, &adj, &layer, &input), layer)
-    };
-
     let fold_group_schedule_index = build_fold_group_schedule_index(&input, arena);
+    let path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
+    let (topological_sccs, component_by_path) =
+        stable_topological_sccs(ctx.sccs, &adj, &path_domains)
+            .ok_or(SchedulerError::InvalidDependencyGraph)?;
+    // LogicPath target widths do not describe the temporary VRegs created
+    // while lowering their SLT expression.  Keep source lowering in a stable
+    // topological stream and leave pressure decisions to the MIR scheduler,
+    // where the complete machine DAG is visible.
+    let sccs = topological_sccs;
 
     let mut builder = SIRBuilder::new();
     let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
@@ -2738,15 +2578,20 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
 
-    let mut pending_layer_indices: Vec<usize> = Vec::new();
-    let mut pending_layer: Option<usize> = None;
+    // Pairwise joint-fold profitability is intentionally local. Keep all
+    // projections of one packed root together, but never build an unbounded
+    // compatibility matrix for a long run of independent roots.
+    const MAX_JOINT_FOLD_ROOTS: usize = 16;
+    let mut pending_fold_indices: Vec<usize> = Vec::new();
+    let mut pending_fold_roots = HashSet::default();
 
     // 4. Scheduling: Process each SCC by selecting either Static Unrolling (A) or Dynamic Convergence (B).
     for scc in sccs {
+        let component = component_by_path[scc[0]];
         let mut user_safety_limit = None;
         for &v_idx in &scc {
             for &u_idx in &adj[v_idx] {
-                if scc.contains(&u_idx) {
+                if component_by_path[u_idx] == component {
                     if let (Some(v_target), Some(u_target)) =
                         (input[v_idx].target.var(), input[u_idx].target.var())
                     {
@@ -2762,12 +2607,11 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         let is_loop = scc.len() > 1 || (scc.len() == 1 && adj[scc[0]].contains(&scc[0]));
 
         if is_loop {
-            // Flush any buffered DAG nodes before entering a loop SCC.
-            flush_pending_layer(
-                &mut pending_layer_indices,
+            // Exact grouped folds are atomic with respect to a loop SCC.
+            flush_pending_fold_paths(
+                &mut pending_fold_indices,
                 &input,
                 &fold_group_schedule_index,
-                &atoms_map,
                 &lowerer,
                 &mut builder,
                 arena,
@@ -2775,13 +2619,12 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 &mut dep_memo,
                 &mut inverse_dep_memo,
                 four_state,
-                var_widths,
             );
-            pending_layer = None;
+            pending_fold_roots.clear();
             let mut authorized = user_safety_limit.is_some();
             'check_scc: for &v_idx in &scc {
                 for &u_idx in &adj[v_idx] {
-                    if scc.contains(&u_idx)
+                    if component_by_path[u_idx] == component
                         && input[v_idx]
                             .target
                             .var()
@@ -2805,7 +2648,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             let optimized_scc_order = greedy_fas_sort(&scc, &adj);
             let force_strategy_b = user_safety_limit.is_some();
             let iterations = calculate_required_iterations(&adj, &optimized_scc_order);
-            let total_ops_estimate = optimized_scc_order.len() * iterations;
+            let total_ops_estimate = optimized_scc_order.len().saturating_mul(iterations);
             if !force_strategy_b && total_ops_estimate <= UNROLL_THRESHOLD {
                 // Strategy A: Static Unrolling
                 // The loop is unrolled a fixed number of times based on structural dependency depth (iterations).
@@ -3002,11 +2845,10 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
             if builder.block_count() >= EU_BLOCK_LIMIT {
-                flush_pending_layer(
-                    &mut pending_layer_indices,
+                flush_pending_fold_paths(
+                    &mut pending_fold_indices,
                     &input,
                     &fold_group_schedule_index,
-                    &atoms_map,
                     &lowerer,
                     &mut builder,
                     arena,
@@ -3014,9 +2856,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     &mut dep_memo,
                     &mut inverse_dep_memo,
                     four_state,
-                    var_widths,
                 );
-                pending_layer = None;
+                pending_fold_roots.clear();
                 if let Some(eu) = builder.flush_eu() {
                     result_eus.push(eu);
                     // Clear the lowering cache — register IDs are EU-scoped
@@ -3025,16 +2866,23 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
 
             let idx = scc[0];
-            let this_layer = layer[idx];
-
-            if pending_layer == Some(this_layer) {
-                pending_layer_indices.push(idx);
+            let exact_fold = is_exact_fold_path(idx, &fold_group_schedule_index);
+            let fold_root = exact_fold
+                .then_some(fold_group_schedule_index.direct_group_by_path[idx])
+                .flatten();
+            let depends_on_pending = pending_fold_indices
+                .iter()
+                .any(|pending| adj[*pending].binary_search(&idx).is_ok());
+            let starts_new_root = fold_root.is_some_and(|root| !pending_fold_roots.contains(&root));
+            let window_full = starts_new_root && pending_fold_roots.len() >= MAX_JOINT_FOLD_ROOTS;
+            if exact_fold && !depends_on_pending && !window_full {
+                pending_fold_indices.push(idx);
+                pending_fold_roots.extend(fold_root);
             } else {
-                flush_pending_layer(
-                    &mut pending_layer_indices,
+                flush_pending_fold_paths(
+                    &mut pending_fold_indices,
                     &input,
                     &fold_group_schedule_index,
-                    &atoms_map,
                     &lowerer,
                     &mut builder,
                     arena,
@@ -3042,20 +2890,29 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     &mut dep_memo,
                     &mut inverse_dep_memo,
                     four_state,
-                    var_widths,
                 );
-                pending_layer = Some(this_layer);
-                pending_layer_indices.push(idx);
+                pending_fold_roots.clear();
+                if exact_fold {
+                    pending_fold_indices.push(idx);
+                    pending_fold_roots.extend(fold_root);
+                } else {
+                    emit_node(
+                        &mut builder,
+                        idx,
+                        &mut lower_cache,
+                        &mut dep_memo,
+                        &mut inverse_dep_memo,
+                    );
+                }
             }
         }
     }
 
-    // Flush remaining pending DAG nodes after the SCC loop.
-    flush_pending_layer(
-        &mut pending_layer_indices,
+    // Flush the final exact grouped-fold run after the SCC loop.
+    flush_pending_fold_paths(
+        &mut pending_fold_indices,
         &input,
         &fold_group_schedule_index,
-        &atoms_map,
         &lowerer,
         &mut builder,
         arena,
@@ -3063,8 +2920,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         &mut dep_memo,
         &mut inverse_dep_memo,
         four_state,
-        var_widths,
     );
+    pending_fold_roots.clear();
 
     builder.seal_block(SIRTerminator::Return);
     let (blocks, reg_map, _) = builder.drain();
@@ -3087,7 +2944,8 @@ mod tests {
         ExactFoldGroup, ExactIndexedLoadKey, FoldGroupReadFacts, NormalizedIndexExpr,
         PathScheduleWork, PathScheduleWorkspace, best_weighted_fold_family,
         build_fold_group_schedule_index, collect_node_input_deps,
-        prepare_atomic_fold_group_results, sort,
+        prepare_atomic_fold_group_results, pressure_schedule_regions, sort,
+        stable_topological_sccs,
     };
     use crate::ir::{BinaryOp, BitAccess, SIRBuilder, SIRInstruction, SIRTerminator, VarAtomBase};
     use crate::logic_tree::{
@@ -3147,8 +3005,8 @@ mod tests {
 
     #[test]
     fn path_scheduler_keeps_independent_dependency_chains_contiguous() {
-        // 0 -> 2 -> 4 and 1 -> 3 -> 5.  The old layer order keeps one
-        // result from each chain live together at every depth.
+        // 0 -> 2 -> 4 and 1 -> 3 -> 5. A layer order keeps one result from
+        // each chain live together at every depth.
         let dependencies = vec![vec![2], vec![3], vec![4], vec![5], vec![], vec![]];
         let data_dependencies = dependencies.clone();
         let weights = vec![1; dependencies.len()];
@@ -3188,8 +3046,6 @@ mod tests {
 
     #[test]
     fn path_scheduler_accounts_for_wide_values_at_the_capacity_boundary() {
-        // The two chains are structurally equal. A layer order materializes
-        // both eight-register values before either consumer, exceeding K=14.
         let dependencies = vec![vec![2], vec![3], vec![], vec![]];
         let data_dependencies = dependencies.clone();
         let weights = vec![8, 8, 0, 0];
@@ -3215,6 +3071,76 @@ mod tests {
         assert_eq!(work.ready_pops, PATHS);
         assert_eq!(work.priority_updates, 0);
         assert_eq!(work.priority_value_visits, 0);
+    }
+
+    #[test]
+    fn event_barrier_splits_pressure_scheduling_regions() {
+        let dependencies = vec![vec![2], vec![], vec![3], vec![]];
+        let data_dependencies = dependencies.clone();
+        let topological = vec![vec![0], vec![1], vec![2], vec![3]];
+        let mut work = PathScheduleWork::default();
+
+        let scheduled = pressure_schedule_regions(
+            topological,
+            &dependencies,
+            &data_dependencies,
+            &[1, 1, 1, 0],
+            &[false, false, true, false],
+            14,
+            &mut work,
+        )
+        .unwrap();
+
+        assert_eq!(
+            scheduled.iter().map(|item| item.region).collect::<Vec<_>>(),
+            vec![0, 0, 1, 2]
+        );
+        assert_eq!(
+            scheduled
+                .iter()
+                .flat_map(|item| item.paths.iter().copied())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn stable_scc_order_preserves_source_order_when_dependencies_allow_it() {
+        // 0 and 1 are initially ready, both feed 2, and 2 feeds 3. Tarjan is
+        // free to return components in any order; lowering remains stable.
+        let adj = vec![vec![2], vec![2], vec![3], vec![]];
+        let unordered = vec![vec![3], vec![1], vec![2], vec![0]];
+
+        let (ordered, component_by_path) =
+            stable_topological_sccs(unordered, &adj, &[None; 4]).unwrap();
+
+        assert_eq!(ordered, vec![vec![0], vec![1], vec![2], vec![3]]);
+        assert_eq!(component_by_path.len(), adj.len());
+    }
+
+    #[test]
+    fn stable_scc_order_drains_only_ready_members_of_an_effect_domain() {
+        let adj = vec![vec![], vec![], vec![], vec![]];
+        let unordered = vec![vec![3], vec![1], vec![2], vec![0]];
+
+        let (ordered, _) =
+            stable_topological_sccs(unordered, &adj, &[Some(0), Some(1), Some(0), Some(1)])
+                .unwrap();
+
+        assert_eq!(ordered, vec![vec![0], vec![2], vec![1], vec![3]]);
+    }
+
+    #[test]
+    fn effect_domain_preference_never_pulls_a_path_across_its_dependency() {
+        // Path 1 shares path 0's destination domain, but it is not ready until
+        // the independent path 2 has executed.
+        let adj = vec![vec![], vec![], vec![1]];
+        let unordered = vec![vec![1], vec![2], vec![0]];
+
+        let (ordered, _) =
+            stable_topological_sccs(unordered, &adj, &[Some(0), Some(0), Some(1)]).unwrap();
+
+        assert_eq!(ordered, vec![vec![0], vec![2], vec![1]]);
     }
 
     fn fixed_group_path(
@@ -3394,7 +3320,7 @@ mod tests {
     }
 
     #[test]
-    fn same_layer_exact_fold_groups_lower_jointly_and_keep_store_order() {
+    fn independent_exact_fold_groups_lower_jointly_and_keep_store_order() {
         let (arena, paths, widths) = fixed_group_fixture(4, 4);
         let result = sort(
             paths,
@@ -3535,7 +3461,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_layer_separates_otherwise_joint_fold_groups() {
+    fn dependency_edge_separates_otherwise_joint_fold_groups() {
         let (arena, mut paths, widths) = fixed_group_fixture(4, 4);
         paths[1].sources.insert(VarAtomBase::new(10, 0, 7));
         let result = sort(
@@ -3731,7 +3657,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_for_fold_group_projections_materialize_once_before_stores() {
+    fn shared_for_fold_group_projections_materialize_once_and_store_sequentially() {
         let mut arena = SLTNodeArena::<u32>::new();
         let guard = arena
             .alloc(SLTNode::Constant(
@@ -3849,11 +3775,14 @@ mod tests {
                     == 2
             })
             .expect("both atomic projection stores share the materialization exit");
-        let first_store = store_block
+        let store_positions = store_block
             .instructions
             .iter()
-            .position(|instruction| matches!(instruction, SIRInstruction::Store(..)))
-            .unwrap();
+            .enumerate()
+            .filter_map(|(position, instruction)| {
+                matches!(instruction, SIRInstruction::Store(..)).then_some(position)
+            })
+            .collect::<Vec<_>>();
         let stored_values = store_block
             .instructions
             .iter()
@@ -3862,7 +3791,8 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for value in stored_values {
+        assert_eq!(store_positions.len(), stored_values.len());
+        for (projection, value) in stored_values.into_iter().enumerate() {
             let definition = store_block
                 .instructions
                 .iter()
@@ -3875,7 +3805,13 @@ mod tests {
                     _ => false,
                 })
                 .expect("stored projection has a local definition");
-            assert!(definition < first_store);
+            assert!(definition < store_positions[projection]);
+            if projection != 0 {
+                assert!(
+                    definition > store_positions[projection - 1],
+                    "a later projection must not remain live across an earlier Store"
+                );
+            }
         }
     }
 }

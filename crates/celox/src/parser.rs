@@ -1071,6 +1071,7 @@ fn scheduler_source_locations(
     let blocks = match error {
         SchedulerError::CombinationalLoop { blocks } => blocks,
         SchedulerError::MultipleDriver { blocks } => blocks,
+        SchedulerError::InvalidDependencyGraph => return Vec::new(),
     };
     let mut seen = HashSet::default();
     blocks
@@ -2809,6 +2810,8 @@ fn build_comb_observer_capture_paths(
                 let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
                     continue;
                 };
+                let trigger_order_before =
+                    direct_consumers_of_path_target(comb_blocks, trigger_idx);
                 let path_id = LogicPathId(comb_blocks.len());
                 if let Some(prev) = previous_trigger_capture_path {
                     comb_blocks[prev.0].order_before.insert(path_id);
@@ -2828,7 +2831,7 @@ fn build_comb_observer_capture_paths(
                     previous_sources: HashSet::default(),
                     address_sources: HashSet::default(),
                     local_inputs: observer.local_inputs.clone(),
-                    order_before: HashSet::default(),
+                    order_before: trigger_order_before,
                     comb_capture_enable_sites: Vec::new(),
                     pre_lower_nodes: Vec::new(),
                     expr: loop_runner,
@@ -2921,6 +2924,7 @@ fn build_comb_observer_capture_paths(
             let Some(trigger_target) = comb_blocks[trigger_idx.0].target.var().copied() else {
                 continue;
             };
+            let trigger_order_before = direct_consumers_of_path_target(comb_blocks, trigger_idx);
             for &member_idx in &group_members[&observer.activation_group] {
                 let member = &observers[member_idx];
                 let member_emit_on_true = matches!(
@@ -2964,7 +2968,7 @@ fn build_comb_observer_capture_paths(
                     previous_sources: HashSet::default(),
                     address_sources: HashSet::default(),
                     local_inputs: member.local_inputs.clone(),
-                    order_before: HashSet::default(),
+                    order_before: trigger_order_before.clone(),
                     comb_capture_enable_sites: Vec::new(),
                     pre_lower_nodes: Vec::new(),
                     expr: member_expr,
@@ -3146,27 +3150,50 @@ fn observer_order_before(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &crate::ir::CombObserver<AbsoluteAddr>,
 ) -> HashSet<LogicPathId> {
-    if !observer_has_statement_position_dependency(paths, observer) {
-        return HashSet::default();
-    }
     let preceding_writes = observer.preceding_writes.iter().collect::<Vec<_>>();
-    let affected_by_preceding_writes = observer_affected_by_preceding_writes(paths, observer);
+    let affected_by_preceding_writes = observer_has_statement_position_dependency(paths, observer)
+        .then(|| observer_affected_by_preceding_writes(paths, observer));
     let mut result = HashSet::default();
     for (idx, path) in paths.iter().enumerate() {
         let Some(target) = path.target.var() else {
             continue;
         };
-        if !atom_overlaps_any(target, &affected_by_preceding_writes) {
-            continue;
-        }
         let already_written = preceding_writes
             .iter()
             .any(|written| target.id == written.id && target.access.overlaps(&written.access));
-        if !already_written {
+        let is_later_observed_write = observer_written_input_overlaps(observer, target);
+        let is_later_affected_write = affected_by_preceding_writes
+            .as_ref()
+            .is_some_and(|affected| atom_overlaps_any(target, affected));
+        if !already_written && (is_later_observed_write || is_later_affected_write) {
             result.insert(LogicPathId(idx));
         }
     }
     result
+}
+
+/// Place a trigger-capture between the write which activated it and each
+/// immediate dataflow consumer of that write. Transitive consumers remain
+/// ordered by the ordinary LogicPath dependency graph.
+fn direct_consumers_of_path_target(
+    paths: &[LogicPath<AbsoluteAddr>],
+    trigger: LogicPathId,
+) -> HashSet<LogicPathId> {
+    let Some(target) = paths.get(trigger.0).and_then(|path| path.target.var()) else {
+        return HashSet::default();
+    };
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            (index != trigger.0
+                && path
+                    .sources
+                    .iter()
+                    .any(|source| source.id == target.id && source.access.overlaps(&target.access)))
+            .then_some(LogicPathId(index))
+        })
+        .collect()
 }
 
 fn observer_affected_by_preceding_writes(

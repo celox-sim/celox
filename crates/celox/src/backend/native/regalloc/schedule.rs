@@ -1,8 +1,9 @@
 //! Pressure-aware scheduling of side-effect-free machine DAG regions.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
+use crate::backend::native::memory_effect::{self, MemoryRange, UnknownMemory};
 use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, VReg};
 
 use super::analysis::AnalysisResult;
@@ -207,6 +208,284 @@ struct RegionSchedule {
     work: RegionWork,
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+struct MemoryHistory {
+    last_writer: Option<usize>,
+    readers_since_write: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct MemorySegment {
+    end: i64,
+    history: MemoryHistory,
+}
+
+/// A sparse partition of the byte-address space. Segment count is bounded by
+/// memory-effect endpoints, not by the byte length of a sparse state region.
+#[derive(Default)]
+struct RangeMemoryHistory {
+    segments: BTreeMap<i64, MemorySegment>,
+}
+
+impl RangeMemoryHistory {
+    fn split_at(&mut self, point: i64) {
+        let Some((&start, segment)) = self.segments.range(..=point).next_back() else {
+            return;
+        };
+        if start == point || point >= segment.end {
+            return;
+        }
+        let tail = segment.clone();
+        self.segments
+            .get_mut(&start)
+            .expect("the selected memory segment exists")
+            .end = point;
+        self.segments.insert(point, tail);
+    }
+
+    fn read(&mut self, range: MemoryRange, instruction: usize, dependencies: &mut BTreeSet<usize>) {
+        let Some(end) = range.end() else {
+            return;
+        };
+        if range.offset >= end {
+            return;
+        }
+        self.split_at(range.offset);
+        self.split_at(end);
+
+        let existing = self
+            .segments
+            .range(range.offset..end)
+            .map(|(&start, segment)| (start, segment.end))
+            .collect::<Vec<_>>();
+        let mut cursor = range.offset;
+        for &(start, segment_end) in &existing {
+            if cursor < start {
+                self.segments.insert(
+                    cursor,
+                    MemorySegment {
+                        end: start,
+                        history: MemoryHistory::default(),
+                    },
+                );
+            }
+            cursor = cursor.max(segment_end);
+        }
+        if cursor < end {
+            self.segments.insert(
+                cursor,
+                MemorySegment {
+                    end,
+                    history: MemoryHistory::default(),
+                },
+            );
+        }
+
+        let starts = self
+            .segments
+            .range(range.offset..end)
+            .map(|(&start, _)| start)
+            .collect::<Vec<_>>();
+        for start in starts {
+            let history = &mut self
+                .segments
+                .get_mut(&start)
+                .expect("the covered memory segment exists")
+                .history;
+            dependencies.extend(history.last_writer);
+            if history.readers_since_write.last() != Some(&instruction) {
+                history.readers_since_write.push(instruction);
+            }
+        }
+    }
+
+    fn write(
+        &mut self,
+        range: MemoryRange,
+        instruction: usize,
+        dependencies: &mut BTreeSet<usize>,
+    ) {
+        let Some(end) = range.end() else {
+            return;
+        };
+        if range.offset >= end {
+            return;
+        }
+        self.split_at(range.offset);
+        self.split_at(end);
+        let starts = self
+            .segments
+            .range(range.offset..end)
+            .map(|(&start, _)| start)
+            .collect::<Vec<_>>();
+        for start in &starts {
+            let history = &self
+                .segments
+                .get(start)
+                .expect("the overlapping memory segment exists")
+                .history;
+            dependencies.extend(history.last_writer);
+            dependencies.extend(history.readers_since_write.iter().copied());
+        }
+        for start in starts {
+            self.segments.remove(&start);
+        }
+        self.segments.insert(
+            range.offset,
+            MemorySegment {
+                end,
+                history: MemoryHistory {
+                    last_writer: Some(instruction),
+                    readers_since_write: Vec::new(),
+                },
+            },
+        );
+        self.coalesce_around(range.offset);
+    }
+
+    fn collect_writers(&self, dependencies: &mut BTreeSet<usize>) {
+        dependencies.extend(
+            self.segments
+                .values()
+                .filter_map(|segment| segment.history.last_writer),
+        );
+    }
+
+    fn collect_reads_and_writes(&self, dependencies: &mut BTreeSet<usize>) {
+        for segment in self.segments.values() {
+            dependencies.extend(segment.history.last_writer);
+            dependencies.extend(segment.history.readers_since_write.iter().copied());
+        }
+    }
+
+    fn coalesce_around(&mut self, mut start: i64) {
+        let Some(mut current) = self.segments.get(&start).cloned() else {
+            return;
+        };
+        let predecessor = self
+            .segments
+            .range(..start)
+            .next_back()
+            .map(|(&other_start, other)| (other_start, other.clone()));
+        if let Some((other_start, other)) = predecessor
+            && other.end == start
+            && other.history == current.history
+        {
+            self.segments.remove(&start);
+            self.segments
+                .get_mut(&other_start)
+                .expect("the predecessor memory segment exists")
+                .end = current.end;
+            start = other_start;
+            current.end = self.segments[&start].end;
+        }
+        if let Some(successor) = self.segments.get(&current.end).cloned()
+            && successor.history == current.history
+        {
+            self.segments.remove(&current.end);
+            self.segments
+                .get_mut(&start)
+                .expect("the current memory segment exists")
+                .end = successor.end;
+        }
+    }
+}
+
+#[derive(Default)]
+struct MemoryDomainHistory {
+    exact: RangeMemoryHistory,
+    last_unknown_writer: Option<usize>,
+    unknown_readers_since_write: Vec<usize>,
+}
+
+impl MemoryDomainHistory {
+    fn read_exact(
+        &mut self,
+        range: MemoryRange,
+        instruction: usize,
+        dependencies: &mut BTreeSet<usize>,
+    ) {
+        dependencies.extend(self.last_unknown_writer);
+        self.exact.read(range, instruction, dependencies);
+    }
+
+    fn write_exact(
+        &mut self,
+        range: MemoryRange,
+        instruction: usize,
+        dependencies: &mut BTreeSet<usize>,
+    ) {
+        dependencies.extend(self.last_unknown_writer);
+        dependencies.extend(self.unknown_readers_since_write.iter().copied());
+        self.exact.write(range, instruction, dependencies);
+    }
+
+    fn read_unknown(&mut self, instruction: usize, dependencies: &mut BTreeSet<usize>) {
+        dependencies.extend(self.last_unknown_writer);
+        self.exact.collect_writers(dependencies);
+        if self.unknown_readers_since_write.last() != Some(&instruction) {
+            self.unknown_readers_since_write.push(instruction);
+        }
+    }
+
+    fn write_unknown(&mut self, instruction: usize, dependencies: &mut BTreeSet<usize>) {
+        dependencies.extend(self.last_unknown_writer);
+        dependencies.extend(self.unknown_readers_since_write.iter().copied());
+        self.exact.collect_reads_and_writes(dependencies);
+        self.exact.segments.clear();
+        self.last_unknown_writer = Some(instruction);
+        self.unknown_readers_since_write.clear();
+    }
+}
+
+#[derive(Default)]
+struct MemoryDependencyTracker {
+    direct: HashMap<BaseReg, MemoryDomainHistory>,
+    indirect: MemoryDomainHistory,
+}
+
+impl MemoryDependencyTracker {
+    fn domain_mut(&mut self, memory: UnknownMemory) -> &mut MemoryDomainHistory {
+        match memory {
+            UnknownMemory::Direct(base) => self.direct.entry(base).or_default(),
+            UnknownMemory::Indirect => &mut self.indirect,
+        }
+    }
+
+    fn add_instruction(
+        &mut self,
+        inst: &MInst,
+        instruction: usize,
+        dependencies: &mut BTreeSet<usize>,
+    ) {
+        let reads = memory_effect::reads(inst);
+        for range in reads.ranges() {
+            self.direct
+                .entry(range.base)
+                .or_default()
+                .read_exact(range, instruction, dependencies);
+        }
+        if let Some(memory) = reads.unknown_memory() {
+            self.domain_mut(memory)
+                .read_unknown(instruction, dependencies);
+        }
+
+        let writes = memory_effect::writes(inst);
+        for range in writes.ranges() {
+            self.direct.entry(range.base).or_default().write_exact(
+                range,
+                instruction,
+                dependencies,
+            );
+        }
+        if let Some(memory) = writes.unknown_memory() {
+            self.domain_mut(memory)
+                .write_unknown(instruction, dependencies);
+        }
+        dependencies.remove(&instruction);
+    }
+}
+
 fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule {
     if region.len() < 2 {
         if let Some(inst) = region.first() {
@@ -248,67 +527,15 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         }
     }
 
-    // Preserve exactly the memory dependences that can change a value.  Two
-    // overlapping Loads commute; serializing them used to pin long runs of
-    // generated bit/prefix reads in source order and prevented the scheduler
-    // from moving each producer next to its consumers.  Track the last writer
-    // and the readers since that writer per byte so RAW, WAR, and WAW remain
-    // ordered without inventing read-after-read edges.  Dynamic/pointer/
-    // release accesses and MemCopy remain region barriers.
-    #[derive(Default)]
-    struct MemoryHistory {
-        last_writer: Option<usize>,
-        readers_since_write: Vec<usize>,
-    }
-    let mut memory_history = HashMap::<(BaseReg, i64), MemoryHistory>::new();
-    // An indexed read can alias any constant-address store, but indexed reads
-    // never conflict with one another.  Keep them inside the schedulable DAG
-    // and add only the conservative store edges they require.  This lets the
-    // pressure scheduler place generated array loads next to their consumers
-    // instead of treating every load as a region barrier.
-    let mut unknown_readers = Vec::<usize>::new();
+    // Preserve RAW, WAR, and WAW without inventing read-after-read edges.
+    // The sparse interval partition scales with effect endpoints rather than
+    // the physical byte length of wide state ranges.
+    let mut memory = MemoryDependencyTracker::default();
     for (instruction, inst) in region.iter().enumerate() {
-        let Some((base, start, bytes, is_write)) = constant_memory_access(inst) else {
-            if is_unknown_memory_read(inst) {
-                let prior_writers = memory_history
-                    .values()
-                    .filter_map(|history| history.last_writer)
-                    .collect::<BTreeSet<_>>();
-                for dependency in prior_writers {
-                    add_dependency(&mut dependencies, &mut users, instruction, dependency);
-                }
-                unknown_readers.push(instruction);
-            }
-            continue;
-        };
         let mut memory_dependencies = BTreeSet::new();
-        for byte in 0..i64::from(bytes) {
-            let address = (base, start + byte);
-            let history = memory_history.entry(address).or_default();
-            if let Some(writer) = history.last_writer {
-                memory_dependencies.insert(writer);
-            }
-            if is_write {
-                memory_dependencies.extend(history.readers_since_write.iter().copied());
-            }
-        }
-        if is_write {
-            memory_dependencies.extend(unknown_readers.iter().copied());
-        }
+        memory.add_instruction(inst, instruction, &mut memory_dependencies);
         for dependency in memory_dependencies {
             add_dependency(&mut dependencies, &mut users, instruction, dependency);
-        }
-        for byte in 0..i64::from(bytes) {
-            let address = (base, start + byte);
-            let history = memory_history
-                .get_mut(&address)
-                .expect("memory history was initialized while collecting dependencies");
-            if is_write {
-                history.last_writer = Some(instruction);
-                history.readers_since_write.clear();
-            } else if history.readers_since_write.last() != Some(&instruction) {
-                history.readers_since_write.push(instruction);
-            }
         }
     }
 
@@ -402,22 +629,6 @@ fn add_dependency(
         dependencies[instruction].push(dependency);
         users[dependency] += 1;
     }
-}
-
-fn constant_memory_access(inst: &MInst) -> Option<(BaseReg, i64, u32, bool)> {
-    match inst {
-        MInst::Load {
-            base, offset, size, ..
-        } => Some((*base, i64::from(*offset), size.bytes(), false)),
-        MInst::Store {
-            base, offset, size, ..
-        } => Some((*base, i64::from(*offset), size.bytes(), true)),
-        _ => None,
-    }
-}
-
-fn is_unknown_memory_read(inst: &MInst) -> bool {
-    matches!(inst, MInst::LoadIndexed { .. })
 }
 
 fn dependency_order_valid(dependencies: &[Vec<usize>], order: &[usize]) -> bool {
@@ -778,6 +989,32 @@ mod tests {
         assert_eq!(stats.backward_liveness_steps, instruction_count);
         assert!(stats.maximum_after <= stats.maximum_before);
         func.verify();
+    }
+
+    #[test]
+    fn sparse_effect_tracking_scales_with_endpoints_not_region_bytes() {
+        const MARKS: usize = 256;
+        const ACTIVE_CAPACITY: usize = 1_000_000;
+        let mut tracker = MemoryDependencyTracker::default();
+        for index in 0..MARKS {
+            let inst = MInst::SparseMarkActive {
+                scratch: VReg(index as u32),
+                active_index: index as u32,
+                active_count_offset: 0,
+                active_flags_offset: 1024,
+                active_list_offset: 1_000_000,
+                active_capacity: ACTIVE_CAPACITY,
+            };
+            let mut dependencies = BTreeSet::new();
+            tracker.add_instruction(&inst, index, &mut dependencies);
+            if index != 0 {
+                assert!(dependencies.contains(&(index - 1)));
+            }
+        }
+
+        let sim_state = &tracker.direct[&BaseReg::SimState].exact;
+        assert_eq!(sim_state.segments.len(), MARKS + 2);
+        assert!(sim_state.segments.len() < ACTIVE_CAPACITY / 1000);
     }
 
     #[test]
