@@ -9,6 +9,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use fxhash::FxHashSet;
 
@@ -85,10 +87,28 @@ impl SlotIndex {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InstructionSlots {
+pub(super) struct InstructionSlots {
     use_: SlotIndex,
     clobber: SlotIndex,
     def: SlotIndex,
+}
+
+impl InstructionSlots {
+    pub(super) fn stable(zone: u64, sequence: u32) -> Option<Self> {
+        Some(Self {
+            use_: SlotIndex::stable(zone, sequence, 0)?,
+            clobber: SlotIndex::stable(zone, sequence, 1)?,
+            def: SlotIndex::stable(zone, sequence, 2)?,
+        })
+    }
+
+    pub(super) fn use_slot(self) -> SlotIndex {
+        self.use_
+    }
+
+    pub(super) fn definition_slot(self) -> SlotIndex {
+        self.def
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,12 +354,55 @@ impl LiveSegment {
     }
 }
 
+/// Canonical immutable use row shared by the fact index and live interval.
+///
+/// Split transactions replace a complete ordered row atomically. Sharing that
+/// row avoids retaining and copying a second all-use vector in `LiveInterval`
+/// while still giving readers a stable contiguous slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SharedUseSites(Arc<[UseSite]>);
+
+impl SharedUseSites {
+    pub(super) fn as_slice(&self) -> &[UseSite] {
+        &self.0
+    }
+}
+
+impl Default for SharedUseSites {
+    fn default() -> Self {
+        Self(Arc::from([]))
+    }
+}
+
+impl From<Vec<UseSite>> for SharedUseSites {
+    fn from(sites: Vec<UseSite>) -> Self {
+        Self(Arc::from(sites))
+    }
+}
+
+impl Deref for SharedUseSites {
+    type Target = [UseSite];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a SharedUseSites {
+    type Item = &'a UseSite;
+    type IntoIter = std::slice::Iter<'a, UseSite>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LiveInterval {
     pub value: VReg,
     pub definition: DefinitionSite,
     pub segments: Vec<LiveSegment>,
-    pub uses: Vec<UseSite>,
+    pub(super) uses: SharedUseSites,
 }
 
 impl LiveInterval {
@@ -613,6 +676,41 @@ struct IndexedBlockFacts {
     uses: Vec<(VReg, UseSite)>,
 }
 
+#[derive(Default)]
+struct IndexedBlockFactDelta {
+    removed_definitions: Vec<(VReg, DefinitionSite)>,
+    added_definitions: Vec<(VReg, DefinitionSite)>,
+    removed_uses: Vec<(VReg, UseSite)>,
+    added_uses: Vec<(VReg, UseSite)>,
+}
+
+/// Exact stable def/use transaction emitted by allocation IR mutations.
+///
+/// The old block-delta API remains as an independent debug oracle. Optimized
+/// allocation consumes this journal directly, so rewriting one operand does
+/// not rescan and compare every unrelated instruction in the same RTL block.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct LivenessFactDelta {
+    pub changed_blocks: BTreeSet<BlockId>,
+    /// Blocks whose ordered instruction snapshot must be republished. Stable
+    /// slots make individual dense insertion positions irrelevant.
+    pub layout_blocks: BTreeSet<BlockId>,
+    pub removed_definitions: Vec<(VReg, DefinitionSite)>,
+    pub added_definitions: Vec<(VReg, DefinitionSite)>,
+    pub removed_uses: Vec<(VReg, UseSite)>,
+    pub added_uses: Vec<(VReg, UseSite)>,
+}
+
+impl LivenessFactDelta {
+    pub(super) fn is_empty(&self) -> bool {
+        self.layout_blocks.is_empty()
+            && self.removed_definitions.is_empty()
+            && self.added_definitions.is_empty()
+            && self.removed_uses.is_empty()
+            && self.added_uses.is_empty()
+    }
+}
+
 /// Mutable strict-SSA fact index used by allocation-owned splitting.
 ///
 /// Facts are owned by the block in which the machine value is physically
@@ -620,11 +718,11 @@ struct IndexedBlockFacts {
 /// Rebuilding one changed block therefore updates exact def/use rows without
 /// solving a function-wide set equation. Values whose old interval crossed
 /// the changed block are recomputed independently by sparse reverse CFG walk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct IncrementalLiveness {
     block_facts: Vec<IndexedBlockFacts>,
     definitions: Vec<Option<DefinitionSite>>,
-    uses: Vec<Vec<UseSite>>,
+    uses: Vec<SharedUseSites>,
     /// Dense-slot programs must revisit values crossing a relabeled block.
     /// Stable allocation IR never renumbers physical coordinates, so it does
     /// not materialize this potentially enormous value-by-block relation.
@@ -634,6 +732,105 @@ pub(super) struct IncrementalLiveness {
     /// block updates only its resident segment contribution; changed geometry
     /// is rebuilt once from the new sparse range.
     program_order_lengths: Vec<Option<u64>>,
+    /// Reused epoch-marked CFG workspace for one-value sparse interval
+    /// reconstruction. This is capacity, not semantic analysis state.
+    interval_scratch: SparseIntervalScratch,
+}
+
+impl PartialEq for IncrementalLiveness {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_facts == other.block_facts
+            && self.definitions == other.definitions
+            && self.uses == other.uses
+            && self.block_members == other.block_members
+            && self.dominators == other.dominators
+            && self.program_order_lengths == other.program_order_lengths
+    }
+}
+
+impl Eq for IncrementalLiveness {}
+
+#[derive(Debug, Clone)]
+struct SparseIntervalScratch {
+    epoch: u32,
+    live_in: Vec<u32>,
+    live_out: Vec<u32>,
+    touched: Vec<u32>,
+    last_use_epoch: Vec<u32>,
+    last_use: Vec<SlotIndex>,
+    queue: Vec<usize>,
+    live_blocks: Vec<usize>,
+}
+
+impl SparseIntervalScratch {
+    fn new(block_count: usize) -> Self {
+        Self {
+            epoch: 0,
+            live_in: vec![0; block_count],
+            live_out: vec![0; block_count],
+            touched: vec![0; block_count],
+            last_use_epoch: vec![0; block_count],
+            last_use: vec![SlotIndex::stable_entry(); block_count],
+            queue: Vec::new(),
+            live_blocks: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, block_count: usize) {
+        if self.live_in.len() != block_count {
+            *self = Self::new(block_count);
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.live_in.fill(0);
+            self.live_out.fill(0);
+            self.touched.fill(0);
+            self.last_use_epoch.fill(0);
+            self.epoch = 1;
+        }
+        self.queue.clear();
+        self.live_blocks.clear();
+    }
+
+    fn touch(&mut self, block: usize) {
+        if self.touched[block] != self.epoch {
+            self.touched[block] = self.epoch;
+            self.live_blocks.push(block);
+        }
+    }
+
+    fn mark_live_in(&mut self, block: usize) -> bool {
+        self.touch(block);
+        if self.live_in[block] == self.epoch {
+            false
+        } else {
+            self.live_in[block] = self.epoch;
+            true
+        }
+    }
+
+    fn mark_live_out(&mut self, block: usize) {
+        self.touch(block);
+        self.live_out[block] = self.epoch;
+    }
+
+    fn record_last_use(&mut self, block: usize, slot: SlotIndex) {
+        self.touch(block);
+        if self.last_use_epoch[block] != self.epoch {
+            self.last_use_epoch[block] = self.epoch;
+            self.last_use[block] = slot;
+        } else {
+            self.last_use[block] = self.last_use[block].max(slot);
+        }
+    }
+
+    fn is_live_out(&self, block: usize) -> bool {
+        self.live_out[block] == self.epoch
+    }
+
+    fn last_use(&self, block: usize) -> Option<SlotIndex> {
+        (self.last_use_epoch[block] == self.epoch).then_some(self.last_use[block])
+    }
 }
 
 /// Exact result of one allocation-IR liveness update.
@@ -1048,6 +1245,10 @@ impl IncrementalLiveness {
             value_uses.sort_unstable();
             value_uses.dedup();
         }
+        let uses = uses
+            .into_iter()
+            .map(SharedUseSites::from)
+            .collect::<Vec<_>>();
         for (value, interval) in intervals.intervals.iter().enumerate() {
             match (definitions[value], interval) {
                 (None, None) if uses[value].is_empty() => {}
@@ -1101,6 +1302,7 @@ impl IncrementalLiveness {
             block_members,
             dominators: DominatorIntervals::build(program, cfg)?,
             program_order_lengths,
+            interval_scratch: SparseIntervalScratch::new(program.block_count()),
         })
     }
 
@@ -1160,7 +1362,8 @@ impl IncrementalLiveness {
 
         let next_value_count = program.value_count() as usize;
         self.definitions.resize(next_value_count, None);
-        self.uses.resize_with(next_value_count, Vec::new);
+        self.uses
+            .resize_with(next_value_count, SharedUseSites::default);
         self.program_order_lengths.resize(next_value_count, None);
         intervals.intervals.resize(next_value_count, None);
 
@@ -1326,6 +1529,167 @@ impl IncrementalLiveness {
             }
         }
 
+        self.rebuild_affected_intervals(program, cfg, intervals, affected)
+    }
+
+    /// Apply the exact stable fact transaction emitted by allocation IR.
+    /// Optimized allocation uses this path; debug verification independently
+    /// rescans every touched block through [`Self::update_delta`] and requires
+    /// byte-for-byte identical indexes and sparse intervals.
+    pub(super) fn update_fact_delta<P: LivenessProgram + ?Sized>(
+        &mut self,
+        program: &P,
+        cfg: &NormalizedCfg,
+        intervals: &mut LiveIntervals,
+        mut delta: LivenessFactDelta,
+    ) -> Result<IncrementalLivenessUpdate, LiveIntervalError> {
+        check_model_shape(program, cfg)?;
+        if !program.has_stable_instruction_slots()
+            || self.block_facts.len() != program.block_count()
+            || self.block_members.is_some()
+            || intervals.block_slots.len() != program.block_count()
+            || program.value_count() < self.definitions.len() as u32
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.FACT_DELTA_SHAPE",
+                None,
+                None,
+                Vec::new(),
+                "exact fact transactions require a stable-slot allocation program",
+            ));
+        }
+        if delta.is_empty() {
+            return Ok(IncrementalLivenessUpdate::default());
+        }
+
+        let oracle = if super::exhaustive_verification_enabled() {
+            let mut oracle_index = self.clone();
+            let mut oracle_intervals = intervals.clone();
+            let oracle_update = oracle_index.update_delta(
+                program,
+                cfg,
+                &mut oracle_intervals,
+                &delta.changed_blocks,
+            )?;
+            Some((oracle_index, oracle_intervals, oracle_update))
+        } else {
+            None
+        };
+
+        normalize_fact_changes(
+            &mut delta.removed_definitions,
+            &mut delta.added_definitions,
+            "definition",
+        )?;
+        normalize_fact_changes(&mut delta.removed_uses, &mut delta.added_uses, "use")?;
+
+        let next_value_count = program.value_count() as usize;
+        self.definitions.resize(next_value_count, None);
+        self.uses
+            .resize_with(next_value_count, SharedUseSites::default);
+        self.program_order_lengths.resize(next_value_count, None);
+        intervals.intervals.resize(next_value_count, None);
+
+        for block_id in &delta.layout_blocks {
+            let block = cfg.block_index.get(block_id).copied().ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.FACT_DELTA_BLOCK",
+                    Some(*block_id),
+                    None,
+                    Vec::new(),
+                    "instruction-layout publication is outside the normalized CFG",
+                )
+            })?;
+            let slots = assign_block_slots(program, block)?;
+            intervals.block_slots[block] = slots;
+        }
+
+        let mut affected = Vec::<VReg>::new();
+        let mut affected_marks = vec![false; next_value_count];
+        for &(value, definition) in &delta.removed_definitions {
+            mark_affected_value(
+                &mut affected,
+                &mut affected_marks,
+                value,
+                definition.block(),
+            )?;
+            let slot = self
+                .definitions
+                .get_mut(value.0 as usize)
+                .ok_or_else(|| value_range_error(definition.block(), value, "definition"))?;
+            if *slot != Some(definition) {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.FACT_DELTA_DEFINITION",
+                    Some(definition.block()),
+                    None,
+                    vec![value],
+                    "removed definition differs from the global stable fact index",
+                ));
+            }
+            *slot = None;
+        }
+        for &(value, definition) in &delta.added_definitions {
+            mark_affected_value(
+                &mut affected,
+                &mut affected_marks,
+                value,
+                definition.block(),
+            )?;
+            record_definition(&mut self.definitions, value, definition)?;
+        }
+        apply_sorted_use_fact_delta(
+            &mut self.uses,
+            &delta.removed_uses,
+            &delta.added_uses,
+            &mut affected,
+            &mut affected_marks,
+        )?;
+        apply_indexed_block_fact_delta(&mut self.block_facts, cfg, &mut delta)?;
+        affected.sort_unstable();
+
+        for block_id in &delta.changed_blocks {
+            let block = cfg.block_index.get(block_id).copied().ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.FACT_DELTA_BLOCK",
+                    Some(*block_id),
+                    None,
+                    Vec::new(),
+                    "changed fact block is outside the normalized CFG",
+                )
+            })?;
+            if intervals.block_slots[block].instructions.len() != program.instruction_count(block) {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.FACT_DELTA_SLOT_SHAPE",
+                    Some(*block_id),
+                    None,
+                    Vec::new(),
+                    "stable slot edits do not reproduce the allocation-IR instruction row",
+                ));
+            }
+        }
+
+        let update = self.rebuild_affected_intervals(program, cfg, intervals, affected)?;
+        if let Some((oracle_index, oracle_intervals, oracle_update)) = oracle
+            && (*self != oracle_index || *intervals != oracle_intervals || update != oracle_update)
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.FACT_DELTA_ORACLE",
+                delta.changed_blocks.iter().next().copied(),
+                None,
+                update.changed_values.clone(),
+                "exact allocation-IR fact transaction differs from a complete changed-block rescan",
+            ));
+        }
+        Ok(update)
+    }
+
+    fn rebuild_affected_intervals<P: LivenessProgram + ?Sized>(
+        &mut self,
+        program: &P,
+        cfg: &NormalizedCfg,
+        intervals: &mut LiveIntervals,
+        affected: Vec<VReg>,
+    ) -> Result<IncrementalLivenessUpdate, LiveIntervalError> {
         let mut update = IncrementalLivenessUpdate::default();
         for value in affected {
             let definition = self.definitions[value.0 as usize];
@@ -1363,6 +1727,7 @@ impl IncrementalLiveness {
                 &self.definitions,
                 &self.uses,
                 &self.dominators,
+                &mut self.interval_scratch,
                 value,
             )?;
             if intervals.intervals[row] != next {
@@ -1451,6 +1816,237 @@ fn same_use_coordinate(left: UseSite, right: UseSite) -> bool {
     left.same_coordinate(right)
 }
 
+fn normalize_fact_changes<T: Copy + Ord>(
+    removed: &mut Vec<T>,
+    added: &mut Vec<T>,
+    kind: &str,
+) -> Result<(), LiveIntervalError> {
+    removed.sort_unstable();
+    added.sort_unstable();
+    if removed.windows(2).any(|pair| pair[0] == pair[1])
+        || added.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.FACT_DELTA_IDENTITY",
+            None,
+            None,
+            Vec::new(),
+            format!("exact {kind} transaction contains a duplicate fact"),
+        ));
+    }
+
+    let mut removed_only = Vec::with_capacity(removed.len());
+    let mut added_only = Vec::with_capacity(added.len());
+    let mut removed_index = 0;
+    let mut added_index = 0;
+    while removed_index < removed.len() && added_index < added.len() {
+        match removed[removed_index].cmp(&added[added_index]) {
+            Ordering::Less => {
+                removed_only.push(removed[removed_index]);
+                removed_index += 1;
+            }
+            Ordering::Greater => {
+                added_only.push(added[added_index]);
+                added_index += 1;
+            }
+            Ordering::Equal => {
+                removed_index += 1;
+                added_index += 1;
+            }
+        }
+    }
+    removed_only.extend_from_slice(&removed[removed_index..]);
+    added_only.extend_from_slice(&added[added_index..]);
+    *removed = removed_only;
+    *added = added_only;
+    Ok(())
+}
+
+fn block_fact_row<'a>(
+    facts: &'a mut [IndexedBlockFacts],
+    cfg: &NormalizedCfg,
+    block: BlockId,
+) -> Result<&'a mut IndexedBlockFacts, LiveIntervalError> {
+    let row = cfg.block_index.get(&block).copied().ok_or_else(|| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.FACT_DELTA_BLOCK",
+            Some(block),
+            None,
+            Vec::new(),
+            "stable fact is outside the normalized CFG",
+        )
+    })?;
+    facts.get_mut(row).ok_or_else(|| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.FACT_DELTA_BLOCK",
+            Some(block),
+            None,
+            Vec::new(),
+            "stable fact has no cached block row",
+        )
+    })
+}
+
+fn apply_indexed_block_fact_delta(
+    facts: &mut [IndexedBlockFacts],
+    cfg: &NormalizedCfg,
+    delta: &mut LivenessFactDelta,
+) -> Result<(), LiveIntervalError> {
+    let mut rows = BTreeMap::<BlockId, IndexedBlockFactDelta>::new();
+    for fact in std::mem::take(&mut delta.removed_definitions) {
+        rows.entry(fact.1.block())
+            .or_default()
+            .removed_definitions
+            .push(fact);
+    }
+    for fact in std::mem::take(&mut delta.added_definitions) {
+        rows.entry(fact.1.block())
+            .or_default()
+            .added_definitions
+            .push(fact);
+    }
+    for fact in std::mem::take(&mut delta.removed_uses) {
+        rows.entry(fact.1.block())
+            .or_default()
+            .removed_uses
+            .push(fact);
+    }
+    for fact in std::mem::take(&mut delta.added_uses) {
+        rows.entry(fact.1.block())
+            .or_default()
+            .added_uses
+            .push(fact);
+    }
+
+    for (block, delta) in rows {
+        let row = block_fact_row(facts, cfg, block)?;
+        row.definitions = merge_sorted_fact_row(
+            &row.definitions,
+            &delta.removed_definitions,
+            &delta.added_definitions,
+            block,
+            "definition",
+            |fact| fact.0,
+        )?;
+        row.uses = merge_sorted_fact_row(
+            &row.uses,
+            &delta.removed_uses,
+            &delta.added_uses,
+            block,
+            "use",
+            |fact| fact.0,
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace one block-owned sorted fact row atomically. A split may rewrite
+/// thousands of operands in one RTL block; repeated `Vec::remove/insert`
+/// would shift that same row once per operand.
+fn merge_sorted_fact_row<T: Copy + Ord>(
+    existing: &[T],
+    removed: &[T],
+    added: &[T],
+    block: BlockId,
+    kind: &str,
+    value_of: impl Fn(T) -> VReg,
+) -> Result<Vec<T>, LiveIntervalError> {
+    if let Some(duplicate) = removed.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.FACT_DELTA_ROW",
+            Some(block),
+            None,
+            vec![value_of(duplicate[0])],
+            format!("block transaction removes the same {kind} fact twice"),
+        ));
+    }
+    if let Some(duplicate) = added.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.FACT_DELTA_ROW",
+            Some(block),
+            None,
+            vec![value_of(duplicate[0])],
+            format!("block transaction adds the same {kind} fact twice"),
+        ));
+    }
+
+    let mut merged = Vec::with_capacity(
+        existing
+            .len()
+            .saturating_sub(removed.len())
+            .saturating_add(added.len()),
+    );
+    let mut existing_index = 0;
+    let mut removed_index = 0;
+    let mut added_index = 0;
+    loop {
+        while let (Some(&existing_fact), Some(&removed_fact)) =
+            (existing.get(existing_index), removed.get(removed_index))
+        {
+            match existing_fact.cmp(&removed_fact) {
+                Ordering::Less => break,
+                Ordering::Equal => {
+                    existing_index += 1;
+                    removed_index += 1;
+                }
+                Ordering::Greater => {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.FACT_DELTA_ROW",
+                        Some(block),
+                        None,
+                        vec![value_of(removed_fact)],
+                        format!("removed {kind} is absent from the cached block row"),
+                    ));
+                }
+            }
+        }
+        if existing_index == existing.len() && removed_index < removed.len() {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.FACT_DELTA_ROW",
+                Some(block),
+                None,
+                vec![value_of(removed[removed_index])],
+                format!("removed {kind} is absent from the cached block row"),
+            ));
+        }
+
+        match (
+            existing.get(existing_index).copied(),
+            added.get(added_index).copied(),
+        ) {
+            (Some(existing_fact), Some(added_fact)) => match existing_fact.cmp(&added_fact) {
+                Ordering::Less => {
+                    merged.push(existing_fact);
+                    existing_index += 1;
+                }
+                Ordering::Greater => {
+                    merged.push(added_fact);
+                    added_index += 1;
+                }
+                Ordering::Equal => {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.FACT_DELTA_ROW",
+                        Some(block),
+                        None,
+                        vec![value_of(added_fact)],
+                        format!("added {kind} already exists in the cached block row"),
+                    ));
+                }
+            },
+            (Some(existing_fact), None) => {
+                merged.push(existing_fact);
+                existing_index += 1;
+            }
+            (None, Some(added_fact)) => {
+                merged.push(added_fact);
+                added_index += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    Ok(merged)
+}
+
 fn value_range_error(block: BlockId, value: VReg, kind: &str) -> LiveIntervalError {
     LiveIntervalError::new(
         "LIVE_INTERVAL.VALUE_RANGE",
@@ -1496,7 +2092,7 @@ fn append_sorted_difference<T: Copy + Ord>(output: &mut Vec<T>, left: &[T], righ
 /// split round quadratic in a heavily used RTL value. Both sides are ordered,
 /// so removal and insertion are exact linear merges.
 fn apply_sorted_use_fact_delta(
-    uses: &mut [Vec<UseSite>],
+    uses: &mut [SharedUseSites],
     removed: &[(VReg, UseSite)],
     added: &[(VReg, UseSite)],
     affected: &mut Vec<VReg>,
@@ -1542,7 +2138,7 @@ fn apply_sorted_use_fact_delta(
 }
 
 fn replace_sorted_uses(
-    existing: &mut Vec<UseSite>,
+    existing: &mut SharedUseSites,
     removed: &[(VReg, UseSite)],
     added: &[(VReg, UseSite)],
     value: VReg,
@@ -1566,12 +2162,38 @@ fn replace_sorted_uses(
         ));
     }
 
-    let mut retained = Vec::with_capacity(existing.len().saturating_sub(removed.len()));
+    let mut merged = Vec::with_capacity(
+        existing
+            .len()
+            .saturating_sub(removed.len())
+            .saturating_add(added.len()),
+    );
     let mut existing_index = 0;
     let mut removed_index = 0;
-    while removed_index < removed.len() {
-        let removed_site = removed[removed_index].1;
-        let Some(&existing_site) = existing.get(existing_index) else {
+    let mut added_index = 0;
+    loop {
+        while let (Some(&existing_site), Some((_, removed_site))) =
+            (existing.get(existing_index), removed.get(removed_index))
+        {
+            match existing_site.cmp(removed_site) {
+                Ordering::Less => break,
+                Ordering::Equal => {
+                    existing_index += 1;
+                    removed_index += 1;
+                }
+                Ordering::Greater => {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.INCREMENTAL_USE",
+                        Some(removed_site.block()),
+                        None,
+                        vec![value],
+                        "cached block use is absent from the global fact index",
+                    ));
+                }
+            }
+        }
+        if existing_index == existing.len() && removed_index < removed.len() {
+            let removed_site = removed[removed_index].1;
             return Err(LiveIntervalError::new(
                 "LIVE_INTERVAL.INCREMENTAL_USE",
                 Some(removed_site.block()),
@@ -1579,58 +2201,43 @@ fn replace_sorted_uses(
                 vec![value],
                 "cached block use is absent from the global fact index",
             ));
-        };
-        match existing_site.cmp(&removed_site) {
-            Ordering::Less => {
-                retained.push(existing_site);
-                existing_index += 1;
-            }
-            Ordering::Equal => {
-                existing_index += 1;
-                removed_index += 1;
-            }
-            Ordering::Greater => {
-                return Err(LiveIntervalError::new(
-                    "LIVE_INTERVAL.INCREMENTAL_USE",
-                    Some(removed_site.block()),
-                    None,
-                    vec![value],
-                    "cached block use is absent from the global fact index",
-                ));
-            }
         }
-    }
-    retained.extend_from_slice(&existing[existing_index..]);
 
-    let mut merged = Vec::with_capacity(retained.len().saturating_add(added.len()));
-    let mut retained_index = 0;
-    let mut added_index = 0;
-    while retained_index < retained.len() && added_index < added.len() {
-        let retained_site = retained[retained_index];
-        let added_site = added[added_index].1;
-        match retained_site.cmp(&added_site) {
-            Ordering::Less => {
-                merged.push(retained_site);
-                retained_index += 1;
+        match (
+            existing.get(existing_index).copied(),
+            added.get(added_index),
+        ) {
+            (Some(existing_site), Some((_, added_site))) => match existing_site.cmp(added_site) {
+                Ordering::Less => {
+                    merged.push(existing_site);
+                    existing_index += 1;
+                }
+                Ordering::Greater => {
+                    merged.push(*added_site);
+                    added_index += 1;
+                }
+                Ordering::Equal => {
+                    return Err(LiveIntervalError::new(
+                        "LIVE_INTERVAL.INCREMENTAL_USE",
+                        Some(added_site.block()),
+                        None,
+                        vec![value],
+                        "new block use already exists in the global fact index",
+                    ));
+                }
+            },
+            (Some(existing_site), None) => {
+                merged.push(existing_site);
+                existing_index += 1;
             }
-            Ordering::Greater => {
-                merged.push(added_site);
+            (None, Some((_, added_site))) => {
+                merged.push(*added_site);
                 added_index += 1;
             }
-            Ordering::Equal => {
-                return Err(LiveIntervalError::new(
-                    "LIVE_INTERVAL.INCREMENTAL_USE",
-                    Some(added_site.block()),
-                    None,
-                    vec![value],
-                    "new block use already exists in the global fact index",
-                ));
-            }
+            (None, None) => break,
         }
     }
-    merged.extend_from_slice(&retained[retained_index..]);
-    merged.extend(added[added_index..].iter().map(|(_, site)| *site));
-    *existing = merged;
+    *existing = merged.into();
     Ok(())
 }
 
@@ -1791,8 +2398,9 @@ fn build_sparse_value_interval<P: LivenessProgram + ?Sized>(
     cfg: &NormalizedCfg,
     slots: &[BlockSlots],
     definitions: &[Option<DefinitionSite>],
-    uses: &[Vec<UseSite>],
+    uses: &[SharedUseSites],
     dominators: &DominatorIntervals,
+    scratch: &mut SparseIntervalScratch,
     value: VReg,
 ) -> Result<Option<LiveInterval>, LiveIntervalError> {
     let definition = definitions.get(value.0 as usize).copied().flatten();
@@ -1824,56 +2432,52 @@ fn build_sparse_value_interval<P: LivenessProgram + ?Sized>(
     }
 
     let definition_block = cfg.block_index[&definition.block()];
-    let mut live_in = BTreeSet::<usize>::new();
-    let mut live_out = BTreeSet::<usize>::new();
-    let mut last_use = BTreeMap::<usize, SlotIndex>::new();
-    let mut queue = VecDeque::new();
+    scratch.begin(program.block_count());
+    scratch.touch(definition_block);
     for &site in value_uses {
         let block = cfg.block_index[&site.block()];
-        last_use
-            .entry(block)
-            .and_modify(|current| *current = (*current).max(site.slot()))
-            .or_insert(site.slot());
+        scratch.record_last_use(block, site.slot());
         match site {
             UseSite::Instruction { .. } if block == definition_block => {}
             UseSite::Instruction { .. } => {
-                if live_in.insert(block) {
-                    queue.push_back(block);
+                if scratch.mark_live_in(block) {
+                    scratch.queue.push(block);
                 }
             }
             UseSite::PhiEdge { .. } => {
-                live_out.insert(block);
-                if block != definition_block && live_in.insert(block) {
-                    queue.push_back(block);
+                scratch.mark_live_out(block);
+                if block != definition_block && scratch.mark_live_in(block) {
+                    scratch.queue.push(block);
                 }
             }
         }
     }
-    while let Some(block) = queue.pop_front() {
+    let mut queue_cursor = 0usize;
+    while queue_cursor < scratch.queue.len() {
+        let block = scratch.queue[queue_cursor];
+        queue_cursor += 1;
         for &predecessor in &cfg.predecessors[block] {
-            live_out.insert(predecessor);
-            if predecessor != definition_block && live_in.insert(predecessor) {
-                queue.push_back(predecessor);
+            scratch.mark_live_out(predecessor);
+            if predecessor != definition_block && scratch.mark_live_in(predecessor) {
+                scratch.queue.push(predecessor);
             }
         }
     }
 
-    let mut live_blocks = BTreeSet::new();
-    live_blocks.insert(definition_block);
-    live_blocks.extend(live_in.iter().copied());
-    live_blocks.extend(live_out.iter().copied());
-    live_blocks.extend(last_use.keys().copied());
-    let mut segments = Vec::with_capacity(live_blocks.len());
-    for block in live_blocks {
+    scratch
+        .live_blocks
+        .sort_unstable_by_key(|&block| program.block_id(block));
+    let mut segments = Vec::with_capacity(scratch.live_blocks.len());
+    for &block in &scratch.live_blocks {
         let block_slots = &slots[block];
         let start = if block == definition_block {
             definition.slot()
         } else {
             block_slots.entry
         };
-        let end = if live_out.contains(&block) {
+        let end = if scratch.is_live_out(block) {
             block_slots.exit.next()
-        } else if let Some(&last_use) = last_use.get(&block) {
+        } else if let Some(last_use) = scratch.last_use(block) {
             last_use.next()
         } else if block == definition_block {
             definition.slot().next()
@@ -2444,7 +3048,7 @@ fn build_intervals<P: LivenessProgram + ?Sized>(
                     value,
                     definition,
                     segments: value_segments,
-                    uses: facts.uses[value.0 as usize].clone(),
+                    uses: facts.uses[value.0 as usize].clone().into(),
                 }));
             }
             None if facts.uses[value.0 as usize].is_empty() => intervals.push(None),
@@ -2532,7 +3136,7 @@ impl LiveIntervals {
             };
             if interval.value != value
                 || Some(interval.definition) != facts.definitions[value_index]
-                || interval.uses != facts.uses[value_index]
+                || interval.uses.as_slice() != facts.uses[value_index]
             {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.VALUE_IDENTITY",

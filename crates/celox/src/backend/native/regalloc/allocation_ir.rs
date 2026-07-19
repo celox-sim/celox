@@ -18,8 +18,8 @@ use super::assignment::{PhysReg, RegConstraint, clobbers, use_constraints};
 use super::cfg::NormalizedCfg;
 use super::home_graph::{HomeGraph, LiveBundleId, RecipeId, RecipeNode};
 use super::live_interval::{
-    DefinitionSite, LiveIntervalError, LiveIntervals, LivenessProgram, SlotIndex, UseSite,
-    analyze_program,
+    DefinitionSite, InstructionSlots, LiveIntervalError, LiveIntervals, LivenessFactDelta,
+    LivenessProgram, SlotIndex, UseSite, analyze_program,
 };
 use super::reload::{PureStep, materialize_pure_step};
 
@@ -93,6 +93,22 @@ struct AllocationInstruction {
     definition: Option<VReg>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingInstructionInsert {
+    block: usize,
+    order: SlotIndex,
+    instruction: AllocationInstruction,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InstructionLivenessSnapshot {
+    block: BlockId,
+    identity: usize,
+    slots: InstructionSlots,
+    uses: Uses,
+    definition: Option<VReg>,
+}
+
 fn liveness_instruction_identity(
     block: &AllocationBlock,
     origin: AllocationInstructionOrigin,
@@ -103,6 +119,23 @@ fn liveness_instruction_identity(
             block.original_instruction_count.checked_add(id.0 as usize)
         }
     }
+}
+
+fn liveness_instruction_slots(origin: AllocationInstructionOrigin) -> Option<InstructionSlots> {
+    let (zone, sequence) = match origin {
+        AllocationInstructionOrigin::Original { instruction } => {
+            let instruction = u64::try_from(instruction).ok()?;
+            (instruction.checked_mul(3)?.checked_add(2)?, 0)
+        }
+        AllocationInstructionOrigin::Synthetic { zone, sequence, .. } => (zone, sequence),
+    };
+    InstructionSlots::stable(zone, sequence)
+}
+
+fn liveness_block_exit_slot(block: &AllocationBlock) -> Option<SlotIndex> {
+    let instruction_count = u64::try_from(block.original_instruction_count).ok()?;
+    let zone = instruction_count.checked_mul(3)?.checked_add(1)?;
+    SlotIndex::stable(zone, 0, 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,15 +171,35 @@ struct SyntheticDefinitionRef {
     block: BlockId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct AllocationIr {
     original_value_count: u32,
     next_value: u32,
     next_synthetic_instruction: u32,
     synthetic_definitions: Vec<Option<SyntheticDefinitionRef>>,
+    next_sequence_by_zone: HashMap<(usize, u64), u32>,
     block_index: HashMap<BlockId, usize>,
     blocks: Vec<AllocationBlock>,
+    instruction_transaction_active: bool,
+    pending_instruction_inserts: Vec<PendingInstructionInsert>,
+    pending_liveness: LivenessFactDelta,
 }
+
+impl PartialEq for AllocationIr {
+    fn eq(&self, other: &Self) -> bool {
+        self.original_value_count == other.original_value_count
+            && self.next_value == other.next_value
+            && self.next_synthetic_instruction == other.next_synthetic_instruction
+            && self.synthetic_definitions == other.synthetic_definitions
+            && self.next_sequence_by_zone == other.next_sequence_by_zone
+            && self.block_index == other.block_index
+            && self.blocks == other.blocks
+            && self.instruction_transaction_active == other.instruction_transaction_active
+            && self.pending_instruction_inserts == other.pending_instruction_inserts
+    }
+}
+
+impl Eq for AllocationIr {}
 
 /// Snapshot index from immutable source-MIR instruction identities to their
 /// current allocation-IR positions. Synthetic insertion changes positions but
@@ -346,8 +399,12 @@ impl AllocationIr {
             next_value: func.vregs.count(),
             next_synthetic_instruction: 0,
             synthetic_definitions: vec![None; func.vregs.count() as usize],
+            next_sequence_by_zone: HashMap::new(),
             block_index,
             blocks,
+            instruction_transaction_active: false,
+            pending_instruction_inserts: Vec::new(),
+            pending_liveness: LivenessFactDelta::default(),
         };
         result.verify_structure()?;
         Ok(result)
@@ -355,6 +412,263 @@ impl AllocationIr {
 
     pub(super) fn value_count(&self) -> u32 {
         self.next_value
+    }
+
+    pub(super) fn take_liveness_delta(&mut self) -> LivenessFactDelta {
+        std::mem::take(&mut self.pending_liveness)
+    }
+
+    /// Begin one allocation-owned instruction transaction. Synthetic rows are
+    /// assigned stable identities immediately but are merged into each dense
+    /// block snapshot only once when the transaction is published.
+    pub(super) fn begin_instruction_transaction(&mut self) -> Result<(), AllocationIrError> {
+        if self.instruction_transaction_active || !self.pending_instruction_inserts.is_empty() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_TRANSACTION",
+                None,
+                None,
+                Vec::new(),
+                "instruction transaction is already active or has unpublished rows",
+            ));
+        }
+        self.instruction_transaction_active = true;
+        Ok(())
+    }
+
+    /// Publish staged rows with one ordered merge per touched block. Dense
+    /// positions are a lowering snapshot; stable `(zone, sequence)` labels are
+    /// the allocation identity and therefore define the merge order.
+    pub(super) fn publish_instruction_transaction(&mut self) -> Result<(), AllocationIrError> {
+        if !self.instruction_transaction_active {
+            if self.pending_instruction_inserts.is_empty() {
+                return Ok(());
+            }
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_TRANSACTION",
+                None,
+                None,
+                Vec::new(),
+                "staged instruction rows exist outside an active transaction",
+            ));
+        }
+
+        for pending in &self.pending_instruction_inserts {
+            let block = pending.block;
+            let instruction = &pending.instruction;
+            let Some(row) = self.blocks.get(block) else {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_TRANSACTION_BLOCK",
+                    None,
+                    None,
+                    Vec::new(),
+                    "staged instruction references a missing block row",
+                ));
+            };
+            if liveness_instruction_identity(row, instruction.origin).is_none() {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                    Some(row.id),
+                    None,
+                    instruction.uses.to_vec(),
+                    "staged instruction exceeds the stable identity or order domain",
+                ));
+            }
+        }
+
+        let mut pending = std::mem::take(&mut self.pending_instruction_inserts);
+        pending.sort_unstable_by_key(|pending| (pending.block, pending.order));
+        let mut pending = pending.into_iter().peekable();
+        let mut inserted_locations = Vec::<(usize, usize)>::new();
+        while let Some(first) = pending.next() {
+            let block = first.block;
+            let mut staged = vec![(first.order, first.instruction)];
+            while pending
+                .peek()
+                .is_some_and(|candidate| candidate.block == block)
+            {
+                let Some(next) = pending.next() else {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                        Some(self.blocks[block].id),
+                        None,
+                        Vec::new(),
+                        "staged instruction iterator changed after inspection",
+                    ));
+                };
+                staged.push((next.order, next.instruction));
+            }
+
+            let existing = std::mem::take(&mut self.blocks[block].instructions);
+            let mut existing = existing.into_iter().peekable();
+            let mut staged = staged.into_iter().peekable();
+            let mut merged = Vec::with_capacity(existing.len().saturating_add(staged.len()));
+            loop {
+                let take_staged = match (existing.peek(), staged.peek()) {
+                    (Some(left), Some(right)) => {
+                        let left = liveness_instruction_slots(left.origin)
+                            .map(InstructionSlots::use_slot)
+                            .ok_or_else(|| {
+                                AllocationIrError::new(
+                                    "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                                    Some(self.blocks[block].id),
+                                    Some(merged.len()),
+                                    left.uses.to_vec(),
+                                    "published instruction exceeds the stable order domain",
+                                )
+                            })?;
+                        let right = right.0;
+                        if left == right {
+                            return Err(AllocationIrError::new(
+                                "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                                Some(self.blocks[block].id),
+                                Some(merged.len()),
+                                Vec::new(),
+                                "two instructions have the same stable order coordinate",
+                            ));
+                        }
+                        right < left
+                    }
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                    (None, None) => break,
+                };
+                if take_staged {
+                    inserted_locations.push((block, merged.len()));
+                    let Some((_, instruction)) = staged.next() else {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                            Some(self.blocks[block].id),
+                            Some(merged.len()),
+                            Vec::new(),
+                            "staged instruction vanished during block publication",
+                        ));
+                    };
+                    merged.push(instruction);
+                } else {
+                    let Some(instruction) = existing.next() else {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.INSTRUCTION_TRANSACTION_ORDER",
+                            Some(self.blocks[block].id),
+                            Some(merged.len()),
+                            Vec::new(),
+                            "published instruction vanished during block publication",
+                        ));
+                    };
+                    merged.push(instruction);
+                }
+            }
+            self.blocks[block].instructions = merged;
+        }
+
+        for (block, position) in inserted_locations {
+            let snapshot = self.instruction_liveness_snapshot(block, position)?;
+            self.record_instruction_inserted(snapshot);
+        }
+        self.instruction_transaction_active = false;
+        Ok(())
+    }
+
+    fn instruction_liveness_snapshot(
+        &self,
+        block: usize,
+        position: usize,
+    ) -> Result<InstructionLivenessSnapshot, AllocationIrError> {
+        let block_row = self.blocks.get(block).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.LIVENESS_BLOCK",
+                None,
+                Some(position),
+                Vec::new(),
+                "instruction liveness snapshot references a missing block",
+            )
+        })?;
+        let instruction = block_row.instructions.get(position).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.LIVENESS_INSTRUCTION",
+                Some(block_row.id),
+                Some(position),
+                Vec::new(),
+                "instruction liveness snapshot references a missing row",
+            )
+        })?;
+        let identity =
+            liveness_instruction_identity(block_row, instruction.origin).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ID_RANGE",
+                    Some(block_row.id),
+                    Some(position),
+                    Vec::new(),
+                    "stable liveness instruction identity exceeds usize",
+                )
+            })?;
+        let slots = liveness_instruction_slots(instruction.origin).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(block_row.id),
+                Some(position),
+                Vec::new(),
+                "stable liveness instruction slots exceed their label domain",
+            )
+        })?;
+        Ok(InstructionLivenessSnapshot {
+            block: block_row.id,
+            identity,
+            slots,
+            uses: instruction.uses,
+            definition: instruction.definition,
+        })
+    }
+
+    fn record_instruction_inserted(&mut self, snapshot: InstructionLivenessSnapshot) {
+        self.pending_liveness.changed_blocks.insert(snapshot.block);
+        self.pending_liveness.layout_blocks.insert(snapshot.block);
+        let use_site = UseSite::Instruction {
+            block: snapshot.block,
+            instruction: snapshot.identity,
+            slot: snapshot.slots.use_slot(),
+        };
+        let mut uses = snapshot.uses.to_vec();
+        uses.sort_unstable();
+        uses.dedup();
+        self.pending_liveness
+            .added_uses
+            .extend(uses.into_iter().map(|value| (value, use_site)));
+        if let Some(value) = snapshot.definition {
+            self.pending_liveness.added_definitions.push((
+                value,
+                DefinitionSite::Instruction {
+                    block: snapshot.block,
+                    instruction: snapshot.identity,
+                    slot: snapshot.slots.definition_slot(),
+                },
+            ));
+        }
+    }
+
+    fn record_instruction_removed(&mut self, snapshot: InstructionLivenessSnapshot) {
+        self.pending_liveness.changed_blocks.insert(snapshot.block);
+        self.pending_liveness.layout_blocks.insert(snapshot.block);
+        let use_site = UseSite::Instruction {
+            block: snapshot.block,
+            instruction: snapshot.identity,
+            slot: snapshot.slots.use_slot(),
+        };
+        let mut uses = snapshot.uses.to_vec();
+        uses.sort_unstable();
+        uses.dedup();
+        self.pending_liveness
+            .removed_uses
+            .extend(uses.into_iter().map(|value| (value, use_site)));
+        if let Some(value) = snapshot.definition {
+            self.pending_liveness.removed_definitions.push((
+                value,
+                DefinitionSite::Instruction {
+                    block: snapshot.block,
+                    instruction: snapshot.identity,
+                    slot: snapshot.slots.definition_slot(),
+                },
+            ));
+        }
     }
 
     /// Materialize the complete allocation IR into a private strict-SSA MIR
@@ -635,6 +949,8 @@ impl AllocationIr {
             } => {
                 let block_index = self.block(block)?;
                 let position = self.original_instruction_position(block_index, instruction)?;
+                let liveness = self.instruction_liveness_snapshot(block_index, position)?;
+                let replacement_already_used = liveness.uses.contains(&replacement);
                 if !self.blocks[block_index].instructions[position]
                     .uses
                     .replace(original, replacement)
@@ -647,6 +963,22 @@ impl AllocationIr {
                         "original instruction does not use the value being rewritten",
                     ));
                 }
+                if original != replacement {
+                    let fact_site = UseSite::Instruction {
+                        block,
+                        instruction: liveness.identity,
+                        slot: liveness.slots.use_slot(),
+                    };
+                    self.pending_liveness.changed_blocks.insert(block);
+                    self.pending_liveness
+                        .removed_uses
+                        .push((original, fact_site));
+                    if !replacement_already_used {
+                        self.pending_liveness
+                            .added_uses
+                            .push((replacement, fact_site));
+                    }
+                }
             }
             UseSite::PhiEdge {
                 predecessor,
@@ -654,6 +986,17 @@ impl AllocationIr {
                 phi,
                 ..
             } => {
+                let predecessor_index = self.block(predecessor)?;
+                let slot =
+                    liveness_block_exit_slot(&self.blocks[predecessor_index]).ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                            Some(predecessor),
+                            None,
+                            vec![original],
+                            "phi-edge stable exit slot exceeds its label domain",
+                        )
+                    })?;
                 let successor_index = self.block(successor)?;
                 let Some(phi_row) = self.blocks[successor_index].phis.get_mut(phi) else {
                     return Err(AllocationIrError::new(
@@ -697,6 +1040,21 @@ impl AllocationIr {
                     ));
                 }
                 *source = replacement;
+                if original != replacement {
+                    let fact_site = UseSite::PhiEdge {
+                        predecessor,
+                        successor,
+                        phi,
+                        slot,
+                    };
+                    self.pending_liveness.changed_blocks.insert(predecessor);
+                    self.pending_liveness
+                        .removed_uses
+                        .push((original, fact_site));
+                    self.pending_liveness
+                        .added_uses
+                        .push((replacement, fact_site));
+                }
             }
         }
         Ok(())
@@ -726,6 +1084,17 @@ impl AllocationIr {
                 "non-register edge locations are valid only for phi-edge uses",
             ));
         };
+        let predecessor_index = self.block(predecessor)?;
+        let stable_slot =
+            liveness_block_exit_slot(&self.blocks[predecessor_index]).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                    Some(predecessor),
+                    None,
+                    vec![current],
+                    "phi-edge stable exit slot exceeds its label domain",
+                )
+            })?;
         let successor_index = self.block(successor)?;
         let phi_row = self.blocks[successor_index]
             .phis
@@ -773,6 +1142,16 @@ impl AllocationIr {
         }
         phi_row.sources[source_index].1 = semantic;
         phi_row.register_sources[source_index] = false;
+        self.pending_liveness.changed_blocks.insert(predecessor);
+        self.pending_liveness.removed_uses.push((
+            current,
+            UseSite::PhiEdge {
+                predecessor,
+                successor,
+                phi,
+                slot: stable_slot,
+            },
+        ));
         Ok(())
     }
 
@@ -816,6 +1195,15 @@ impl AllocationIr {
         }
         row.register_definition = false;
         row.stack_home = Some(home);
+        self.pending_liveness.changed_blocks.insert(block);
+        self.pending_liveness.removed_definitions.push((
+            destination,
+            DefinitionSite::Phi {
+                block,
+                phi,
+                slot: SlotIndex::stable_phi_def(),
+            },
+        ));
         Ok(())
     }
 
@@ -1482,6 +1870,7 @@ impl AllocationIr {
                         "synthetic-definition index references a missing instruction",
                     )
                 })?;
+            let liveness = self.instruction_liveness_snapshot(block, position)?;
             let instruction = &self.blocks[block].instructions[position];
             let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
             else {
@@ -1512,6 +1901,7 @@ impl AllocationIr {
             operands.dedup();
             self.blocks[block].instructions.remove(position);
             self.synthetic_definitions[value.0 as usize] = None;
+            self.record_instruction_removed(liveness);
             changed_blocks.insert(definition.block);
 
             for operand in operands {
@@ -1549,21 +1939,11 @@ impl AllocationIr {
     ) -> Result<InsertedSynthetic, AllocationIrError> {
         self.verify_operation(anchor, operation, uses, defines_value)?;
         let block = self.block(anchor.block())?;
-        let position = self.insertion_position(block, anchor)?;
         let zone = self.stable_anchor_zone(block, anchor)?;
-        let sequence = self.blocks[block]
-            .instructions
-            .iter()
-            .filter_map(|instruction| match instruction.origin {
-                AllocationInstructionOrigin::Synthetic {
-                    zone: candidate,
-                    sequence,
-                    ..
-                } if candidate == zone => Some(sequence),
-                AllocationInstructionOrigin::Original { .. }
-                | AllocationInstructionOrigin::Synthetic { .. } => None,
-            })
-            .max()
+        let sequence = self
+            .next_sequence_by_zone
+            .get(&(block, zone))
+            .copied()
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| {
@@ -1608,21 +1988,42 @@ impl AllocationIr {
                 "synthetic-definition index is outside the monotonic VReg domain",
             ));
         }
-        self.blocks[block].instructions.insert(
-            position,
-            AllocationInstruction {
-                origin: AllocationInstructionOrigin::Synthetic {
-                    id: instruction,
-                    anchor,
-                    operation,
-                    zone,
-                    sequence,
-                },
-                original: None,
-                uses,
-                definition,
+        let row = AllocationInstruction {
+            origin: AllocationInstructionOrigin::Synthetic {
+                id: instruction,
+                anchor,
+                operation,
+                zone,
+                sequence,
             },
-        );
+            original: None,
+            uses,
+            definition,
+        };
+        let inserted_position = if self.instruction_transaction_active {
+            let order = liveness_instruction_slots(row.origin)
+                .map(InstructionSlots::use_slot)
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(anchor.block()),
+                        None,
+                        row.uses.to_vec(),
+                        "synthetic instruction exceeds the stable order domain",
+                    )
+                })?;
+            self.pending_instruction_inserts
+                .push(PendingInstructionInsert {
+                    block,
+                    order,
+                    instruction: row,
+                });
+            None
+        } else {
+            let position = self.insertion_position(block, anchor)?;
+            self.blocks[block].instructions.insert(position, row);
+            Some(position)
+        };
         if definition.is_some() {
             self.synthetic_definitions
                 .push(Some(SyntheticDefinitionRef {
@@ -1630,6 +2031,11 @@ impl AllocationIr {
                     block: anchor.block(),
                 }));
         }
+        if let Some(position) = inserted_position {
+            let liveness = self.instruction_liveness_snapshot(block, position)?;
+            self.record_instruction_inserted(liveness);
+        }
+        self.next_sequence_by_zone.insert((block, zone), sequence);
         self.next_synthetic_instruction = next_instruction;
         self.next_value = next_value;
         Ok(InsertedSynthetic {
@@ -1727,16 +2133,48 @@ impl AllocationIr {
         block: usize,
         instruction: usize,
     ) -> Result<usize, AllocationIrError> {
-        self.blocks[block]
-            .instructions
-            .iter()
-            .position(|candidate| {
-                candidate.origin == AllocationInstructionOrigin::Original { instruction }
-            })
+        let row = &self.blocks[block];
+        let target_origin = AllocationInstructionOrigin::Original { instruction };
+        let target = liveness_instruction_slots(target_origin)
+            .map(InstructionSlots::use_slot)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                    Some(row.id),
+                    Some(instruction),
+                    Vec::new(),
+                    "original instruction exceeds the stable order-key domain",
+                )
+            })?;
+        let mut left = 0usize;
+        let mut right = row.instructions.len();
+        while left < right {
+            let middle = left + (right - left) / 2;
+            let key = liveness_instruction_slots(row.instructions[middle].origin)
+                .map(InstructionSlots::use_slot)
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(row.id),
+                        Some(middle),
+                        Vec::new(),
+                        "allocation instruction exceeds the stable order-key domain",
+                    )
+                })?;
+            if key < target {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        row.instructions
+            .get(left)
+            .filter(|candidate| candidate.origin == target_origin)
+            .map(|_| left)
             .ok_or_else(|| {
                 AllocationIrError::new(
                     "ALLOCATION_IR.INSTRUCTION_RANGE",
-                    Some(self.blocks[block].id),
+                    Some(row.id),
                     Some(instruction),
                     Vec::new(),
                     "anchor references a missing original instruction",
@@ -1850,6 +2288,15 @@ impl AllocationIr {
     }
 
     fn verify_structure(&self) -> Result<(), AllocationIrError> {
+        if self.instruction_transaction_active || !self.pending_instruction_inserts.is_empty() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.UNPUBLISHED_INSTRUCTION_TRANSACTION",
+                None,
+                None,
+                Vec::new(),
+                "allocation IR was consumed before its instruction transaction was published",
+            ));
+        }
         if self.blocks.is_empty()
             || self.block_index.len() != self.blocks.len()
             || self.next_value < self.original_value_count
@@ -2836,21 +3283,11 @@ impl LivenessProgram for AllocationIr {
 
     fn instruction_use_slot(&self, block: usize, instruction: usize) -> Option<SlotIndex> {
         let instruction = self.blocks.get(block)?.instructions.get(instruction)?;
-        let (zone, sequence) = match instruction.origin {
-            AllocationInstructionOrigin::Original { instruction } => {
-                let instruction = u64::try_from(instruction).ok()?;
-                (instruction.checked_mul(3)?.checked_add(2)?, 0)
-            }
-            AllocationInstructionOrigin::Synthetic { zone, sequence, .. } => (zone, sequence),
-        };
-        SlotIndex::stable(zone, sequence, 0)
+        Some(liveness_instruction_slots(instruction.origin)?.use_slot())
     }
 
     fn block_exit_slot(&self, block: usize) -> Option<SlotIndex> {
-        let instruction_count =
-            u64::try_from(self.blocks.get(block)?.original_instruction_count).ok()?;
-        let zone = instruction_count.checked_mul(3)?.checked_add(1)?;
-        SlotIndex::stable(zone, 0, 0)
+        liveness_block_exit_slot(self.blocks.get(block)?)
     }
 
     fn has_stable_instruction_slots(&self) -> bool {
@@ -2924,7 +3361,9 @@ mod tests {
             .clone();
         let original_length = incremental.program_order_length(VReg(0)).unwrap();
         let original_exit = intervals.block_slots[0].exit;
+        let original_instruction_count = allocation_ir.blocks[0].instructions.len();
 
+        allocation_ir.begin_instruction_transaction().unwrap();
         let inserted = allocation_ir
             .insert_before_use(
                 original.uses[0],
@@ -2935,14 +3374,22 @@ mod tests {
                 true,
             )
             .unwrap();
+        assert_eq!(
+            allocation_ir.blocks[0].instructions.len(),
+            original_instruction_count,
+            "transaction must not shift the published dense row per insertion"
+        );
+        allocation_ir.publish_instruction_transaction().unwrap();
+        assert_eq!(
+            allocation_ir.blocks[0].instructions.len(),
+            original_instruction_count + 1
+        );
         let inserted_value = inserted.definition.unwrap();
+        let delta = allocation_ir.take_liveness_delta();
+        assert_eq!(delta.changed_blocks, BTreeSet::from([BlockId(0)]));
+        assert_eq!(delta.layout_blocks, BTreeSet::from([BlockId(0)]));
         let update = incremental
-            .update_delta(
-                &allocation_ir,
-                &cfg,
-                &mut intervals,
-                &BTreeSet::from([BlockId(0)]),
-            )
+            .update_fact_delta(&allocation_ir, &cfg, &mut intervals, delta)
             .unwrap();
         let rebuilt = allocation_ir.analyze(&cfg).unwrap();
         assert_eq!(intervals, rebuilt);
@@ -2965,6 +3412,60 @@ mod tests {
         );
         assert!(update.changed_values.contains(&inserted_value));
         assert!(update.range_changed_values.contains(&inserted_value));
+    }
+
+    #[test]
+    fn synthetic_sequence_is_local_to_its_stable_anchor_zone() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let interval = intervals.intervals[0].as_ref().unwrap();
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        allocation_ir
+            .insert_after_definition(
+                interval.definition,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+        allocation_ir
+            .insert_before_use(
+                interval.uses[0],
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(1),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+        allocation_ir
+            .insert_after_definition(
+                interval.definition,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(2),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+
+        let coordinates = allocation_ir.blocks[0]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction.origin {
+                AllocationInstructionOrigin::Synthetic { zone, sequence, .. } => {
+                    Some((zone, sequence))
+                }
+                AllocationInstructionOrigin::Original { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(coordinates, [(3, 1), (3, 2), (4, 1)]);
     }
 
     #[test]
@@ -3053,7 +3554,7 @@ mod tests {
         assert!(reload_interval.definition.slot() < reload_interval.uses[0].slot());
         assert!(recipe_interval.definition.slot() < recipe_interval.uses[0].slot());
         assert!(reload_interval.uses[0].slot() < recipe_interval.uses[0].slot());
-        assert_eq!(recipe_interval.uses, vec![resolved_use]);
+        assert_eq!(recipe_interval.uses.as_slice(), [resolved_use]);
         assert_ne!(resolved_use, use_site);
     }
 
@@ -3207,7 +3708,7 @@ mod tests {
             .unwrap();
         let reload_interval = intervals.intervals[reload.0 as usize].as_ref().unwrap();
 
-        assert_eq!(reload_interval.uses, vec![resolved_edge]);
+        assert_eq!(reload_interval.uses.as_slice(), [resolved_edge]);
         assert_ne!(resolved_edge.slot(), edge.slot());
         assert!(matches!(
             reload_interval.uses[0],

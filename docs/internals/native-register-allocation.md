@@ -153,23 +153,30 @@ resident while dead, rewritten, displaced, and new values re-enter the work
 queue.
 
 Allocation-session liveness uses immutable original-instruction identities,
-monotonic synthetic identities, and stable physical slots. A changed block is
-rescanned once and its sorted old/new facts are differenced; all use changes
-for one VReg are applied by one linear merge. Unchanged stable ranges retain
-their matrix token and assignment. The stable allocation IR therefore needs no
-dense value-by-block membership relation, while ordinary dense-slot MIR keeps
-one because inserting a dense position genuinely relabels crossing ranges.
-Copy/phi affinity weights and fixed-register reservations are likewise
-session-owned sparse indexes with explicit revision publication. Complete
-liveness, machine facts, and allocation are still rebuilt independently at the
-publication boundary.
+monotonic synthetic identities, and stable physical slots. Allocation IR emits
+an exact def/use journal while a split round is being mutated. Synthetic rows
+receive identities immediately, but each touched block publishes its dense
+instruction snapshot with one ordered merge at the round boundary. Dense
+positions are therefore lowering metadata rather than mutation identities.
 
-This removes the split loop's known whole-program liveness and affinity scans,
-but it does not yet satisfy the actual-scale complexity contract. The retained
-Linux workload still spends most compilation time inside joint allocation and
-uses several GiB. Remaining work must replace all-range interference and
-ownership operations with persistent sparse indexes before integrated SSA
-spill placement is considered complete.
+The liveness session applies each block fact row and each VReg use row with one
+ordered merge. The fact index and `LiveInterval` share the resulting immutable
+use row, and sparse range reconstruction reuses one epoch-marked CFG workspace.
+Unchanged stable ranges retain their matrix token and assignment. Ordinary
+dense-slot MIR still keeps value-by-block membership because inserting a dense
+position genuinely relabels crossing ranges. Copy/phi affinity weights and
+fixed-register reservations are likewise session-owned sparse indexes with
+explicit revision publication.
+
+Debug builds, or optimized builds with `CELOX_REGALLOC_VERIFY`, compare every
+exact transaction with a changed-block rescan. Optimized production performs
+the independent complete liveness, machine-fact, allocation, lowering, and
+physical-matrix proofs once at the atomic publication boundary. On the retained
+Linux workload this transaction model restored non-LTO compilation to about
+56 seconds and completed at `cy=9ae070 x3=aa pass=1`. Compile latency is no
+longer the blocker exposed by the earlier differential updater; integrated SSA
+fragment allocation and spill placement remain open, and peak memory has not
+yet been requalified.
 
 ### Allocation algorithm
 

@@ -3355,6 +3355,58 @@ persistent sparse indexes. It must preserve assignments for unchanged ranges
 and pass an independent final rebuild; local queue ordering, thresholds, or
 container substitutions are not substitutes.
 
+Step 28d changes the split mutation boundary rather than tuning those
+containers. Optimized sampling found two representations of the same defect:
+`AllocationIr::insert_synthetic` shifted the complete dense block once per
+synthetic operation, and the liveness updater repeatedly rebuilt block and
+VReg use rows before reconstructing the affected sparse range. Stable slots
+already made those intermediate dense layouts semantically irrelevant.
+
+An allocation round now stages synthetic rows in a monotonic-ID arena and
+publishes each touched block with one ordered merge. The exact producer journal
+publishes a final block-layout replacement instead of replaying dense insertion
+positions. Definition/use facts are merged once per block; the canonical
+immutable use row is shared by the fact index and `LiveInterval`, so range
+reconstruction does not retain or copy a second all-use vector. One
+epoch-marked CFG workspace is reused across affected values. The former
+changed-block rescan remains an independent debug oracle and agrees exactly
+with the producer journal in all focused fixtures.
+
+Synthetic order sequences are monotonic per `(block, anchor zone)`, not aliases
+of the global synthetic instruction ID. A global ID is a valid total-order tie
+breaker but not a valid distance coordinate: insertions at other anchors would
+create empty same-zone gaps and distort interval length and spill cost. A
+focused regression interleaves two anchor zones and requires local sequences
+`1, 2` and `1` independently.
+
+Whole-session split verifiers are now exhaustive development checks, enabled
+by debug assertions or `CELOX_REGALLOC_VERIFY`. They are not repeated after
+every symbolic split in optimized compilation. This does not weaken the
+publication contract: atomic lowering still independently rebuilds complete
+liveness, machine facts, assignments, and the physical interval matrix before
+publishing MIR.
+
+The successive trace-free compile-only gates completed in 132.604 s after
+moving exhaustive proofs to that boundary, 119.497 s after the exact producer
+journal, 94.470 s after epoch-marked sparse reconstruction, and 50.045 s after
+block-transaction publication and shared use rows. That last compile-only
+candidate still used global IDs as same-anchor distance labels; it motivated
+the final local-sequence correction and is not an acceptance result. Its record
+is `target/heliodor/results/20260719T032436Z_celox_test_soc_linux_boot.log`.
+The final-source non-LTO full run at
+`target/heliodor/results/20260719T034452Z_celox_test_soc_linux_boot.log`
+printed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 56.294 s compile and 127.017 s execute. The
+compile interval is 65.6% below Step 28c's 163.766 s full-run interval and is
+again in the Step 28b range. Execution remains inside the previously observed
+host variation, so this step makes no generated-code speed claim.
+
+All 240 focused allocator tests, all 860 interval library tests, 60 non-ignored
+native-testbench tests, and 9 non-ignored counter tests pass, together with
+all-target strict clippy, formatting, and diff checks. This closes the
+allocation-session update complexity defect; peak RSS still requires a
+separate retained measurement.
+
 The next allocator slice must change the generated code at its primary spill
 boundary. Today `allocate_roots` chooses persistent homes, `expand` commits
 stores/reloads, and only then does joint physical allocation discover the
@@ -3446,6 +3498,7 @@ new allocator produces a substantial non-LTO execution win.
 | 28a local fixed-use fragments without whole-live-set permutations | this step | fixed-operand isolation and clobber non-mutation; legalize 10/10; regalloc 230/230 | candidate lib 850/850; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 384.401 s; full compile 382.284 s; execute 124.495 s | effective comb edge copies fall 98,037→1,334 and execute improves 53.4%; exact fixed-register interval reservations remain next |
 | 28b immutable fixed intervals and exact pressure cuts | this step | live interval 9/9; interval union 7/7; constraints 4/4; joint allocation 7/7; split 6/6; regalloc 232/232 | candidate lib 852/852; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | three CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; complete Step 28a/final-28b SIR, MIR, assignments, and disassembly are byte-identical | adjacent compile-only 53.619 s (28a) / 52.540 s (28b); final-source compile 56.282 s; execute 141.988 / 118.501 / final 122.963 s | clobbers are exact immutable `[barrier, def)` occupancy and split requests carry owner-qualified cuts; no generated-code or speed claim; integrated fragment allocation/spill placement remains next |
 | 28c stable allocation-session deltas | this step | stable original/synthetic coordinates; exact block-fact diff; affinity/reservation revisions; regalloc 239/239 | interval lib 859/859; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, format, and diff checks pass | non-LTO full run passes once through kernel power-down with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 163.886 s; full compile 163.766 s; execute 149.306 s | rejected updater compile time reduced 29.7%; still far above committed Step 28b and 5--7 GiB RSS, so persistent interval/session indexing remains open |
+| 28d block-transaction allocation publication | this step | exact producer journal vs changed-block oracle; staged dense-row publication; anchor-local stable sequences; shared immutable use rows; regalloc 240/240 | interval lib 860/860; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | non-LTO full run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | final full compile 56.294 s; execute 127.017 s | per-insertion dense shifts and duplicate fact/use-row reconstruction removed; compile interval returns to the Step 28b range; integrated fragment allocation remains next |
 
 ## Related design records
 

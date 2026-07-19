@@ -63,6 +63,16 @@ pub use assignment::AssignmentMap;
 /// pointer; spill slots are addressed relative to RSP after the prologue.
 pub const NUM_REGS: usize = 14;
 
+/// Enable allocator-internal exhaustive consistency checks.
+///
+/// Publication always performs an independent whole-function rebuild in
+/// `allocation_lower`; this switch is for additional checks at intermediate
+/// split-session boundaries.  Repeating those whole-session proofs after
+/// every symbolic split is intentionally kept out of optimized compilation.
+pub(super) fn exhaustive_verification_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some()
+}
+
 /// Result of register allocation: assignment map + spill frame size.
 pub struct RegallocResult {
     pub assignment: AssignmentMap,

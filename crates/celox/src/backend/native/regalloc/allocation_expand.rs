@@ -541,12 +541,16 @@ pub(super) fn expand_unallocated(
 fn finish_expansion(
     func: &MFunction,
     cfg: &NormalizedCfg,
-    ir: AllocationIr,
+    mut ir: AllocationIr,
     mut roots: Vec<ExpandedRoot>,
     register_regions: Vec<ExpandedRegisterRegion>,
     stack_homes: Vec<ExpandedStackHome>,
 ) -> Result<ExpandedAllocationProblem, AllocationExpandError> {
     let intervals = analyze_and_resolve(&ir, &mut roots, cfg)?;
+    // Initial expansion is indexed from its final IR snapshot. Its mutation
+    // journal is therefore already represented by `intervals` and must not be
+    // replayed into the incremental session.
+    let _ = ir.take_liveness_delta();
     let incremental_liveness =
         IncrementalLiveness::build(&ir, cfg, &intervals).map_err(AllocationExpandError::live)?;
     let region_rows = register_regions
@@ -590,9 +594,32 @@ pub(super) fn refresh(
     cfg: &NormalizedCfg,
     changed_blocks: &BTreeSet<BlockId>,
 ) -> Result<IncrementalLivenessUpdate, AllocationExpandError> {
+    problem
+        .ir
+        .publish_instruction_transaction()
+        .map_err(AllocationExpandError::ir)?;
+    let delta = problem.ir.take_liveness_delta();
+    if super::exhaustive_verification_enabled()
+        && delta
+            .changed_blocks
+            .iter()
+            .any(|block| !changed_blocks.contains(block))
+    {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.LIVENESS_JOURNAL",
+            delta
+                .changed_blocks
+                .iter()
+                .find(|block| !changed_blocks.contains(block))
+                .copied(),
+            None,
+            None,
+            "exact liveness journal contains a block omitted by the split transaction",
+        ));
+    }
     let update = problem
         .incremental_liveness
-        .update_delta(&problem.ir, cfg, &mut problem.intervals, changed_blocks)
+        .update_fact_delta(&problem.ir, cfg, &mut problem.intervals, delta)
         .map_err(AllocationExpandError::live)?;
     // Expanded root uses retain immutable block/stable-slot coordinates.
     // Synthetic insertion changes only dense lowering positions, which are
@@ -1322,8 +1349,9 @@ mod tests {
             problem.intervals.intervals[use_.value.0 as usize]
                 .as_ref()
                 .unwrap()
-                .uses,
-            vec![use_.site]
+                .uses
+                .as_slice(),
+            [use_.site]
         );
         assert_eq!(
             problem.intervals.intervals[expanded.origin.0 as usize]

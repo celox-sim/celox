@@ -755,7 +755,9 @@ fn plan_candidate_at(
         entries,
         transition_cost,
     };
-    verify_plan(expanded, joint, candidate, &plan, cfg, dominance, home_plan)?;
+    if super::exhaustive_verification_enabled() {
+        verify_plan(expanded, joint, candidate, &plan, cfg, dominance, home_plan)?;
+    }
     Ok(Some(plan))
 }
 
@@ -792,6 +794,18 @@ fn apply_split_with_context(
         &context.dominance,
         context.home_plan(plan.root)?,
     )?;
+    expanded
+        .ir
+        .begin_instruction_transaction()
+        .map_err(|error| {
+            AllocationSplitError::new(
+                error.rule,
+                error.block,
+                error.values.first().copied(),
+                Some(plan.root),
+                error.message,
+            )
+        })?;
     let mut journal = SplitMutationJournal::default();
     mutate_verified_split(expanded, graph, plan, &mut journal)?;
     let liveness = finish_split_mutations(expanded, cfg, &mut journal, std::slice::from_ref(plan))?;
@@ -1029,18 +1043,32 @@ fn apply_split_round(
                 "one allocation round contains two plans for the same semantic root",
             ));
         }
-        let candidate = candidate_from_plan(joint, plan)?;
-        verify_plan(
-            expanded,
-            joint,
-            &candidate,
-            plan,
-            cfg,
-            &context.dominance,
-            context.home_plan(plan.root)?,
-        )?;
+        if super::exhaustive_verification_enabled() {
+            let candidate = candidate_from_plan(joint, plan)?;
+            verify_plan(
+                expanded,
+                joint,
+                &candidate,
+                plan,
+                cfg,
+                &context.dominance,
+                context.home_plan(plan.root)?,
+            )?;
+        }
     }
 
+    expanded
+        .ir
+        .begin_instruction_transaction()
+        .map_err(|error| {
+            AllocationSplitError::new(
+                error.rule,
+                error.block,
+                error.values.first().copied(),
+                plans.first().map(|plan| plan.root),
+                error.message,
+            )
+        })?;
     let mut journal = SplitMutationJournal::default();
     for plan in plans {
         mutate_verified_split(expanded, graph, plan, &mut journal)?;

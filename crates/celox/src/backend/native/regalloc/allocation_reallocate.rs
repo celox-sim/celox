@@ -2233,7 +2233,9 @@ impl JointAllocationSession {
         }
 
         if !self.deferred.is_empty() {
-            self.matrix.verify().map_err(JointAllocationError::union)?;
+            if super::exhaustive_verification_enabled() {
+                self.matrix.verify().map_err(JointAllocationError::union)?;
+            }
             return Ok(JointAllocationOutcome::DeferredRound);
         }
 
@@ -2242,8 +2244,10 @@ impl JointAllocationSession {
         let result = JointAllocation {
             assignments: self.assignments.clone(),
         };
-        self.problem.verify(cfg, registers, &result)?;
-        self.matrix.verify().map_err(JointAllocationError::union)?;
+        if super::exhaustive_verification_enabled() {
+            self.problem.verify(cfg, registers, &result)?;
+            self.matrix.verify().map_err(JointAllocationError::union)?;
+        }
         Ok(JointAllocationOutcome::Complete(result))
     }
 }
