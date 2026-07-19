@@ -3670,9 +3670,10 @@ range now advances through `Split2` to a concrete `Spill` obligation.
 At the Step 30b checkpoint, a successful partial split still materialized its
 moved complement immediately.  Steps 30c--30f replace that operation with
 ordinary strict-SSA machine intervals returned to the queue.  The remaining
-architectural cleanup is removal of `JointAllocationSession` and the obsolete
-home-producing planner in favor of the base driver and final rewrite described
-above.
+architectural cleanup was removal of `JointAllocationSession` and the obsolete
+home-producing planner from the production driver in favor of the base driver
+and final rewrite described above. Step 30g completes that cleanup; the old
+planner remains test-only historical coverage.
 
 The complete trace at
 `target/heliodor/analysis/step30b-spiller-separation-20260719` took 58.203 s.
@@ -3763,6 +3764,27 @@ completed through `reboot: Power down` and exactly one
 because generated MIR is unchanged and runtime is noisy, it makes no speed
 claim.
 
+Step 30g does more than rename `JointAllocationSession`: it extracts its mixed
+state into conventional owners. `MachineLiveIntervals` owns exact intervals,
+incremental constraints, and
+semantic-use annotations; `LiveRegMatrix` separately owns sparse range tokens,
+occupancy, and assignments; `GreedyAllocator` coordinates those owners and
+directly owns the staged worklist, eviction protocol, and selection scratch.
+Home plans stay in `Spiller` and are passed into interval-cost refreshes
+without being retained by either
+allocation owner.  Production constructs that spiller directly, so the legacy
+home-producing split context's dominance and per-root use-topology analyses
+are no longer built on the production path.
+
+The complete non-LTO trace at
+`target/heliodor/analysis/step30g-greedy-owners-20260719` took 56.072 s.  All
+four full outputs are byte-identical to Step 30f, including MIR SHA-256
+`a2c7746d55bf4bbdbf1454763177dd055694db8cbf058584174924e83b123741`.
+This is therefore exactly the generated code already observed through
+`reboot: Power down` and `cy=9ae070 x3=aa pass=1`; a second simulation cannot
+add a code-semantic distinction.  The single trace timing is noisy and makes
+no code-generation speed claim.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3846,6 +3868,7 @@ claim.
 | 30d strict-SSA SplitEditor topology | this step | diamond and loop pruned-IDF/dominator-rename regressions 2/2; regalloc 256/256 | lib 876/876; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | legal copy cuts, loop phis, and exact child ranges are constructed; ownership/work-queue connection remains open |
 | 30e machine-interval representative ownership | this step | empty-semantic-use split representative rebuild; regalloc 257/257 | lib 877/877; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | machine uses, not root-use subsets, own live ranges; generic machine spilling remains before production switch |
 | 30f production strict-SSA splitting and machine spilling | this step | production split-to-machine-spill lowering regression; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 29e | trace 53.926 s; full code generation 52.491 s; simulation 116.325 s | every useful split product re-enters the queue and only `Spill` materializes it; `JointAllocationSession` removal remains |
+| 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | complete SIR/MIR byte-identical to boot-qualified Step 30f | trace 56.072 s; simulation not repeated for identical MIR | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
 
 ## Related design records
 

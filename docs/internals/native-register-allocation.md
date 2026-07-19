@@ -264,12 +264,21 @@ Stable order gaps permit those reloads immediately before older synthetic
 instructions.  The old `DeferredRound`, symbolic fragment reservations, hard
 child colors, and immediate partial-home split are no longer in production.
 
-This remains an intermediate checkpoint only because
-`JointAllocationSession` still wraps the base driver and the preceding
-home-producing split planner remains as legacy/test-only code.  The next slice
-removes that wrapper and obsolete planner so the production control flow is
-directly `LiveIntervals` + `LiveRegMatrix` + queue + `SplitEditor` + `Spiller`,
-followed by one final allocation-IR-to-MIR rewrite and independent verification.
+Step 30g removes the last production `JointAllocationSession` wrapper.  The
+base `GreedyAllocator` now coordinates two explicit owners:
+`MachineLiveIntervals` owns exact intervals plus incremental constraint and
+semantic-use annotations, while `LiveRegMatrix` owns sparse range tokens,
+physical occupancy, and assignments.  Allocation stages and eviction cascades
+remain in the base worklist.  None of these owners stores a `RootHomePlan` or
+a memory-location decision; the caller's `Spiller` supplies scalar spill costs
+when an edit refreshes interval annotations.
+
+Production also constructs `Spiller` directly.  It no longer constructs the
+legacy home-producing split context, its dominance tree, or its per-root use
+topologies.  That planner remains reachable only by historical unit tests.
+The production control flow is therefore `MachineLiveIntervals` +
+`LiveRegMatrix` + staged queue + `SplitEditor` + `Spiller`, followed by one
+allocation-IR-to-MIR rewrite and independent verification.
 
 Step 30c establishes the strict-SSA edit substrate without enabling it in the
 production split path.  Allocation IR now has a first-class synthetic `Copy`
@@ -317,6 +326,14 @@ then handles transition-only representatives at their exact synthetic uses
 and definitions.  A focused diamond regression takes this path through final
 allocation lowering and validates the resulting MIR, including a stack-backed
 synthetic merge phi.
+
+Step 30g makes those boundaries concrete in the implementation rather than
+fields mixed inside one persistent session.  Incremental machine-fact updates
+change `MachineLiveIntervals`; matrix publication removes only changed or dead
+ranges and preserves unchanged assignments; eviction and split products enter
+the same base queue.  A focused regression rebuilds the function with a new
+VReg and proves that unchanged ranges retain both their dense assignment and
+their exact sparse matrix membership.
 
 ### Legacy allocation algorithm
 

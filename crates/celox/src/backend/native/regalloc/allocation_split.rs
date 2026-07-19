@@ -21,8 +21,8 @@ use super::allocation_expand::{
     ExpandedUseSource, RegisterRegionId,
 };
 use super::allocation_reallocate::{
-    AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
-    JointAllocationError, JointAllocationOutcome, JointAllocationProblem, JointAllocationSession,
+    AllocationPressurePoint, AllocationValue, AllocationValueClass, GreedyAllocator,
+    JointAllocation, JointAllocationError, JointAllocationOutcome, JointAllocationProblem,
     RegionSpillRequest, RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
 };
 use super::assignment::PhysReg;
@@ -1274,13 +1274,13 @@ fn insert_register_representative(
 /// Rewrite one interval only after both split stages have failed to produce a
 /// shorter register range.  The spiller owns the concrete home choices and
 /// returns only short transition ranges to the allocation session.
-fn apply_spill_with_context(
+fn apply_spill(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
     joint: &JointAllocationProblem,
     request: &RegionSpillRequest,
     cfg: &NormalizedCfg,
-    context: &SplitPlanningContext,
+    spiller: &Spiller,
 ) -> Result<AppliedSplit, AllocationSplitError> {
     let value = joint.value(request.value).ok_or_else(|| {
         AllocationSplitError::new(
@@ -1318,8 +1318,7 @@ fn apply_spill_with_context(
         let SpillEdit {
             liveness_blocks,
             constraint_blocks,
-        } = context
-            .spiller
+        } = spiller
             .materialize_machine_interval(expanded, request.root, &interval)
             .map_err(AllocationSplitError::spill)?;
         let mut journal = SplitMutationJournal {
@@ -1369,8 +1368,7 @@ fn apply_spill_with_context(
             preferred_register: None,
         })
         .collect::<Vec<_>>();
-    let spill = context
-        .spiller
+    let spill = spiller
         .plan(expanded, request.root, request.value, &entries)
         .map_err(AllocationSplitError::spill)?;
     expanded
@@ -1390,8 +1388,7 @@ fn apply_spill_with_context(
     let SpillEdit {
         liveness_blocks,
         constraint_blocks,
-    } = context
-        .spiller
+    } = spiller
         .materialize(
             expanded,
             graph,
@@ -1824,17 +1821,12 @@ pub(super) fn allocate_with_splitting(
     cfg: &NormalizedCfg,
     registers: &[PhysReg],
 ) -> Result<JointAllocation, AllocationSplitError> {
-    let planning = SplitPlanningContext::build(graph, cfg)?;
-    let mut session = JointAllocationSession::new_cached_persistent(
-        expanded,
-        cfg,
-        graph,
-        registers,
-        planning.spiller.home_plans(),
-    )
-    .map_err(AllocationSplitError::joint)?;
+    let spiller = Spiller::build(graph).map_err(AllocationSplitError::spill)?;
+    let mut allocator =
+        GreedyAllocator::for_function(expanded, cfg, graph, registers, spiller.home_plans())
+            .map_err(AllocationSplitError::joint)?;
     loop {
-        match session
+        match allocator
             .allocate(cfg, registers)
             .map_err(AllocationSplitError::joint)?
         {
@@ -1842,25 +1834,33 @@ pub(super) fn allocate_with_splitting(
                 return Ok(allocation);
             }
             JointAllocationOutcome::NeedsSplit(request) => {
-                let (candidate, frontier) =
-                    match select_live_range_frontier(expanded, session.problem(), &request) {
-                        Ok(selection) => selection,
-                        Err(error) if error.rule == "ALLOCATION_SPLIT.NO_PROGRESS" => {
-                            let value = cheapest_spill_candidate(session.problem(), &request)?;
-                            session
-                                .require_spill(value)
-                                .map_err(AllocationSplitError::joint)?;
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                session
-                    .unassign_for_split(candidate.value)
+                let (candidate, frontier) = match select_live_range_frontier(
+                    expanded,
+                    allocator.live_intervals(),
+                    &request,
+                ) {
+                    Ok(selection) => selection,
+                    Err(error) if error.rule == "ALLOCATION_SPLIT.NO_PROGRESS" => {
+                        let value = cheapest_spill_candidate(allocator.live_intervals(), &request)?;
+                        allocator
+                            .require_spill(value)
+                            .map_err(AllocationSplitError::joint)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                allocator
+                    .release_for_split(candidate.value)
                     .map_err(AllocationSplitError::joint)?;
-                let applied =
-                    apply_live_range_edit(expanded, session.problem(), &candidate, &frontier, cfg)?;
-                session
-                    .update_from_expanded_round(
+                let applied = apply_live_range_edit(
+                    expanded,
+                    allocator.live_intervals(),
+                    &candidate,
+                    &frontier,
+                    cfg,
+                )?;
+                allocator
+                    .update_after_edit(
                         expanded,
                         cfg,
                         graph,
@@ -1870,21 +1870,21 @@ pub(super) fn allocate_with_splitting(
                         &applied.range_changed_values,
                         &applied.live_lengths,
                         std::slice::from_ref(&applied.root),
-                        planning.spiller.home_plans(),
+                        spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
             }
             JointAllocationOutcome::NeedsSpill(request) => {
-                let applied = apply_spill_with_context(
+                let applied = apply_spill(
                     expanded,
                     graph,
-                    session.problem(),
+                    allocator.live_intervals(),
                     &request,
                     cfg,
-                    &planning,
+                    &spiller,
                 )?;
-                session
-                    .update_from_expanded_round(
+                allocator
+                    .update_after_edit(
                         expanded,
                         cfg,
                         graph,
@@ -1894,7 +1894,7 @@ pub(super) fn allocate_with_splitting(
                         &applied.range_changed_values,
                         &applied.live_lengths,
                         std::slice::from_ref(&applied.root),
-                        planning.spiller.home_plans(),
+                        spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
             }
@@ -3155,7 +3155,15 @@ mod tests {
             uses: uses.clone(),
         };
         let context = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        apply_spill_with_context(&mut expanded, &graph, &joint, &request, &cfg, &context).unwrap();
+        apply_spill(
+            &mut expanded,
+            &graph,
+            &joint,
+            &request,
+            &cfg,
+            &context.spiller,
+        )
+        .unwrap();
 
         assert!(
             expanded
@@ -3704,12 +3712,13 @@ mod tests {
         );
 
         let mut session =
-            JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
+            GreedyAllocator::new_with_incremental_state(joint, &expanded, &cfg, &graph, &registers)
                 .unwrap();
-        session.unassign_for_split(plan.value).unwrap();
-        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        session.release_for_split(plan.value).unwrap();
+        let update =
+            apply_split(&mut expanded, &graph, session.live_intervals(), &plan, &cfg).unwrap();
         session
-            .update_from_expanded(
+            .update_after_test_edit(
                 &expanded,
                 &cfg,
                 &graph,
@@ -3743,7 +3752,7 @@ mod tests {
             panic!("published child regions should complete ordinary allocation");
         };
         session
-            .problem()
+            .live_intervals()
             .verify(&cfg, &registers, &allocation)
             .unwrap();
     }
@@ -3914,13 +3923,14 @@ mod tests {
         }));
 
         let mut session =
-            JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
+            GreedyAllocator::new_with_incremental_state(joint, &expanded, &cfg, &graph, &registers)
                 .unwrap();
-        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        let update =
+            apply_split(&mut expanded, &graph, session.live_intervals(), &plan, &cfg).unwrap();
         assert!(update.constraint_blocks.contains(&BlockId(1)));
         assert!(update.constraint_blocks.contains(&BlockId(2)));
         session
-            .update_from_expanded(
+            .update_after_test_edit(
                 &expanded,
                 &cfg,
                 &graph,
@@ -3933,7 +3943,7 @@ mod tests {
             )
             .unwrap();
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        assert_eq!(session.problem(), &rebuilt);
+        assert_eq!(session.live_intervals(), &rebuilt);
         assert_eq!(session.assigned_register(plan.value), None);
         let JointAllocationOutcome::Complete(allocation) =
             session.allocate(&cfg, &registers).unwrap()
@@ -3941,7 +3951,7 @@ mod tests {
             panic!("updated split children should reenter ordinary allocation");
         };
         session
-            .problem()
+            .live_intervals()
             .verify(&cfg, &registers, &allocation)
             .unwrap();
     }
@@ -4128,7 +4138,7 @@ mod tests {
                 .all(|selection| selection.kind == super::super::home_graph::HomeKind::Stack)
         );
 
-        let mut session = JointAllocationSession::new_persistent(
+        let mut session = GreedyAllocator::new_with_incremental_state(
             joint.clone(),
             &expanded,
             &cfg,
@@ -4136,9 +4146,10 @@ mod tests {
             &registers,
         )
         .unwrap();
-        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        let update =
+            apply_split(&mut expanded, &graph, session.live_intervals(), &plan, &cfg).unwrap();
         session
-            .update_from_expanded(
+            .update_after_test_edit(
                 &expanded,
                 &cfg,
                 &graph,
@@ -4162,7 +4173,7 @@ mod tests {
                 .any(|home| home.root == plan.root)
         );
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        assert_eq!(session.problem(), &rebuilt);
+        assert_eq!(session.live_intervals(), &rebuilt);
         assert!(matches!(
             rebuilt.value(VReg(2)).unwrap().class,
             AllocationValueClass::Region { .. }
@@ -4278,7 +4289,15 @@ mod tests {
             uses: uses.clone(),
         };
         let context = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        apply_spill_with_context(&mut expanded, &graph, &joint, &request, &cfg, &context).unwrap();
+        apply_spill(
+            &mut expanded,
+            &graph,
+            &joint,
+            &request,
+            &cfg,
+            &context.spiller,
+        )
+        .unwrap();
 
         let root = root_for(&expanded, VReg(0));
         assert!(root.uses.iter().all(|use_| {

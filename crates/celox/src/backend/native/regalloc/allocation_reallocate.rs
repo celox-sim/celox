@@ -1,11 +1,11 @@
-//! Joint physical allocation model for expanded original and synthetic values.
+//! Greedy physical allocation for expanded original and synthetic values.
 //!
 //! Home expansion invalidates every physical assignment made before synthetic
-//! stores, reloads, and recipe nodes existed. This module rebuilds one sparse
-//! allocation problem from the expanded IR. Existing register numbers are
-//! affinities only. A failed coloring returns exact resident conflicts and the
-//! root regions which may be split; it never invents a scratch register or
-//! silently finalizes a value to memory.
+//! stores, reloads, and recipe nodes existed. Machine live intervals,
+//! physical-register occupancy, and the staged greedy worklist have separate
+//! owners. Existing register numbers are affinities only. A failed allocation
+//! returns exact resident conflicts and machine intervals which may be edited;
+//! only the caller's spiller can finalize a value to memory.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -256,25 +256,51 @@ pub(super) struct JointAllocation {
     pub assignments: Vec<Option<PhysReg>>,
 }
 
-/// Persistent physical allocation state across exact region splits.
-/// Unchanged session VRegs retain both their sparse-range token and matrix
-/// membership; only dead, rewritten, or newly materialized values re-enter
-/// the allocation queue.
+/// Function-lifetime machine live intervals and the analyses which annotate
+/// them. This owner has no physical assignments and never chooses a color.
 #[derive(Debug)]
-pub(super) struct JointAllocationSession {
+struct MachineLiveIntervals {
     problem: JointAllocationProblem,
     constraints: Option<IncrementalConstraintModel>,
     ownership: Option<RegionOwnershipIndex>,
-    definition_rank: Vec<usize>,
-    matrix: LiveIntervalMatrix,
-    conflict_collector: ConflictCollector,
+}
+
+/// Exact sparse physical-register occupancy. Live-range stages, split policy,
+/// and spill policy are deliberately absent from this owner.
+#[derive(Debug)]
+struct LiveRegMatrix {
+    unions: LiveIntervalMatrix,
     ranges: Vec<Option<SparseRange>>,
     assignments: Vec<Option<PhysReg>>,
+}
+
+impl std::ops::Deref for LiveRegMatrix {
+    type Target = LiveIntervalMatrix;
+
+    fn deref(&self) -> &Self::Target {
+        &self.unions
+    }
+}
+
+impl std::ops::DerefMut for LiveRegMatrix {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.unions
+    }
+}
+
+/// Conventional greedy base allocator across exact machine live-range edits.
+/// Unchanged VRegs retain their sparse-range token and matrix membership; only
+/// dead, rewritten, evicted, or newly materialized values re-enter the queue.
+#[derive(Debug)]
+pub(super) struct GreedyAllocator {
+    intervals: MachineLiveIntervals,
+    matrix: LiveRegMatrix,
+    definition_rank: Vec<usize>,
+    conflict_collector: ConflictCollector,
     pending: BinaryHeap<AllocationQueueItem>,
     /// Conventional per-live-interval stage and eviction-cascade state. This
     /// is deliberately independent of semantic roots and memory homes.
     live_ranges: GreedyLiveRanges,
-    home_plans: Option<Vec<RootHomePlan>>,
     frontier_workspace: FreePrefixWorkspace,
 }
 
@@ -1149,12 +1175,13 @@ impl JointAllocationProblem {
         self.value(VReg(bundle.0))
     }
 
+    #[cfg(test)]
     pub(super) fn allocate(
         &self,
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<JointAllocationOutcome, JointAllocationError> {
-        JointAllocationSession::new(self.clone(), cfg, registers)?.allocate(cfg, registers)
+        GreedyAllocator::new(self.clone(), cfg, registers)?.allocate(cfg, registers)
     }
     fn assigned_affinity_score(
         &self,
@@ -1794,7 +1821,7 @@ fn register_free_prefix_frontier(
     Ok(cuts)
 }
 
-impl JointAllocationSession {
+impl GreedyAllocator {
     pub(super) fn new(
         problem: JointAllocationProblem,
         cfg: &NormalizedCfg,
@@ -1841,26 +1868,30 @@ impl JointAllocationSession {
         }
         let definition_rank = dominator_rank(cfg)?;
         Ok(Self {
-            problem,
-            constraints: None,
-            ownership: None,
+            intervals: MachineLiveIntervals {
+                problem,
+                constraints: None,
+                ownership: None,
+            },
+            matrix: LiveRegMatrix {
+                unions: matrix,
+                ranges,
+                assignments,
+            },
             definition_rank,
-            matrix,
             conflict_collector: ConflictCollector::default(),
-            ranges,
-            assignments,
             pending,
             live_ranges,
-            home_plans: None,
             frontier_workspace: FreePrefixWorkspace::new(cfg.successors.len()),
         })
     }
 
-    pub(super) fn problem(&self) -> &JointAllocationProblem {
-        &self.problem
+    pub(super) fn live_intervals(&self) -> &JointAllocationProblem {
+        &self.intervals.problem
     }
 
-    pub(super) fn new_persistent(
+    #[cfg(test)]
+    pub(super) fn new_with_incremental_state(
         problem: JointAllocationProblem,
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
@@ -1887,17 +1918,16 @@ impl JointAllocationSession {
             ));
         }
         let mut result = Self::new(problem, cfg, registers)?;
-        result.constraints = Some(constraints);
-        result.ownership = Some(ownership);
-        result.home_plans = Some(home_plans);
+        result.intervals.constraints = Some(constraints);
+        result.intervals.ownership = Some(ownership);
         Ok(result)
     }
 
-    /// Start the production allocation session directly from the incremental
-    /// constraint owner. The caller already owns function-lifetime home plans,
-    /// so this constructs neither a second constraint model nor an independent
-    /// whole-function liveness proof.
-    pub(super) fn new_cached_persistent(
+    /// Start production allocation directly from the function's incremental
+    /// live-interval annotations. The caller's spiller owns function-lifetime
+    /// home plans; the allocator consumes only their scalar spill costs and
+    /// retains neither plans nor memory-location decisions.
+    pub(super) fn for_function(
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
         graph: &HomeGraph,
@@ -1915,12 +1945,13 @@ impl JointAllocationSession {
             home_plans,
         )?;
         let mut result = Self::new(problem, cfg, registers)?;
-        result.constraints = Some(constraints);
-        result.ownership = Some(ownership);
+        result.intervals.constraints = Some(constraints);
+        result.intervals.ownership = Some(ownership);
         Ok(result)
     }
 
-    pub(super) fn update_from_expanded(
+    #[cfg(test)]
+    pub(super) fn update_after_test_edit(
         &mut self,
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
@@ -1932,15 +1963,8 @@ impl JointAllocationSession {
         live_lengths: &[(VReg, Option<u64>)],
         changed_root: LiveBundleId,
     ) -> Result<(), JointAllocationError> {
-        let home_plans = self.home_plans.take().ok_or_else(|| {
-            JointAllocationError::new(
-                "JOINT_ALLOC.SESSION_HOME_COST_STATE",
-                None,
-                None,
-                "persistent joint update has no function-lifetime home-cost model",
-            )
-        })?;
-        let result = self.update_from_expanded_round(
+        let home_plans = build_home_plans(graph)?;
+        self.update_after_edit(
             expanded,
             cfg,
             graph,
@@ -1951,13 +1975,11 @@ impl JointAllocationSession {
             live_lengths,
             std::slice::from_ref(&changed_root),
             &home_plans,
-        );
-        self.home_plans = Some(home_plans);
-        result
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn update_from_expanded_round(
+    pub(super) fn update_after_edit(
         &mut self,
         expanded: &ExpandedAllocationProblem,
         cfg: &NormalizedCfg,
@@ -1978,7 +2000,7 @@ impl JointAllocationSession {
                 "allocation-IR publication must clear symbolic matrix occupancy first",
             ));
         }
-        if registers != self.problem.target_registers {
+        if registers != self.intervals.problem.target_registers {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.TARGET_REGISTER_SET",
                 None,
@@ -1987,6 +2009,7 @@ impl JointAllocationSession {
             ));
         }
         let constraint_update = self
+            .intervals
             .constraints
             .as_mut()
             .ok_or_else(|| {
@@ -2007,7 +2030,7 @@ impl JointAllocationSession {
                 "incremental allocation round has no roots or duplicate/out-of-order roots",
             ));
         }
-        let ownership = self.ownership.as_mut().ok_or_else(|| {
+        let ownership = self.intervals.ownership.as_mut().ok_or_else(|| {
             JointAllocationError::new(
                 "JOINT_ALLOC.SESSION_REGION_STATE",
                 None,
@@ -2027,8 +2050,8 @@ impl JointAllocationSession {
         affected.extend(constraint_update.changed_values.iter().copied());
         affected.extend(ownership_changes);
 
-        let constraints = self.constraints.as_ref().unwrap().model();
-        let ownership = self.ownership.as_ref().unwrap();
+        let constraints = self.intervals.constraints.as_ref().unwrap().model();
+        let ownership = self.intervals.ownership.as_ref().unwrap();
         let mut replacements = Vec::with_capacity(affected.len());
         for &value in &affected {
             replacements.push((
@@ -2058,7 +2081,8 @@ impl JointAllocationSession {
             registers,
         )?;
         self.relabel_intervals(expanded, changed_values)?;
-        self.problem
+        self.intervals
+            .problem
             .update_block_boundaries(expanded, cfg, changed_blocks)?;
         Ok(())
     }
@@ -2073,10 +2097,11 @@ impl JointAllocationSession {
                 continue;
             }
             let Some(length) = length else {
-                if self.problem.value(value).is_some() {
+                if self.intervals.problem.value(value).is_some() {
                     return Err(JointAllocationError::new(
                         "JOINT_ALLOC.LIVE_LENGTH_CACHE",
-                        self.problem
+                        self.intervals
+                            .problem
                             .value(value)
                             .map(|value| value.interval.definition.block()),
                         Some(value),
@@ -2088,14 +2113,15 @@ impl JointAllocationSession {
             if length == 0 {
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.LIVE_LENGTH_CACHE",
-                    self.problem
+                    self.intervals
+                        .problem
                         .value(value)
                         .map(|value| value.interval.definition.block()),
                     Some(value),
                     "active cached program-order length is zero",
                 ));
             }
-            if let Some(current) = self.problem.value_mut(value) {
+            if let Some(current) = self.intervals.problem.value_mut(value) {
                 current.live_length = length;
             }
         }
@@ -2113,7 +2139,7 @@ impl JointAllocationSession {
                 .intervals
                 .get(value.0 as usize)
                 .and_then(Option::as_ref);
-            match (self.problem.value_mut(value), next) {
+            match (self.intervals.problem.value_mut(value), next) {
                 (None, None) => {}
                 (Some(current), Some(next)) => {
                     if current.interval != *next && !current.interval.relabel_from(next) {
@@ -2155,7 +2181,7 @@ impl JointAllocationSession {
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<(), JointAllocationError> {
-        if value_count < self.problem.value_count {
+        if value_count < self.intervals.problem.value_count {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.SESSION_ID_RANGE",
                 None,
@@ -2163,15 +2189,20 @@ impl JointAllocationSession {
                 "allocation-session VReg bound decreased after a split",
             ));
         }
-        self.problem.value_count = value_count;
-        self.problem.value_rows.resize(value_count as usize, None);
-        self.assignments.resize(value_count as usize, None);
-        self.ranges.resize_with(value_count as usize, || None);
+        self.intervals.problem.value_count = value_count;
+        self.intervals
+            .problem
+            .value_rows
+            .resize(value_count as usize, None);
+        self.matrix.assignments.resize(value_count as usize, None);
+        self.matrix
+            .ranges
+            .resize_with(value_count as usize, || None);
         self.live_ranges.grow(value_count);
 
         let mut changed = BTreeSet::new();
         for (value, replacement) in replacements {
-            let previous = self.problem.value(value).cloned();
+            let previous = self.intervals.problem.value(value).cloned();
             if previous == replacement {
                 continue;
             }
@@ -2184,11 +2215,11 @@ impl JointAllocationSession {
                 // range from its current dense lowering position. Updating
                 // only that metadata must not evict a valid color or rebuild
                 // its interval-union token.
-                self.problem.replace_value(value, replacement)?;
+                self.intervals.problem.replace_value(value, replacement)?;
                 continue;
             }
             let index = value.0 as usize;
-            if self.assignments[index].is_some() {
+            if self.matrix.assignments[index].is_some() {
                 let previous = previous.as_ref().ok_or_else(|| {
                     JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_ASSIGNMENT",
@@ -2197,7 +2228,7 @@ impl JointAllocationSession {
                         "assigned value has no previous semantic allocation row",
                     )
                 })?;
-                let range = self.ranges[index].as_ref().ok_or_else(|| {
+                let range = self.matrix.ranges[index].as_ref().ok_or_else(|| {
                     JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_RANGE",
                         Some(previous.interval.definition.block()),
@@ -2206,17 +2237,18 @@ impl JointAllocationSession {
                     )
                 })?;
                 self.matrix
+                    .unions
                     .unassign_validated(previous.id, range.validated())
                     .map_err(JointAllocationError::union)?;
             }
-            self.assignments[index] = None;
-            self.ranges[index] = None;
+            self.matrix.assignments[index] = None;
+            self.matrix.ranges[index] = None;
             if let Some(previous) = &previous {
                 let entry = DefinitionOrderEntry {
                     key: definition_key(previous, cfg, &self.definition_rank)?,
                     id: previous.id,
                 };
-                if !self.problem.definition_order.remove(&entry) {
+                if !self.intervals.problem.definition_order.remove(&entry) {
                     return Err(JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_DEFINITION_ORDER",
                         Some(previous.interval.definition.block()),
@@ -2225,7 +2257,9 @@ impl JointAllocationSession {
                     ));
                 }
             }
-            self.problem.replace_value(value, replacement.clone())?;
+            self.intervals
+                .problem
+                .replace_value(value, replacement.clone())?;
             if let Some(replacement) = replacement {
                 if previous.is_none() {
                     self.live_ranges.reset_new(value);
@@ -2245,7 +2279,7 @@ impl JointAllocationSession {
                     key: definition_key(&replacement, cfg, &self.definition_rank)?,
                     id: replacement.id,
                 };
-                if !self.problem.definition_order.insert(entry) {
+                if !self.intervals.problem.definition_order.insert(entry) {
                     return Err(JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_DEFINITION_ORDER",
                         Some(replacement.interval.definition.block()),
@@ -2253,7 +2287,7 @@ impl JointAllocationSession {
                         "changed value duplicates a persistent definition-order entry",
                     ));
                 }
-                self.ranges[index] = Some(
+                self.matrix.ranges[index] = Some(
                     self.matrix
                         .make_range(replacement.interval.segments.clone())
                         .map_err(JointAllocationError::union)?,
@@ -2262,15 +2296,17 @@ impl JointAllocationSession {
             changed.insert(value);
         }
         if let Some(affinities) = affinities {
-            self.problem.affinities = affinities;
-            self.problem.affinity_index =
-                AffinityIndex::build(self.problem.value_count, &self.problem.affinities)?;
+            self.intervals.problem.affinities = affinities;
+            self.intervals.problem.affinity_index = AffinityIndex::build(
+                self.intervals.problem.value_count,
+                &self.intervals.problem.affinities,
+            )?;
         }
         if let Some(fixed_reservations) = fixed_reservations {
             self.matrix
                 .replace_fixed_reservations(&fixed_reservations)
                 .map_err(JointAllocationError::union)?;
-            self.problem.fixed_reservations = fixed_reservations;
+            self.intervals.problem.fixed_reservations = fixed_reservations;
         }
 
         let mut pending = self
@@ -2279,17 +2315,19 @@ impl JointAllocationSession {
             .map(|item| item.id)
             .collect::<BTreeSet<_>>();
         pending.retain(|id| {
-            self.problem.value(VReg(id.0)).is_some() && self.assignments[id.0 as usize].is_none()
+            self.intervals.problem.value(VReg(id.0)).is_some()
+                && self.matrix.assignments[id.0 as usize].is_none()
         });
         pending.extend(changed.into_iter().filter_map(|value| {
-            (self.problem.value(value).is_some() && self.assignments[value.0 as usize].is_none())
-                .then_some(AllocationBundleId(value.0))
+            (self.intervals.problem.value(value).is_some()
+                && self.matrix.assignments[value.0 as usize].is_none())
+            .then_some(AllocationBundleId(value.0))
         }));
         let mut rebuilt = BinaryHeap::new();
         for id in pending {
             let value_id = VReg(id.0);
             let stage = self.live_ranges.on_enqueue(value_id);
-            let value = self.problem.bundle(id).ok_or_else(|| {
+            let value = self.intervals.problem.bundle(id).ok_or_else(|| {
                 JointAllocationError::new(
                     "JOINT_ALLOC.SESSION_PENDING_VALUE",
                     None,
@@ -2306,7 +2344,8 @@ impl JointAllocationSession {
     /// Replace the semantic problem while retaining every byte-identical
     /// interval's physical assignment. Stable VReg/bundle identities make the
     /// comparison independent of active-row compaction.
-    pub(super) fn update(
+    #[cfg(test)]
+    pub(super) fn replace_test_intervals(
         &mut self,
         next: JointAllocationProblem,
         registers: &[PhysReg],
@@ -2319,7 +2358,9 @@ impl JointAllocationSession {
                 "allocation facts cannot change before symbolic fragments are cleared",
             ));
         }
-        if registers != self.problem.target_registers || registers != next.target_registers {
+        if registers != self.intervals.problem.target_registers
+            || registers != next.target_registers
+        {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.TARGET_REGISTER_SET",
                 None,
@@ -2327,7 +2368,7 @@ impl JointAllocationSession {
                 "updated allocation problem uses a different physical register set",
             ));
         }
-        if next.value_count < self.problem.value_count {
+        if next.value_count < self.intervals.problem.value_count {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.SESSION_ID_RANGE",
                 None,
@@ -2336,13 +2377,13 @@ impl JointAllocationSession {
             ));
         }
 
-        for old in &self.problem.values {
+        for old in &self.intervals.problem.values {
             if next.value(old.value) == Some(old) {
                 continue;
             }
             let value = old.value.0 as usize;
-            if self.assignments[value].is_some() {
-                let range = self.ranges[value].as_ref().ok_or_else(|| {
+            if self.matrix.assignments[value].is_some() {
+                let range = self.matrix.ranges[value].as_ref().ok_or_else(|| {
                     JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_RANGE",
                         Some(old.interval.definition.block()),
@@ -2351,20 +2392,25 @@ impl JointAllocationSession {
                     )
                 })?;
                 self.matrix
+                    .unions
                     .unassign_validated(old.id, range.validated())
                     .map_err(JointAllocationError::union)?;
             }
-            self.assignments[value] = None;
-            self.ranges[value] = None;
+            self.matrix.assignments[value] = None;
+            self.matrix.ranges[value] = None;
         }
 
-        self.assignments.resize(next.value_count as usize, None);
-        self.ranges.resize_with(next.value_count as usize, || None);
+        self.matrix
+            .assignments
+            .resize(next.value_count as usize, None);
+        self.matrix
+            .ranges
+            .resize_with(next.value_count as usize, || None);
         self.live_ranges.grow(next.value_count);
         for value in &next.values {
             let index = value.value.0 as usize;
-            if self.problem.value(value.value) == Some(value) {
-                if self.ranges[index].is_none() {
+            if self.intervals.problem.value(value.value) == Some(value) {
+                if self.matrix.ranges[index].is_none() {
                     return Err(JointAllocationError::new(
                         "JOINT_ALLOC.SESSION_RANGE",
                         Some(value.interval.definition.block()),
@@ -2374,7 +2420,7 @@ impl JointAllocationSession {
                 }
                 continue;
             }
-            if self.problem.value(value.value).is_none() {
+            if self.intervals.problem.value(value.value).is_none() {
                 self.live_ranges.reset_new(value.value);
             } else if self.live_ranges.stage(value.value) >= LiveRangeStage::Split
                 && matches!(value.class, AllocationValueClass::Region { .. })
@@ -2385,7 +2431,7 @@ impl JointAllocationSession {
                 self.live_ranges.mark_done(value.value);
             }
             validate_allocatable_value(value, registers)?;
-            self.ranges[index] = Some(
+            self.matrix.ranges[index] = Some(
                 self.matrix
                     .make_range(value.interval.segments.clone())
                     .map_err(JointAllocationError::union)?,
@@ -2400,28 +2446,33 @@ impl JointAllocationSession {
         for value in next
             .values
             .iter()
-            .filter(|value| self.assignments[value.value.0 as usize].is_none())
+            .filter(|value| self.matrix.assignments[value.value.0 as usize].is_none())
         {
             let stage = self.live_ranges.on_enqueue(value.value);
             pending.push(allocation_queue_item(value, stage)?);
         }
         self.pending = pending;
-        self.problem = next;
+        self.intervals.problem = next;
         Ok(())
     }
 
     /// Unassign the source before SplitEditor mutates private allocation IR.
     /// The edited source and every new child are rebuilt and requeued by the
     /// immediately following incremental publication.
-    pub(super) fn unassign_for_split(&mut self, value: VReg) -> Result<(), JointAllocationError> {
-        let allocation = self.problem.value(value).cloned().ok_or_else(|| {
-            JointAllocationError::new(
-                "JOINT_ALLOC.DEFER_RANGE",
-                None,
-                Some(value),
-                "split source is outside the allocation problem",
-            )
-        })?;
+    pub(super) fn release_for_split(&mut self, value: VReg) -> Result<(), JointAllocationError> {
+        let allocation = self
+            .intervals
+            .problem
+            .value(value)
+            .cloned()
+            .ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.DEFER_RANGE",
+                    None,
+                    Some(value),
+                    "split source is outside the allocation problem",
+                )
+            })?;
         if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.DEFER_CLASS",
@@ -2432,8 +2483,8 @@ impl JointAllocationSession {
         }
 
         let index = value.0 as usize;
-        if self.assignments[index].is_some() {
-            let range = self.ranges[index].as_ref().ok_or_else(|| {
+        if self.matrix.assignments[index].is_some() {
+            let range = self.matrix.ranges[index].as_ref().ok_or_else(|| {
                 JointAllocationError::new(
                     "JOINT_ALLOC.DEFER_RANGE",
                     Some(allocation.interval.definition.block()),
@@ -2442,9 +2493,10 @@ impl JointAllocationSession {
                 )
             })?;
             self.matrix
+                .unions
                 .unassign_validated(allocation.id, range.validated())
                 .map_err(JointAllocationError::union)?;
-            self.assignments[index] = None;
+            self.matrix.assignments[index] = None;
         }
         Ok(())
     }
@@ -2453,7 +2505,7 @@ impl JointAllocationSession {
     /// a stage transition, not an allocation fallback: the next queue visit
     /// returns a concrete spill obligation to the driver.
     pub(super) fn require_spill(&mut self, value: VReg) -> Result<(), JointAllocationError> {
-        let allocation = self.problem.value(value).ok_or_else(|| {
+        let allocation = self.intervals.problem.value(value).ok_or_else(|| {
             JointAllocationError::new(
                 "JOINT_ALLOC.SPILL_RANGE",
                 None,
@@ -2477,7 +2529,7 @@ impl JointAllocationSession {
                 "live interval reached the spiller before split analysis",
             ));
         }
-        self.unassign_for_split(value)?;
+        self.release_for_split(value)?;
         self.live_ranges.require_split_progress(value);
         self.live_ranges.require_spill(value);
         self.queue_value(value)
@@ -2485,10 +2537,16 @@ impl JointAllocationSession {
 
     #[cfg(test)]
     pub(super) fn assigned_register(&self, value: VReg) -> Option<PhysReg> {
-        let assignment = self.assignments.get(value.0 as usize).copied().flatten();
+        let assignment = self
+            .matrix
+            .assignments
+            .get(value.0 as usize)
+            .copied()
+            .flatten();
         debug_assert_eq!(
             assignment,
-            self.problem
+            self.intervals
+                .problem
                 .value(value)
                 .and_then(|allocation| self.matrix.register(allocation.id))
         );
@@ -2497,7 +2555,7 @@ impl JointAllocationSession {
 
     fn queue_value(&mut self, value: VReg) -> Result<(), JointAllocationError> {
         let stage = self.live_ranges.on_enqueue(value);
-        let allocation = self.problem.value(value).ok_or_else(|| {
+        let allocation = self.intervals.problem.value(value).ok_or_else(|| {
             JointAllocationError::new(
                 "JOINT_ALLOC.QUEUE_VALUE",
                 None,
@@ -2539,7 +2597,7 @@ impl JointAllocationSession {
                 .collect_interference_validated(
                     *register,
                     range.validated(),
-                    self.assignments.len(),
+                    self.matrix.assignments.len(),
                     &mut self.conflict_collector,
                     &mut conflicts,
                     &mut cuts,
@@ -2558,7 +2616,7 @@ impl JointAllocationSession {
             let mut heaviest = None::<AllocationQueueItem>;
             let mut eligible = true;
             for &conflict in &conflicts {
-                let victim = self.problem.bundle(conflict).ok_or_else(|| {
+                let victim = self.intervals.problem.bundle(conflict).ok_or_else(|| {
                     JointAllocationError::new(
                         "JOINT_ALLOC.EVICTION_CONFLICT",
                         Some(candidate.interval.definition.block()),
@@ -2639,15 +2697,20 @@ impl JointAllocationSession {
                 )
             })?;
         for victim_id in victims {
-            let victim = self.problem.bundle(victim_id).cloned().ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.EVICTION_CONFLICT",
-                    Some(candidate.interval.definition.block()),
-                    Some(candidate.value),
-                    "selected eviction victim disappeared before commit",
-                )
-            })?;
-            let victim_range = self.ranges[victim.value.0 as usize]
+            let victim = self
+                .intervals
+                .problem
+                .bundle(victim_id)
+                .cloned()
+                .ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.EVICTION_CONFLICT",
+                        Some(candidate.interval.definition.block()),
+                        Some(candidate.value),
+                        "selected eviction victim disappeared before commit",
+                    )
+                })?;
+            let victim_range = self.matrix.ranges[victim.value.0 as usize]
                 .as_ref()
                 .ok_or_else(|| {
                     JointAllocationError::new(
@@ -2658,9 +2721,10 @@ impl JointAllocationSession {
                     )
                 })?;
             self.matrix
+                .unions
                 .unassign_validated(victim.id, victim_range.validated())
                 .map_err(JointAllocationError::union)?;
-            self.assignments[victim.value.0 as usize] = None;
+            self.matrix.assignments[victim.value.0 as usize] = None;
             if !self.live_ranges.inherit_eviction(victim.value, cascade) {
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.EVICTION_CASCADE",
@@ -2679,7 +2743,7 @@ impl JointAllocationSession {
         cfg: &NormalizedCfg,
         registers: &[PhysReg],
     ) -> Result<JointAllocationOutcome, JointAllocationError> {
-        if registers != self.problem.target_registers {
+        if registers != self.intervals.problem.target_registers {
             return Err(JointAllocationError::new(
                 "JOINT_ALLOC.TARGET_REGISTER_SET",
                 None,
@@ -2689,7 +2753,7 @@ impl JointAllocationSession {
         }
         while let Some(item) = self.pending.pop() {
             let id = item.id;
-            let value = self.problem.bundle(id).cloned().ok_or_else(|| {
+            let value = self.intervals.problem.bundle(id).cloned().ok_or_else(|| {
                 JointAllocationError::new(
                     "JOINT_ALLOC.ORDER_RANGE",
                     None,
@@ -2718,10 +2782,10 @@ impl JointAllocationSession {
                     uses: uses.clone(),
                 }));
             }
-            if self.assignments[value.value.0 as usize].is_some() {
+            if self.matrix.assignments[value.value.0 as usize].is_some() {
                 continue;
             }
-            let range = self.ranges[value.value.0 as usize]
+            let range = self.matrix.ranges[value.value.0 as usize]
                 .as_ref()
                 .ok_or_else(|| {
                     JointAllocationError::new(
@@ -2738,10 +2802,10 @@ impl JointAllocationSession {
                 .enumerate()
                 .filter(|(_, register)| value.allowed_registers.contains(*register))
                 .map(|(order, register)| {
-                    let affinity_score = self.problem.assigned_affinity_score(
+                    let affinity_score = self.intervals.problem.assigned_affinity_score(
                         value.value,
                         register,
-                        &self.assignments,
+                        &self.matrix.assignments,
                     );
                     (order, register, affinity_score)
                 })
@@ -2776,7 +2840,7 @@ impl JointAllocationSession {
                 self.matrix
                     .assign_validated(value.id, register, range.validated())
                     .map_err(JointAllocationError::union)?;
-                self.assignments[value.value.0 as usize] = Some(register);
+                self.matrix.assignments[value.value.0 as usize] = Some(register);
                 continue;
             }
 
@@ -2784,7 +2848,7 @@ impl JointAllocationSession {
                 self.matrix
                     .assign_validated(value.id, register, range.validated())
                     .map_err(JointAllocationError::union)?;
-                self.assignments[value.value.0 as usize] = Some(register);
+                self.matrix.assignments[value.value.0 as usize] = Some(register);
                 continue;
             }
 
@@ -2805,7 +2869,7 @@ impl JointAllocationSession {
             for register in blocked_registers {
                 let cuts = register_free_prefix_frontier(
                     &self.matrix,
-                    &self.problem,
+                    &self.intervals.problem,
                     cfg,
                     &range,
                     &value,
@@ -2841,14 +2905,15 @@ impl JointAllocationSession {
                     };
                     match cut.owner {
                         OccupancyOwner::Bundle(resident_id) => {
-                            let resident = self.problem.bundle(resident_id).ok_or_else(|| {
-                                JointAllocationError::new(
-                                    "JOINT_ALLOC.CONFLICT_RANGE",
-                                    Some(segment.block),
-                                    Some(value.value),
-                                    "occupancy frontier references a missing resident value",
-                                )
-                            })?;
+                            let resident =
+                                self.intervals.problem.bundle(resident_id).ok_or_else(|| {
+                                    JointAllocationError::new(
+                                        "JOINT_ALLOC.CONFLICT_RANGE",
+                                        Some(segment.block),
+                                        Some(value.value),
+                                        "occupancy frontier references a missing resident value",
+                                    )
+                                })?;
                             resident_values.insert(resident.value);
                             if matches!(resident.class, AllocationValueClass::Region { .. }) {
                                 resident_points.push((resident.value, point));
@@ -2905,7 +2970,7 @@ impl JointAllocationSession {
                         let values = conflict
                             .values
                             .iter()
-                            .filter_map(|resident| self.problem.value(*resident))
+                            .filter_map(|resident| self.intervals.problem.value(*resident))
                             .map(allocation_value_summary)
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -2926,7 +2991,7 @@ impl JointAllocationSession {
             let candidates = split_frontiers
                 .into_iter()
                 .map(|(candidate, frontiers)| {
-                    let candidate = self.problem.value(candidate).ok_or_else(|| {
+                    let candidate = self.intervals.problem.value(candidate).ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.SPLIT_RANGE",
                             Some(value.interval.definition.block()),
@@ -2974,13 +3039,19 @@ impl JointAllocationSession {
             ));
         }
 
-        self.problem
-            .coalesce_affinities(&mut self.matrix, &self.ranges, &mut self.assignments)?;
+        let LiveRegMatrix {
+            unions,
+            ranges,
+            assignments,
+        } = &mut self.matrix;
+        self.intervals
+            .problem
+            .coalesce_affinities(unions, ranges, assignments)?;
         let result = JointAllocation {
-            assignments: self.assignments.clone(),
+            assignments: self.matrix.assignments.clone(),
         };
         if super::exhaustive_verification_enabled() {
-            self.problem.verify(cfg, registers, &result)?;
+            self.intervals.problem.verify(cfg, registers, &result)?;
             self.matrix.verify().map_err(JointAllocationError::union)?;
         }
         Ok(JointAllocationOutcome::Complete(result))
@@ -3572,17 +3643,18 @@ mod tests {
             };
             row.spill_cost = Some(cost);
         }
-        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
+        let mut session = GreedyAllocator::new(problem, &cfg, &registers).unwrap();
 
         // Seed the cheaper range as a resident to exercise eviction rather
         // than allocation-order luck.
-        let resident = session.problem.value(VReg(0)).unwrap().clone();
-        let resident_range = session.ranges[VReg(0).0 as usize].as_ref().unwrap();
+        let resident = session.live_intervals().value(VReg(0)).unwrap().clone();
+        let resident_range = session.matrix.ranges[VReg(0).0 as usize].as_ref().unwrap();
         session
             .matrix
+            .unions
             .assign_validated(resident.id, PhysReg::RAX, resident_range.validated())
             .unwrap();
-        session.assignments[VReg(0).0 as usize] = Some(PhysReg::RAX);
+        session.matrix.assignments[VReg(0).0 as usize] = Some(PhysReg::RAX);
         session.pending.clear();
         session.queue_value(VReg(1)).unwrap();
 
@@ -3640,7 +3712,7 @@ mod tests {
         let (cfg, graph) = model(&mut function);
         let expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
         let problem = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
+        let mut session = GreedyAllocator::new(problem, &cfg, &registers).unwrap();
 
         let JointAllocationOutcome::NeedsSplit(request) =
             session.allocate(&cfg, &registers).unwrap()
@@ -3661,7 +3733,7 @@ mod tests {
                 .iter()
                 .any(|item| item.id == AllocationBundleId(source.0))
         );
-        session.unassign_for_split(source).unwrap();
+        session.release_for_split(source).unwrap();
         assert_eq!(session.pending.len(), pending_before);
         assert_eq!(session.assigned_register(source), None);
         session.require_spill(source).unwrap();
@@ -3999,7 +4071,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_session_retains_unchanged_matrix_memberships() {
+    fn greedy_allocator_retains_unchanged_live_matrix_memberships() {
         let registers = [PhysReg::RAX, PhysReg::RDX];
         let mut before = function(
             2,
@@ -4017,10 +4089,9 @@ mod tests {
         );
         let (before_cfg, _) = model(&mut before);
         let before_problem = fixed_problem(&before, &before_cfg, &registers);
-        let mut session =
-            JointAllocationSession::new(before_problem, &before_cfg, &registers).unwrap();
+        let mut allocator = GreedyAllocator::new(before_problem, &before_cfg, &registers).unwrap();
         let JointAllocationOutcome::Complete(before_allocation) =
-            session.allocate(&before_cfg, &registers).unwrap()
+            allocator.allocate(&before_cfg, &registers).unwrap()
         else {
             panic!("the initial fixed problem must fit");
         };
@@ -4045,20 +4116,22 @@ mod tests {
         );
         let (after_cfg, _) = model(&mut after);
         let after_problem = fixed_problem(&after, &after_cfg, &registers);
-        session.update(after_problem, &registers).unwrap();
+        allocator
+            .replace_test_intervals(after_problem, &registers)
+            .unwrap();
 
         for value in [VReg(0), VReg(1)] {
             assert_eq!(
-                session.assignments[value.0 as usize],
+                allocator.matrix.assignments[value.0 as usize],
                 before_allocation.assignments[value.0 as usize]
             );
             assert_eq!(
-                session.matrix.register(AllocationBundleId(value.0)),
+                allocator.matrix.register(AllocationBundleId(value.0)),
                 before_allocation.assignments[value.0 as usize]
             );
         }
         assert_eq!(
-            session
+            allocator
                 .pending
                 .iter()
                 .map(|item| item.id)
@@ -4066,7 +4139,7 @@ mod tests {
             vec![AllocationBundleId(2)]
         );
         let JointAllocationOutcome::Complete(after_allocation) =
-            session.allocate(&after_cfg, &registers).unwrap()
+            allocator.allocate(&after_cfg, &registers).unwrap()
         else {
             panic!("the extended fixed problem must fit");
         };
