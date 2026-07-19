@@ -178,6 +178,27 @@ pub(super) struct InsertedSynthetic {
     pub definition: Option<VReg>,
 }
 
+/// One legal, stable allocation-IR boundary selected for a real split copy.
+///
+/// The anchor itself stays private to allocation IR.  SplitEditor may compare
+/// the exposed coordinates to coalesce duplicate frontier cuts, then hand the
+/// opaque placement back to [`AllocationIr::insert_planned_split_copy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SplitCopyPlacement {
+    anchor: SyntheticAnchor,
+    pub block: BlockId,
+    pub use_slot: SlotIndex,
+    pub definition_slot: SlotIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InsertedSplitCopy {
+    pub instruction: SyntheticInstructionId,
+    pub definition: VReg,
+    pub source_use: UseSite,
+    pub definition_site: DefinitionSite,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct InsertedSyntheticPhi {
     pub block: BlockId,
@@ -945,6 +966,136 @@ impl AllocationIr {
         self.insert_synthetic(anchor, operation, uses, defines_value)
     }
 
+    /// Select the latest legal machine boundary before an exact pressure cut.
+    ///
+    /// Allocation IR intentionally does not renumber stable instruction
+    /// coordinates.  A new row can therefore be appended only within one of
+    /// the immutable source-MIR anchor zones.  This is the strict-SSA analogue
+    /// of SplitKit's legal split-point query: the copy source must be live at
+    /// its use slot and the copy definition must precede the requested cut.
+    pub(super) fn plan_split_copy_before(
+        &self,
+        interval: &super::live_interval::LiveInterval,
+        block: BlockId,
+        cut: SlotIndex,
+    ) -> Result<SplitCopyPlacement, AllocationIrError> {
+        if interval.value.0 >= self.next_value || !interval.covers(block, cut) {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SPLIT_CUT",
+                Some(block),
+                None,
+                vec![interval.value],
+                "split cut is outside the source live interval",
+            ));
+        }
+        let block_index = self.block(block)?;
+        let row = &self.blocks[block_index];
+        let mut anchors = Vec::with_capacity(
+            row.original_instruction_count
+                .saturating_mul(2)
+                .saturating_add(1),
+        );
+        anchors.push(SyntheticAnchor::BlockEntry { block });
+        for instruction in 0..row.original_instruction_count {
+            anchors.push(SyntheticAnchor::BeforeInstruction { block, instruction });
+            if row.original_terminator != Some(instruction) {
+                anchors.push(SyntheticAnchor::AfterInstruction { block, instruction });
+            }
+        }
+
+        let mut best = None::<SplitCopyPlacement>;
+        for anchor in anchors {
+            let slots = self.next_instruction_slots_at_anchor(block_index, anchor)?;
+            let use_slot = slots.use_slot();
+            let definition_slot = slots.definition_slot();
+            if definition_slot >= cut || !interval.covers(block, use_slot) {
+                continue;
+            }
+            let placement = SplitCopyPlacement {
+                anchor,
+                block,
+                use_slot,
+                definition_slot,
+            };
+            if best.is_none_or(|current| current.definition_slot < definition_slot) {
+                best = Some(placement);
+            }
+        }
+        best.ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.NO_LEGAL_SPLIT_POINT",
+                Some(block),
+                None,
+                vec![interval.value],
+                "no stable instruction boundary can define a split copy before the cut",
+            )
+        })
+    }
+
+    /// Insert a previously selected split copy without changing its physical
+    /// coordinate.  A stale placement is rejected instead of silently moving
+    /// the boundary after another edit.
+    pub(super) fn insert_planned_split_copy(
+        &mut self,
+        placement: SplitCopyPlacement,
+        source: VReg,
+    ) -> Result<InsertedSplitCopy, AllocationIrError> {
+        let block_index = self.block(placement.block)?;
+        let current = self.next_instruction_slots_at_anchor(block_index, placement.anchor)?;
+        if current.use_slot() != placement.use_slot
+            || current.definition_slot() != placement.definition_slot
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STALE_SPLIT_POINT",
+                Some(placement.block),
+                None,
+                vec![source],
+                "split-copy anchor was occupied after legal-point selection",
+            ));
+        }
+        let inserted = self.insert_synthetic(
+            placement.anchor,
+            SyntheticOperation::Copy,
+            Uses::one(source),
+            true,
+        )?;
+        let definition = inserted.definition.ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.SPLIT_COPY_DEFINITION",
+                Some(placement.block),
+                None,
+                vec![source],
+                "split copy did not define a machine value",
+            )
+        })?;
+        let instruction = self.blocks[block_index]
+            .original_instruction_count
+            .checked_add(inserted.instruction.0 as usize)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ID_RANGE",
+                    Some(placement.block),
+                    None,
+                    vec![source, definition],
+                    "split-copy liveness identity exceeds usize",
+                )
+            })?;
+        Ok(InsertedSplitCopy {
+            instruction: inserted.instruction,
+            definition,
+            source_use: UseSite::Instruction {
+                block: placement.block,
+                instruction,
+                slot: placement.use_slot,
+            },
+            definition_site: DefinitionSite::Instruction {
+                block: placement.block,
+                instruction,
+                slot: placement.definition_slot,
+            },
+        })
+    }
+
     /// Append an empty strict-SSA merge phi for live-range editing.  Sources
     /// are installed after dominator-tree renaming with
     /// [`Self::set_synthetic_phi_sources`].  Original phi rows always remain
@@ -1199,7 +1350,8 @@ impl AllocationIr {
                 block, instruction, ..
             } => {
                 let block_index = self.block(block)?;
-                let position = self.original_instruction_position(block_index, instruction)?;
+                let position =
+                    self.instruction_position_by_liveness_identity(block_index, instruction)?;
                 let liveness = self.instruction_liveness_snapshot(block_index, position)?;
                 let replacement_already_used = liveness.uses.contains(&replacement);
                 if !self.blocks[block_index].instructions[position]
@@ -2403,6 +2555,38 @@ impl AllocationIr {
             })
     }
 
+    fn next_instruction_slots_at_anchor(
+        &self,
+        block: usize,
+        anchor: SyntheticAnchor,
+    ) -> Result<InstructionSlots, AllocationIrError> {
+        let zone = self.stable_anchor_zone(block, anchor)?;
+        let sequence = self
+            .next_sequence_by_zone
+            .get(&(block, zone))
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                    Some(anchor.block()),
+                    None,
+                    Vec::new(),
+                    "synthetic instruction sequence exceeds u32",
+                )
+            })?;
+        InstructionSlots::stable(zone, sequence).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(anchor.block()),
+                None,
+                Vec::new(),
+                "synthetic instruction anchor exceeds the stable slot domain",
+            )
+        })
+    }
+
     fn original_instruction_position(
         &self,
         block: usize,
@@ -2453,6 +2637,47 @@ impl AllocationIr {
                     Some(instruction),
                     Vec::new(),
                     "anchor references a missing original instruction",
+                )
+            })
+    }
+
+    fn instruction_position_by_liveness_identity(
+        &self,
+        block: usize,
+        identity: usize,
+    ) -> Result<usize, AllocationIrError> {
+        let row = &self.blocks[block];
+        if identity < row.original_instruction_count {
+            return self.original_instruction_position(block, identity);
+        }
+        let synthetic = identity
+            .checked_sub(row.original_instruction_count)
+            .and_then(|identity| u32::try_from(identity).ok())
+            .map(SyntheticInstructionId)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_RANGE",
+                    Some(row.id),
+                    Some(identity),
+                    Vec::new(),
+                    "synthetic liveness instruction identity exceeds u32",
+                )
+            })?;
+        row.instructions
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    instruction.origin,
+                    AllocationInstructionOrigin::Synthetic { id, .. } if id == synthetic
+                )
+            })
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_RANGE",
+                    Some(row.id),
+                    Some(identity),
+                    Vec::new(),
+                    "anchor references a missing synthetic instruction",
                 )
             })
     }

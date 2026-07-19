@@ -273,8 +273,23 @@ affinities, target lowering, incremental def/use deltas, full liveness rebuild,
 and final strict-SSA MIR materialization all see the same values.  A diamond
 regression inserts one copy on each arm and one merge phi, rewrites the joined
 use, and requires incremental liveness to equal an independent reconstruction.
-The next slice is the actual `SplitEditor`: legal cut placement, pruned-IDF phi
-insertion, dominator renaming, child/root-use ownership, and work-queue stages.
+
+Step 30d implements the topology-changing half of `SplitEditor`.  For every
+exact pressure cut it selects the latest source-MIR anchor at which the source
+is live and a real copy definition still precedes the cut.  Duplicate cuts at
+one legal boundary share that copy.  The enlarged logical definition set is
+then reconstructed with pruned iterated-dominance-frontier phis and one
+dominator-tree rename.  Original semantic uses, split-copy inputs, loop
+backedges, and merge-phi inputs therefore all name ordinary strict-SSA VRegs;
+no fragment is represented only by a slot range or symbolic color.
+
+Focused diamond and loop regressions require incremental liveness to equal an
+independent full reconstruction and require the atomically materialized MIR to
+pass strict-SSA verification.  This checkpoint still leaves the editor
+disconnected from production: the next slice must transfer semantic root-use
+ownership to all returned representatives, insert every exact child interval
+into the work queue, and make the unmaterialized complement enter `Spill` only
+after its own assignment and split stages fail.
 
 ### Legacy allocation algorithm
 

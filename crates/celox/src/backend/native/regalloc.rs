@@ -35,6 +35,8 @@ mod interval_union;
 mod legalize;
 #[allow(dead_code)]
 mod live_interval;
+#[allow(dead_code)]
+mod live_range_edit;
 mod next_use;
 mod pressure;
 mod reconstruct;

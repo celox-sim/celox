@@ -3705,6 +3705,23 @@ The non-LTO full run completed through `reboot: Power down` and exactly one
 simulation (176.312 s total).  The complete library passes 874/874.  Because
 the generated code is identical, this checkpoint makes no speed claim.
 
+Step 30d implements a strict-SSA `SplitEditor` transaction, still disconnected
+from the production split request.  Each exact frontier cut is projected onto
+the latest legal stable machine boundary, where a real copy consumes the old
+representative and defines a new one before the cut.  The editor places merge
+phis over the pruned iterated dominance frontier and renames both semantic
+uses and copy inputs along the dominator tree.  A loop regression specifically
+requires a backedge copy to create a header phi and feed the next iteration;
+the diamond regression requires independent arm copies and one join phi.
+Incremental liveness must exactly equal an independent full reconstruction in
+both cases, and final private-IR materialization must remain valid strict SSA.
+
+This checkpoint does not yet alter production allocation or claim a generated-
+code/runtime change.  The next slice is not another split heuristic: it must
+make the returned representatives own exact root uses and transition uses,
+requeue their exact intervals, and leave the complement unmaterialized until
+that interval itself reaches the `Spill` stage.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3785,6 +3802,7 @@ the generated code is identical, this checkpoint makes no speed claim.
 | 30a greedy live-range driver | `6251aef5` | staged queue, eviction cascade, split-child requeue, and matrix ownership regressions | lib 875/875; non-LTO build, format, and diff checks pass | complete SIR/MIR byte-identical to Step 28b | trace-only compile recorded separately; no timing claim | production allocation follows staged greedy control flow; legacy symbolic spill ownership remains for removal |
 | 30b dedicated spiller boundary | `ce398251` | regalloc 253/253 including concrete Spill-stage and topology-only child regressions | lib 873/873; non-LTO build, format, and diff checks pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 28b | trace 58.203 s; full code generation 57.321 s; simulation 124.955 s | split topology and spill policy are separated; partial spill remainder and base-driver replacement remain open |
 | 30c strict-SSA live-range-edit substrate | this step | split-copy/merge-phi incremental-versus-full liveness and atomic-materialization regression | lib 874/874; non-LTO build and allocation-IR 12/12 pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30b | trace 58.254 s; full code generation 56.754 s; simulation 119.546 s | real copy and merge-phi values are representable; production cut editing and child ownership remain open |
+| 30d strict-SSA SplitEditor topology | this step | diamond and loop pruned-IDF/dominator-rename regressions 2/2; regalloc 256/256 | lib 876/876; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | legal copy cuts, loop phis, and exact child ranges are constructed; ownership/work-queue connection remains open |
 
 ## Related design records
 
