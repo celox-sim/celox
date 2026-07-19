@@ -23,6 +23,8 @@ use super::live_interval::{
 };
 use super::reload::{PureStep, materialize_pure_step};
 
+mod state_home;
+
 /// Stable anchor-local order labels leave room for later insertion around a
 /// synthetic split boundary. Appending remains O(1); before/after insertion
 /// bisects one of these gaps and fails structurally if it is exhausted.
@@ -30,6 +32,27 @@ const SYNTHETIC_SEQUENCE_STRIDE: u32 = 1 << 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct StackHomeId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct StateHomeId(pub u32);
+
+/// One full machine-accessible packed-state word. This is physical home
+/// metadata, not an arbitrary HDL width attached to a MIR VReg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct PackedStateHome {
+    pub id: StateHomeId,
+    pub offset: i32,
+    pub size: OpSize,
+    pub live_on_entry: bool,
+}
+
+impl PackedStateHome {
+    fn byte_range(self) -> Option<std::ops::Range<i64>> {
+        let start = i64::from(self.offset);
+        let end = start.checked_add(i64::from(self.size.bytes()))?;
+        Some(start..end)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct SyntheticInstructionId(pub u32);
@@ -44,6 +67,12 @@ pub(super) enum SyntheticOperation {
     },
     StackReload {
         home: StackHomeId,
+    },
+    StateStore {
+        home: PackedStateHome,
+    },
+    StateReload {
+        home: PackedStateHome,
     },
     RecipeNode {
         root: LiveBundleId,
@@ -1692,7 +1721,9 @@ impl AllocationIr {
                     SyntheticOperation::StackReload { home } => {
                         (home, AllocationStackOperationKind::Reload)
                     }
-                    SyntheticOperation::RecipeNode { .. } => continue,
+                    SyntheticOperation::StateStore { .. }
+                    | SyntheticOperation::StateReload { .. }
+                    | SyntheticOperation::RecipeNode { .. } => continue,
                 };
                 operations.push(AllocationStackOperation {
                     instruction,
@@ -2046,6 +2077,15 @@ impl AllocationIr {
         verify_stack_home_reaching_definitions(self, cfg)
     }
 
+    /// Prove that every synthetic packed-state reload observes its exact home
+    /// on every path and that no overlapping original or synthetic write has
+    /// replaced it. The verifier rebuilds sparse byte MemorySSA from the
+    /// current allocation IR; it does not trust the allocator's cached plan.
+    pub(super) fn verify_state_homes(&self, cfg: &NormalizedCfg) -> Result<(), AllocationIrError> {
+        self.verify_structure()?;
+        state_home::verify(self, cfg)
+    }
+
     /// Remove pure synthetic materialization DAGs which no longer reach an
     /// original instruction, phi edge, or explicit stack store. Repeated
     /// pressure splitting can replace a whole register region; keeping its old
@@ -2083,7 +2123,9 @@ impl AllocationIr {
                     }
                     AllocationInstructionOrigin::Synthetic {
                         id,
-                        operation: SyntheticOperation::StackStore { .. },
+                        operation:
+                            SyntheticOperation::StackStore { .. }
+                            | SyntheticOperation::StateStore { .. },
                         ..
                     } => {
                         retained_instructions[id.0 as usize] = true;
@@ -2094,6 +2136,7 @@ impl AllocationIr {
                             operation,
                             SyntheticOperation::Copy
                                 | SyntheticOperation::StackReload { .. }
+                                | SyntheticOperation::StateReload { .. }
                                 | SyntheticOperation::RecipeNode { .. }
                         ) {
                             return Err(AllocationIrError::new(
@@ -2277,6 +2320,7 @@ impl AllocationIr {
                     operation,
                     SyntheticOperation::Copy
                         | SyntheticOperation::StackReload { .. }
+                        | SyntheticOperation::StateReload { .. }
                         | SyntheticOperation::RecipeNode { .. }
                 )
             {
@@ -2435,6 +2479,12 @@ impl AllocationIr {
             SyntheticOperation::Copy => uses.len() == 1 && defines_value,
             SyntheticOperation::StackStore { .. } => uses.len() == 1 && !defines_value,
             SyntheticOperation::StackReload { .. } => uses.is_empty() && defines_value,
+            SyntheticOperation::StateStore { home } => {
+                home.byte_range().is_some() && uses.len() == 1 && !defines_value
+            }
+            SyntheticOperation::StateReload { home } => {
+                home.byte_range().is_some() && uses.is_empty() && defines_value
+            }
             SyntheticOperation::RecipeNode { .. } => uses.len() <= 2 && defines_value,
         };
         if !valid {
@@ -3458,6 +3508,46 @@ fn materialize_synthetic_instruction(
                 size: OpSize::S64,
             })
         }
+        SyntheticOperation::StateStore { home } => {
+            let [source] = operands.as_slice() else {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            };
+            if definition.is_some() {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            }
+            Ok(MInst::Store {
+                base: BaseReg::SimState,
+                offset: home.offset,
+                src: *source,
+                size: home.size,
+            })
+        }
+        SyntheticOperation::StateReload { home } => {
+            let ([], Some(destination)) = (operands.as_slice(), definition) else {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            };
+            Ok(MInst::Load {
+                dst: destination,
+                base: BaseReg::SimState,
+                offset: home.offset,
+                size: home.size,
+            })
+        }
         SyntheticOperation::RecipeNode { root, node } => {
             if graph
                 .bundles
@@ -3707,7 +3797,9 @@ fn verify_stack_home_reaching_definitions(
                 SyntheticOperation::StackReload { home } => {
                     required_homes.insert(home);
                 }
-                SyntheticOperation::RecipeNode { .. } => {}
+                SyntheticOperation::StateStore { .. }
+                | SyntheticOperation::StateReload { .. }
+                | SyntheticOperation::RecipeNode { .. } => {}
             }
         }
     }
@@ -3830,7 +3922,10 @@ fn verify_stack_home_reaching_definitions(
                             .unwrap_or(StackDefinition::False),
                     });
                 }
-                SyntheticOperation::StackStore { .. } | SyntheticOperation::RecipeNode { .. } => {}
+                SyntheticOperation::StackStore { .. }
+                | SyntheticOperation::StateStore { .. }
+                | SyntheticOperation::StateReload { .. }
+                | SyntheticOperation::RecipeNode { .. } => {}
             }
         }
         for &successor in &cfg.successors[block] {

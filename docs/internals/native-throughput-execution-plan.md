@@ -3974,14 +3974,46 @@ ignored, and check, strict all-target clippy, format, and diff gates pass.  Both
 analyses remain disconnected from executable SIR, so this slice deliberately
 has no generated-code or Linux timing claim.
 
-The next slice gives the allocation IR an explicit packed-state home creation
-operation.  Instruction-defined versions become short definition-to-writeback
-ranges; phi-defined versions can choose edge inheritance or a local home.
-Only after those state homes participate in the same split/reallocation loop
-as stack and rematerialized homes may one atomic publication replace loads and
-stores.
+Step 32c gives allocation IR explicit `StateStore` and `StateReload`
+operations.  Their home is one full machine-accessible 8/16/32/64-bit packed
+state word identified by physical SimState offset and a versioned home ID.  It
+is deliberately not an arbitrary HDL width attached to a MIR VReg.  A selected
+definition therefore ends at one real state store, and each later use begins
+at one real state reload; both short machine ranges re-enter ordinary exact
+liveness, interference, and coloring.  Materialization emits the corresponding
+SimState MIR store/load, and effect-aware synthetic DCE retains stores while
+allowing dead reloads to disappear.
 
-Status: **32a--32b complete; allocation-IR packed-home connection is in
+Atomic allocation lowering now independently verifies every such reload before
+publishing MIR.  The verifier scans only bytes belonging to requested homes,
+intersects known original writes through the shared MIR memory-effect model,
+and rejects an unknown direct SimState alias.  It then constructs pruned sparse
+byte MemorySSA, performs dominator-tree renaming, and resolves loop-carried phi
+cycles with iterative SCC condensation.  A reload is legal only when every
+physical byte and every reaching CFG path resolves to its exact home ID;
+overlapping state homes and ordinary MIR stores invalidate only intersecting
+bytes.  No byte-by-block matrix or reload-path enumeration is built.  For `I`
+allocation instructions, `R` requested physical bytes, `K` intersecting
+write-byte facts, `L` live `(byte, block)` pairs, and `E` MemorySSA edges, the
+verification uses `O(I log R + K + L + E)` time and `O(R + K + L + E)` extra
+storage.
+
+Focused state-home tests pass 8/8 for exact materialization and short reload
+liveness, every-arm and missing-arm diamonds, overlapping and disjoint
+synthetic/original writes, loop-carried entry homes, and conflicting home
+identity.  Allocation-IR tests pass 21/21.  The complete non-LTO library passes
+913/913, native testbench passes 60 with 1 ignored, counter passes 9 with 3
+ignored, and package all-target strict clippy, check, format, and diff gates
+pass.  No production range plan emits these operations yet, so this slice has
+no Linux semantic or timing claim.
+
+The next slice maps range versions to full machine-word roots and publishes one
+allocator-selected use cluster as state operations plus exact use rewrites.
+Phi-inherited homes must remain edge facts until the complete atomic allocation
+rewrite can represent them; they must not be converted back into eager broad
+loads or long arbitrary-width register ranges.
+
+Status: **32a--32c complete; range-version to machine-word lowering is in
 progress**.
 
 ## Execution record
@@ -4070,6 +4102,7 @@ progress**.
 | 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy/docs gates pass | release/LTO pass through `reboot: Power down` and exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30f | trace 56.072 s; release code generation 51.122 s; simulation 131.346 s | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
 | 31 no-layer effect stream and sparse MIR memory dependencies | this step | parser scheduler 18/18; memory effects 6/6; MIR scheduler 16/16 | lib 891/891; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check gates pass | normal testbench passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | trace 57.512 s; full code generation 57.777 s; simulation 133.430 s | layer/frontier batches removed; path-width pressure and unconditional block-local constants rejected; no throughput gain claimed; range StateSSA/lazy writeback remains next |
 | 32a--32b sparse terminal StateSSA and lazy residency graph | this step | range StateSSA 8/8; residency/writeback 6/6 | lib 905/905; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/strict clippy/format/diff gates pass | production remains disconnected; no Linux semantic or timing claim | n/a | terminal visibility now creates exact phis; phi SCC inheritance and allocator-selected branch/shared writeback clusters are represented without eagerly changing SIR |
+| 32c allocation-owned packed-state operations and sparse physical MemorySSA | this step | state homes 8/8; allocation IR 21/21 | lib 913/913; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; package all-target strict clippy and non-LTO check/format/diff gates pass | production range lowering remains disconnected; no Linux semantic or timing claim | n/a | full machine-word stores/reloads enter exact allocation liveness; independent sparse MemorySSA rejects every wrong-path or overlapping reload before atomic MIR publication |
 
 ## Related design records
 
