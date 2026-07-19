@@ -8,8 +8,6 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
     Entry Block: 0
     Registers:
       r0: logic<32>
-      r1: logic<32>
-      r2: logic<32>
       r3: logic<32>
     b0:
       r0 = Load(addr=x (region=0), offset=0, bits=32)

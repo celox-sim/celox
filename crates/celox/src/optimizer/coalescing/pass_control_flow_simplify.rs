@@ -127,13 +127,51 @@ fn finish_cfg_rewrites(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, changed: bo
         return;
     }
 
+    remove_unreachable_blocks(eu);
+
     // Mux replacement and threaded edges disconnect whole load/expression
     // DAGs.  The existing mark/sweep is linear in def-use edges and treats
     // loads as pure SIR values, which is exactly what is needed here.
     super::pass_vectorize_concat::remove_dead_definitions(eu);
     trim_dead_register_types(eu);
 
-    debug_assert!(eu.verify_result().is_ok());
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+}
+
+fn remove_unreachable_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let mut reachable = HashSet::default();
+    let mut work = vec![eu.entry_block_id];
+    while let Some(block_id) = work.pop() {
+        if !reachable.insert(block_id) {
+            continue;
+        }
+        let Some(block) = eu.blocks.get(&block_id) else {
+            continue;
+        };
+        match &block.terminator {
+            SIRTerminator::Jump(target, _) => work.push(*target),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                work.push(true_block.0);
+                work.push(false_block.0);
+            }
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    let unreachable = eu
+        .blocks
+        .keys()
+        .copied()
+        .filter(|block| !reachable.contains(block))
+        .collect::<Vec<_>>();
+    let changed = !unreachable.is_empty();
+    for block in unreachable {
+        eu.blocks.remove(&block);
+    }
+    changed
 }
 
 fn apply_sccp_rewrites(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, analysis: &Analysis) -> bool {

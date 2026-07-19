@@ -258,9 +258,6 @@ Execution Unit 0:
     r280: logic<1>
     r281: logic<32>
     r282: logic<32>
-    r283: logic<1>
-    r284: logic<32>
-    r285: logic<32>
     r286: logic<32>
     r287: logic<32>
     r289: logic<1>
@@ -356,8 +353,7 @@ Execution Unit 0:
     r434: logic<64>
     r436: logic<64>
     r437: logic<64>
-    r439: logic<64>
-    r441: logic<64>
+    r439: bit<2>
   b0:
     r0 = SIRValue(0x0)
     r1 = SIRValue(0x13)
@@ -369,6 +365,7 @@ Execution Unit 0:
   b2:
     r312 = Load(addr=v (region=0), offset=0, bits=64)
     r15 = Load(addr=i (region=0), offset=0, bits=1)
+    r279 = Load(addr=v (region=0), offset=19, bits=1)
     r294 = Load(addr=v (region=0), offset=0, bits=1)
     r313 = SIRValue(0x3)
     r314 = r312 Shr r313
@@ -675,22 +672,16 @@ Execution Unit 0:
     r272 = r271 Xor r16
     r274 = r272 Shr r0
     r276 = r274 And r20
-    Store(addr=v (region=0), offset=18, bits=1, src_reg = 276)
-    r439 = Load(addr=v (region=0), offset=0, bits=64)
     r277 = r264 Ne r276
     r278 = r263 Or r277
-    r441 = r439 Shr r436
-    r279 = r441 And r315
     r281 = Concat(r6, r276)
     r282 = r281 And r9
-    r283 = r439 And r315
-    r284 = Concat(r6, r283)
-    r285 = r284 And r9
-    r286 = r282 Xor r285
+    r286 = r282 Xor r57
     r287 = r286 Xor r16
     r289 = r287 Shr r0
     r291 = r289 And r20
-    Store(addr=v (region=0), offset=19, bits=1, src_reg = 291)
+    r439 = Concat(r291, r276)
+    Store(addr=v (region=0), offset=18, bits=2, src_reg = 439)
     r292 = r279 Ne r291
     r293 = r278 Or r292
     r296 = Concat(r6, r291)
