@@ -495,6 +495,7 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
             offset,
             index,
             size,
+            ..
         } if *index == imm_vreg => sign_extended_i32(value)
             .and_then(|index| offset.checked_add(index))
             .map(|offset| MInst::Load {
@@ -4453,6 +4454,7 @@ mod tests {
                     offset: 16,
                     index: VReg(0),
                     size: OpSize::S64,
+                    alias_range: None,
                 },
                 MInst::StoreIndexed {
                     base: BaseReg::SimState,
@@ -5147,6 +5149,7 @@ mod tests {
                     offset: 0,
                     index: VReg(1),
                     size: OpSize::S8,
+                    alias_range: None,
                 },
                 MInst::Store {
                     base: BaseReg::SimState,

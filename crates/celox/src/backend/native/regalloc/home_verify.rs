@@ -908,6 +908,8 @@ mod tests {
         plan.edge_ops.clear();
         plan.recipe_reloads.clear();
         plan.recipe_homes.clear();
+        plan.state_homes.clear();
+        plan.state_reload_recipes.clear();
         for state in plan
             .w_entry
             .iter_mut()

@@ -3637,6 +3637,7 @@ fn prepare_sparse_store(
             offset: sparse.dirty_words_offset as i32,
             index: dirty_index,
             size: OpSize::S64,
+            alias_range: dirty_alias_range,
         });
         let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, bit_in_word, chunk, 63);
@@ -3686,6 +3687,9 @@ fn prepare_sparse_store(
                 offset: stable_base + plane_delta,
                 index: data_index,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(stable_base + plane_delta, byte_len)
+                }),
             });
             block.push(MInst::LoadIndexed {
                 dst: working,
@@ -3693,6 +3697,9 @@ fn prepare_sparse_store(
                 offset: sparse_base + plane_delta,
                 index: data_index,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(sparse_base + plane_delta, byte_len)
+                }),
             });
             let initialized = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Select {
@@ -3747,6 +3754,7 @@ fn prepare_sparse_store(
             offset: sparse.summary_words_offset as i32,
             index: summary_index,
             size: OpSize::S64,
+            alias_range: summary_alias_range,
         });
         let summary_bit = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, summary_bit, dirty_word, 63);
@@ -3848,6 +3856,7 @@ fn emit_aligned_dynamic_wide_store(
                 offset,
                 index: byte_offset,
                 size: OpSize::S8,
+                alias_range,
             });
             let new = ctx.alloc_vreg(SpillDesc::transient());
             ctx.emit_bfi(block, new, old, src, 0, mask_for_width(tail_bits));
@@ -3894,6 +3903,7 @@ fn emit_dynamic_scalar_bitfield_store(
         offset: base_offset,
         index: byte_offset,
         size: ISelContext::op_size_for_width(width + 7),
+        alias_range,
     });
     let shifted_src = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::Shl {
@@ -4010,6 +4020,7 @@ fn emit_dynamic_scalar_bitfield_store(
         offset: base_offset + 8,
         index: byte_offset,
         size: OpSize::S8,
+        alias_range,
     });
     let inverted_high_mask = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::BitNot {
@@ -4560,6 +4571,10 @@ fn lower_instruction(
                     let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                     let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
                     let base_off = ctx.byte_offset(addr, 0);
+                    let value_alias_range = MemoryAliasRange::new(
+                        base_off,
+                        ctx.layout.plane_size(&addr.absolute_addr()),
+                    );
 
                     // Compute byte offset and intra-byte bit shift
                     let byte_off = ctx.alloc_vreg(SpillDesc::transient());
@@ -4578,6 +4593,7 @@ fn lower_instruction(
                             offset_vreg,
                             offset_low_zero_bits,
                             *width_bits,
+                            value_alias_range,
                         );
                         if *width_bits > 64 {
                             ctx.set_wide_chunks(*dst, chunks);
@@ -4587,6 +4603,10 @@ fn lower_instruction(
 
                         if ctx.is_4state_var(addr) {
                             let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                            let mask_alias_range = MemoryAliasRange::new(
+                                mask_base_off,
+                                ctx.layout.plane_size(&addr.absolute_addr()),
+                            );
                             let mask_chunks = lower_dynamic_wide_load_chunks(
                                 ctx,
                                 block,
@@ -4595,6 +4615,7 @@ fn lower_instruction(
                                 offset_vreg,
                                 offset_low_zero_bits,
                                 *width_bits,
+                                mask_alias_range,
                             );
                             if let Some(&(mask0, _)) = mask_chunks.first() {
                                 ctx.set_mask(*dst, mask0);
@@ -4621,6 +4642,7 @@ fn lower_instruction(
                             offset: base_off,
                             index: byte_off,
                             size: load_size,
+                            alias_range: value_alias_range,
                         });
                         if *width_bits < 64 {
                             ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
@@ -4641,6 +4663,7 @@ fn lower_instruction(
                             offset: base_off,
                             index: byte_off,
                             size: load_size,
+                            alias_range: value_alias_range,
                         });
 
                         // Shift right by bit_shift (dynamic)
@@ -4737,6 +4760,10 @@ fn lower_instruction(
                         // Dynamic: load mask similarly with indexed addressing
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                        let mask_alias_range = MemoryAliasRange::new(
+                            mask_base_off,
+                            ctx.layout.plane_size(&addr.absolute_addr()),
+                        );
                         let byte_off = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::ShrImm {
                             dst: byte_off,
@@ -4752,6 +4779,7 @@ fn lower_instruction(
                                 offset: mask_base_off,
                                 index: byte_off,
                                 size: load_size,
+                                alias_range: mask_alias_range,
                             });
                             let mvreg = ctx.alloc_vreg(SpillDesc::transient());
                             if *width_bits < 64 {
@@ -4772,6 +4800,7 @@ fn lower_instruction(
                             offset: mask_base_off,
                             index: byte_off,
                             size: load_size,
+                            alias_range: mask_alias_range,
                         });
                         let shifted = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Shr {
@@ -5228,6 +5257,7 @@ fn lower_instruction(
                                     offset: base_off,
                                     index: byte_off,
                                     size: store_size,
+                                    alias_range: value_alias_range,
                                 });
                                 Some(old)
                             };
@@ -5781,6 +5811,10 @@ fn lower_instruction(
                                 offset: src_base_off + copied as i32,
                                 index: byte_off,
                                 size: chunk_size,
+                                alias_range: MemoryAliasRange::new(
+                                    src_base_off,
+                                    ctx.layout.plane_size(&src_addr.absolute_addr()),
+                                ),
                             });
                             block.push(MInst::StoreIndexed {
                                 base: BaseReg::SimState,
@@ -5879,6 +5913,10 @@ fn lower_instruction(
                                     offset: src_mask_base + copied as i32,
                                     index: byte_off,
                                     size: cs,
+                                    alias_range: MemoryAliasRange::new(
+                                        src_mask_base,
+                                        ctx.layout.plane_size(&src_addr.absolute_addr()),
+                                    ),
                                 });
                                 block.push(MInst::StoreIndexed {
                                     base: BaseReg::SimState,
@@ -9884,6 +9922,7 @@ fn lower_dynamic_wide_load_chunks(
     offset_vreg: VReg,
     offset_low_zero_bits: u32,
     width_bits: usize,
+    alias_range: Option<MemoryAliasRange>,
 ) -> Vec<(VReg, usize)> {
     let n_chunks = ISelContext::num_chunks(width_bits);
     let mut chunks = Vec::with_capacity(n_chunks);
@@ -9900,6 +9939,7 @@ fn lower_dynamic_wide_load_chunks(
                 offset: base_off + (bit_pos / 8) as i32,
                 index: byte_off,
                 size: ISelContext::op_size_for_width(chunk_bits),
+                alias_range,
             });
             chunks.push((chunk, chunk_bits));
             bit_pos += chunk_bits;
@@ -9950,6 +9990,7 @@ fn lower_dynamic_wide_load_chunks(
             offset: base_off + byte_delta,
             index: byte_off,
             size: OpSize::S64,
+            alias_range,
         });
         let lo_shifted = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Shr {
@@ -9965,6 +10006,7 @@ fn lower_dynamic_wide_load_chunks(
             offset: base_off + byte_delta + 8,
             index: byte_off,
             size: OpSize::S8,
+            alias_range,
         });
         let hi_shifted_raw = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Shl {
@@ -12102,17 +12144,24 @@ mod tests {
         }
     }
 
-    fn assert_indexed_stores_have_alias_ranges(function: &MFunction) {
-        let stores = function
-            .blocks
-            .iter()
-            .flat_map(|block| &block.insts)
-            .filter_map(|inst| match inst {
-                MInst::StoreIndexed { alias_range, .. } => Some(alias_range),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+    fn assert_indexed_state_accesses_have_alias_ranges(function: &MFunction) {
+        let (loads, stores) = function.blocks.iter().flat_map(|block| &block.insts).fold(
+            (Vec::new(), Vec::new()),
+            |mut accesses, inst| {
+                match inst {
+                    MInst::LoadIndexed { alias_range, .. } => accesses.0.push(alias_range),
+                    MInst::StoreIndexed { alias_range, .. } => accesses.1.push(alias_range),
+                    _ => {}
+                }
+                accesses
+            },
+        );
+        assert!(!loads.is_empty(), "fixture did not lower an indexed load");
         assert!(!stores.is_empty(), "fixture did not lower an indexed store");
+        assert!(
+            loads.iter().all(|range| range.is_some()),
+            "ISel emitted an indexed load without a bounded memory effect"
+        );
         assert!(
             stores.iter().all(|range| range.is_some()),
             "ISel emitted an indexed store without a bounded memory effect"
@@ -12264,7 +12313,7 @@ mod tests {
         };
         let mut function = lower_execution_unit(&eu, &layout, four_state);
         if dynamic {
-            assert_indexed_stores_have_alias_ranges(&function);
+            assert_indexed_state_accesses_have_alias_ranges(&function);
         }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
@@ -12501,7 +12550,7 @@ mod tests {
         };
         let mut function = lower_execution_unit(&eu, &layout, false);
         if dynamic {
-            assert_indexed_stores_have_alias_ranges(&function);
+            assert_indexed_state_accesses_have_alias_ranges(&function);
         }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);

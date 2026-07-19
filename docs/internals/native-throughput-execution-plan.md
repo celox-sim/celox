@@ -4013,8 +4013,52 @@ Phi-inherited homes must remain edge facts until the complete atomic allocation
 rewrite can represent them; they must not be converted back into eager broad
 loads or long arbitrary-width register ranges.
 
-Status: **32a--32c complete; range-version to machine-word lowering is in
-progress**.
+Step 32d connects full machine-word versions to the production SSA allocator
+and establishes the final proof boundary.  Reconstruction records each
+allocator-owned state store by its final per-block SimState-write identity and
+each reload by its strict-SSA destination.  Final MIR is converted back to the
+allocation IR, only those exact operations are tagged as allocator-owned, and
+the sparse physical-byte MemorySSA verifier proves that every reload is reached
+by the selected home on every byte and CFG path.  Ordinary state recipes use a
+stable original-write identity: allocator-inserted writes no longer renumber a
+later disjoint original write, but an inserted write which actually reaches
+the recipe remains a distinct version and is rejected.  This removes the
+incorrect dependency on probe-MIR write ordinals without weakening alias or
+path checks.
+
+The production integration experiment also exposes why eager physical-word
+promotion is the wrong allocation boundary.  It creates one VReg for every
+non-entry cell version and makes terminal visibility a use of that VReg before
+the ordinary spill planner sees the function.  A direct store which previously
+ended a range can therefore become a value live to a terminal writeback; a
+short direct load can become a cross-block phi range.  Deferred state homes
+recover some spills only after those ranges and their pressure already exist.
+On Heliodor this leaves `eval_comb` with a 46,120-byte frame versus the accepted
+31,032-byte baseline, `eval_only_ff` with 13,168 versus 7,024 bytes, and even
+turns `apply_ff`'s zero-byte frame into 1,576 bytes.  The complete generated MIR
+is retained at
+`target/heliodor/analysis/step32g-stable-write-identity-20260719`.
+
+All 924 optimized non-LTO library tests pass, along with 60 native-testbench
+tests (1 ignored), 9 counter tests (3 ignored), and the focused final-write
+identity/overlap regressions.  The unmodified Heliodor checkout reaches
+`reboot: Power down` and exactly one `cy=9ae070 x3=aa pass=1`.  Trace-free code
+generation takes 86.870 s and execution takes 128.011 s, compared with the
+accepted Step 30f 52.491 s and 116.325 s.  Correctness is established, but the
+eager promotion experiment is rejected as a performance design.
+
+The replacement unit is a MemorySSA def-use cluster, not a scheduler layer and
+not a whole physical cell.  Original loads and stores remain memory operations
+unless allocation selects a concrete cluster.  A selected store-to-load
+cluster introduces only the short register regions needed between that
+definition and those uses; branch-local clusters split independently, and
+terminal writeback remains a memory obligation rather than an artificial
+whole-CFG register use.  Stack, existing-state, deferred-state, rematerialized,
+and register alternatives are then priced and allocated together before the
+atomic MIR rewrite.
+
+Status: **32a--32d correctness boundary complete; eager whole-version
+promotion rejected; use-cluster allocation is in progress**.
 
 ## Execution record
 
@@ -4103,6 +4147,7 @@ progress**.
 | 31 no-layer effect stream and sparse MIR memory dependencies | this step | parser scheduler 18/18; memory effects 6/6; MIR scheduler 16/16 | lib 891/891; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check gates pass | normal testbench passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | trace 57.512 s; full code generation 57.777 s; simulation 133.430 s | layer/frontier batches removed; path-width pressure and unconditional block-local constants rejected; no throughput gain claimed; range StateSSA/lazy writeback remains next |
 | 32a--32b sparse terminal StateSSA and lazy residency graph | this step | range StateSSA 8/8; residency/writeback 6/6 | lib 905/905; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/strict clippy/format/diff gates pass | production remains disconnected; no Linux semantic or timing claim | n/a | terminal visibility now creates exact phis; phi SCC inheritance and allocator-selected branch/shared writeback clusters are represented without eagerly changing SIR |
 | 32c allocation-owned packed-state operations and sparse physical MemorySSA | this step | state homes 8/8; allocation IR 21/21 | lib 913/913; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; package all-target strict clippy and non-LTO check/format/diff gates pass | production range lowering remains disconnected; no Linux semantic or timing claim | n/a | full machine-word stores/reloads enter exact allocation liveness; independent sparse MemorySSA rejects every wrong-path or overlapping reload before atomic MIR publication |
+| 32d production state-home proof and eager-promotion rejection | this step | regalloc 278/278; final-write identity accepts 40 disjoint inserted writes and rejects a reaching overlap | lib 924/924; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/format gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | trace 89.995 s; full compile 86.870 s; execute 128.011 s | final MIR proof is sound; eager whole-version promotion raises the main frames and regresses Step 30f execution, so use-cluster allocation replaces it next |
 
 ## Related design records
 

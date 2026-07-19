@@ -152,8 +152,9 @@ fn home_rank(kind: HomeKind) -> u8 {
     match kind {
         HomeKind::Rematerialize(_) => 0,
         HomeKind::State(_) => 1,
-        HomeKind::Stack => 2,
-        HomeKind::Register => 3,
+        HomeKind::DeferredState(_) => 2,
+        HomeKind::Stack => 3,
+        HomeKind::Register => 4,
     }
 }
 
@@ -202,6 +203,7 @@ fn choose_use_home(
 struct PartitionCost {
     total: u64,
     uses_stack: bool,
+    uses_deferred_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,8 +217,10 @@ struct HomeCostTotals {
     use_count: usize,
     without_stack_total: u64,
     without_stack_missing: usize,
+    without_stack_deferred_count: usize,
     with_stack_total: u64,
     with_stack_use_count: usize,
+    with_stack_deferred_count: usize,
 }
 
 impl HomeCostTotals {
@@ -245,6 +249,19 @@ impl HomeCostTotals {
                         format!("root bundle {root:?} non-stack home cost exceeds u64"),
                     )
                 })?;
+            if matches!(choice.kind, HomeKind::DeferredState(_)) {
+                self.without_stack_deferred_count = self
+                    .without_stack_deferred_count
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                            None,
+                            None,
+                            format!("root bundle {root:?} deferred-state use count exceeds usize"),
+                        )
+                    })?;
+            }
         } else {
             self.without_stack_missing =
                 self.without_stack_missing.checked_add(1).ok_or_else(|| {
@@ -277,6 +294,18 @@ impl HomeCostTotals {
                         format!("root bundle {root:?} stack-use count exceeds usize"),
                     )
                 })?;
+        } else if matches!(row.with_stack.kind, HomeKind::DeferredState(_)) {
+            self.with_stack_deferred_count = self
+                .with_stack_deferred_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                        None,
+                        None,
+                        format!("root bundle {root:?} deferred-state use count exceeds usize"),
+                    )
+                })?;
         }
         Ok(())
     }
@@ -306,6 +335,21 @@ impl HomeCostTotals {
                         format!("root bundle {root:?} non-stack complement cost underflowed"),
                     )
                 })?;
+            if matches!(choice.kind, HomeKind::DeferredState(_)) {
+                self.without_stack_deferred_count = self
+                    .without_stack_deferred_count
+                    .checked_sub(1)
+                    .ok_or_else(|| {
+                        IntervalAllocationError::new(
+                            "INTERVAL_ALLOC.HOME_COST_INDEX",
+                            None,
+                            None,
+                            format!(
+                                "root bundle {root:?} deferred-state complement count underflowed"
+                            ),
+                        )
+                    })?;
+            }
         } else {
             self.without_stack_missing =
                 self.without_stack_missing.checked_sub(1).ok_or_else(|| {
@@ -338,27 +382,64 @@ impl HomeCostTotals {
                         format!("root bundle {root:?} stack-use count underflowed"),
                     )
                 })?;
+        } else if matches!(row.with_stack.kind, HomeKind::DeferredState(_)) {
+            self.with_stack_deferred_count = self
+                .with_stack_deferred_count
+                .checked_sub(1)
+                .ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        format!("root bundle {root:?} deferred-state complement count underflowed"),
+                    )
+                })?;
         }
         Ok(())
     }
 
     fn finish(self, root: LiveBundleId) -> Result<PartitionCost, IntervalAllocationError> {
-        self.finish_with_existing_stack(root, false)
+        self.finish_with_existing_homes(root, false, false)
     }
 
-    fn finish_with_existing_stack(
+    fn finish_with_existing_homes(
         self,
         root: LiveBundleId,
         stack_exists: bool,
+        deferred_state_exists: bool,
     ) -> Result<PartitionCost, IntervalAllocationError> {
+        let without_stack_deferred_creation =
+            if self.without_stack_deferred_count != 0 && !deferred_state_exists {
+                1_u64
+            } else {
+                0
+            };
+        let without_stack = self
+            .without_stack_total
+            .checked_add(without_stack_deferred_creation)
+            .ok_or_else(|| {
+                IntervalAllocationError::new(
+                    "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                    None,
+                    None,
+                    format!("root bundle {root:?} deferred-state creation cost exceeds u64"),
+                )
+            })?;
         let stack_creation_cost = if self.with_stack_use_count != 0 && !stack_exists {
             u64::from(STACK_HOME_CREATION_COST)
         } else {
             0
         };
+        let deferred_creation_cost =
+            if self.with_stack_deferred_count != 0 && !deferred_state_exists {
+                1_u64
+            } else {
+                0
+            };
         let with_stack = self
             .with_stack_total
             .checked_add(stack_creation_cost)
+            .and_then(|total| total.checked_add(deferred_creation_cost))
             .ok_or_else(|| {
                 IntervalAllocationError::new(
                     "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
@@ -367,15 +448,17 @@ impl HomeCostTotals {
                     format!("root bundle {root:?} stack-home creation cost exceeds u64"),
                 )
             })?;
-        if self.without_stack_missing == 0 && self.without_stack_total <= with_stack {
+        if self.without_stack_missing == 0 && without_stack <= with_stack {
             Ok(PartitionCost {
-                total: self.without_stack_total,
+                total: without_stack,
                 uses_stack: false,
+                uses_deferred_state: self.without_stack_deferred_count != 0,
             })
         } else {
             Ok(PartitionCost {
                 total: with_stack,
                 uses_stack: self.with_stack_use_count != 0,
+                uses_deferred_state: self.with_stack_deferred_count != 0,
             })
         }
     }
@@ -399,6 +482,7 @@ pub(super) struct RootHomeCostAccumulator {
     root: LiveBundleId,
     totals: HomeCostTotals,
     stack_exists: bool,
+    deferred_state_exists: bool,
 }
 
 impl RootHomePlan {
@@ -492,11 +576,16 @@ impl RootHomePlan {
         })
     }
 
-    pub(super) fn cost_accumulator(&self, stack_exists: bool) -> RootHomeCostAccumulator {
+    pub(super) fn cost_accumulator(
+        &self,
+        stack_exists: bool,
+        deferred_state_exists: bool,
+    ) -> RootHomeCostAccumulator {
         RootHomeCostAccumulator {
             root: self.root,
             totals: HomeCostTotals::default(),
             stack_exists,
+            deferred_state_exists,
         }
     }
 
@@ -536,7 +625,11 @@ impl RootHomePlan {
         }
         Ok(accumulator
             .totals
-            .finish_with_existing_stack(self.root, accumulator.stack_exists)?
+            .finish_with_existing_homes(
+                self.root,
+                accumulator.stack_exists,
+                accumulator.deferred_state_exists,
+            )?
             .total)
     }
 
@@ -631,6 +724,19 @@ impl RootHomePlan {
                 creation_cost: 0,
                 materialization_cost: choice.cost,
             },
+            HomeKind::DeferredState(_) => HomeSelection {
+                kind: choice.kind,
+                materializations: vec![choice.materialization.ok_or_else(|| {
+                    IntervalAllocationError::new(
+                        "INTERVAL_ALLOC.HOME_COST_INDEX",
+                        None,
+                        None,
+                        "deferred-state use choice has no exact materialization",
+                    )
+                })?],
+                creation_cost: u32::from(true),
+                materialization_cost: choice.cost,
+            },
             HomeKind::Register => {
                 return Err(IntervalAllocationError::new(
                     "INTERVAL_ALLOC.USE_HOME_CLASS",
@@ -651,14 +757,15 @@ impl RootHomePlan {
         Ok(selection)
     }
 
-    fn cost_for_with_existing_stack(
+    fn cost_for_with_existing_homes(
         &self,
         uses: &[BundleUseId],
         stack_exists: bool,
+        deferred_state_exists: bool,
     ) -> Result<PartitionCost, IntervalAllocationError> {
         let mut totals = HomeCostTotals::default();
         self.visit_uses(uses, |row| totals.add(self.root, row))?;
-        totals.finish_with_existing_stack(self.root, stack_exists)
+        totals.finish_with_existing_homes(self.root, stack_exists, deferred_state_exists)
     }
 
     /// Exact displacement cost used by the physical-allocation worklist.
@@ -668,23 +775,27 @@ impl RootHomePlan {
         &self,
         uses: &[BundleUseId],
         stack_exists: bool,
+        deferred_state_exists: bool,
     ) -> Result<u64, IntervalAllocationError> {
-        Ok(self.cost_for_with_existing_stack(uses, stack_exists)?.total)
+        Ok(self
+            .cost_for_with_existing_homes(uses, stack_exists, deferred_state_exists)?
+            .total)
     }
 
     pub(super) fn partition(
         &self,
         uses: &[BundleUseId],
     ) -> Result<HomePartition, IntervalAllocationError> {
-        self.partition_with_existing_stack(uses, false)
+        self.partition_with_existing_homes(uses, false, false)
     }
 
-    pub(super) fn partition_with_existing_stack(
+    pub(super) fn partition_with_existing_homes(
         &self,
         uses: &[BundleUseId],
         stack_exists: bool,
+        deferred_state_exists: bool,
     ) -> Result<HomePartition, IntervalAllocationError> {
-        let cost = self.cost_for_with_existing_stack(uses, stack_exists)?;
+        let cost = self.cost_for_with_existing_homes(uses, stack_exists, deferred_state_exists)?;
         let mut grouped = BTreeMap::<HomeKind, (Vec<BundleUseId>, Vec<UseMaterialization>)>::new();
         let mut previous = None;
         for &use_id in uses {
@@ -744,17 +855,19 @@ impl RootHomePlan {
                             )
                         })?
                 }
-                HomeKind::Rematerialize(_) | HomeKind::State(_) => materializations
-                    .iter()
-                    .try_fold(0_u32, |total, item| total.checked_add(item.cost))
-                    .ok_or_else(|| {
-                        IntervalAllocationError::new(
-                            "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
-                            None,
-                            None,
-                            "recipe materialization cost exceeds u32",
-                        )
-                    })?,
+                HomeKind::Rematerialize(_) | HomeKind::State(_) | HomeKind::DeferredState(_) => {
+                    materializations
+                        .iter()
+                        .try_fold(0_u32, |total, item| total.checked_add(item.cost))
+                        .ok_or_else(|| {
+                            IntervalAllocationError::new(
+                                "INTERVAL_ALLOC.HOME_COST_OVERFLOW",
+                                None,
+                                None,
+                                "recipe materialization cost exceeds u32",
+                            )
+                        })?
+                }
                 HomeKind::Register => {
                     return Err(IntervalAllocationError::new(
                         "INTERVAL_ALLOC.USE_HOME_CLASS",
@@ -764,10 +877,10 @@ impl RootHomePlan {
                     ));
                 }
             };
-            let creation_cost = if kind == HomeKind::Stack && !stack_exists {
-                STACK_HOME_CREATION_COST
-            } else {
-                0
+            let creation_cost = match kind {
+                HomeKind::Stack if !stack_exists => STACK_HOME_CREATION_COST,
+                HomeKind::DeferredState(_) if !deferred_state_exists => 1,
+                _ => 0,
             };
             let selection = HomeSelection {
                 kind,
@@ -828,6 +941,28 @@ fn selection_covers(
         }
         HomeKind::Rematerialize(_) | HomeKind::State(_) => {
             selection.creation_cost == 0
+                && selection.materializations.len() == uses.len()
+                && uses
+                    .iter()
+                    .zip(&selection.materializations)
+                    .all(|(&use_id, materialization)| {
+                        materialization.use_id == use_id
+                            && homes.uses.get(use_id.0 as usize).is_some_and(|options| {
+                                options.iter().any(|option| {
+                                    option.kind == selection.kind
+                                        && option.recipe == materialization.recipe
+                                        && option.cost == materialization.cost
+                                })
+                            })
+                    })
+                && selection.materialization_cost
+                    == selection
+                        .materializations
+                        .iter()
+                        .fold(0_u32, |cost, item| cost.saturating_add(item.cost))
+        }
+        HomeKind::DeferredState(_) => {
+            selection.creation_cost == 1
                 && selection.materializations.len() == uses.len()
                 && uses
                     .iter()

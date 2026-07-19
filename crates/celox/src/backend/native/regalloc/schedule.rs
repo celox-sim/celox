@@ -1409,6 +1409,7 @@ mod tests {
                 offset: (lane * 8) as i32,
                 index,
                 size: OpSize::S64,
+                alias_range: None,
             });
         }
         for (&dst, &src) in masked.iter().zip(&loaded) {
@@ -1469,6 +1470,7 @@ mod tests {
                 offset: 64,
                 index,
                 size: OpSize::S64,
+                alias_range: None,
             },
             MInst::AddImm {
                 dst: stored_after,

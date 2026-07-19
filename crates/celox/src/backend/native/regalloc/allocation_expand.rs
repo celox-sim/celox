@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::backend::native::features::VariableShiftEncoding;
-use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, PackedStateHome, Uses, VReg};
 
 use super::allocation_ir::{
     AllocationIr, AllocationIrError, StackHomeId, SyntheticInstructionId, SyntheticOperation,
@@ -126,6 +126,14 @@ pub(super) struct ExpandedStackHome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExpandedStateHome {
+    pub home: PackedStateHome,
+    pub root: LiveBundleId,
+    pub definition: SyntheticInstructionId,
+    pub value: VReg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExpandedStackDefinition {
     Store {
         instruction: SyntheticInstructionId,
@@ -161,6 +169,7 @@ pub(super) struct ExpandedAllocationProblem {
     pub region_rows: BTreeMap<RegisterRegionId, usize>,
     pub next_register_region: u32,
     pub stack_homes: Vec<ExpandedStackHome>,
+    pub state_homes: Vec<ExpandedStateHome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +259,7 @@ pub(super) fn expand(
     let mut roots = Vec::with_capacity(graph.bundles.len());
     let mut register_regions = Vec::new();
     let mut stack_homes = Vec::new();
+    let mut state_homes = Vec::new();
 
     for (root_index, root) in graph.bundles.iter().enumerate() {
         if root.id.0 as usize != root_index {
@@ -276,6 +286,23 @@ pub(super) fn expand(
                 .get(leaf.0 as usize)
                 .is_some_and(bundle_uses_stack)
         });
+        let needs_deferred_state = leaves.iter().any(|&leaf| {
+            plan.bundles
+                .get(leaf.0 as usize)
+                .is_some_and(bundle_uses_deferred_state)
+        });
+        if needs_deferred_state {
+            let home = graph.deferred_homes[root_index].ok_or_else(|| {
+                AllocationExpandError::new(
+                    "ALLOCATION_EXPAND.DEFERRED_STATE_HOME",
+                    Some(root.definition.block()),
+                    Some(root.id),
+                    None,
+                    "allocation selected a deferred home absent from its machine root",
+                )
+            })?;
+            ensure_state_home(&mut ir, &mut state_homes, root, home)?;
+        }
         let keeps_original_register = leaves.iter().any(|&leaf| {
             plan.bundles.get(leaf.0 as usize).is_some_and(|bundle| {
                 bundle.parent.is_none()
@@ -510,7 +537,15 @@ pub(super) fn expand(
         });
     }
 
-    finish_expansion(func, cfg, ir, roots, register_regions, stack_homes)
+    finish_expansion(
+        func,
+        cfg,
+        ir,
+        roots,
+        register_regions,
+        stack_homes,
+        state_homes,
+    )
 }
 
 /// Seed joint allocation with the original SSA ranges and no preselected
@@ -555,7 +590,7 @@ pub(super) fn expand_unallocated(
             uses,
         });
     }
-    finish_expansion(func, cfg, ir, roots, Vec::new(), Vec::new())
+    finish_expansion(func, cfg, ir, roots, Vec::new(), Vec::new(), Vec::new())
 }
 
 fn finish_expansion(
@@ -565,6 +600,7 @@ fn finish_expansion(
     mut roots: Vec<ExpandedRoot>,
     register_regions: Vec<ExpandedRegisterRegion>,
     stack_homes: Vec<ExpandedStackHome>,
+    state_homes: Vec<ExpandedStateHome>,
 ) -> Result<ExpandedAllocationProblem, AllocationExpandError> {
     let intervals = analyze_and_resolve(&ir, &mut roots, cfg)?;
     // Initial expansion is indexed from its final IR snapshot. Its mutation
@@ -606,6 +642,7 @@ fn finish_expansion(
         region_rows,
         next_register_region,
         stack_homes,
+        state_homes,
     })
 }
 
@@ -735,6 +772,72 @@ fn bundle_uses_stack(bundle: &AllocatedBundle) -> bool {
             false
         }
     }
+}
+
+fn bundle_uses_deferred_state(bundle: &AllocatedBundle) -> bool {
+    match &bundle.assignment {
+        BundleAssignment::Home(selection) => {
+            matches!(selection.kind, HomeKind::DeferredState(_))
+        }
+        BundleAssignment::Register(_) => bundle
+            .transitions
+            .iter()
+            .any(|transition| matches!(transition.home.kind, HomeKind::DeferredState(_))),
+        BundleAssignment::Unassigned | BundleAssignment::Split { .. } | BundleAssignment::Dead => {
+            false
+        }
+    }
+}
+
+pub(super) fn ensure_state_home(
+    ir: &mut AllocationIr,
+    homes: &mut Vec<ExpandedStateHome>,
+    root: &LiveBundle,
+    home: PackedStateHome,
+) -> Result<SyntheticInstructionId, AllocationExpandError> {
+    if let Some(existing) = homes
+        .iter()
+        .find(|existing| existing.home.id == home.id && existing.root == root.id)
+    {
+        if existing.home != home || existing.value != root.origin {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.DEFERRED_STATE_IDENTITY",
+                Some(root.definition.block()),
+                Some(root.id),
+                None,
+                "deferred state-home identity is shared by different machine values",
+            ));
+        }
+        return Ok(existing.definition);
+    }
+    if homes
+        .iter()
+        .any(|existing| existing.home.id == home.id && existing.home != home)
+    {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.DEFERRED_STATE_IDENTITY",
+            Some(root.definition.block()),
+            Some(root.id),
+            None,
+            "one deferred state-home version names two physical words",
+        ));
+    }
+    let definition = ir
+        .insert_after_definition(
+            root.definition,
+            SyntheticOperation::StateStore { home },
+            Uses::one(root.origin),
+            false,
+        )
+        .map_err(AllocationExpandError::ir)?
+        .instruction;
+    homes.push(ExpandedStateHome {
+        home,
+        root: root.id,
+        definition,
+        value: root.origin,
+    });
+    Ok(definition)
 }
 
 fn root_use(
@@ -902,6 +1005,15 @@ fn lower_phi_edge_materialization(
                 }
             }
         }
+        HomeKind::DeferredState(_) => {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.DEFERRED_STATE_EDGE",
+                Some(site.block()),
+                Some(root.id),
+                Some(use_id),
+                "deferred state homes are not offered on phi edges",
+            ));
+        }
         HomeKind::Register => {
             return Err(AllocationExpandError::new(
                 "ALLOCATION_EXPAND.HOME_CLASS",
@@ -1002,7 +1114,7 @@ fn lower_register_materialization(
                 },
             })
         }
-        HomeKind::Rematerialize(_) | HomeKind::State(_) => {
+        HomeKind::Rematerialize(_) | HomeKind::State(_) | HomeKind::DeferredState(_) => {
             let materialization = exact_recipe(selection, root, use_id, site)?;
             let (value, instructions) =
                 lower_recipe(ir, graph, root, site, materialization.recipe)?;
@@ -1032,6 +1144,26 @@ fn lower_recipe(
     site: UseSite,
     recipe: RecipeId,
 ) -> Result<(VReg, Vec<SyntheticInstructionId>), AllocationExpandError> {
+    if let Some(RecipeNode::DeferredState(home)) = graph.recipe_nodes.get(recipe.0 as usize) {
+        let inserted = ir
+            .insert_before_use(
+                site,
+                SyntheticOperation::StateReload { home: *home },
+                Uses::none(),
+                true,
+            )
+            .map_err(AllocationExpandError::ir)?;
+        let value = inserted.definition.ok_or_else(|| {
+            AllocationExpandError::new(
+                "ALLOCATION_EXPAND.SYNTHETIC_DEFINITION",
+                Some(site.block()),
+                Some(root.id),
+                None,
+                "deferred state reload did not define its allocation value",
+            )
+        })?;
+        return Ok((value, vec![inserted.instruction]));
+    }
     let mut reachable = BTreeSet::<RecipeId>::new();
     let mut work = vec![recipe];
     while let Some(node) = work.pop() {
@@ -1048,7 +1180,7 @@ fn lower_recipe(
             )
         })?;
         match operation {
-            RecipeNode::Constant(_) | RecipeNode::State(_) => {}
+            RecipeNode::Constant(_) | RecipeNode::State(_) | RecipeNode::DeferredState(_) => {}
             RecipeNode::Unary { input, .. } => work.push(*input),
             RecipeNode::Or64 { left, right } => {
                 work.push(*left);
@@ -1062,7 +1194,9 @@ fn lower_recipe(
     for node in reachable {
         let operation = &graph.recipe_nodes[node.0 as usize];
         let uses = match operation {
-            RecipeNode::Constant(_) | RecipeNode::State(_) => Uses::none(),
+            RecipeNode::Constant(_) | RecipeNode::State(_) | RecipeNode::DeferredState(_) => {
+                Uses::none()
+            }
             RecipeNode::Unary { input, .. } => Uses::one(*values.get(input).ok_or_else(|| {
                 AllocationExpandError::new(
                     "ALLOCATION_EXPAND.RECIPE_TOPOLOGY",

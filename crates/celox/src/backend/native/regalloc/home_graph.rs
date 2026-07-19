@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, PackedStateHome, StateHomeId, VReg};
 
 use super::cfg::NormalizedCfg;
 use super::live_interval::{
@@ -58,6 +58,10 @@ pub(super) struct RecipeShapeId(pub u32);
 pub(super) enum RecipeNode {
     Constant(u64),
     State(StateRecipe),
+    /// A versioned packed word whose store is created only if allocation
+    /// selects this home.  Unlike `State`, this is not pre-existing MemorySSA
+    /// state and therefore has a one-time creation cost.
+    DeferredState(PackedStateHome),
     Unary {
         operation: PureStep,
         input: RecipeId,
@@ -79,6 +83,7 @@ pub(super) enum RecipeShapeNode {
         observed_start: i64,
         observed_end: i64,
     },
+    DeferredState(PackedStateHome),
     Unary {
         operation: PureStep,
         input: RecipeShapeId,
@@ -100,6 +105,9 @@ pub(super) enum HomeKind {
     /// One or more physical state loads, independent of their use-local
     /// MemorySSA versions.
     State(RecipeShapeId),
+    /// One allocator-created packed-state word. The identity is the SSA
+    /// version stored there, not merely its physical address.
+    DeferredState(StateHomeId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,6 +147,8 @@ pub(super) struct HomeGraph {
     /// Shape identity corresponding to every exact recipe node.
     pub recipe_shapes: Vec<RecipeShapeId>,
     pub homes: Vec<BundleHomes>,
+    /// Optional allocator-created packed home owned by each root bundle.
+    pub deferred_homes: Vec<Option<PackedStateHome>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +266,7 @@ impl RecipeInterner {
                     observed_end,
                 }
             }
+            RecipeNode::DeferredState(home) => RecipeShapeNode::DeferredState(*home),
             RecipeNode::Unary { operation, input } => RecipeShapeNode::Unary {
                 operation: *operation,
                 input: input_shape(*input)?,
@@ -302,6 +313,10 @@ impl RecipeInterner {
 
     fn unary(&mut self, operation: PureStep, input: RecipeId) -> Result<RecipeId, HomeGraphError> {
         self.intern(RecipeNode::Unary { operation, input })
+    }
+
+    fn deferred_state(&mut self, home: PackedStateHome) -> Result<RecipeId, HomeGraphError> {
+        self.intern(RecipeNode::DeferredState(home))
     }
 
     fn linear(&mut self, recipe: &ResolvedRecipe) -> Result<(RecipeId, bool), HomeGraphError> {
@@ -438,8 +453,36 @@ fn build_unverified(func: &MFunction, cfg: &NormalizedCfg) -> Result<HomeGraph, 
     let bundles = root_bundles(&intervals)?;
     let mut recipes = RecipeInterner::default();
     let mut homes = Vec::with_capacity(bundles.len());
+    let mut deferred_homes = Vec::with_capacity(bundles.len());
+    let mut deferred_ids = HashMap::<StateHomeId, PackedStateHome>::new();
     for bundle in &bundles {
-        homes.push(bundle_homes(bundle, &reloads, &mut recipes)?);
+        let deferred = func
+            .spill_desc(bundle.origin)
+            .and_then(|descriptor| descriptor.deferred_state_home);
+        if let Some(home) = deferred {
+            if home.live_on_entry || home.byte_range().is_none() {
+                return Err(HomeGraphError::new(
+                    "HOME_GRAPH.DEFERRED_STATE_HOME",
+                    Some(bundle.definition.block()),
+                    None,
+                    vec![bundle.origin],
+                    "deferred state home must be a finite allocator-created version",
+                ));
+            }
+            if let Some(previous) = deferred_ids.insert(home.id, home)
+                && previous != home
+            {
+                return Err(HomeGraphError::new(
+                    "HOME_GRAPH.DEFERRED_STATE_IDENTITY",
+                    Some(bundle.definition.block()),
+                    None,
+                    vec![bundle.origin],
+                    "one deferred state-home version names two physical words",
+                ));
+            }
+        }
+        homes.push(bundle_homes(bundle, deferred, &reloads, &mut recipes)?);
+        deferred_homes.push(deferred);
     }
     Ok(HomeGraph {
         intervals,
@@ -448,6 +491,7 @@ fn build_unverified(func: &MFunction, cfg: &NormalizedCfg) -> Result<HomeGraph, 
         recipe_shape_nodes: recipes.shape_nodes,
         recipe_shapes: recipes.shapes,
         homes,
+        deferred_homes,
     })
 }
 
@@ -541,6 +585,7 @@ fn fragment_recipe(
 
 fn bundle_homes(
     bundle: &LiveBundle,
+    deferred_home: Option<PackedStateHome>,
     reloads: &ReloadRecipeAnalysis,
     recipes: &mut RecipeInterner,
 ) -> Result<BundleHomes, HomeGraphError> {
@@ -562,6 +607,17 @@ fn bundle_homes(
             let root = recipes.composite(recipe)?;
             let kind = HomeKind::State(recipes.shape(root)?);
             insert_use_home(&mut options, kind, root, &recipes.nodes)?;
+        }
+        if matches!(point, UsePoint::Instruction(_))
+            && let Some(home) = deferred_home
+        {
+            let root = recipes.deferred_state(home)?;
+            insert_use_home(
+                &mut options,
+                HomeKind::DeferredState(home.id),
+                root,
+                &recipes.nodes,
+            )?;
         }
         options.sort_unstable_by_key(|option| option.kind);
         uses.push(options);
@@ -607,7 +663,7 @@ fn recipe_cost(nodes: &[RecipeNode], root: RecipeId) -> Result<u32, HomeGraphErr
             ));
         };
         match node {
-            RecipeNode::Constant(_) | RecipeNode::State(_) => {}
+            RecipeNode::Constant(_) | RecipeNode::State(_) | RecipeNode::DeferredState(_) => {}
             RecipeNode::Unary { input, .. } => stack.push(*input),
             RecipeNode::Or64 { left, right } => {
                 stack.push(*left);
@@ -636,7 +692,7 @@ fn recipe_contains_state(nodes: &[RecipeNode], root: RecipeId) -> Result<bool, H
         };
         match node {
             RecipeNode::Constant(_) => {}
-            RecipeNode::State(_) => return Ok(true),
+            RecipeNode::State(_) | RecipeNode::DeferredState(_) => return Ok(true),
             RecipeNode::Unary { input, .. } => stack.push(*input),
             RecipeNode::Or64 { left, right } => {
                 stack.push(*left);
@@ -656,6 +712,18 @@ impl HomeGraph {
         self.intervals
             .verify(func, cfg)
             .map_err(HomeGraphError::live)?;
+        for (index, bundle) in self.bundles.iter().enumerate() {
+            let descriptor = func
+                .spill_desc(bundle.origin)
+                .and_then(|descriptor| descriptor.deferred_state_home);
+            if self.deferred_homes.get(index).copied().flatten() != descriptor {
+                return Err(Self::candidate_error(
+                    bundle,
+                    "HOME_GRAPH.DEFERRED_STATE_MATCH",
+                    "deferred state home differs from its MIR machine root",
+                ));
+            }
+        }
         self.verify_structure()
     }
 
@@ -674,8 +742,9 @@ impl HomeGraph {
     }
 
     fn verify_use_home(&self, bundle: &LiveBundle, home: UseHome) -> Result<(), HomeGraphError> {
-        let shape = match home.kind {
-            HomeKind::Rematerialize(shape) | HomeKind::State(shape) => shape,
+        let expected_shape = match home.kind {
+            HomeKind::Rematerialize(shape) | HomeKind::State(shape) => Some(shape),
+            HomeKind::DeferredState(_) => None,
             HomeKind::Register | HomeKind::Stack => {
                 return Err(Self::candidate_error(
                     bundle,
@@ -684,7 +753,9 @@ impl HomeGraph {
                 ));
             }
         };
-        if self.recipe_shape_nodes.get(shape.0 as usize).is_none() {
+        if let Some(shape) = expected_shape
+            && self.recipe_shape_nodes.get(shape.0 as usize).is_none()
+        {
             return Err(Self::candidate_error(
                 bundle,
                 "HOME_GRAPH.RECIPE_SHAPE_RANGE",
@@ -698,20 +769,36 @@ impl HomeGraph {
                 format!("use home references missing recipe {:?}", home.recipe),
             ));
         };
-        if actual_shape != shape {
+        if expected_shape.is_some_and(|shape| actual_shape != shape) {
             return Err(Self::candidate_error(
                 bundle,
                 "HOME_GRAPH.MATERIALIZATION_SHAPE",
-                format!("exact recipe shape {actual_shape:?} differs from home {shape:?}"),
+                format!(
+                    "exact recipe shape {actual_shape:?} differs from home {:?}",
+                    expected_shape.expect("shape mismatch has an expected shape")
+                ),
             ));
         }
-        if recipe_contains_state(&self.recipe_nodes, home.recipe)?
-            != matches!(home.kind, HomeKind::State(_))
-        {
+        let class_matches = match home.kind {
+            HomeKind::Rematerialize(_) => !recipe_contains_state(&self.recipe_nodes, home.recipe)?,
+            HomeKind::State(_) => {
+                recipe_contains_state(&self.recipe_nodes, home.recipe)?
+                    && !matches!(
+                        self.recipe_nodes.get(home.recipe.0 as usize),
+                        Some(RecipeNode::DeferredState(_))
+                    )
+            }
+            HomeKind::DeferredState(id) => matches!(
+                self.recipe_nodes.get(home.recipe.0 as usize),
+                Some(RecipeNode::DeferredState(candidate)) if candidate.id == id
+            ),
+            HomeKind::Register | HomeKind::Stack => false,
+        };
+        if !class_matches {
             return Err(Self::candidate_error(
                 bundle,
                 "HOME_GRAPH.MATERIALIZATION_CLASS",
-                "state and pure-rematerialization home classes are inconsistent",
+                "materialization recipe and home classes are inconsistent",
             ));
         }
         if home.cost != recipe_cost(&self.recipe_nodes, home.recipe)? {
@@ -725,13 +812,14 @@ impl HomeGraph {
     }
 
     fn verify_structure(&self) -> Result<(), HomeGraphError> {
-        if self.homes.len() != self.bundles.len() {
+        if self.homes.len() != self.bundles.len() || self.deferred_homes.len() != self.bundles.len()
+        {
             return Err(HomeGraphError::new(
                 "HOME_GRAPH.BUNDLE_COVERAGE",
                 None,
                 None,
                 Vec::new(),
-                "use-home table does not cover every bundle",
+                "use-home and deferred-home tables do not cover every bundle",
             ));
         }
         if self.recipe_shapes.len() != self.recipe_nodes.len() {
@@ -758,7 +846,9 @@ impl HomeGraph {
                 }
             };
             match node {
-                RecipeShapeNode::Constant(_) | RecipeShapeNode::State { .. } => {}
+                RecipeShapeNode::Constant(_)
+                | RecipeShapeNode::State { .. }
+                | RecipeShapeNode::DeferredState(_) => {}
                 RecipeShapeNode::Unary { input, .. } => check_input(*input)?,
                 RecipeShapeNode::Or64 { left, right } => {
                     check_input(*left)?;
@@ -781,7 +871,7 @@ impl HomeGraph {
                 }
             };
             match node {
-                RecipeNode::Constant(_) | RecipeNode::State(_) => {}
+                RecipeNode::Constant(_) | RecipeNode::State(_) | RecipeNode::DeferredState(_) => {}
                 RecipeNode::Unary { input, .. } => check_input(*input)?,
                 RecipeNode::Or64 { left, right } => {
                     check_input(*left)?;
@@ -799,6 +889,7 @@ impl HomeGraph {
                         observed_end,
                     }
                 }
+                RecipeNode::DeferredState(home) => RecipeShapeNode::DeferredState(*home),
                 RecipeNode::Unary { operation, input } => RecipeShapeNode::Unary {
                     operation: *operation,
                     input: child_shape(*input),
@@ -857,6 +948,7 @@ impl HomeGraph {
                 ));
             }
             let homes = &self.homes[bundle_index];
+            let deferred = self.deferred_homes[bundle_index];
             if homes.uses.len() != bundle.uses.len() {
                 return Err(HomeGraphError::new(
                     "HOME_GRAPH.USE_HOME_COVERAGE",
@@ -880,6 +972,15 @@ impl HomeGraph {
                     ));
                 }
                 for &home in use_homes {
+                    if let HomeKind::DeferredState(id) = home.kind
+                        && deferred.is_none_or(|candidate| candidate.id != id)
+                    {
+                        return Err(Self::candidate_error(
+                            bundle,
+                            "HOME_GRAPH.DEFERRED_STATE_OWNERSHIP",
+                            "use-local deferred home is not owned by this machine root",
+                        ));
+                    }
                     self.verify_use_home(bundle, home)?;
                 }
             }

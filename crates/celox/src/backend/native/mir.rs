@@ -232,6 +232,32 @@ pub enum SpillKind {
     Remat { value: u64 },
 }
 
+/// Version identity for one allocator-created packed-state home.
+///
+/// The identity is distinct from the physical address: two SSA versions may
+/// use the same packed word at different points, but a reload is valid only
+/// for the exact version which most recently established that home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct StateHomeId(pub u32);
+
+/// One full machine-accessible packed-state word.  This is allocator metadata
+/// over target-relevant 8/16/32/64-bit operations, not an HDL value width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct PackedStateHome {
+    pub id: StateHomeId,
+    pub offset: i32,
+    pub size: OpSize,
+    pub live_on_entry: bool,
+}
+
+impl PackedStateHome {
+    pub(crate) fn byte_range(self) -> Option<std::ops::Range<i64>> {
+        let start = i64::from(self.offset);
+        let end = start.checked_add(i64::from(self.size.bytes()))?;
+        Some(start..end)
+    }
+}
+
 /// Semantic subvalue inserted into the machine word produced by a static
 /// state-store read-modify-write. This is per-definition provenance for
 /// MemorySSA, not a width or type attached to the referenced VReg.
@@ -261,6 +287,10 @@ pub struct SpillDesc {
     pub spill_cost: u8,
     /// Optional relation established only when this definition is stored.
     pub(crate) state_insert: Option<StateInsertDesc>,
+    /// Optional allocator-created physical spill home for this complete
+    /// 32/64-bit machine value.  The store is deferred until allocation
+    /// actually chooses this home.
+    pub(crate) deferred_state_home: Option<PackedStateHome>,
 }
 
 impl SpillDesc {
@@ -271,6 +301,7 @@ impl SpillDesc {
             reload_cost: 1,
             spill_cost: 0,
             state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -296,6 +327,7 @@ impl SpillDesc {
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
             state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -321,6 +353,7 @@ impl SpillDesc {
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
             state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -328,7 +361,11 @@ impl SpillDesc {
     pub fn copy_for_snapshot(&self) -> Self {
         match self.kind {
             SpillKind::Remat { .. } => self.clone(),
-            _ => Self::transient(),
+            _ => self
+                .deferred_state_home
+                .map_or_else(Self::transient, |home| {
+                    Self::transient().with_deferred_state_home(home)
+                }),
         }
     }
 
@@ -339,7 +376,13 @@ impl SpillDesc {
             reload_cost: 2,
             spill_cost: 2,
             state_insert: None,
+            deferred_state_home: None,
         }
+    }
+
+    pub(crate) fn with_deferred_state_home(mut self, home: PackedStateHome) -> Self {
+        self.deferred_state_home = Some(home);
+        self
     }
 
     pub(crate) fn with_state_insert(
@@ -401,7 +444,7 @@ impl fmt::Display for BlockId {
 // ────────────────────────────────────────────────────────────────
 
 /// Operand size for memory and ALU operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OpSize {
     S8,
     S16,
@@ -443,8 +486,8 @@ pub enum BaseReg {
     StackFrame,
 }
 
-/// Closed-open physical-state byte envelope whose values may be changed by a
-/// register-indexed store.
+/// Closed-open physical-state byte envelope which may be observed or changed
+/// by a register-indexed access.
 ///
 /// A read-modify-write may use a wider machine access while preserving bytes
 /// outside this envelope. This range describes its semantic memory effect,
@@ -603,6 +646,9 @@ pub enum MInst {
         offset: i32,
         index: VReg,
         size: OpSize,
+        /// Conservative physical envelope for every possible indexed read.
+        /// `None` means the complete direct-addressed base may be observed.
+        alias_range: Option<MemoryAliasRange>,
     },
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
@@ -888,6 +934,7 @@ impl fmt::Display for MInst {
                 offset,
                 index,
                 size,
+                ..
             } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
             MInst::StoreIndexed {
                 base,
@@ -1792,6 +1839,7 @@ mod tests {
                     offset: 8,
                     index: a,
                     size: OpSize::S64,
+                    alias_range: None,
                 },
                 expected: vec![a],
             },

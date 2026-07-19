@@ -2,10 +2,12 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use crate::backend::native::memory_effect::{self, UnknownMemory};
 use crate::backend::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
 };
 
+use super::allocation_ir::{MaterializedStateReload, MaterializedStateStore};
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
 #[cfg(test)]
@@ -19,6 +21,8 @@ use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillP
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
     pub recipe_reloads: Vec<ExpectedMaterializedReload>,
+    pub state_stores: Vec<MaterializedStateStore>,
+    pub state_reloads: Vec<MaterializedStateReload>,
     pub shared_reload_blocks: usize,
 }
 
@@ -67,6 +71,13 @@ enum MaterializedOp {
 struct PreparedRecipe {
     expected: ResolvedRecipe,
     instructions: Vec<MInst>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingStateStore {
+    block: usize,
+    instruction: usize,
+    home: crate::backend::native::mir::PackedStateHome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -127,6 +138,23 @@ pub(super) fn reconstruct(
     let mut insertions = HashMap::<(usize, usize), Vec<MaterializedOp>>::new();
     let mut reload_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
     let mut edge_reload_bundles = Vec::<EdgeReloadBundle>::new();
+    for spill in super::ssa_state_home::planned_spills(func, cfg, plan).map_err(|error| {
+        ReconstructError::new(
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })? {
+        insertions
+            .entry((spill.block, spill.instruction))
+            .or_default()
+            .push(MaterializedOp::Spill {
+                value: spill.value,
+                home: spill.home,
+            });
+    }
     let spilled_phis = plan
         .point_ops
         .iter()
@@ -136,47 +164,12 @@ pub(super) fn reconstruct(
         })
         .collect::<BTreeSet<_>>();
     for block in 0..func.blocks.len() {
-        let removed = func.blocks[block]
-            .phis
-            .iter()
-            .filter(|phi| spilled_phis.contains(&plan.logical.of(phi.dst)))
-            .cloned()
-            .collect::<Vec<_>>();
         func.blocks[block]
             .phis
             .retain(|phi| !spilled_phis.contains(&plan.logical.of(phi.dst)));
-        for phi in removed {
-            let home = plan.homes.of_vreg(phi.dst);
-            if recipe_homes.contains(&home) {
-                continue;
-            }
-            for (predecessor, source) in phi.sources {
-                let Some(&predecessor) = cfg.block_index.get(&predecessor) else {
-                    return Err(ReconstructError::new(
-                        "RECONSTRUCT.PHI_PREDECESSOR_EXISTS",
-                        Some(func.blocks[block].id),
-                        None,
-                        vec![phi.dst, source],
-                        "spilled phi names a predecessor outside normalized CFG",
-                    ));
-                };
-                let source = plan.logical.of(source);
-                if plan.s_exit[predecessor].contains(&source) {
-                    continue;
-                }
-                let instruction = func.blocks[predecessor].insts.len() - 1;
-                insertions
-                    .entry((predecessor, instruction))
-                    .or_default()
-                    .push(MaterializedOp::Spill {
-                        value: source,
-                        home,
-                    });
-            }
-        }
     }
     for &(point, operation) in &plan.point_ops {
-        if matches!(operation, PlannedOp::SpillPhi { .. }) {
+        if !matches!(operation, PlannedOp::Reload { .. }) {
             continue;
         }
         let Some(&block) = cfg.block_index.get(&point.block) else {
@@ -188,13 +181,7 @@ pub(super) fn reconstruct(
                 "spill-plan point names a block outside normalized CFG",
             ));
         };
-        let recipe = reload_recipe_at_point(
-            reload_recipes,
-            point,
-            operation,
-            recipe_homes,
-            &plan.recipe_reloads,
-        )?;
+        let recipe = reload_recipe_at_point(reload_recipes, point, operation, plan)?;
         let _ = materialize_operation(
             func,
             plan,
@@ -237,6 +224,22 @@ pub(super) fn reconstruct(
         };
         let mut reloads_only = true;
         for &operation in operations {
+            match operation {
+                PlannedOp::Spill { .. } => {
+                    reloads_only = false;
+                    continue;
+                }
+                PlannedOp::SpillPhi { value, .. } => {
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.EDGE_SPILL_PHI",
+                        Some(predecessor_id),
+                        None,
+                        vec![VReg(value.0)],
+                        "SpillPhi cannot be an edge operation",
+                    ));
+                }
+                PlannedOp::Reload { .. } => {}
+            }
             let recipe = reload_recipe_on_edge(
                 func,
                 reload_recipes,
@@ -244,7 +247,7 @@ pub(super) fn reconstruct(
                 successor,
                 instruction,
                 operation,
-                recipe_homes,
+                plan,
             )?;
             let materialized = materialize_operation(
                 func,
@@ -258,8 +261,13 @@ pub(super) fn reconstruct(
                 recipe,
             )?;
             let Some(materialized) = materialized else {
-                reloads_only = false;
-                continue;
+                return Err(ReconstructError::new(
+                    "RECONSTRUCT.EDGE_RELOAD_MATERIALIZED",
+                    Some(predecessor_id),
+                    None,
+                    vec![VReg(planned_value(operation).0)],
+                    "edge reload did not produce a materialization",
+                ));
             };
             bundle.shape.push(materialized.shape);
             bundle.final_definitions.push(materialized.final_definition);
@@ -352,6 +360,8 @@ pub(super) fn reconstruct(
     }
     let mut stacks = HashMap::<LogicalValue, Vec<VReg>>::new();
     let mut recipe_reloads = Vec::<ExpectedMaterializedReload>::new();
+    let mut pending_state_stores = Vec::<PendingStateStore>::new();
+    let mut state_reloads = Vec::<MaterializedStateReload>::new();
     rename_block(
         0,
         func,
@@ -365,10 +375,18 @@ pub(super) fn reconstruct(
         &mut stacks,
         recipe_homes,
         &mut recipe_reloads,
+        &mut pending_state_stores,
+        &mut state_reloads,
     )?;
-    let shared_reload_blocks =
-        share_identical_edge_reload_bundles(func, &edge_reload_bundles, &mut recipe_reloads)?;
-    eliminate_dead_definitions(func, &mut recipe_reloads);
+    let state_stores = resolve_state_store_ordinals(func, &pending_state_stores)?;
+    let shared_reload_blocks = share_identical_edge_reload_bundles(
+        func,
+        &edge_reload_bundles,
+        &mut recipe_reloads,
+        &mut state_reloads,
+    )?;
+    let removed = eliminate_dead_definitions(func, &mut recipe_reloads);
+    state_reloads.retain(|reload| !removed.contains(&reload.reload));
 
     let frame_size = u32::try_from(stack_offsets.len())
         .ok()
@@ -385,6 +403,8 @@ pub(super) fn reconstruct(
     Ok(ReconstructionResult {
         frame_size,
         recipe_reloads,
+        state_stores,
+        state_reloads,
         shared_reload_blocks,
     })
 }
@@ -420,14 +440,26 @@ fn reload_recipe_at_point(
     analysis: &ReloadRecipeAnalysis,
     point: ProgramPoint,
     operation: PlannedOp,
-    recipe_homes: &BTreeSet<SpillHome>,
-    planned_recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
+    plan: &SpillPlan,
 ) -> Result<Option<ResolvedRecipe>, ReconstructError> {
     let PlannedOp::Reload { value, home } = operation else {
         return Ok(None);
     };
-    let planned_recipe = planned_recipe_reloads.contains(&(point.block, point.instruction, value));
-    if !recipe_homes.contains(&home) && !planned_recipe {
+    let key = (point.block, point.instruction, value);
+    if let Some(recipe) = plan.state_reload_recipes.get(&key) {
+        return Ok(Some(recipe.clone()));
+    }
+    if plan.state_homes.contains_key(&home) {
+        return Err(ReconstructError::new(
+            "RECONSTRUCT.POINT_STATE_HOME_RECIPE",
+            Some(point.block),
+            Some(point.instruction),
+            vec![VReg(value.0)],
+            format!("selected state home {home:?} has no exact reload recipe"),
+        ));
+    }
+    let planned_recipe = plan.recipe_reloads.contains(&key);
+    if !plan.recipe_homes.contains(&home) && !planned_recipe {
         return Ok(None);
     }
     available_recipe_at_point(analysis, point, value)
@@ -451,16 +483,31 @@ fn reload_recipe_on_edge(
     successor: usize,
     instruction: usize,
     operation: PlannedOp,
-    recipe_homes: &BTreeSet<SpillHome>,
+    plan: &SpillPlan,
 ) -> Result<Option<ResolvedRecipe>, ReconstructError> {
     let PlannedOp::Reload { value, home } = operation else {
         return Ok(None);
     };
-    if !recipe_homes.contains(&home) {
-        return Ok(None);
-    }
     let predecessor_id = func.blocks[predecessor].id;
     let successor_id = func.blocks[successor].id;
+    let key = (predecessor_id, instruction, value);
+    if let Some(recipe) = plan.state_reload_recipes.get(&key) {
+        return Ok(Some(recipe.clone()));
+    }
+    if plan.state_homes.contains_key(&home) {
+        return Err(ReconstructError::new(
+            "RECONSTRUCT.EDGE_STATE_HOME_RECIPE",
+            Some(predecessor_id),
+            None,
+            vec![VReg(value.0)],
+            format!(
+                "selected state home {home:?} has no exact recipe on edge {predecessor_id} -> {successor_id}"
+            ),
+        ));
+    }
+    if !plan.recipe_homes.contains(&home) {
+        return Ok(None);
+    }
     available_recipe_before_terminator(analysis, predecessor_id, instruction, value)
         .cloned()
         .map(Some)
@@ -538,6 +585,88 @@ fn eliminate_dead_definitions(
     removed
 }
 
+fn resolve_state_store_ordinals(
+    func: &MFunction,
+    pending: &[PendingStateStore],
+) -> Result<Vec<MaterializedStateStore>, ReconstructError> {
+    let mut by_location = HashMap::with_capacity(pending.len());
+    for store in pending {
+        if by_location
+            .insert((store.block, store.instruction), store.home)
+            .is_some()
+        {
+            return Err(ReconstructError::new(
+                "RECONSTRUCT.STATE_STORE_UNIQUE",
+                func.blocks.get(store.block).map(|block| block.id),
+                Some(store.instruction),
+                Vec::new(),
+                "more than one state-home store occupies one MIR instruction",
+            ));
+        }
+    }
+    let mut result = Vec::with_capacity(pending.len());
+    for (block, row) in func.blocks.iter().enumerate() {
+        let mut write_ordinal = 0usize;
+        for (instruction, inst) in row.insts.iter().enumerate() {
+            let writes = memory_effect::writes(inst);
+            let affects_state = writes.unknown_memory()
+                == Some(UnknownMemory::Direct(BaseReg::SimState))
+                || writes.ranges().any(|range| range.base == BaseReg::SimState);
+            if let Some(&home) = by_location.get(&(block, instruction)) {
+                if !affects_state
+                    || !matches!(
+                        inst,
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            size,
+                            ..
+                        } if *offset == home.offset && *size == home.size
+                    )
+                {
+                    return Err(ReconstructError::new(
+                        "RECONSTRUCT.STATE_STORE_SHAPE",
+                        Some(row.id),
+                        Some(instruction),
+                        Vec::new(),
+                        format!("state-home store does not materialize {home:?}"),
+                    ));
+                }
+                result.push(MaterializedStateStore {
+                    block: row.id,
+                    write_ordinal,
+                    home,
+                });
+            }
+            if affects_state {
+                write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
+                    ReconstructError::new(
+                        "RECONSTRUCT.STATE_STORE_ORDINAL_RANGE",
+                        Some(row.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "per-block SimState write ordinal exceeds usize",
+                    )
+                })?;
+            }
+        }
+    }
+    if result.len() != pending.len() {
+        return Err(ReconstructError::new(
+            "RECONSTRUCT.STATE_STORE_LOCATION",
+            None,
+            None,
+            Vec::new(),
+            format!(
+                "resolved {} of {} state-home store locations",
+                result.len(),
+                pending.len()
+            ),
+        ));
+    }
+    Ok(result)
+}
+
 fn stack_layout(
     func: &MFunction,
     plan: &SpillPlan,
@@ -550,9 +679,12 @@ fn stack_layout(
         .chain(plan.edge_ops.values().flatten().copied())
         .filter_map(|operation| match operation {
             PlannedOp::Spill { home, .. } => (!is_rematerializable(func, plan, home)
-                && !recipe_homes.contains(&home))
+                && !recipe_homes.contains(&home)
+                && !plan.state_homes.contains_key(&home))
             .then_some(home),
-            PlannedOp::SpillPhi { home, .. } => (!recipe_homes.contains(&home)).then_some(home),
+            PlannedOp::SpillPhi { home, .. } => (!recipe_homes.contains(&home)
+                && !plan.state_homes.contains_key(&home))
+            .then_some(home),
             PlannedOp::Reload { .. } => None,
         })
         .collect::<BTreeSet<_>>();
@@ -585,6 +717,7 @@ fn verify_reload_homes(
         if let PlannedOp::Reload { value, home } = operation
             && rematerialized_logical_value(func, value).is_none()
             && !recipe_homes.contains(&home)
+            && !plan.state_homes.contains_key(&home)
             && !plan
                 .recipe_reloads
                 .contains(&(point.block, point.instruction, value))
@@ -608,6 +741,7 @@ fn verify_reload_homes(
             if let PlannedOp::Reload { value, home } = operation
                 && rematerialized_logical_value(func, value).is_none()
                 && !recipe_homes.contains(&home)
+                && !plan.state_homes.contains_key(&home)
             {
                 if !stack_offsets.contains_key(&home) {
                     let block = func.blocks.get(edge.0).map(|block| block.id);
@@ -805,6 +939,8 @@ fn rename_block(
     stacks: &mut HashMap<LogicalValue, Vec<VReg>>,
     recipe_homes: &BTreeSet<SpillHome>,
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+    pending_state_stores: &mut Vec<PendingStateStore>,
+    state_reloads: &mut Vec<MaterializedStateReload>,
 ) -> Result<(), ReconstructError> {
     enum Event {
         Enter(usize),
@@ -859,6 +995,8 @@ fn rename_block(
                         &mut rewritten,
                         recipe_homes,
                         recipe_reloads,
+                        pending_state_stores,
+                        state_reloads,
                     )?;
                     let uses = inst.uses().into_iter().collect::<BTreeSet<_>>();
                     for original_use in uses {
@@ -937,6 +1075,7 @@ fn share_identical_edge_reload_bundles(
     func: &mut MFunction,
     bundles: &[EdgeReloadBundle],
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+    state_reloads: &mut Vec<MaterializedStateReload>,
 ) -> Result<usize, ReconstructError> {
     let mut grouped = HashMap::<EdgeReloadGroupKey, Vec<usize>>::new();
     for (bundle, edge) in bundles.iter().enumerate() {
@@ -1111,6 +1250,7 @@ fn share_identical_edge_reload_bundles(
     }
 
     recipe_reloads.retain(|reload| !removed_recipe_reloads.contains(&reload.reload));
+    state_reloads.retain(|reload| !removed_recipe_reloads.contains(&reload.reload));
     Ok(shared_count)
 }
 
@@ -1193,6 +1333,8 @@ fn emit_insertions(
     output: &mut Vec<MInst>,
     recipe_homes: &BTreeSet<SpillHome>,
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
+    pending_state_stores: &mut Vec<PendingStateStore>,
+    state_reloads: &mut Vec<MaterializedStateReload>,
 ) -> Result<(), ReconstructError> {
     let mut operations = insertions.remove(&(block, instruction)).unwrap_or_default();
     // A SpillPlan program point is parallel.  When materialized serially,
@@ -1223,6 +1365,20 @@ fn emit_insertions(
                         "spill is not dominated by a logical definition",
                     ));
                 };
+                if let Some(physical) = plan.state_homes.get(&home) {
+                    pending_state_stores.push(PendingStateStore {
+                        block,
+                        instruction: output.len(),
+                        home: *physical,
+                    });
+                    output.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: physical.offset,
+                        src: source,
+                        size: physical.size,
+                    });
+                    continue;
+                }
                 let Some(&offset) = stack_offsets.get(&home) else {
                     return Err(ReconstructError::new(
                         "RECONSTRUCT.SPILL_HOME_EXISTS",
@@ -1264,10 +1420,22 @@ fn emit_insertions(
                             "prepared reload recipe final definition changed before emission",
                         ));
                     }
-                    recipe_reloads.push(ExpectedMaterializedReload {
-                        reload: fresh,
-                        expected: recipe.expected,
-                    });
+                    if let Some(physical) = plan.state_homes.get(&home) {
+                        state_reloads.push(MaterializedStateReload {
+                            reload: fresh,
+                            home: *physical,
+                        });
+                    } else {
+                        recipe_reloads.push(ExpectedMaterializedReload {
+                            reload: fresh,
+                            expected: recipe.expected,
+                            planned_use: Some(PointUse {
+                                block: func.blocks[block].id,
+                                instruction,
+                                value: VReg(logical.0),
+                            }),
+                        });
+                    }
                     output.extend(recipe.instructions);
                     stacks.entry(logical).or_default().push(fresh);
                     pushed.push(logical);
@@ -1493,6 +1661,7 @@ mod tests {
                     base: ResolvedBase::Constant(0),
                     steps: Vec::new(),
                 },
+                planned_use: None,
             },
             ExpectedMaterializedReload {
                 reload: live,
@@ -1500,6 +1669,7 @@ mod tests {
                     base: ResolvedBase::Constant(1),
                     steps: Vec::new(),
                 },
+                planned_use: None,
             },
         ];
         assert_eq!(
@@ -1628,8 +1798,13 @@ mod tests {
             },
         ];
 
-        let shared =
-            share_identical_edge_reload_bundles(&mut func, &bundles, &mut Vec::new()).unwrap();
+        let shared = share_identical_edge_reload_bundles(
+            &mut func,
+            &bundles,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(shared, 1);
         assert_eq!(func.blocks.len(), 7);
@@ -1698,6 +1873,8 @@ mod tests {
         children[0].push(successor);
         let recipe_homes = BTreeSet::new();
         let mut recipe_reloads = Vec::new();
+        let mut pending_state_stores = Vec::new();
+        let mut state_reloads = Vec::new();
 
         let error = rename_block(
             0,
@@ -1712,6 +1889,8 @@ mod tests {
             &mut HashMap::new(),
             &recipe_homes,
             &mut recipe_reloads,
+            &mut pending_state_stores,
+            &mut state_reloads,
         )
         .unwrap_err();
 

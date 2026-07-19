@@ -10,8 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
 use crate::backend::native::features::VariableShiftEncoding;
+use crate::backend::native::memory_effect::{self, UnknownMemory};
 use crate::backend::native::mir::{
-    BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, Uses, VReg,
+    BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PackedStateHome, PhiNode, SpillDesc,
+    StateHomeId, Uses, VReg,
 };
 
 use super::assignment::{PhysReg, RegConstraint, clobbers, use_constraints};
@@ -32,27 +34,6 @@ const SYNTHETIC_SEQUENCE_STRIDE: u32 = 1 << 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct StackHomeId(pub u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(super) struct StateHomeId(pub u32);
-
-/// One full machine-accessible packed-state word. This is physical home
-/// metadata, not an arbitrary HDL width attached to a MIR VReg.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct PackedStateHome {
-    pub id: StateHomeId,
-    pub offset: i32,
-    pub size: OpSize,
-    pub live_on_entry: bool,
-}
-
-impl PackedStateHome {
-    fn byte_range(self) -> Option<std::ops::Range<i64>> {
-        let start = i64::from(self.offset);
-        let end = start.checked_add(i64::from(self.size.bytes()))?;
-        Some(start..end)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct SyntheticInstructionId(pub u32);
@@ -384,6 +365,25 @@ pub(super) struct AllocationIrError {
     pub instruction: Option<usize>,
     pub values: Vec<VReg>,
     pub message: String,
+}
+
+/// One packed-state store emitted by SSA reconstruction, identified by its
+/// final per-block SimState-write ordinal.  Dead-definition cleanup never
+/// removes writes, so this coordinate remains stable through publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaterializedStateStore {
+    pub block: BlockId,
+    pub write_ordinal: usize,
+    pub home: PackedStateHome,
+}
+
+/// One packed-state reload emitted by SSA reconstruction.  Its SSA
+/// destination remains a unique identity even if instruction positions are
+/// compacted or an identical edge tail is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaterializedStateReload {
+    pub reload: VReg,
+    pub home: PackedStateHome,
 }
 
 impl AllocationIrError {
@@ -3605,6 +3605,15 @@ fn materialize_synthetic_instruction(
                         size: state.load.size,
                     }
                 }
+                RecipeNode::DeferredState(_) => {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.DEFERRED_STATE_RECIPE",
+                        Some(block),
+                        Some(instruction),
+                        operands,
+                        "deferred state leaves must lower as explicit state reloads",
+                    ));
+                }
                 RecipeNode::Unary {
                     operation: step,
                     input,
@@ -4104,6 +4113,209 @@ impl LivenessProgram for AllocationIr {
     }
 }
 
+/// Rebuild the proven allocation-IR packed-state MemorySSA over final MIR.
+///
+/// Reconstruction records only stable final identities: a per-block write
+/// ordinal for stores and the strict-SSA destination for reloads.  This
+/// adapter tags those exact instructions as allocator-owned operations while
+/// leaving every other MIR write unowned, then delegates to the same sparse
+/// all-byte/all-path verifier used before interval allocation publication.
+pub(super) fn verify_materialized_state_homes(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    stores: &[MaterializedStateStore],
+    reloads: &[MaterializedStateReload],
+) -> Result<(), AllocationIrError> {
+    if stores.is_empty() && reloads.is_empty() {
+        return Ok(());
+    }
+
+    let mut program = AllocationIr::from_mir(func)?;
+    let wanted_reloads = reloads
+        .iter()
+        .map(|reload| reload.reload)
+        .collect::<BTreeSet<_>>();
+    let mut reload_locations = HashMap::<VReg, (usize, usize)>::new();
+    let mut write_locations = HashMap::<(BlockId, usize), (usize, usize)>::new();
+    for (block, row) in func.blocks.iter().enumerate() {
+        let mut write_ordinal = 0usize;
+        for (instruction, inst) in row.insts.iter().enumerate() {
+            if inst
+                .def()
+                .is_some_and(|definition| wanted_reloads.contains(&definition))
+                && reload_locations
+                    .insert(
+                        inst.def().expect("definition was matched"),
+                        (block, instruction),
+                    )
+                    .is_some()
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.MATERIALIZED_STATE_RELOAD_IDENTITY",
+                    Some(row.id),
+                    Some(instruction),
+                    inst.def().into_iter().collect(),
+                    "materialized state reload has more than one MIR definition",
+                ));
+            }
+            let writes = memory_effect::writes(inst);
+            let affects_state = writes.unknown_memory()
+                == Some(UnknownMemory::Direct(BaseReg::SimState))
+                || writes.ranges().any(|range| range.base == BaseReg::SimState);
+            if affects_state {
+                write_locations.insert((row.id, write_ordinal), (block, instruction));
+                write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.MATERIALIZED_STATE_WRITE_RANGE",
+                        Some(row.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "per-block SimState write ordinal exceeds usize",
+                    )
+                })?;
+            }
+        }
+    }
+
+    let mut tagged = BTreeSet::<(usize, usize)>::new();
+    let mut next_id = 0u32;
+    let mut tag = |program: &mut AllocationIr,
+                   block: usize,
+                   instruction: usize,
+                   operation: SyntheticOperation|
+     -> Result<(), AllocationIrError> {
+        if !tagged.insert((block, instruction)) {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_UNIQUE",
+                program.blocks.get(block).map(|row| row.id),
+                Some(instruction),
+                Vec::new(),
+                "one final MIR instruction was tagged as more than one state-home operation",
+            ));
+        }
+        let row = program.blocks.get_mut(block).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_BLOCK",
+                None,
+                Some(instruction),
+                Vec::new(),
+                "materialized state operation names a block outside final MIR",
+            )
+        })?;
+        let candidate = row.instructions.get_mut(instruction).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_INSTRUCTION",
+                Some(row.id),
+                Some(instruction),
+                Vec::new(),
+                "materialized state operation names an instruction outside final MIR",
+            )
+        })?;
+        let id = SyntheticInstructionId(next_id);
+        next_id = next_id.checked_add(1).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_ID_RANGE",
+                Some(row.id),
+                Some(instruction),
+                Vec::new(),
+                "materialized state-operation identity exceeds u32",
+            )
+        })?;
+        candidate.origin = AllocationInstructionOrigin::Synthetic {
+            id,
+            anchor: SyntheticAnchor::BeforeInstruction {
+                block: row.id,
+                instruction,
+            },
+            operation,
+            zone: 0,
+            sequence: id.0,
+        };
+        candidate.original = None;
+        Ok(())
+    };
+
+    for store in stores {
+        let &(block, instruction) = write_locations
+            .get(&(store.block, store.write_ordinal))
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.MATERIALIZED_STATE_STORE_IDENTITY",
+                    Some(store.block),
+                    None,
+                    Vec::new(),
+                    format!(
+                        "final MIR has no SimState write ordinal {}",
+                        store.write_ordinal
+                    ),
+                )
+            })?;
+        if !matches!(
+            &func.blocks[block].insts[instruction],
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                size,
+                ..
+            } if *offset == store.home.offset && *size == store.home.size
+        ) {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_STORE_SHAPE",
+                Some(store.block),
+                Some(instruction),
+                Vec::new(),
+                format!("recorded state store does not materialize {:?}", store.home),
+            ));
+        }
+        tag(
+            &mut program,
+            block,
+            instruction,
+            SyntheticOperation::StateStore { home: store.home },
+        )?;
+    }
+    for reload in reloads {
+        let &(block, instruction) = reload_locations.get(&reload.reload).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_RELOAD_IDENTITY",
+                None,
+                None,
+                vec![reload.reload],
+                "materialized state reload destination has no final MIR definition",
+            )
+        })?;
+        if !matches!(
+            &func.blocks[block].insts[instruction],
+            MInst::Load {
+                dst,
+                base: BaseReg::SimState,
+                offset,
+                size,
+            } if *dst == reload.reload
+                && *offset == reload.home.offset
+                && *size == reload.home.size
+        ) {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.MATERIALIZED_STATE_RELOAD_SHAPE",
+                Some(func.blocks[block].id),
+                Some(instruction),
+                vec![reload.reload],
+                format!(
+                    "recorded state reload does not materialize {:?}",
+                    reload.home
+                ),
+            ));
+        }
+        tag(
+            &mut program,
+            block,
+            instruction,
+            SyntheticOperation::StateReload { home: reload.home },
+        )?;
+    }
+    state_home::verify(&program, cfg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4124,6 +4336,110 @@ mod tests {
 
     fn normalize(function: &mut MFunction) -> NormalizedCfg {
         super::super::cfg::normalize(function).unwrap()
+    }
+
+    fn packed_home(id: u32, offset: i32, size: OpSize) -> PackedStateHome {
+        PackedStateHome {
+            id: StateHomeId(id),
+            offset,
+            size,
+            live_on_entry: false,
+        }
+    }
+
+    #[test]
+    fn final_state_home_verification_uses_final_write_identity() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        for ordinal in 0..40 {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16 + ordinal * 8,
+                src: VReg(0),
+                size: OpSize::S64,
+            });
+        }
+        let home = packed_home(0, 0, OpSize::S64);
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: home.offset,
+            src: VReg(0),
+            size: home.size,
+        });
+        block.push(MInst::Load {
+            dst: VReg(1),
+            base: BaseReg::SimState,
+            offset: home.offset,
+            size: home.size,
+        });
+        block.push(MInst::Return);
+        let mut function = function(2, vec![block]);
+        let cfg = normalize(&mut function);
+
+        verify_materialized_state_homes(
+            &function,
+            &cfg,
+            &[MaterializedStateStore {
+                block: BlockId(0),
+                write_ordinal: 40,
+                home,
+            }],
+            &[MaterializedStateReload {
+                reload: VReg(1),
+                home,
+            }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn final_state_home_verification_rejects_untagged_overlap() {
+        let home = packed_home(0, 0, OpSize::S64);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: home.offset,
+            src: VReg(0),
+            size: home.size,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 4,
+            src: VReg(0),
+            size: OpSize::S32,
+        });
+        block.push(MInst::Load {
+            dst: VReg(1),
+            base: BaseReg::SimState,
+            offset: home.offset,
+            size: home.size,
+        });
+        block.push(MInst::Return);
+        let mut function = function(2, vec![block]);
+        let cfg = normalize(&mut function);
+
+        let error = verify_materialized_state_homes(
+            &function,
+            &cfg,
+            &[MaterializedStateStore {
+                block: BlockId(0),
+                write_ordinal: 0,
+                home,
+            }],
+            &[MaterializedStateReload {
+                reload: VReg(1),
+                home,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.rule, "ALLOCATION_IR.STATE_RELOAD_ALL_PATH_HOME");
     }
 
     fn straight_line() -> MFunction {

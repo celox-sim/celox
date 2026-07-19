@@ -906,6 +906,7 @@ mod tests {
             region_rows: BTreeMap::new(),
             next_register_region: 0,
             stack_homes,
+            state_homes: Vec::new(),
         }
     }
 
@@ -1089,6 +1090,7 @@ mod tests {
             region_rows: BTreeMap::new(),
             next_register_region: 0,
             stack_homes: homes,
+            state_homes: Vec::new(),
         };
 
         let coloring = color(&expanded, &cfg).unwrap();

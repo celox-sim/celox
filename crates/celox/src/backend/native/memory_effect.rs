@@ -190,7 +190,12 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
         } => checked_range(*base, *offset, size.bytes() as usize)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
-        MInst::LoadIndexed { base, .. } => MemoryEffects::unknown(UnknownMemory::Direct(*base)),
+        MInst::LoadIndexed {
+            base, alias_range, ..
+        } => alias_range
+            .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
         MInst::LoadPtr { .. } | MInst::LoadPtrIndexed { .. } => {
             MemoryEffects::unknown(UnknownMemory::Indirect)
         }
@@ -415,6 +420,28 @@ mod tests {
             }]
         );
         assert_eq!(writes(&inst).unknown_memory(), None);
+    }
+
+    #[test]
+    fn bounded_indexed_load_uses_its_semantic_alias_envelope() {
+        let inst = MInst::LoadIndexed {
+            dst: VReg(1),
+            base: BaseReg::SimState,
+            offset: 120,
+            index: VReg(0),
+            size: OpSize::S64,
+            alias_range: MemoryAliasRange::new(100, 64),
+        };
+
+        assert_eq!(
+            reads(&inst).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 100,
+                byte_len: 64,
+            }]
+        );
+        assert_eq!(reads(&inst).unknown_memory(), None);
     }
 
     #[test]

@@ -804,6 +804,28 @@ impl JointAllocationProblem {
                 },
             }
         }
+        let mut deferred_state_roots = BTreeSet::new();
+        for home in &expanded.state_homes {
+            let root = expanded.roots.get(home.root.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.STATE_HOME_ROOT",
+                    None,
+                    Some(home.value),
+                    "expanded state home references a missing root",
+                )
+            })?;
+            if root.id != home.root
+                || root.origin != home.value
+                || !deferred_state_roots.insert(home.root)
+            {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.STATE_HOME_IDENTITY",
+                    None,
+                    Some(home.value),
+                    "expanded state home has inconsistent or duplicate root ownership",
+                ));
+            }
+        }
 
         let region_metadata = expanded
             .register_regions
@@ -1016,7 +1038,11 @@ impl JointAllocationProblem {
                     machine_transition_spill_cost(interval)
                 } else {
                     home_plan
-                        .spill_cost(&region.uses, stack_roots.contains(&region.root))
+                        .spill_cost(
+                            &region.uses,
+                            stack_roots.contains(&region.root),
+                            deferred_state_roots.contains(&region.root),
+                        )
                         .map_err(JointAllocationError::home)?
                 };
                 (
@@ -3185,11 +3211,15 @@ fn session_allocation_value(
             .stack_homes
             .iter()
             .any(|home| home.root == owner.root && home.kind == ExpandedStackHomeKind::Root);
+        let deferred_state_exists = expanded
+            .state_homes
+            .iter()
+            .any(|home| home.root == owner.root);
         let spill_cost = if owner.uses.is_empty() {
             machine_transition_spill_cost(interval)
         } else {
             home_plan
-                .spill_cost(&owner.uses, stack_exists)
+                .spill_cost(&owner.uses, stack_exists, deferred_state_exists)
                 .map_err(JointAllocationError::home)?
         };
         (

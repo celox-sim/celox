@@ -2515,13 +2515,39 @@ fn rename_memory_ssa(
 pub(super) struct ExpectedMaterializedReload {
     pub reload: VReg,
     pub expected: ResolvedRecipe,
+    /// Pre-reconstruction point whose abstract reload selected this recipe.
+    /// This is diagnostic/proof provenance, not an instruction coordinate in
+    /// final MIR (dead-code elimination may compact that block).
+    pub planned_use: Option<PointUse>,
 }
 
+#[cfg(test)]
 pub(super) fn verify_expected_materialized_reloads(
     func: &MFunction,
     cfg: &NormalizedCfg,
     reloads: &[ExpectedMaterializedReload],
 ) -> Result<(), ReloadRecipeError> {
+    verify_expected_materialized_reloads_after_state_spills(func, cfg, reloads, &[])
+}
+
+/// Verify recipes after SSA reconstruction has inserted allocator-owned
+/// SimState stores.
+///
+/// Pre-reconstruction `MemoryVersion::Write` ordinals name only the original
+/// MIR writes.  Final MIR ordinals also contain the supplied allocator-owned
+/// stores.  Treating those inserted stores as part of the original ordinal
+/// space would renumber every later, disjoint write and reject an unchanged
+/// reaching definition.  This verifier therefore compares in the stable
+/// original-write space while retaining each inserted store as a distinct
+/// version: a synthetic store which actually reaches a generic recipe still
+/// fails the proof.
+pub(super) fn verify_expected_materialized_reloads_after_state_spills(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    reloads: &[ExpectedMaterializedReload],
+    inserted_state_writes: &[(BlockId, usize)],
+) -> Result<(), ReloadRecipeError> {
+    let inserted_state_writes = validate_inserted_state_writes(func, inserted_state_writes)?;
     let mut destinations = BTreeSet::new();
     for materialization in reloads {
         if !destinations.insert(materialization.reload) {
@@ -2583,15 +2609,83 @@ pub(super) fn verify_expected_materialized_reloads(
                 "materialized destination has no closed recipe in final MIR",
             ));
         };
-        verify_resolved_recipe_match(materialization.reload, &materialization.expected, &actual)?;
+        verify_resolved_recipe_match(
+            func,
+            materialization.reload,
+            materialization.planned_use,
+            location,
+            &materialization.expected,
+            &actual,
+            &inserted_state_writes,
+        )?;
     }
     Ok(())
 }
 
+fn validate_inserted_state_writes(
+    func: &MFunction,
+    writes: &[(BlockId, usize)],
+) -> Result<BTreeMap<BlockId, Vec<usize>>, ReloadRecipeError> {
+    let mut grouped = BTreeMap::<BlockId, Vec<usize>>::new();
+    for &(block, ordinal) in writes {
+        grouped.entry(block).or_default().push(ordinal);
+    }
+    for (&block, ordinals) in &mut grouped {
+        ordinals.sort_unstable();
+        if ordinals.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.INSERTED_WRITE_UNIQUE",
+                Some(block),
+                None,
+                None,
+                "more than one allocator-owned state store has the same final write identity",
+            ));
+        }
+        let owner = func
+            .blocks
+            .iter()
+            .find(|owner| owner.id == block)
+            .ok_or_else(|| {
+                ReloadRecipeError::new(
+                    "RELOAD_RECIPE.INSERTED_WRITE_BLOCK",
+                    Some(block),
+                    None,
+                    None,
+                    "allocator-owned state store names a block outside final MIR",
+                )
+            })?;
+        let write_count = owner
+            .insts
+            .iter()
+            .filter(|inst| {
+                let effect = memory_effect::writes(inst);
+                matches!(
+                    effect.unknown_memory(),
+                    Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
+                ) || effect.ranges().any(|range| range.base == BaseReg::SimState)
+            })
+            .count();
+        if let Some(&ordinal) = ordinals.iter().find(|&&ordinal| ordinal >= write_count) {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.INSERTED_WRITE_IDENTITY",
+                Some(block),
+                None,
+                None,
+                format!("final MIR has no SimState write ordinal {ordinal}"),
+            ));
+        }
+    }
+    Ok(grouped)
+}
+
 fn verify_resolved_recipe_match(
+    func: &MFunction,
     reload: VReg,
+    planned_use: Option<PointUse>,
+    final_location: PointUse,
     original: &ResolvedRecipe,
     materialized: &ResolvedRecipe,
+    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
 ) -> Result<(), ReloadRecipeError> {
     match (&original.base, &materialized.base) {
         (ResolvedBase::Constant(left), ResolvedBase::Constant(right)) if left == right => {}
@@ -2615,15 +2709,47 @@ fn verify_resolved_recipe_match(
                     ),
                 ));
             }
-            if left.version != right.version {
+            if !stable_state_version_matches(&left.version, &right.version, inserted_state_writes) {
+                let first_difference =
+                    std::iter::once((left.version.unknown_alias, right.version.unknown_alias))
+                        .chain(
+                            left.version
+                                .bytes
+                                .iter()
+                                .copied()
+                                .zip(right.version.bytes.iter().copied()),
+                        )
+                        .find(|(expected, actual)| {
+                            !stable_memory_version_matches(
+                                *expected,
+                                *actual,
+                                inserted_state_writes,
+                            )
+                        })
+                        .map(|(expected, actual)| {
+                            format!(
+                                "; expected_write={} actual_write={}",
+                                describe_expected_memory_version_write(
+                                    func,
+                                    expected,
+                                    inserted_state_writes,
+                                ),
+                                describe_memory_version_write(func, actual)
+                            )
+                        })
+                        .unwrap_or_default();
                 return Err(ReloadRecipeError::new(
                     "RELOAD_RECIPE.STATE_VERSION_CURRENT",
                     None,
                     None,
                     Some(reload),
                     format!(
-                        "an overlapping or unknown state write changed the selected version {:?} to {:?}",
-                        left.version, right.version
+                        "an overlapping or unknown state write changed the selected version {:?} to {:?}{}; planned_use={planned_use:?} final_load={}/i{}",
+                        left.version,
+                        right.version,
+                        first_difference,
+                        final_location.block,
+                        final_location.instruction
                     ),
                 ));
             }
@@ -2654,6 +2780,132 @@ fn verify_resolved_recipe_match(
         ));
     }
     Ok(())
+}
+
+fn stable_state_version_matches(
+    expected: &StateVersion,
+    actual: &StateVersion,
+    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+) -> bool {
+    stable_memory_version_matches(
+        expected.unknown_alias,
+        actual.unknown_alias,
+        inserted_state_writes,
+    ) && expected.bytes.len() == actual.bytes.len()
+        && expected
+            .bytes
+            .iter()
+            .copied()
+            .zip(actual.bytes.iter().copied())
+            .all(|(expected, actual)| {
+                stable_memory_version_matches(expected, actual, inserted_state_writes)
+            })
+}
+
+fn stable_memory_version_matches(
+    expected: MemoryVersion,
+    actual: MemoryVersion,
+    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+) -> bool {
+    match (expected, actual) {
+        (MemoryVersion::Entry(expected), MemoryVersion::Entry(actual)) => expected == actual,
+        (
+            MemoryVersion::Phi {
+                block: expected_block,
+                variable: expected_variable,
+            },
+            MemoryVersion::Phi {
+                block: actual_block,
+                variable: actual_variable,
+            },
+        ) => expected_block == actual_block && expected_variable == actual_variable,
+        (
+            MemoryVersion::Write {
+                block: expected_block,
+                ordinal: expected_ordinal,
+                variable: expected_variable,
+            },
+            MemoryVersion::Write {
+                block: actual_block,
+                ordinal: actual_ordinal,
+                variable: actual_variable,
+            },
+        ) if expected_block == actual_block && expected_variable == actual_variable => {
+            let inserted = inserted_state_writes
+                .get(&actual_block)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            match inserted.binary_search(&actual_ordinal) {
+                Ok(_) => false,
+                Err(insertions_before) => actual_ordinal
+                    .checked_sub(insertions_before)
+                    .is_some_and(|stable_ordinal| stable_ordinal == expected_ordinal),
+            }
+        }
+        _ => false,
+    }
+}
+
+fn describe_expected_memory_version_write(
+    func: &MFunction,
+    version: MemoryVersion,
+    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+) -> String {
+    let MemoryVersion::Write {
+        block,
+        ordinal,
+        variable,
+    } = version
+    else {
+        return format!("{version:?}");
+    };
+    let mut final_ordinal = ordinal;
+    for &inserted in inserted_state_writes
+        .get(&block)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if inserted > final_ordinal {
+            break;
+        }
+        let Some(next) = final_ordinal.checked_add(1) else {
+            return format!("{version:?} (final ordinal overflow)");
+        };
+        final_ordinal = next;
+    }
+    describe_memory_version_write(
+        func,
+        MemoryVersion::Write {
+            block,
+            ordinal: final_ordinal,
+            variable,
+        },
+    )
+}
+
+fn describe_memory_version_write(func: &MFunction, version: MemoryVersion) -> String {
+    let MemoryVersion::Write { block, ordinal, .. } = version else {
+        return format!("{version:?}");
+    };
+    let Some(owner) = func.blocks.iter().find(|owner| owner.id == block) else {
+        return format!("{version:?} (block absent from final MIR)");
+    };
+    let located = owner
+        .insts
+        .iter()
+        .enumerate()
+        .filter(|(_, inst)| {
+            let effect = memory_effect::writes(inst);
+            matches!(
+                effect.unknown_memory(),
+                Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
+            ) || effect.ranges().any(|range| range.base == BaseReg::SimState)
+        })
+        .nth(ordinal);
+    located.map_or_else(
+        || format!("{version:?} (ordinal absent from final MIR)"),
+        |(instruction, inst)| format!("{block}/i{instruction} {inst:?}"),
+    )
 }
 
 fn set_current(
@@ -4808,9 +5060,126 @@ mod tests {
             &[ExpectedMaterializedReload {
                 reload: values[1],
                 expected,
+                planned_use: None,
             }],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn independent_verifier_keeps_original_write_identity_across_state_spills() {
+        let (mut func, values) = function_with_values(3);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: values[0],
+            value: 9,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: values[1],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let (func, _, analysis) = analyze_function(func);
+        let expected = analysis.resolved_recipe(values[1]).unwrap().unwrap();
+
+        let mut final_func = func.clone();
+        let inserted = (0..40)
+            .map(|index| MInst::Store {
+                base: BaseReg::SimState,
+                offset: 1024 + index * 8,
+                src: values[0],
+                size: OpSize::S64,
+            })
+            .collect::<Vec<_>>();
+        final_func.blocks[0].insts.splice(1..1, inserted);
+        let final_cfg = super::super::cfg::normalize(&mut final_func).unwrap();
+        let inserted_writes = (0..40)
+            .map(|ordinal| (BlockId(0), ordinal))
+            .collect::<Vec<_>>();
+
+        verify_expected_materialized_reloads_after_state_spills(
+            &final_func,
+            &final_cfg,
+            &[ExpectedMaterializedReload {
+                reload: values[2],
+                expected,
+                planned_use: None,
+            }],
+            &inserted_writes,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn independent_verifier_rejects_reaching_state_spill() {
+        let (mut func, values) = function_with_values(3);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: values[0],
+            value: 9,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: values[1],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: values[2],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let (func, _, analysis) = analyze_function(func);
+        let expected = analysis.resolved_recipe(values[1]).unwrap().unwrap();
+
+        let mut final_func = func.clone();
+        final_func.blocks[0].insts.insert(
+            2,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 40,
+                src: values[0],
+                size: OpSize::S64,
+            },
+        );
+        let final_cfg = super::super::cfg::normalize(&mut final_func).unwrap();
+
+        let error = verify_expected_materialized_reloads_after_state_spills(
+            &final_func,
+            &final_cfg,
+            &[ExpectedMaterializedReload {
+                reload: values[2],
+                expected,
+                planned_use: None,
+            }],
+            &[(BlockId(0), 1)],
+        )
+        .unwrap_err();
+        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_VERSION_CURRENT");
     }
 
     #[test]
@@ -4850,6 +5219,7 @@ mod tests {
             &[ExpectedMaterializedReload {
                 reload: values[2],
                 expected,
+                planned_use: None,
             }],
         )
         .unwrap_err();
@@ -4883,6 +5253,7 @@ mod tests {
             &[ExpectedMaterializedReload {
                 reload: values[1],
                 expected,
+                planned_use: None,
             }],
         )
         .unwrap_err();

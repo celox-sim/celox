@@ -3,12 +3,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, PackedStateHome, VReg};
 
 use super::assignment::clobbers;
 use super::cfg::NormalizedCfg;
 use super::next_use::{NextUseAnalysis, NextUseDistance};
-use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis};
+use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, ResolvedRecipe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct LogicalValue(pub u32);
@@ -56,6 +56,14 @@ pub(super) struct SpillPlan {
     /// Phi-congruence homes whose complete selected reload set is supplied by
     /// exact rematerialization recipes instead of a stack slot.
     pub recipe_homes: BTreeSet<SpillHome>,
+    /// Phi-congruence homes assigned to allocator-managed packed SimState
+    /// words.  These homes remain ordinary W/S homes: unlike recipe-only
+    /// homes, every path must execute the planned spill before a reload.
+    pub state_homes: BTreeMap<SpillHome, PackedStateHome>,
+    /// Exact MemorySSA recipe for every reload assigned to `state_homes`.
+    /// Keys retain the pre-reconstruction insertion point; reconstruction
+    /// independently proves the emitted load against final MIR.
+    pub state_reload_recipes: BTreeMap<(BlockId, usize, LogicalValue), ResolvedRecipe>,
     pub w_entry: Vec<BTreeSet<LogicalValue>>,
     pub w_exit: Vec<BTreeSet<LogicalValue>>,
     pub s_entry: Vec<BTreeSet<LogicalValue>>,
@@ -419,6 +427,8 @@ pub(super) fn plan_with_recipe_costs(
         edge_ops: BTreeMap::new(),
         recipe_reloads: BTreeSet::new(),
         recipe_homes: BTreeSet::new(),
+        state_homes: BTreeMap::new(),
+        state_reload_recipes: BTreeMap::new(),
         w_entry: vec![BTreeSet::new(); func.blocks.len()],
         w_exit: vec![BTreeSet::new(); func.blocks.len()],
         s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -1448,7 +1458,8 @@ impl SpillPlan {
             }
         }
         candidates.retain(|home| {
-            !rejected.contains(home)
+            !self.state_homes.contains_key(home)
+                && !rejected.contains(home)
                 && recipe_costs.get(home).copied().unwrap_or(u128::MAX)
                     < baseline_costs.get(home).copied().unwrap_or_default()
         });
@@ -1884,6 +1895,8 @@ mod tests {
             edge_ops: BTreeMap::new(),
             recipe_reloads: BTreeSet::new(),
             recipe_homes: BTreeSet::new(),
+            state_homes: BTreeMap::new(),
+            state_reload_recipes: BTreeMap::new(),
             w_entry: vec![BTreeSet::new(); func.blocks.len()],
             w_exit: vec![BTreeSet::new(); func.blocks.len()],
             s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -1980,6 +1993,8 @@ mod tests {
             edge_ops: BTreeMap::new(),
             recipe_reloads: BTreeSet::new(),
             recipe_homes: BTreeSet::new(),
+            state_homes: BTreeMap::new(),
+            state_reload_recipes: BTreeMap::new(),
             w_entry: vec![BTreeSet::new(); func.blocks.len()],
             w_exit: vec![BTreeSet::new(); func.blocks.len()],
             s_entry: vec![BTreeSet::new(); func.blocks.len()],
@@ -2070,6 +2085,8 @@ mod tests {
             edge_ops: BTreeMap::new(),
             recipe_reloads: BTreeSet::new(),
             recipe_homes: BTreeSet::new(),
+            state_homes: BTreeMap::new(),
+            state_reload_recipes: BTreeMap::new(),
             w_entry: vec![BTreeSet::new(); func.blocks.len()],
             w_exit: vec![BTreeSet::new(); func.blocks.len()],
             s_entry: vec![BTreeSet::new(); func.blocks.len()],

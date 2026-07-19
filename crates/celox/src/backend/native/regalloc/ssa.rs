@@ -60,6 +60,36 @@ pub(super) fn allocate(
         );
     }
 
+    let phase = timing.then(crate::timing::now);
+    super::ssa_state_home::select(func, cfg, &mut plan).map_err(|error| {
+        super::RegallocError::new(
+            "packed state-home selection",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
+    super::ssa_state_home::verify(func, &plan).map_err(|error| {
+        super::RegallocError::new(
+            "packed state-home verification",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
+    if let Some(start) = phase {
+        eprintln!(
+            "[regalloc-timing] ssa packed_state_homes homes={} reloads={} elapsed={:?}",
+            plan.state_homes.len(),
+            plan.state_reload_recipes.len(),
+            start.elapsed()
+        );
+    }
+
     // Edge coupling operations are chosen by the spill planner, so their
     // materialization points do not exist as MIR uses during the first recipe
     // analysis.  Query the exact insertion point (immediately before the
@@ -102,6 +132,16 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
+    super::ssa_state_home::verify(func, &plan).map_err(|error| {
+        super::RegallocError::new(
+            "final packed state-home verification",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
     if let Err(error) = super::home_verify::verify(func, cfg, &plan) {
         let (block, instruction) = match error.location {
             Some(super::home_verify::HomeLocation::Point(point)) => {
@@ -179,10 +219,37 @@ pub(super) fn allocate(
     };
     let cfg = reconstructed_cfg.as_ref().unwrap_or(cfg);
 
-    super::reload::verify_expected_materialized_reloads(func, cfg, &reconstruction.recipe_reloads)
-        .map_err(|error| {
-            super::reload_recipe_error("spill-planner reload-recipe verification", error)
-        })?;
+    super::allocation_ir::verify_materialized_state_homes(
+        func,
+        cfg,
+        &reconstruction.state_stores,
+        &reconstruction.state_reloads,
+    )
+    .map_err(|error| {
+        super::RegallocError::new(
+            "materialized packed state-home verification",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
+
+    let inserted_state_writes = reconstruction
+        .state_stores
+        .iter()
+        .map(|store| (store.block, store.write_ordinal))
+        .collect::<Vec<_>>();
+    super::reload::verify_expected_materialized_reloads_after_state_spills(
+        func,
+        cfg,
+        &reconstruction.recipe_reloads,
+        &inserted_state_writes,
+    )
+    .map_err(|error| {
+        super::reload_recipe_error("spill-planner reload-recipe verification", error)
+    })?;
 
     // Prove the spill result itself fits the machine before Perm boundaries
     // introduce fresh representatives.  This keeps pressure correctness

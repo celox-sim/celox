@@ -47,8 +47,10 @@ mod spiller;
 #[cfg(test)]
 mod spilling;
 mod ssa;
+mod ssa_state_home;
 #[allow(dead_code)]
 mod stack_color;
+mod state_promote;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -411,6 +413,25 @@ fn run_regalloc_in_place(
         eprintln!(
             "[regalloc-timing] label={label} cfg_normalize blocks={} elapsed={:?}",
             func.blocks.len(),
+            start.elapsed()
+        );
+    }
+    let state_promote_start = timing.then(crate::timing::now);
+    state_promote::promote(func, &normalized_cfg).map_err(|error| {
+        RegallocError::new(
+            "physical state promotion",
+            error.rule,
+            error.block,
+            error.instruction,
+            Vec::new(),
+            error.message,
+        )
+    })?;
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("physical state promotion verification", error))?;
+    if let Some(start) = state_promote_start {
+        eprintln!(
+            "[regalloc-timing] label={label} physical_state_promotion elapsed={:?}",
             start.elapsed()
         );
     }

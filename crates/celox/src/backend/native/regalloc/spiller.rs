@@ -186,6 +186,14 @@ impl Spiller {
         Ok(stack_home(expanded, root)?.is_some())
     }
 
+    pub(super) fn deferred_state_home_exists(
+        &self,
+        expanded: &ExpandedAllocationProblem,
+        root: LiveBundleId,
+    ) -> bool {
+        expanded.state_homes.iter().any(|home| home.root == root)
+    }
+
     pub(super) fn plan(
         &self,
         expanded: &ExpandedAllocationProblem,
@@ -206,11 +214,13 @@ impl Spiller {
         }
         let home_plan = self.home_plan(root)?;
         let stack_exists = self.stack_home_exists(expanded, root)?;
+        let deferred_state_exists = self.deferred_state_home_exists(expanded, root);
         let partition = home_plan
-            .partition_with_existing_stack(&ordered, stack_exists)
+            .partition_with_existing_homes(&ordered, stack_exists, deferred_state_exists)
             .map_err(|error| SpillerError::home(error, root))?;
         let mut selections = BTreeMap::new();
         let mut stack_creation_pending = !stack_exists;
+        let mut deferred_state_creation_pending = !deferred_state_exists;
         let mut materialized_total = 0u64;
         for piece in partition.pieces {
             for use_id in piece.uses {
@@ -229,7 +239,9 @@ impl Spiller {
                             materialization_cost: STACK_HOME_MATERIALIZATION_COST,
                         }
                     }
-                    HomeKind::Rematerialize(_) | HomeKind::State(_) => {
+                    HomeKind::Rematerialize(_)
+                    | HomeKind::State(_)
+                    | HomeKind::DeferredState(_) => {
                         let materialization = piece
                             .selection
                             .materializations
@@ -247,10 +259,19 @@ impl Spiller {
                                     ),
                                 )
                             })?;
+                        let creation_cost =
+                            if matches!(piece.selection.kind, HomeKind::DeferredState(_))
+                                && deferred_state_creation_pending
+                            {
+                                deferred_state_creation_pending = false;
+                                1
+                            } else {
+                                0
+                            };
                         HomeSelection {
                             kind: piece.selection.kind,
                             materializations: vec![materialization],
-                            creation_cost: 0,
+                            creation_cost,
                             materialization_cost: materialization.cost,
                         }
                     }
@@ -359,6 +380,34 @@ impl Spiller {
             .any(|selection| selection.kind == HomeKind::Stack);
         let existing_stack_home = stack_home(expanded, root)?;
         let mut edit = SpillEdit::default();
+        let needs_deferred_state = plan
+            .selections
+            .values()
+            .any(|selection| matches!(selection.kind, HomeKind::DeferredState(_)));
+        if needs_deferred_state {
+            let home = graph
+                .deferred_homes
+                .get(root.0 as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    SpillerError::new(
+                        "SPILLER.DEFERRED_STATE_HOME",
+                        Some(graph_root.definition.block()),
+                        Some(value),
+                        Some(root),
+                        "spill plan selected a deferred home absent from its machine root",
+                    )
+                })?;
+            allocation_expand::ensure_state_home(
+                &mut expanded.ir,
+                &mut expanded.state_homes,
+                graph_root,
+                home,
+            )
+            .map_err(SpillerError::expand)?;
+            edit.record_block(graph_root.definition.block());
+        }
         let stack_home = if needs_stack {
             if existing_stack_home.is_none() {
                 edit.record_block(graph_root.definition.block());
@@ -965,4 +1014,138 @@ fn expanded_use(
             format!("spill use {use_id:?} is outside its root"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::native::mir::{
+        BaseReg, MBlock, MFunction, MInst, OpSize, PackedStateHome, SpillDesc, StateHomeId,
+        VRegAllocator,
+    };
+
+    #[test]
+    fn deferred_machine_word_home_is_created_once_and_reloaded_per_selected_use() {
+        let home = PackedStateHome {
+            id: StateHomeId(7),
+            offset: 32,
+            size: OpSize::S64,
+            live_on_entry: false,
+        };
+        let mut values = VRegAllocator::new();
+        for _ in 0..5 {
+            values.alloc();
+        }
+        let mut descriptors = vec![SpillDesc::transient(); 5];
+        descriptors[0] = SpillDesc::transient().with_deferred_state_home(home);
+        let mut function = MFunction::new(values, descriptors);
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 3,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 5,
+            },
+            MInst::Add {
+                dst: VReg(0),
+                lhs: VReg(1),
+                rhs: VReg(2),
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(0),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 64,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Mov {
+                dst: VReg(4),
+                src: VReg(3),
+            },
+            MInst::Return,
+        ];
+        function.blocks.push(block);
+
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let root = graph
+            .bundles
+            .iter()
+            .find(|bundle| bundle.origin == VReg(0))
+            .unwrap()
+            .id;
+        let mut expanded = allocation_expand::expand_unallocated(&function, &cfg, &graph).unwrap();
+        let spiller = Spiller::build(&graph).unwrap();
+        let entries = graph.bundles[root.0 as usize]
+            .uses
+            .iter()
+            .map(|use_| SpillEntry {
+                entry: use_.id,
+                uses: vec![use_.id],
+                kind: SpillEntryKind::Materialized,
+                preferred_register: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = spiller.plan(&expanded, root, VReg(0), &entries).unwrap();
+        assert_eq!(plan.total_cost, 3);
+        assert!(
+            plan.selections()
+                .values()
+                .all(|selection| matches!(selection.kind, HomeKind::DeferredState(StateHomeId(7))))
+        );
+        assert_eq!(
+            plan.selections()
+                .values()
+                .filter(|selection| selection.creation_cost == 1)
+                .count(),
+            1
+        );
+
+        spiller
+            .materialize(&mut expanded, &graph, VReg(0), root, &entries, &plan, true)
+            .unwrap();
+        expanded.ir.verify_state_homes(&cfg).unwrap();
+        assert_eq!(expanded.state_homes.len(), 1);
+        let lowered = expanded.ir.materialize(&function, &graph, &[]).unwrap();
+        let state_stores = lowered
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 32,
+                        size: OpSize::S64,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let state_reloads = lowered
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    MInst::Load {
+                        base: BaseReg::SimState,
+                        offset: 32,
+                        size: OpSize::S64,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(state_stores, 1);
+        assert_eq!(state_reloads, 2);
+    }
 }
