@@ -23,6 +23,11 @@ use super::live_interval::{
 };
 use super::reload::{PureStep, materialize_pure_step};
 
+/// Stable anchor-local order labels leave room for later insertion around a
+/// synthetic split boundary. Appending remains O(1); before/after insertion
+/// bisects one of these gaps and fails structurally if it is exhausted.
+const SYNTHETIC_SEQUENCE_STRIDE: u32 = 1 << 12;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct StackHomeId(pub u32);
 
@@ -59,6 +64,14 @@ enum SyntheticAnchor {
         block: BlockId,
         instruction: usize,
     },
+    BeforeSynthetic {
+        block: BlockId,
+        instruction: SyntheticInstructionId,
+    },
+    AfterSynthetic {
+        block: BlockId,
+        instruction: SyntheticInstructionId,
+    },
     BeforePhiEdge {
         predecessor: BlockId,
         successor: BlockId,
@@ -71,7 +84,9 @@ impl SyntheticAnchor {
         match self {
             Self::BlockEntry { block }
             | Self::BeforeInstruction { block, .. }
-            | Self::AfterInstruction { block, .. } => block,
+            | Self::AfterInstruction { block, .. }
+            | Self::BeforeSynthetic { block, .. }
+            | Self::AfterSynthetic { block, .. } => block,
             Self::BeforePhiEdge { predecessor, .. } => predecessor,
         }
     }
@@ -948,21 +963,7 @@ impl AllocationIr {
         uses: Uses,
         defines_value: bool,
     ) -> Result<InsertedSynthetic, AllocationIrError> {
-        let anchor = match site {
-            UseSite::Instruction {
-                block, instruction, ..
-            } => SyntheticAnchor::BeforeInstruction { block, instruction },
-            UseSite::PhiEdge {
-                predecessor,
-                successor,
-                phi,
-                ..
-            } => SyntheticAnchor::BeforePhiEdge {
-                predecessor,
-                successor,
-                phi,
-            },
-        };
+        let anchor = self.anchor_before_use(site)?;
         self.insert_synthetic(anchor, operation, uses, defines_value)
     }
 
@@ -1254,49 +1255,19 @@ impl AllocationIr {
         Ok(())
     }
 
-    /// Return a conservative lower bound for any synthetic definition
-    /// inserted immediately before `site`.  A materialization can contain
-    /// several instructions and the exact defining sequence does not exist
-    /// until publication, so symbolic allocation reserves from the first
-    /// currently unused sequence in the immutable anchor zone. Every eventual
-    /// definition in that transaction is therefore covered without
-    /// predicting its instruction count or conflicting with older insertions.
+    /// Return the next stable definition slot immediately before `site`.
+    /// Original-instruction anchors advance in fixed-width sequence strides;
+    /// a synthetic-instruction anchor instead bisects the retained order gap
+    /// before that exact instruction.  The returned slot therefore has the
+    /// same order that publication will assign to the next inserted
+    /// definition, including insertions around older synthetic operations.
     pub(super) fn earliest_insert_before_use_slot(
         &self,
         site: UseSite,
     ) -> Result<SlotIndex, AllocationIrError> {
-        let anchor = match site {
-            UseSite::Instruction {
-                block, instruction, ..
-            } => SyntheticAnchor::BeforeInstruction { block, instruction },
-            UseSite::PhiEdge {
-                predecessor,
-                successor,
-                phi,
-                ..
-            } => SyntheticAnchor::BeforePhiEdge {
-                predecessor,
-                successor,
-                phi,
-            },
-        };
+        let anchor = self.anchor_before_use(site)?;
         let block = self.block(anchor.block())?;
-        let zone = self.stable_anchor_zone(block, anchor)?;
-        let sequence = self
-            .next_sequence_by_zone
-            .get(&(block, zone))
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
-                    Some(anchor.block()),
-                    None,
-                    Vec::new(),
-                    "synthetic use-anchor sequence exceeds u32",
-                )
-            })?;
+        let (zone, sequence) = self.instruction_order_at_anchor(block, anchor)?;
         SlotIndex::stable(zone, sequence, 0).ok_or_else(|| {
             AllocationIrError::new(
                 "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
@@ -1322,7 +1293,7 @@ impl AllocationIr {
             DefinitionSite::Phi { block, .. } => SyntheticAnchor::BlockEntry { block },
             DefinitionSite::Instruction {
                 block, instruction, ..
-            } => SyntheticAnchor::AfterInstruction { block, instruction },
+            } => self.anchor_after_instruction_definition(block, instruction)?,
         };
         self.insert_synthetic(anchor, operation, uses, defines_value)
     }
@@ -1690,20 +1661,15 @@ impl AllocationIr {
         let mut operations = Vec::new();
         let mut phi_definitions = Vec::new();
         for block in &self.blocks {
-            for phi in &block.phis {
+            for (phi_index, phi) in block.phis.iter().enumerate() {
                 if let Some(home) = phi.stack_home {
-                    let original_phi = phi.original_phi.ok_or_else(|| {
-                        AllocationIrError::new(
-                            "ALLOCATION_IR.SYNTHETIC_PHI_HOME",
-                            Some(block.id),
-                            None,
-                            vec![phi.destination],
-                            "live-range-edit merge phi cannot own a semantic stack destination",
-                        )
-                    })?;
                     phi_definitions.push(AllocationStackPhiDefinition {
                         block: block.id,
-                        phi: original_phi,
+                        // Original phis form the unchanged prefix, while
+                        // SplitEditor phis are appended. Both are real MIR phi
+                        // rows at atomic materialization and can therefore be
+                        // assigned a conventional stack destination.
+                        phi: phi_index,
                         destination: phi.destination,
                         home,
                     });
@@ -2365,22 +2331,7 @@ impl AllocationIr {
     ) -> Result<InsertedSynthetic, AllocationIrError> {
         self.verify_operation(anchor, operation, uses, defines_value)?;
         let block = self.block(anchor.block())?;
-        let zone = self.stable_anchor_zone(block, anchor)?;
-        let sequence = self
-            .next_sequence_by_zone
-            .get(&(block, zone))
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
-                    Some(anchor.block()),
-                    None,
-                    Vec::new(),
-                    "synthetic instruction sequence exceeds u32",
-                )
-            })?;
+        let (zone, sequence) = self.instruction_order_at_anchor(block, anchor)?;
         let Some(next_instruction) = self.next_synthetic_instruction.checked_add(1) else {
             return Err(AllocationIrError::new(
                 "ALLOCATION_IR.INSTRUCTION_ID_RANGE",
@@ -2461,7 +2412,10 @@ impl AllocationIr {
             let liveness = self.instruction_liveness_snapshot(block, position)?;
             self.record_instruction_inserted(liveness);
         }
-        self.next_sequence_by_zone.insert((block, zone), sequence);
+        self.next_sequence_by_zone
+            .entry((block, zone))
+            .and_modify(|current| *current = (*current).max(sequence))
+            .or_insert(sequence);
         self.next_synthetic_instruction = next_instruction;
         self.next_value = next_value;
         Ok(InsertedSynthetic {
@@ -2506,6 +2460,72 @@ impl AllocationIr {
         Ok(())
     }
 
+    fn anchor_before_use(&self, site: UseSite) -> Result<SyntheticAnchor, AllocationIrError> {
+        match site {
+            UseSite::Instruction {
+                block, instruction, ..
+            } => {
+                let block_index = self.block(block)?;
+                if instruction < self.blocks[block_index].original_instruction_count {
+                    Ok(SyntheticAnchor::BeforeInstruction { block, instruction })
+                } else {
+                    Ok(SyntheticAnchor::BeforeSynthetic {
+                        block,
+                        instruction: self
+                            .synthetic_id_from_liveness_identity(block_index, instruction)?,
+                    })
+                }
+            }
+            UseSite::PhiEdge {
+                predecessor,
+                successor,
+                phi,
+                ..
+            } => Ok(SyntheticAnchor::BeforePhiEdge {
+                predecessor,
+                successor,
+                phi,
+            }),
+        }
+    }
+
+    fn anchor_after_instruction_definition(
+        &self,
+        block: BlockId,
+        instruction: usize,
+    ) -> Result<SyntheticAnchor, AllocationIrError> {
+        let block_index = self.block(block)?;
+        if instruction < self.blocks[block_index].original_instruction_count {
+            Ok(SyntheticAnchor::AfterInstruction { block, instruction })
+        } else {
+            Ok(SyntheticAnchor::AfterSynthetic {
+                block,
+                instruction: self.synthetic_id_from_liveness_identity(block_index, instruction)?,
+            })
+        }
+    }
+
+    fn synthetic_id_from_liveness_identity(
+        &self,
+        block: usize,
+        identity: usize,
+    ) -> Result<SyntheticInstructionId, AllocationIrError> {
+        let row = &self.blocks[block];
+        identity
+            .checked_sub(row.original_instruction_count)
+            .and_then(|identity| u32::try_from(identity).ok())
+            .map(SyntheticInstructionId)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_RANGE",
+                    Some(row.id),
+                    Some(identity),
+                    Vec::new(),
+                    "synthetic liveness instruction identity exceeds u32",
+                )
+            })
+    }
+
     fn block(&self, id: BlockId) -> Result<usize, AllocationIrError> {
         self.block_index.get(&id).copied().ok_or_else(|| {
             AllocationIrError::new(
@@ -2527,6 +2547,20 @@ impl AllocationIr {
             SyntheticAnchor::BlockEntry { .. } => return Ok(0),
             SyntheticAnchor::BeforeInstruction { instruction, .. } => (instruction, 1_u64),
             SyntheticAnchor::AfterInstruction { instruction, .. } => (instruction, 3_u64),
+            SyntheticAnchor::BeforeSynthetic { instruction, .. }
+            | SyntheticAnchor::AfterSynthetic { instruction, .. } => {
+                let (_, origin) = self.synthetic_instruction(block, instruction)?;
+                let AllocationInstructionOrigin::Synthetic { zone, .. } = origin else {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.SYNTHETIC_ANCHOR",
+                        Some(self.blocks[block].id),
+                        None,
+                        Vec::new(),
+                        "synthetic anchor resolved to an original instruction",
+                    ));
+                };
+                return Ok(zone);
+            }
             SyntheticAnchor::BeforePhiEdge { .. } => (
                 self.blocks[block].original_terminator.ok_or_else(|| {
                     AllocationIrError::new(
@@ -2560,22 +2594,7 @@ impl AllocationIr {
         block: usize,
         anchor: SyntheticAnchor,
     ) -> Result<InstructionSlots, AllocationIrError> {
-        let zone = self.stable_anchor_zone(block, anchor)?;
-        let sequence = self
-            .next_sequence_by_zone
-            .get(&(block, zone))
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| {
-                AllocationIrError::new(
-                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
-                    Some(anchor.block()),
-                    None,
-                    Vec::new(),
-                    "synthetic instruction sequence exceeds u32",
-                )
-            })?;
+        let (zone, sequence) = self.instruction_order_at_anchor(block, anchor)?;
         InstructionSlots::stable(zone, sequence).ok_or_else(|| {
             AllocationIrError::new(
                 "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
@@ -2585,6 +2604,126 @@ impl AllocationIr {
                 "synthetic instruction anchor exceeds the stable slot domain",
             )
         })
+    }
+
+    fn instruction_order_at_anchor(
+        &self,
+        block: usize,
+        anchor: SyntheticAnchor,
+    ) -> Result<(u64, u32), AllocationIrError> {
+        let zone = self.stable_anchor_zone(block, anchor)?;
+        let sequence = match anchor {
+            SyntheticAnchor::BeforeSynthetic { instruction, .. }
+            | SyntheticAnchor::AfterSynthetic { instruction, .. } => {
+                let (_, origin) = self.synthetic_instruction(block, instruction)?;
+                let AllocationInstructionOrigin::Synthetic {
+                    sequence: target, ..
+                } = origin
+                else {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.SYNTHETIC_ANCHOR",
+                        Some(self.blocks[block].id),
+                        None,
+                        Vec::new(),
+                        "synthetic order anchor resolved to an original instruction",
+                    ));
+                };
+                let sequences = self.blocks[block]
+                    .instructions
+                    .iter()
+                    .chain(
+                        self.pending_instruction_inserts
+                            .iter()
+                            .filter(|pending| pending.block == block)
+                            .map(|pending| &pending.instruction),
+                    )
+                    .filter_map(|instruction| match instruction.origin {
+                        AllocationInstructionOrigin::Synthetic {
+                            zone: candidate_zone,
+                            sequence,
+                            ..
+                        } if candidate_zone == zone => Some(sequence),
+                        _ => None,
+                    });
+                match anchor {
+                    SyntheticAnchor::BeforeSynthetic { .. } => {
+                        let lower = sequences
+                            .filter(|&sequence| sequence < target)
+                            .max()
+                            .unwrap_or(0);
+                        lower
+                            .checked_add((target - lower) / 2)
+                            .filter(|sequence| *sequence > lower && *sequence < target)
+                    }
+                    SyntheticAnchor::AfterSynthetic { .. } => {
+                        let upper = sequences.filter(|&sequence| sequence > target).min();
+                        if let Some(upper) = upper {
+                            target
+                                .checked_add((upper - target) / 2)
+                                .filter(|sequence| *sequence > target && *sequence < upper)
+                        } else {
+                            self.next_sequence_by_zone
+                                .get(&(block, zone))
+                                .copied()
+                                .unwrap_or(target)
+                                .checked_add(SYNTHETIC_SEQUENCE_STRIDE)
+                        }
+                    }
+                    _ => unreachable!("synthetic order branch checked above"),
+                }
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.SYNTHETIC_ORDER_GAP",
+                        Some(anchor.block()),
+                        None,
+                        Vec::new(),
+                        "stable order gap around a synthetic instruction is exhausted",
+                    )
+                })?
+            }
+            _ => self
+                .next_sequence_by_zone
+                .get(&(block, zone))
+                .copied()
+                .unwrap_or(0)
+                .checked_add(SYNTHETIC_SEQUENCE_STRIDE)
+                .ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(anchor.block()),
+                        None,
+                        Vec::new(),
+                        "synthetic instruction sequence exceeds u32",
+                    )
+                })?,
+        };
+        Ok((zone, sequence))
+    }
+
+    fn synthetic_instruction(
+        &self,
+        block: usize,
+        instruction: SyntheticInstructionId,
+    ) -> Result<(usize, AllocationInstructionOrigin), AllocationIrError> {
+        self.blocks[block]
+            .instructions
+            .iter()
+            .enumerate()
+            .find_map(|(position, row)| match row.origin {
+                AllocationInstructionOrigin::Synthetic { id, .. } if id == instruction => {
+                    Some((position, row.origin))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.SYNTHETIC_ANCHOR",
+                    Some(self.blocks[block].id),
+                    Some(instruction.0 as usize),
+                    Vec::new(),
+                    "anchor references a missing published synthetic instruction",
+                )
+            })
     }
 
     fn original_instruction_position(
@@ -2734,6 +2873,31 @@ impl AllocationIr {
                 }
                 Ok(position)
             }
+            SyntheticAnchor::BeforeSynthetic { instruction, .. }
+            | SyntheticAnchor::AfterSynthetic { instruction, .. } => {
+                let (_, target_origin) = self.synthetic_instruction(block, instruction)?;
+                let target = liveness_instruction_slots(target_origin)
+                    .map(InstructionSlots::use_slot)
+                    .ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                            Some(self.blocks[block].id),
+                            Some(instruction.0 as usize),
+                            Vec::new(),
+                            "synthetic insertion target exceeds the stable order domain",
+                        )
+                    })?;
+                let before = matches!(anchor, SyntheticAnchor::BeforeSynthetic { .. });
+                Ok(self.blocks[block]
+                    .instructions
+                    .partition_point(|candidate| {
+                        let candidate = liveness_instruction_slots(candidate.origin)
+                            .map(InstructionSlots::use_slot);
+                        candidate.is_some_and(|candidate| {
+                            candidate < target || (!before && candidate == target)
+                        })
+                    }))
+            }
             SyntheticAnchor::BeforePhiEdge {
                 predecessor,
                 successor,
@@ -2848,8 +3012,6 @@ impl AllocationIr {
                         .any(|(_, value)| value.0 >= self.next_value)
                     || phi.register_sources.len() != phi.sources.len()
                     || (phi.register_definition == phi.stack_home.is_some())
-                    || (phi.original_phi.is_none()
-                        && (!phi.register_definition || phi.stack_home.is_some()))
             }) {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.PHI_IDENTITY",
@@ -4091,7 +4253,7 @@ mod tests {
             allocation_ir
                 .earliest_insert_before_use_slot(interval.uses[0])
                 .unwrap(),
-            SlotIndex::stable(4, 1, 0).unwrap()
+            SlotIndex::stable(4, SYNTHETIC_SEQUENCE_STRIDE, 0).unwrap()
         );
 
         allocation_ir.begin_instruction_transaction().unwrap();
@@ -4130,7 +4292,7 @@ mod tests {
             allocation_ir
                 .earliest_insert_before_use_slot(interval.uses[0])
                 .unwrap(),
-            SlotIndex::stable(4, 2, 0).unwrap()
+            SlotIndex::stable(4, SYNTHETIC_SEQUENCE_STRIDE * 2, 0).unwrap()
         );
 
         let coordinates = allocation_ir.blocks[0]
@@ -4143,7 +4305,74 @@ mod tests {
                 AllocationInstructionOrigin::Original { .. } => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(coordinates, [(3, 1), (3, 2), (4, 1)]);
+        assert_eq!(
+            coordinates,
+            [
+                (3, SYNTHETIC_SEQUENCE_STRIDE),
+                (3, SYNTHETIC_SEQUENCE_STRIDE * 2),
+                (4, SYNTHETIC_SEQUENCE_STRIDE),
+            ]
+        );
+    }
+
+    #[test]
+    fn synthetic_order_gaps_accept_real_insertion_on_both_sides() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let interval = intervals.intervals[0].as_ref().unwrap();
+        let cut = interval.uses[0];
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let placement = allocation_ir
+            .plan_split_copy_before(interval, cut.block(), cut.slot())
+            .unwrap();
+        let split = allocation_ir
+            .insert_planned_split_copy(placement, VReg(0))
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let before = allocation_ir
+            .insert_before_use(
+                split.source_use,
+                SyntheticOperation::Copy,
+                Uses::one(VReg(0)),
+                true,
+            )
+            .unwrap();
+        let after = allocation_ir
+            .insert_after_definition(
+                split.definition_site,
+                SyntheticOperation::Copy,
+                Uses::one(split.definition),
+                true,
+            )
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+
+        let rows = allocation_ir
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction.origin {
+                AllocationInstructionOrigin::Synthetic {
+                    id, zone, sequence, ..
+                } if [before.instruction, split.instruction, after.instruction].contains(&id) => {
+                    Some((id, zone, sequence))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, before.instruction);
+        assert_eq!(rows[1].0, split.instruction);
+        assert_eq!(rows[2].0, after.instruction);
+        assert_eq!(rows[0].1, rows[1].1);
+        assert_eq!(rows[1].1, rows[2].1);
+        assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2);
+        allocation_ir.analyze(&cfg).unwrap();
     }
 
     #[test]

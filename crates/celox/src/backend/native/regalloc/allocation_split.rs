@@ -125,6 +125,16 @@ impl AllocationSplitError {
             error.message,
         )
     }
+
+    fn ir(error: super::allocation_ir::AllocationIrError, root: LiveBundleId) -> Self {
+        Self::new(
+            error.rule,
+            error.block,
+            error.values.first().copied(),
+            Some(root),
+            error.message,
+        )
+    }
 }
 
 impl fmt::Display for AllocationSplitError {
@@ -631,6 +641,183 @@ fn plan_split_with_context(
     })
 }
 
+/// Select one conventional strict-SSA live-range edit from exact physical
+/// free-prefix frontiers. This stage deliberately knows nothing about stack,
+/// State-MemorySSA, rematerialization, or HomeGraph transition costs; those
+/// decisions belong exclusively to the later `Spill` stage.
+fn select_live_range_frontier(
+    expanded: &ExpandedAllocationProblem,
+    joint: &JointAllocationProblem,
+    request: &RegionSplitRequest,
+) -> Result<(RegionSplitCandidate, RegisterPressureFrontier), AllocationSplitError> {
+    let blocked = joint.value(request.blocked_value).ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPLIT.BLOCKED_VALUE",
+            Some(request.definition.block()),
+            Some(request.blocked_value),
+            None,
+            "split request references a value outside joint allocation",
+        )
+    })?;
+    if blocked.interval.definition != request.definition || request.candidates.is_empty() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REQUEST_IDENTITY",
+            Some(request.definition.block()),
+            Some(request.blocked_value),
+            None,
+            "split request has a stale definition or no splittable live interval",
+        ));
+    }
+
+    let mut best = None::<(
+        usize,
+        u64,
+        u64,
+        VReg,
+        PhysReg,
+        RegionSplitCandidate,
+        RegisterPressureFrontier,
+    )>;
+    for candidate in &request.candidates {
+        if candidate.frontiers.is_empty()
+            || candidate
+                .frontiers
+                .windows(2)
+                .any(|pair| pair[0].register >= pair[1].register)
+        {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.PRESSURE_POINTS",
+                Some(request.definition.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "candidate register frontiers are empty, duplicated, or unordered",
+            ));
+        }
+        let allocation = joint.value(candidate.value).ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.CANDIDATE_RANGE",
+                Some(request.definition.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "split candidate is outside joint allocation",
+            )
+        })?;
+        let spill_cost = allocation.spill_cost.ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.CANDIDATE_CLASS",
+                Some(allocation.interval.definition.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "fixed transition was selected as a split candidate",
+            )
+        })?;
+        for frontier in &candidate.frontiers {
+            let Some(&first_cut) = frontier.points.first() else {
+                return Err(AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.PRESSURE_POINTS",
+                    Some(request.definition.block()),
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "candidate has an empty physical-register frontier",
+                ));
+            };
+            let value = verify_candidate(joint, candidate, first_cut)?;
+            if frontier.register != first_cut.register()
+                || frontier.points.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.PRESSURE_POINTS",
+                    Some(first_cut.block()),
+                    Some(candidate.value),
+                    Some(candidate.root),
+                    "frontier points are mixed, duplicated, or unordered",
+                ));
+            }
+
+            let mut placements = BTreeSet::new();
+            let mut legal = true;
+            for &cut in &frontier.points {
+                verify_pressure_point(value, candidate, cut)?;
+                let placement = match expanded.ir.plan_split_copy_before(
+                    &value.interval,
+                    cut.block(),
+                    cut.slot(),
+                ) {
+                    Ok(placement) => placement,
+                    Err(error) if error.rule == "ALLOCATION_IR.NO_LEGAL_SPLIT_POINT" => {
+                        legal = false;
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(AllocationSplitError::ir(error, candidate.root));
+                    }
+                };
+                // Inserting another copy in the same anchor zone merely
+                // lengthens a copy chain while leaving the pressure frontier
+                // unchanged. A later original boundary may still be split.
+                if placement.block == value.interval.definition.block()
+                    && placement.definition_slot.stable_zone()
+                        == value.interval.definition.slot().stable_zone()
+                {
+                    legal = false;
+                    break;
+                }
+                placements.insert((
+                    placement.block,
+                    placement.use_slot,
+                    placement.definition_slot,
+                ));
+            }
+            if !legal || placements.is_empty() {
+                continue;
+            }
+
+            // Fewer copies are preferred. Spill density is used only as a
+            // conventional allocation weight; no home is selected here.
+            let key = (
+                placements.len(),
+                spill_cost,
+                value.live_length,
+                candidate.value,
+                frontier.register,
+            );
+            let replace = best.as_ref().is_none_or(
+                |(best_copies, best_cost, best_length, best_value, best_register, _, _)| {
+                    let candidate_density = u128::from(spill_cost) * u128::from(*best_length);
+                    let best_density = u128::from(*best_cost) * u128::from(value.live_length);
+                    placements.len() < *best_copies
+                        || (placements.len() == *best_copies
+                            && (candidate_density < best_density
+                                || (candidate_density == best_density
+                                    && (candidate.value, frontier.register)
+                                        < (*best_value, *best_register))))
+                },
+            );
+            if replace {
+                best = Some((
+                    key.0,
+                    key.1,
+                    key.2,
+                    key.3,
+                    key.4,
+                    candidate.clone(),
+                    frontier.clone(),
+                ));
+            }
+        }
+    }
+    best.map(|(_, _, _, _, _, candidate, frontier)| (candidate, frontier))
+        .ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.NO_PROGRESS",
+                Some(request.definition.block()),
+                Some(request.blocked_value),
+                None,
+                "no requested live interval has a new legal machine boundary before its pressure frontier",
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plan_candidate_frontiers(
     expanded: &ExpandedAllocationProblem,
@@ -841,7 +1028,11 @@ fn apply_live_range_edit(
             "frontier register differs from its first exact pressure point",
         ));
     }
-    let source_preference = value.preferred_register;
+    // The source is exactly the free prefix proved for this register. New
+    // suffix representatives return to the ordinary queue without inheriting
+    // a color that is known to be blocked beyond the frontier.
+    let source_preference = Some(frontier.register);
+    let child_preference = None;
     let cuts = frontier
         .points
         .iter()
@@ -861,12 +1052,15 @@ fn apply_live_range_edit(
 
     let root_origin = expanded_root(expanded, candidate.root)?.origin;
     let mut regions = BTreeMap::<VReg, RegisterRegionId>::new();
+    let mut region_preferences = BTreeMap::<VReg, Option<PhysReg>>::new();
     if let Some(metadata) = expanded
         .register_regions
-        .iter()
+        .iter_mut()
         .find(|metadata| metadata.root == candidate.root && metadata.value == candidate.value)
     {
+        metadata.preferred_register = source_preference;
         regions.insert(candidate.value, metadata.id);
+        region_preferences.insert(candidate.value, source_preference);
     } else if candidate.value == root_origin {
         let region = insert_register_representative(
             expanded,
@@ -876,6 +1070,7 @@ fn apply_live_range_edit(
             ExpandedRegisterEntry::Original,
         )?;
         regions.insert(candidate.value, region);
+        region_preferences.insert(candidate.value, source_preference);
     } else {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.REGION_METADATA",
@@ -890,26 +1085,28 @@ fn apply_live_range_edit(
             expanded,
             candidate.root,
             copy.definition,
-            source_preference,
+            child_preference,
             ExpandedRegisterEntry::SplitCopy {
                 instruction: copy.instruction,
                 source: candidate.value,
             },
         )?;
         regions.insert(copy.definition, region);
+        region_preferences.insert(copy.definition, child_preference);
     }
     for phi in &edit.phis {
         let region = insert_register_representative(
             expanded,
             candidate.root,
             phi.definition,
-            source_preference,
+            child_preference,
             ExpandedRegisterEntry::SplitPhi {
                 block: phi.block,
                 phi: phi.phi,
             },
         )?;
         regions.insert(phi.definition, region);
+        region_preferences.insert(phi.definition, child_preference);
     }
 
     let rewritten = edit
@@ -965,9 +1162,22 @@ fn apply_live_range_edit(
                     "renamed semantic use has no register-representative metadata",
                 )
             })?;
+            let preferred_register =
+                region_preferences
+                    .get(&replacement)
+                    .copied()
+                    .ok_or_else(|| {
+                        AllocationSplitError::new(
+                            "ALLOCATION_SPLIT.REGION_METADATA",
+                            Some(use_.site.block()),
+                            Some(replacement),
+                            Some(candidate.root),
+                            "renamed semantic use has no representative preference",
+                        )
+                    })?;
             use_.source = ExpandedUseSource::RegisterRegion {
                 region,
-                preferred_register: source_preference,
+                preferred_register,
             };
         }
     }
@@ -1090,13 +1300,54 @@ fn apply_spill_with_context(
             "spill request no longer references a register live interval",
         ));
     };
-    if *root != request.root || *uses != request.uses || request.uses.is_empty() {
+    if *root != request.root || *uses != request.uses {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPILL.REQUEST_IDENTITY",
             Some(value.interval.definition.block()),
             Some(request.value),
             Some(request.root),
             "spill request and current live interval own different root uses",
+        ));
+    }
+    if requires_machine_interval_spill(expanded, request, &value.interval)? {
+        let interval = value.interval.clone();
+        expanded
+            .ir
+            .begin_instruction_transaction()
+            .map_err(|error| AllocationSplitError::ir(error, request.root))?;
+        let SpillEdit {
+            liveness_blocks,
+            constraint_blocks,
+        } = context
+            .spiller
+            .materialize_machine_interval(expanded, request.root, &interval)
+            .map_err(AllocationSplitError::spill)?;
+        let mut journal = SplitMutationJournal {
+            liveness_blocks,
+            constraint_blocks,
+        };
+        let replacement = (request.value, request.root);
+        let liveness = finish_split_mutations(
+            expanded,
+            cfg,
+            &mut journal,
+            std::slice::from_ref(&replacement),
+        )?;
+        return Ok(AppliedSplit {
+            root: request.root,
+            constraint_blocks: journal.constraint_blocks,
+            changed_values: liveness.changed_values,
+            range_changed_values: liveness.range_changed_values,
+            live_lengths: liveness.live_lengths,
+        });
+    }
+    if request.uses.is_empty() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPILL.EMPTY_MACHINE_INTERVAL",
+            Some(value.interval.definition.block()),
+            Some(request.value),
+            Some(request.root),
+            "an empty semantic region did not contain a machine transition use",
         ));
     }
     let candidate = RegionSplitCandidate {
@@ -1180,6 +1431,75 @@ fn apply_spill_with_context(
         range_changed_values: liveness.range_changed_values,
         live_lengths: liveness.live_lengths,
     })
+}
+
+/// A HomeGraph spill recipe owns only the immutable RTL-use subset. Once
+/// SplitEditor has introduced copies or merge phis, an interval can also own
+/// allocator-created transition uses. Such a representative must be spilled
+/// as one exact machine interval; otherwise the semantic rewrite silently
+/// leaves the pressure-causing suffix resident as an unspillable fixed value.
+fn requires_machine_interval_spill(
+    expanded: &ExpandedAllocationProblem,
+    request: &RegionSpillRequest,
+    interval: &super::live_interval::LiveInterval,
+) -> Result<bool, AllocationSplitError> {
+    let root = expanded_root(expanded, request.root)?;
+    let mut recipe_owned = BTreeSet::new();
+    for &use_id in &request.uses {
+        let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPILL.USE_RANGE",
+                Some(interval.definition.block()),
+                Some(request.value),
+                Some(request.root),
+                "spill request references a semantic use outside its root",
+            )
+        })?;
+        if use_.id != use_id || use_.value != request.value {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPILL.USE_OWNERSHIP",
+                Some(use_.site.block()),
+                Some(request.value),
+                Some(request.root),
+                "spill request no longer owns one of its semantic uses",
+            ));
+        }
+        recipe_owned.insert(use_.site);
+    }
+
+    // A logical-root home store is an effectful use deliberately retained by
+    // the HDL-specific path. It does not by itself turn the value into a
+    // SplitEditor product.
+    let synthetic = expanded
+        .ir
+        .index_synthetic_instructions()
+        .map_err(|error| AllocationSplitError::ir(error, request.root))?;
+    for home in &expanded.stack_homes {
+        let super::allocation_expand::ExpandedStackDefinition::Store { instruction, value } =
+            home.definition
+        else {
+            continue;
+        };
+        if value != request.value {
+            continue;
+        }
+        let site = expanded
+            .ir
+            .resolve_stack_store_use_site_indexed(
+                instruction,
+                home.id,
+                value,
+                &expanded.intervals,
+                &synthetic,
+            )
+            .map_err(|error| AllocationSplitError::ir(error, request.root))?;
+        recipe_owned.insert(site);
+    }
+
+    Ok(interval
+        .uses
+        .iter()
+        .any(|site| !recipe_owned.contains(site)))
 }
 
 /// Mutate only semantic ownership and allocation IR. Liveness, constraints,
@@ -1368,7 +1688,77 @@ fn finish_split_mutations(
                 .map_err(AllocationSplitError::expand)?,
         );
     }
+    prune_dead_register_representatives(expanded, replacements)?;
     Ok(liveness)
+}
+
+/// Incremental DCE can delete an older split copy while pruning the operand
+/// cone of the value currently being spilled. Representative metadata is an
+/// allocation fact, so it must be retired in the same root transaction once
+/// exact liveness proves that its machine definition is dead.
+fn prune_dead_register_representatives(
+    expanded: &mut ExpandedAllocationProblem,
+    replacements: &[(VReg, LiveBundleId)],
+) -> Result<(), AllocationSplitError> {
+    let changed_roots = replacements
+        .iter()
+        .map(|(_, root)| *root)
+        .collect::<BTreeSet<_>>();
+    let mut retained = Vec::with_capacity(expanded.register_regions.len());
+    for metadata in std::mem::take(&mut expanded.register_regions) {
+        let live = expanded
+            .intervals
+            .intervals
+            .get(metadata.value.0 as usize)
+            .and_then(Option::as_ref)
+            .is_some();
+        if live {
+            retained.push(metadata);
+            continue;
+        }
+        if !changed_roots.contains(&metadata.root) {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.DEAD_REGION_ROOT",
+                None,
+                Some(metadata.value),
+                Some(metadata.root),
+                "incremental DCE removed a representative outside the changed-root transaction",
+            ));
+        }
+        let root = expanded_root(expanded, metadata.root)?;
+        if root.uses.iter().any(|use_| {
+            use_.value == metadata.value
+                || matches!(
+                    use_.source,
+                    ExpandedUseSource::RegisterRegion { region, .. } if region == metadata.id
+                )
+        }) {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.DEAD_REGION_USE",
+                root.uses
+                    .iter()
+                    .find(|use_| use_.value == metadata.value)
+                    .map(|use_| use_.site.block()),
+                Some(metadata.value),
+                Some(metadata.root),
+                "dead machine representative is still claimed by a semantic root use",
+            ));
+        }
+    }
+    expanded.register_regions = retained;
+    expanded.region_rows.clear();
+    for (row, metadata) in expanded.register_regions.iter().enumerate() {
+        if expanded.region_rows.insert(metadata.id, row).is_some() {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.REGION_IDENTITY",
+                None,
+                Some(metadata.value),
+                Some(metadata.root),
+                "live register representatives contain a duplicate stable identity",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn cheapest_spill_candidate(
@@ -1424,40 +1814,17 @@ fn cheapest_spill_candidate(
     })
 }
 
-/// Iterate exact splitting and joint coloring to a fixed point.  The bound is
-/// derived from use ownership: regions are never merged, and every accepted
-/// split reduces pairwise co-residency, original residency, or register uses.
+/// Iterate conventional live-range splitting, spilling, and greedy coloring
+/// to a fixed point. Per-value allocator stages and legal machine boundaries
+/// provide progress; semantic root-use counts are not an iteration bound once
+/// strict-SSA edits create real copy and phi representatives.
 pub(super) fn allocate_with_splitting(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
     cfg: &NormalizedCfg,
     registers: &[PhysReg],
 ) -> Result<JointAllocation, AllocationSplitError> {
-    let initial_register_uses = split_progress(expanded).register_uses;
-    let root_count = u128::try_from(expanded.roots.len()).map_err(|_| {
-        AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ITERATION_BOUND",
-            None,
-            None,
-            None,
-            "root count exceeds u128",
-        )
-    })?;
-    let max_steps = initial_register_uses
-        .checked_mul(3)
-        .and_then(|steps| steps.checked_add(root_count))
-        .and_then(|steps| steps.checked_add(1))
-        .ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ITERATION_BOUND",
-                None,
-                None,
-                None,
-                "split iteration bound exceeds u128",
-            )
-        })?;
     let planning = SplitPlanningContext::build(graph, cfg)?;
-    let mut steps = 0u128;
     let mut session = JointAllocationSession::new_cached_persistent(
         expanded,
         cfg,
@@ -1475,45 +1842,23 @@ pub(super) fn allocate_with_splitting(
                 return Ok(allocation);
             }
             JointAllocationOutcome::NeedsSplit(request) => {
-                if steps >= max_steps {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.ITERATION_BOUND",
-                        Some(request.definition.block()),
-                        Some(request.blocked_value),
-                        None,
-                        "monotonic split sequence exceeded its ownership-derived bound",
-                    ));
-                }
-                let plan = match plan_split_with_context(
-                    expanded,
-                    graph,
-                    session.problem(),
-                    &request,
-                    cfg,
-                    &planning,
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) if error.rule == "ALLOCATION_SPLIT.NO_PROGRESS" => {
-                        let value = cheapest_spill_candidate(session.problem(), &request)?;
-                        session
-                            .require_spill(value)
-                            .map_err(AllocationSplitError::joint)?;
-                        steps += 1;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+                let (candidate, frontier) =
+                    match select_live_range_frontier(expanded, session.problem(), &request) {
+                        Ok(selection) => selection,
+                        Err(error) if error.rule == "ALLOCATION_SPLIT.NO_PROGRESS" => {
+                            let value = cheapest_spill_candidate(session.problem(), &request)?;
+                            session
+                                .require_spill(value)
+                                .map_err(AllocationSplitError::joint)?;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                 session
-                    .unassign_for_split(plan.value)
+                    .unassign_for_split(candidate.value)
                     .map_err(AllocationSplitError::joint)?;
-                let applied = apply_split_with_context(
-                    expanded,
-                    graph,
-                    session.problem(),
-                    &plan,
-                    cfg,
-                    &planning,
-                )?;
+                let applied =
+                    apply_live_range_edit(expanded, session.problem(), &candidate, &frontier, cfg)?;
                 session
                     .update_from_expanded_round(
                         expanded,
@@ -1528,21 +1873,8 @@ pub(super) fn allocate_with_splitting(
                         planning.spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
-                steps += 1;
             }
             JointAllocationOutcome::NeedsSpill(request) => {
-                if steps >= max_steps {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPILL.ITERATION_BOUND",
-                        session
-                            .problem()
-                            .value(request.value)
-                            .map(|value| value.interval.definition.block()),
-                        Some(request.value),
-                        Some(request.root),
-                        "monotonic split/spill sequence exceeded its ownership-derived bound",
-                    ));
-                }
                 let applied = apply_spill_with_context(
                     expanded,
                     graph,
@@ -1565,7 +1897,6 @@ pub(super) fn allocate_with_splitting(
                         planning.spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
-                steps += 1;
             }
         }
     }
@@ -1594,7 +1925,7 @@ fn verify_candidate<'a>(
             "split candidate is not a retained register region",
         ));
     };
-    if *root != candidate.root || *uses != candidate.uses || candidate.uses.is_empty() {
+    if *root != candidate.root || *uses != candidate.uses {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.CANDIDATE_IDENTITY",
             Some(value.interval.definition.block()),
@@ -2742,6 +3073,168 @@ mod tests {
             }
             assert!(value.spill_cost.is_some());
         }
+    }
+
+    #[test]
+    fn split_editor_transition_is_spilled_as_one_exact_machine_interval() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        merge.push(MInst::Return);
+        let mut function = function(3, Vec::new());
+        function.blocks = vec![entry, left, right, merge];
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = home_graph::build(&function, &cfg).unwrap();
+        let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX];
+        let mut expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let mut candidate = candidate(&joint, VReg(0));
+        let points = [BlockId(1), BlockId(2)]
+            .into_iter()
+            .map(|block| {
+                let row = cfg.block_index[&block];
+                AllocationPressurePoint {
+                    register: PhysReg::RAX,
+                    block,
+                    slot: expanded.intervals.block_slots[row]
+                        .instruction_use(0)
+                        .unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        candidate.frontiers = vec![RegisterPressureFrontier {
+            register: PhysReg::RAX,
+            points,
+        }];
+        apply_live_range_edit(
+            &mut expanded,
+            &joint,
+            &candidate,
+            &candidate.frontiers[0],
+            &cfg,
+        )
+        .unwrap();
+
+        let source = expanded
+            .register_regions
+            .iter()
+            .find_map(|region| {
+                matches!(region.entry, ExpandedRegisterEntry::SplitCopy { .. })
+                    .then_some(region.value)
+            })
+            .unwrap();
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let value = joint.value(source).unwrap();
+        let AllocationValueClass::Region { root, uses } = &value.class else {
+            panic!("split-copy product is not a spillable machine interval");
+        };
+        assert!(uses.is_empty());
+        let request = RegionSpillRequest {
+            value: source,
+            root: *root,
+            uses: uses.clone(),
+        };
+        let context = SplitPlanningContext::build(&graph, &cfg).unwrap();
+        apply_spill_with_context(&mut expanded, &graph, &joint, &request, &cfg, &context).unwrap();
+
+        assert!(
+            expanded
+                .register_regions
+                .iter()
+                .all(|row| row.value != source)
+        );
+        assert!(expanded.stack_homes.iter().any(|home| {
+            home.root == request.root
+                && home.kind
+                    == super::super::allocation_expand::ExpandedStackHomeKind::Machine {
+                        value: source,
+                    }
+        }));
+
+        // A strict-SSA merge is also an ordinary machine definition. Spilling
+        // it assigns the synthetic phi a real stack destination and inserts a
+        // reload for its exact downstream use.
+        let merge = expanded
+            .register_regions
+            .iter()
+            .find_map(|region| {
+                matches!(region.entry, ExpandedRegisterEntry::SplitPhi { .. })
+                    .then_some(region.value)
+            })
+            .unwrap();
+        let interval = expanded.intervals.intervals[merge.0 as usize]
+            .as_ref()
+            .unwrap()
+            .clone();
+        expanded.ir.begin_instruction_transaction().unwrap();
+        let SpillEdit {
+            liveness_blocks,
+            constraint_blocks,
+        } = context
+            .spiller
+            .materialize_machine_interval(&mut expanded, request.root, &interval)
+            .unwrap();
+        let mut journal = SplitMutationJournal {
+            liveness_blocks,
+            constraint_blocks,
+        };
+        finish_split_mutations(&mut expanded, &cfg, &mut journal, &[(merge, request.root)])
+            .unwrap();
+        assert!(expanded.stack_homes.iter().any(|home| {
+            home.root == request.root
+                && home.kind
+                    == super::super::allocation_expand::ExpandedStackHomeKind::Machine {
+                        value: merge,
+                    }
+                && matches!(
+                    home.definition,
+                    super::super::allocation_expand::ExpandedStackDefinition::Phi {
+                        destination,
+                        ..
+                    } if destination == merge
+                )
+        }));
+        expanded.ir.verify_stack_homes(&cfg).unwrap();
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert!(matches!(
+            rebuilt.value(source).map(|value| &value.class),
+            Some(AllocationValueClass::Fixed)
+        ));
+        assert!(!matches!(
+            rebuilt.value(merge).map(|value| &value.class),
+            Some(AllocationValueClass::Region { .. })
+        ));
+        let allocation = allocate_with_splitting(&mut expanded, &graph, &cfg, &registers).unwrap();
+        let lowered = super::super::allocation_lower::lower(
+            &function,
+            &cfg,
+            &graph,
+            &expanded,
+            &allocation,
+            &registers,
+        )
+        .unwrap();
+        lowered.function.verify_result().unwrap();
     }
 
     #[test]

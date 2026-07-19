@@ -12,8 +12,9 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, Uses, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedRegisterEntry, ExpandedRegisterRegion,
-    ExpandedStackHome, ExpandedUseSource, RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedMaterialization, ExpandedRegisterEntry,
+    ExpandedRegisterRegion, ExpandedStackDefinition, ExpandedStackHome, ExpandedStackHomeKind,
+    ExpandedUseSource, RegisterRegionId,
 };
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::assignment::PhysReg;
@@ -22,7 +23,7 @@ use super::home_graph::{
     STACK_HOME_MATERIALIZATION_COST,
 };
 use super::interval_allocator::{HomeSelection, IntervalAllocationError, RootHomePlan};
-use super::live_interval::{DefinitionSite, UseSite};
+use super::live_interval::{DefinitionSite, LiveInterval, UseSite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SpillEntryKind {
@@ -495,6 +496,237 @@ impl Spiller {
         }
         Ok(edit)
     }
+
+    /// Spill one exact allocation-IR machine representative conventionally.
+    ///
+    /// Unlike logical-root home selection, this operation owns every machine
+    /// use in the live interval, including older split-copy and merge-phi
+    /// transitions. The definition establishes one private stack home and a
+    /// fresh one-use reload is inserted before each exact use. Those reload
+    /// products leave representative metadata and therefore enter the greedy
+    /// queue at `Done` rather than recursively selecting another home.
+    pub(super) fn materialize_machine_interval(
+        &self,
+        expanded: &mut ExpandedAllocationProblem,
+        root: LiveBundleId,
+        interval: &LiveInterval,
+    ) -> Result<SpillEdit, SpillerError> {
+        let value = interval.value;
+        let current = expanded
+            .intervals
+            .intervals
+            .get(value.0 as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                SpillerError::new(
+                    "SPILLER.MACHINE_INTERVAL",
+                    Some(interval.definition.block()),
+                    Some(value),
+                    Some(root),
+                    "generic spill source has no current exact live interval",
+                )
+            })?;
+        if current != interval || interval.uses.is_empty() {
+            return Err(SpillerError::new(
+                "SPILLER.MACHINE_INTERVAL",
+                Some(interval.definition.block()),
+                Some(value),
+                Some(root),
+                "generic spill request is stale or has no machine uses",
+            ));
+        }
+        let root_index = root.0 as usize;
+        if !matches!(expanded.roots.get(root_index), Some(row) if row.id == root) {
+            return Err(SpillerError::new(
+                "SPILLER.ROOT_IDENTITY",
+                Some(interval.definition.block()),
+                Some(value),
+                Some(root),
+                "generic spill root differs from its dense expanded root row",
+            ));
+        }
+        if expanded
+            .stack_homes
+            .iter()
+            .any(|home| home.kind == ExpandedStackHomeKind::Machine { value })
+            || expanded
+                .stack_homes
+                .iter()
+                .enumerate()
+                .any(|(row, home)| home.id.0 as usize != row)
+        {
+            return Err(SpillerError::new(
+                "SPILLER.MACHINE_HOME_IDENTITY",
+                Some(interval.definition.block()),
+                Some(value),
+                Some(root),
+                "machine representative already has a home or stack-home IDs are not dense",
+            ));
+        }
+        let id = StackHomeId(u32::try_from(expanded.stack_homes.len()).map_err(|_| {
+            SpillerError::new(
+                "SPILLER.STACK_HOME_ID_RANGE",
+                Some(interval.definition.block()),
+                Some(value),
+                Some(root),
+                "expanded stack-home count exceeds u32",
+            )
+        })?);
+        let mut edit = SpillEdit::default();
+        edit.record_block(interval.definition.block());
+        let definition = match interval.definition {
+            DefinitionSite::Phi { block, phi, .. } => {
+                expanded
+                    .ir
+                    .assign_phi_definition_home(interval.definition, value, id)
+                    .map_err(|error| {
+                        SpillerError::new(
+                            error.rule,
+                            error.block,
+                            error.values.first().copied(),
+                            Some(root),
+                            error.message,
+                        )
+                    })?;
+                ExpandedStackDefinition::Phi {
+                    block,
+                    phi,
+                    destination: value,
+                }
+            }
+            DefinitionSite::Instruction { .. } => {
+                let instruction = expanded
+                    .ir
+                    .insert_after_definition(
+                        interval.definition,
+                        SyntheticOperation::StackStore { home: id },
+                        Uses::one(value),
+                        false,
+                    )
+                    .map_err(|error| {
+                        SpillerError::new(
+                            error.rule,
+                            error.block,
+                            error.values.first().copied(),
+                            Some(root),
+                            error.message,
+                        )
+                    })?
+                    .instruction;
+                ExpandedStackDefinition::Store { instruction, value }
+            }
+        };
+        expanded.stack_homes.push(ExpandedStackHome {
+            id,
+            root,
+            definition,
+            kind: ExpandedStackHomeKind::Machine { value },
+        });
+
+        let uses = interval.uses.iter().copied().collect::<Vec<_>>();
+        for site in uses {
+            let reload = expanded
+                .ir
+                .insert_before_use(
+                    site,
+                    SyntheticOperation::StackReload { home: id },
+                    Uses::none(),
+                    true,
+                )
+                .map_err(|error| {
+                    SpillerError::new(
+                        error.rule,
+                        error.block,
+                        error.values.first().copied(),
+                        Some(root),
+                        error.message,
+                    )
+                })?;
+            let replacement = reload.definition.ok_or_else(|| {
+                SpillerError::new(
+                    "SPILLER.MACHINE_RELOAD_DEFINITION",
+                    Some(site.block()),
+                    Some(value),
+                    Some(root),
+                    "generic machine reload did not define a value",
+                )
+            })?;
+            expanded
+                .ir
+                .rewrite_use(site, value, replacement)
+                .map_err(|error| {
+                    SpillerError::new(
+                        error.rule,
+                        error.block,
+                        error.values.first().copied(),
+                        Some(root),
+                        error.message,
+                    )
+                })?;
+            edit.record_use(site);
+            let root_row = &mut expanded.roots[root_index];
+            for use_ in root_row
+                .uses
+                .iter_mut()
+                .filter(|use_| use_.value == value && use_.site == site)
+            {
+                use_.value = replacement;
+                use_.source = ExpandedUseSource::Materialized(ExpandedMaterialization::Stack {
+                    home: id,
+                    instruction: reload.instruction,
+                });
+            }
+        }
+        remove_register_representative(expanded, root, value)?;
+        Ok(edit)
+    }
+}
+
+fn remove_register_representative(
+    expanded: &mut ExpandedAllocationProblem,
+    root: LiveBundleId,
+    value: VReg,
+) -> Result<(), SpillerError> {
+    let Some((region, row)) = expanded
+        .register_regions
+        .iter()
+        .enumerate()
+        .find_map(|(row, metadata)| (metadata.value == value).then_some((metadata.id, row)))
+    else {
+        return Ok(());
+    };
+    let indexed = expanded.region_rows.remove(&region).ok_or_else(|| {
+        SpillerError::new(
+            "SPILLER.REGION_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "machine-spill source is absent from the representative index",
+        )
+    })?;
+    if indexed != row {
+        return Err(SpillerError::new(
+            "SPILLER.REGION_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "machine-spill source has inconsistent representative indexes",
+        ));
+    }
+    let removed = expanded.register_regions.swap_remove(row);
+    if removed.id != region || removed.root != root || removed.value != value {
+        return Err(SpillerError::new(
+            "SPILLER.REGION_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "removed machine-spill representative has incompatible ownership",
+        ));
+    }
+    if let Some(moved) = expanded.register_regions.get(row) {
+        expanded.region_rows.insert(moved.id, row);
+    }
+    Ok(())
 }
 
 fn stack_home(

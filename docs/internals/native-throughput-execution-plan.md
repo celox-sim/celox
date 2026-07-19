@@ -3667,12 +3667,12 @@ State-MemorySSA, and rematerialization decisions and their allocation-IR edits.
 The symbolic-round reservation protocol has been removed, and a no-progress
 range now advances through `Split2` to a concrete `Spill` obligation.
 
-This checkpoint does not yet satisfy the whole Step 30 architecture.  A
-successful partial split still materializes its moved complement immediately;
-that complement must become an ordinary unmaterialized interval, return to the
-queue, and reach the spiller only after its own assignment and split attempts
-fail.  `JointAllocationSession` must then be removed in favor of the base
-driver and final rewrite described above.
+At the Step 30b checkpoint, a successful partial split still materialized its
+moved complement immediately.  Steps 30c--30f replace that operation with
+ordinary strict-SSA machine intervals returned to the queue.  The remaining
+architectural cleanup is removal of `JointAllocationSession` and the obsolete
+home-producing planner in favor of the base driver and final rewrite described
+above.
 
 The complete trace at
 `target/heliodor/analysis/step30b-spiller-separation-20260719` took 58.203 s.
@@ -3732,11 +3732,36 @@ joint problem independently and requires all four representatives to have
 exact sparse intervals and spill costs, while only the merge representative
 owns the downstream logical-root use.
 
-The next prerequisite for the production switch is generic machine spilling.
-A transition-only representative may use another value at a synthetic copy or
-merge boundary; reloading it requires stable insertion before that synthetic
-instruction.  The order-maintenance model and spiller must implement that
-operation before the old partial-home split path can be removed safely.
+Step 30f completes the production switch.  Split selection now reads physical
+free-prefix topology only, probes legal strict-SSA copy boundaries, and calls
+`LiveRangeEdit`; it neither queries HomeGraph costs nor materializes the
+remainder.  Source, copy, and pruned-IDF merge products return as exact queue
+units with no hard color.  A same stable-anchor-zone guard rejects repeated
+copy-only non-progress without imposing an arbitrary iteration cap.
+
+Generic machine spilling is now the `Spill`-stage fallback for representatives
+whose exact uses extend beyond direct semantic root uses.  It can store an
+instruction definition, assign a stack destination to an original or
+synthetic phi, insert reloads immediately before older synthetic copies/phis,
+and remove only the exhausted representative.  Reload products are ordinary
+short machine values and final lowering sees the same stack-home facts.  The
+focused production regression executes split, requeue, machine spill, final
+allocation lowering, and MIR verification as one transaction.
+
+The complete non-LTO trace at
+`target/heliodor/analysis/step30f-production-split-editor-20260719` took
+53.926 s and contains all 58,353,245-byte pre-optimized SIR,
+19,713,339-byte post-optimized SIR, 20,313,891-byte native-optimized SIR, and
+194,315,959-byte MIR outputs.  They are byte-identical to the accepted Step 29e
+input/output artifacts; the MIR SHA-256 is
+`a2c7746d55bf4bbdbf1454763177dd055694db8cbf058584174924e83b123741`.
+The non-LTO O2 Linux run in
+`target/heliodor/results/20260719T110345Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`: code generation took 52.491 s and simulation took
+116.325 s (168.826 s total).  This single run proves semantics for the switch;
+because generated MIR is unchanged and runtime is noisy, it makes no speed
+claim.
 
 ## Execution record
 
@@ -3820,6 +3845,7 @@ operation before the old partial-home split path can be removed safely.
 | 30c strict-SSA live-range-edit substrate | this step | split-copy/merge-phi incremental-versus-full liveness and atomic-materialization regression | lib 874/874; non-LTO build and allocation-IR 12/12 pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30b | trace 58.254 s; full code generation 56.754 s; simulation 119.546 s | real copy and merge-phi values are representable; production cut editing and child ownership remain open |
 | 30d strict-SSA SplitEditor topology | this step | diamond and loop pruned-IDF/dominator-rename regressions 2/2; regalloc 256/256 | lib 876/876; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | legal copy cuts, loop phis, and exact child ranges are constructed; ownership/work-queue connection remains open |
 | 30e machine-interval representative ownership | this step | empty-semantic-use split representative rebuild; regalloc 257/257 | lib 877/877; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | machine uses, not root-use subsets, own live ranges; generic machine spilling remains before production switch |
+| 30f production strict-SSA splitting and machine spilling | this step | production split-to-machine-spill lowering regression; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 29e | trace 53.926 s; full code generation 52.491 s; simulation 116.325 s | every useful split product re-enters the queue and only `Spill` materializes it; `JointAllocationSession` removal remains |
 
 ## Related design records
 

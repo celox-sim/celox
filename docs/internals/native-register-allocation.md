@@ -244,27 +244,32 @@ rename uses along the dominator tree.  Those copy and phi results are ordinary
 machine values and live intervals.  They are not home states, hard-colored
 fragments, or a reason to bypass the base work queue.
 
-The current Step 30 checkpoint has established the first production pieces of
-this boundary.  `GreedyLiveRanges` owns the staged priority queue and eviction
+The current Step 30 checkpoint has established the production pieces of this
+boundary.  `GreedyLiveRanges` owns the staged priority queue and eviction
 cascades, physical occupancy is mutable, evicted ranges return to the queue,
-and stale queue entries are rejected against the range's current stage.
-Split plans now contain topology only.  A separate function-lifetime `Spiller`
-owns `RootHomePlan`, chooses stack, State-MemorySSA, or rematerialization homes,
-verifies those choices, and performs the corresponding private allocation-IR
-edit.  The old `DeferredRound`, symbolic fragment reservations, and hard child
-colors have been removed from the production allocation session.  A range for
-which both split stages make no progress now reaches `Spill`; the spiller
-materializes each concrete use and removes the exhausted source interval.
+and stale queue entries are rejected against the range's current stage.  The
+production split selector reads only exact live-range topology and physical
+interference.  `SplitEditor` inserts real strict-SSA copies and pruned-IDF
+merge phis, returns the source and every surviving product as exact machine
+intervals, and the base queue chooses their eventual colors independently.
+No successful split creates a stack, State-MemorySSA, rematerialization, or
+hard-colored child.
 
-This is an intermediate checkpoint, not completion of the normative design.
-A successful partial split still sends its moved complement directly to the
-spiller instead of returning an unmaterialized remainder interval to the work
-queue.  `JointAllocationSession` also remains as the base driver.  The next
-slice must give that remainder its own machine value and exact live range,
-requeue every split product, and invoke the spiller only after that remainder
-itself fails assignment and both split stages.  Once that path is in place,
-the remaining session/publication protocol can be replaced by the base driver
-and one final allocation-IR-to-MIR rewrite.
+A separate function-lifetime `Spiller` owns `RootHomePlan` and all concrete
+home edits.  It is called only when an exact interval reaches `Spill`.  A
+logical-root representative may use the HDL-specific home recipes; a split
+transition whose uses include synthetic copies or phis is spilled as one exact
+machine interval with a private stack definition and one-use reload products.
+Stable order gaps permit those reloads immediately before older synthetic
+instructions.  The old `DeferredRound`, symbolic fragment reservations, hard
+child colors, and immediate partial-home split are no longer in production.
+
+This remains an intermediate checkpoint only because
+`JointAllocationSession` still wraps the base driver and the preceding
+home-producing split planner remains as legacy/test-only code.  The next slice
+removes that wrapper and obsolete planner so the production control flow is
+directly `LiveIntervals` + `LiveRegMatrix` + queue + `SplitEditor` + `Spiller`,
+followed by one final allocation-IR-to-MIR rewrite and independent verification.
 
 Step 30c establishes the strict-SSA edit substrate without enabling it in the
 production split path.  Allocation IR now has a first-class synthetic `Copy`
@@ -302,12 +307,16 @@ ranges instead of becoming unspillable fixed glue.  The source, both arm
 copies, and merge result in the focused diamond all survive an independent
 joint-problem rebuild; only the merge result owns the downstream root use.
 
-The retained production path still calls the old home-producing split edit.
-Before switching it, generic machine spilling must support representatives
-whose exact uses include older copy/phi transitions, including insertion before
-synthetic instructions.  That is a machine-IR order-maintenance and spiller
-requirement, not a reason to restore root-use ownership as the live-range
-model.
+Step 30f switches production selection to that ownership model.  A physical
+free-prefix frontier chooses only legal copy cuts; `LiveRangeEdit` publishes
+the source, copy, and merge products back to the same staged queue.  A
+same-anchor order-zone guard rejects a split that could only build an
+unbounded copy chain, while useful children restart at `New` and the remainder
+must fail both split stages before entering `Spill`.  Generic machine spilling
+then handles transition-only representatives at their exact synthetic uses
+and definitions.  A focused diamond regression takes this path through final
+allocation lowering and validates the resulting MIR, including a stack-backed
+synthetic merge phi.
 
 ### Legacy allocation algorithm
 

@@ -84,6 +84,13 @@ impl SlotIndex {
             )
         })
     }
+
+    /// Immutable source-MIR anchor zone for one allocation-owned program
+    /// point. Sequence labels may be inserted within a zone, but doing so does
+    /// not cross another real machine boundary.
+    pub(super) fn stable_zone(self) -> Option<u64> {
+        self.stable_parts().map(|(zone, _, _)| zone)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
