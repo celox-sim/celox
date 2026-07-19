@@ -235,6 +235,15 @@ exclusive RTL control-flow paths, and MemorySSA may prove a state load or pure
 expression cheaper than a stack reload.  Both fit behind the conventional
 matrix and spiller interfaces; neither changes the worklist protocol.
 
+LLVM's greedy allocator edits a post-SSA machine function and represents one
+virtual register with multiple value numbers.  Celox deliberately keeps its
+private allocation IR in strict SSA until atomic lowering.  Its equivalent
+`LiveRangeEdit` operation must therefore insert real copy definitions at split
+boundaries, place merge phis at the pruned iterated dominance frontier, and
+rename uses along the dominator tree.  Those copy and phi results are ordinary
+machine values and live intervals.  They are not home states, hard-colored
+fragments, or a reason to bypass the base work queue.
+
 The current Step 30 checkpoint has established the first production pieces of
 this boundary.  `GreedyLiveRanges` owns the staged priority queue and eviction
 cascades, physical occupancy is mutable, evicted ranges return to the queue,
@@ -256,6 +265,16 @@ requeue every split product, and invoke the spiller only after that remainder
 itself fails assignment and both split stages.  Once that path is in place,
 the remaining session/publication protocol can be replaced by the base driver
 and one final allocation-IR-to-MIR rewrite.
+
+Step 30c establishes the strict-SSA edit substrate without enabling it in the
+production split path.  Allocation IR now has a first-class synthetic `Copy`
+operation and synthetic merge-phi rows with stable VReg identities.  Copy
+affinities, target lowering, incremental def/use deltas, full liveness rebuild,
+and final strict-SSA MIR materialization all see the same values.  A diamond
+regression inserts one copy on each arm and one merge phi, rewrites the joined
+use, and requires incremental liveness to equal an independent reconstruction.
+The next slice is the actual `SplitEditor`: legal cut placement, pruned-IDF phi
+insertion, dominator renaming, child/root-use ownership, and work-queue stages.
 
 ### Legacy allocation algorithm
 

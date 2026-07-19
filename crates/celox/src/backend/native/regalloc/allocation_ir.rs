@@ -31,9 +31,19 @@ pub(super) struct SyntheticInstructionId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SyntheticOperation {
-    StackStore { home: StackHomeId },
-    StackReload { home: StackHomeId },
-    RecipeNode { root: LiveBundleId, node: RecipeId },
+    /// A live-range split boundary.  This is a real machine copy, not a spill
+    /// or rematerialization recipe, and both sides return to allocation.
+    Copy,
+    StackStore {
+        home: StackHomeId,
+    },
+    StackReload {
+        home: StackHomeId,
+    },
+    RecipeNode {
+        root: LiveBundleId,
+        node: RecipeId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +150,10 @@ fn liveness_block_exit_slot(block: &AllocationBlock) -> Option<SlotIndex> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AllocationPhi {
-    original_phi: usize,
+    /// `Some` rows are immutable source-MIR phis.  `None` rows are strict-SSA
+    /// merge phis inserted by live-range editing and materialized atomically
+    /// with the rest of allocation IR.
+    original_phi: Option<usize>,
     destination: VReg,
     original_sources: Vec<(BlockId, VReg)>,
     sources: Vec<(BlockId, VReg)>,
@@ -166,9 +179,22 @@ pub(super) struct InsertedSynthetic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SyntheticDefinitionRef {
-    instruction: SyntheticInstructionId,
-    block: BlockId,
+pub(super) struct InsertedSyntheticPhi {
+    pub block: BlockId,
+    pub phi: usize,
+    pub definition: VReg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticDefinitionRef {
+    Instruction {
+        instruction: SyntheticInstructionId,
+        block: BlockId,
+    },
+    Phi {
+        block: BlockId,
+        phi: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +387,7 @@ impl AllocationIr {
                 .iter()
                 .enumerate()
                 .map(|(original_phi, phi)| AllocationPhi {
-                    original_phi,
+                    original_phi: Some(original_phi),
                     destination: phi.dst,
                     original_sources: phi.sources.clone(),
                     sources: phi.sources.clone(),
@@ -749,7 +775,13 @@ impl AllocationIr {
                     "source MIR block identity, instruction domain, or CFG changed after allocation-IR construction",
                 ));
             }
-            if source.phis.len() != allocation_block.phis.len() {
+            if source.phis.len()
+                != allocation_block
+                    .phis
+                    .iter()
+                    .filter(|phi| phi.original_phi.is_some())
+                    .count()
+            {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.SOURCE_PHI",
                     Some(allocation_block.id),
@@ -762,30 +794,34 @@ impl AllocationIr {
             let mut block = MBlock::new(allocation_block.id);
             block.phis.reserve(allocation_block.phis.len());
             for phi in &allocation_block.phis {
-                let source_phi = &source.phis[phi.original_phi];
-                if source_phi.dst != phi.destination || source_phi.sources != phi.original_sources {
-                    return Err(AllocationIrError::new(
-                        "ALLOCATION_IR.SOURCE_PHI",
-                        Some(allocation_block.id),
-                        None,
-                        vec![phi.destination],
-                        "source MIR phi changed after allocation-IR construction",
-                    ));
-                }
-                if phi.sources.len() != phi.original_sources.len()
-                    || phi.sources.iter().zip(&phi.original_sources).any(
-                        |((predecessor, _), (original_predecessor, _))| {
-                            predecessor != original_predecessor
-                        },
-                    )
-                {
-                    return Err(AllocationIrError::new(
-                        "ALLOCATION_IR.PHI_EDGE_IDENTITY",
-                        Some(allocation_block.id),
-                        None,
-                        vec![phi.destination],
-                        "allocation rewrite changed phi predecessor identity or order",
-                    ));
+                if let Some(original_phi) = phi.original_phi {
+                    let source_phi = &source.phis[original_phi];
+                    if source_phi.dst != phi.destination
+                        || source_phi.sources != phi.original_sources
+                    {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.SOURCE_PHI",
+                            Some(allocation_block.id),
+                            None,
+                            vec![phi.destination],
+                            "source MIR phi changed after allocation-IR construction",
+                        ));
+                    }
+                    if phi.sources.len() != phi.original_sources.len()
+                        || phi.sources.iter().zip(&phi.original_sources).any(
+                            |((predecessor, _), (original_predecessor, _))| {
+                                predecessor != original_predecessor
+                            },
+                        )
+                    {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.PHI_EDGE_IDENTITY",
+                            Some(allocation_block.id),
+                            None,
+                            vec![phi.destination],
+                            "allocation rewrite changed phi predecessor identity or order",
+                        ));
+                    }
                 }
                 block.phis.push(PhiNode {
                     dst: phi.destination,
@@ -907,6 +943,164 @@ impl AllocationIr {
             },
         };
         self.insert_synthetic(anchor, operation, uses, defines_value)
+    }
+
+    /// Append an empty strict-SSA merge phi for live-range editing.  Sources
+    /// are installed after dominator-tree renaming with
+    /// [`Self::set_synthetic_phi_sources`].  Original phi rows always remain
+    /// the block prefix, so immutable source-use identities do not move.
+    pub(super) fn insert_synthetic_phi(
+        &mut self,
+        block: BlockId,
+    ) -> Result<InsertedSyntheticPhi, AllocationIrError> {
+        let block_index = self.block(block)?;
+        if self.synthetic_definitions.len() != self.next_value as usize {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SYNTHETIC_INDEX_SHAPE",
+                Some(block),
+                None,
+                Vec::new(),
+                "synthetic-definition index is outside the monotonic VReg domain",
+            ));
+        }
+        let next_value = self.next_value.checked_add(1).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.VALUE_ID_RANGE",
+                Some(block),
+                None,
+                Vec::new(),
+                "synthetic phi exhausted the machine-value namespace",
+            )
+        })?;
+        let definition = VReg(self.next_value);
+        let phi = self.blocks[block_index].phis.len();
+        self.blocks[block_index].phis.push(AllocationPhi {
+            original_phi: None,
+            destination: definition,
+            original_sources: Vec::new(),
+            sources: Vec::new(),
+            register_sources: Vec::new(),
+            register_definition: true,
+            stack_home: None,
+        });
+        self.synthetic_definitions
+            .push(Some(SyntheticDefinitionRef::Phi { block, phi }));
+        self.next_value = next_value;
+        self.pending_liveness.changed_blocks.insert(block);
+        self.pending_liveness.added_definitions.push((
+            definition,
+            DefinitionSite::Phi {
+                block,
+                phi,
+                slot: SlotIndex::stable_phi_def(),
+            },
+        ));
+        Ok(InsertedSyntheticPhi {
+            block,
+            phi,
+            definition,
+        })
+    }
+
+    /// Complete one newly inserted merge phi with exactly one source per CFG
+    /// predecessor and publish its edge-use facts.  Keeping construction in
+    /// two phases permits standard pruned-IDF insertion followed by one
+    /// dominator-tree rename.
+    pub(super) fn set_synthetic_phi_sources(
+        &mut self,
+        block: BlockId,
+        phi: usize,
+        mut sources: Vec<(BlockId, VReg)>,
+    ) -> Result<(), AllocationIrError> {
+        let block_index = self.block(block)?;
+        let expected_predecessors = self
+            .blocks
+            .iter()
+            .filter(|candidate| candidate.successors.contains(&block))
+            .map(|candidate| candidate.id)
+            .collect::<BTreeSet<_>>();
+        let actual_predecessors = sources
+            .iter()
+            .map(|(predecessor, _)| *predecessor)
+            .collect::<BTreeSet<_>>();
+        if sources.is_empty()
+            || actual_predecessors.len() != sources.len()
+            || actual_predecessors != expected_predecessors
+            || sources.iter().any(|(_, value)| value.0 >= self.next_value)
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SYNTHETIC_PHI_SOURCES",
+                Some(block),
+                None,
+                sources.iter().map(|(_, value)| *value).collect(),
+                "synthetic phi does not have one in-range source for every CFG predecessor",
+            ));
+        }
+        sources.sort_unstable_by_key(|(predecessor, _)| {
+            self.block_index
+                .get(predecessor)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        let destination = {
+            let row = self.blocks[block_index].phis.get(phi).ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.PHI_RANGE",
+                    Some(block),
+                    None,
+                    Vec::new(),
+                    "synthetic phi source update references a missing row",
+                )
+            })?;
+            if row.original_phi.is_some() || !row.sources.is_empty() {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.SYNTHETIC_PHI_IDENTITY",
+                    Some(block),
+                    None,
+                    vec![row.destination],
+                    "phi source update requires one unfinished synthetic merge row",
+                ));
+            }
+            row.destination
+        };
+        if self.synthetic_definitions[destination.0 as usize]
+            != Some(SyntheticDefinitionRef::Phi { block, phi })
+        {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SYNTHETIC_PHI_IDENTITY",
+                Some(block),
+                None,
+                vec![destination],
+                "synthetic phi differs from its stable definition index",
+            ));
+        }
+        for &(predecessor, value) in &sources {
+            let predecessor_index = self.block(predecessor)?;
+            let slot =
+                liveness_block_exit_slot(&self.blocks[predecessor_index]).ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(predecessor),
+                        None,
+                        vec![value],
+                        "synthetic phi source exceeds the stable edge-slot domain",
+                    )
+                })?;
+            self.pending_liveness.changed_blocks.insert(predecessor);
+            self.pending_liveness.added_uses.push((
+                value,
+                UseSite::PhiEdge {
+                    predecessor,
+                    successor: block,
+                    phi,
+                    slot,
+                },
+            ));
+        }
+        let row = &mut self.blocks[block_index].phis[phi];
+        row.register_sources = vec![true; sources.len()];
+        row.sources = sources;
+        Ok(())
     }
 
     /// Return a conservative lower bound for any synthetic definition
@@ -1346,9 +1540,18 @@ impl AllocationIr {
         for block in &self.blocks {
             for phi in &block.phis {
                 if let Some(home) = phi.stack_home {
+                    let original_phi = phi.original_phi.ok_or_else(|| {
+                        AllocationIrError::new(
+                            "ALLOCATION_IR.SYNTHETIC_PHI_HOME",
+                            Some(block.id),
+                            None,
+                            vec![phi.destination],
+                            "live-range-edit merge phi cannot own a semantic stack destination",
+                        )
+                    })?;
                     phi_definitions.push(AllocationStackPhiDefinition {
                         block: block.id,
-                        phi: phi.original_phi,
+                        phi: original_phi,
                         destination: phi.destination,
                         home,
                     });
@@ -1364,6 +1567,7 @@ impl AllocationIr {
                     continue;
                 };
                 let (home, kind) = match operation {
+                    SyntheticOperation::Copy => continue,
                     SyntheticOperation::StackStore { home } => {
                         (home, AllocationStackOperationKind::Store)
                     }
@@ -1770,7 +1974,8 @@ impl AllocationIr {
                     AllocationInstructionOrigin::Synthetic { id, operation, .. } => {
                         if !matches!(
                             operation,
-                            SyntheticOperation::StackReload { .. }
+                            SyntheticOperation::Copy
+                                | SyntheticOperation::StackReload { .. }
                                 | SyntheticOperation::RecipeNode { .. }
                         ) {
                             return Err(AllocationIrError::new(
@@ -1907,59 +2112,71 @@ impl AllocationIr {
             else {
                 continue;
             };
-            let block = self.block(definition.block)?;
-            let position = self.blocks[block]
+            let SyntheticDefinitionRef::Instruction {
+                instruction: synthetic_instruction,
+                block,
+            } = definition
+            else {
+                // Synthetic phis are removed by the SSA-aware whole-DAG
+                // sweeper; the local instruction cone updater cannot delete a
+                // phi without rebuilding all incoming edge facts.
+                continue;
+            };
+            let block_index = self.block(block)?;
+            let position = self.blocks[block_index]
                 .instructions
                 .iter()
                 .position(|instruction| {
                     matches!(
                         instruction.origin,
                         AllocationInstructionOrigin::Synthetic { id, .. }
-                            if id == definition.instruction
+                            if id == synthetic_instruction
                     )
                 })
                 .ok_or_else(|| {
                     AllocationIrError::new(
                         "ALLOCATION_IR.DCE_INSTRUCTION_INDEX",
-                        Some(definition.block),
+                        Some(block),
                         None,
                         vec![value],
                         "synthetic-definition index references a missing instruction",
                     )
                 })?;
-            let liveness = self.instruction_liveness_snapshot(block, position)?;
-            let instruction = &self.blocks[block].instructions[position];
-            let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
+            let liveness = self.instruction_liveness_snapshot(block_index, position)?;
+            let instruction_row = &self.blocks[block_index].instructions[position];
+            let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction_row.origin
             else {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.DCE_INSTRUCTION_INDEX",
-                    Some(definition.block),
+                    Some(block),
                     Some(position),
                     vec![value],
                     "synthetic-definition index resolved to an original instruction",
                 ));
             };
-            if instruction.definition != Some(value)
+            if instruction_row.definition != Some(value)
                 || !matches!(
                     operation,
-                    SyntheticOperation::StackReload { .. } | SyntheticOperation::RecipeNode { .. }
+                    SyntheticOperation::Copy
+                        | SyntheticOperation::StackReload { .. }
+                        | SyntheticOperation::RecipeNode { .. }
                 )
             {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.DCE_DEFINITION_INDEX",
-                    Some(definition.block),
+                    Some(block),
                     Some(position),
                     vec![value],
                     "synthetic-definition index references an incompatible instruction",
                 ));
             }
-            let mut operands = instruction.uses.to_vec();
+            let mut operands = instruction_row.uses.to_vec();
             operands.sort_unstable();
             operands.dedup();
-            self.blocks[block].instructions.remove(position);
+            self.blocks[block_index].instructions.remove(position);
             self.synthetic_definitions[value.0 as usize] = None;
             self.record_instruction_removed(liveness);
-            changed_blocks.insert(definition.block);
+            changed_blocks.insert(block);
 
             for operand in operands {
                 let count = remaining_uses.entry(operand).or_insert_with(|| {
@@ -1972,7 +2189,7 @@ impl AllocationIr {
                 if *count == 0 {
                     return Err(AllocationIrError::new(
                         "ALLOCATION_IR.DCE_USE_COUNT",
-                        Some(definition.block),
+                        Some(block),
                         Some(position),
                         vec![operand],
                         "removed synthetic operand has no indexed live use",
@@ -2083,7 +2300,7 @@ impl AllocationIr {
         };
         if definition.is_some() {
             self.synthetic_definitions
-                .push(Some(SyntheticDefinitionRef {
+                .push(Some(SyntheticDefinitionRef::Instruction {
                     instruction,
                     block: anchor.block(),
                 }));
@@ -2109,6 +2326,7 @@ impl AllocationIr {
         defines_value: bool,
     ) -> Result<(), AllocationIrError> {
         let valid = match operation {
+            SyntheticOperation::Copy => uses.len() == 1 && defines_value,
             SyntheticOperation::StackStore { .. } => uses.len() == 1 && !defines_value,
             SyntheticOperation::StackReload { .. } => uses.is_empty() && defines_value,
             SyntheticOperation::RecipeNode { .. } => uses.len() <= 2 && defines_value,
@@ -2379,19 +2597,34 @@ impl AllocationIr {
                     "block identity differs from its dense allocation-IR row",
                 ));
             }
+            let mut next_original_phi = 0usize;
             if block.phis.iter().enumerate().any(|(index, phi)| {
-                phi.original_phi != index
-                    || phi.destination.0 >= self.original_value_count
-                    || phi
-                        .original_sources
-                        .iter()
-                        .any(|(_, value)| value.0 >= self.original_value_count)
+                let original_shape = match phi.original_phi {
+                    Some(original_phi) => {
+                        let valid = original_phi == next_original_phi
+                            && index == next_original_phi
+                            && phi.destination.0 < self.original_value_count
+                            && phi
+                                .original_sources
+                                .iter()
+                                .all(|(_, value)| value.0 < self.original_value_count);
+                        next_original_phi += 1;
+                        valid
+                    }
+                    None => {
+                        phi.original_sources.is_empty()
+                            && phi.destination.0 >= self.original_value_count
+                    }
+                };
+                !original_shape
                     || phi
                         .sources
                         .iter()
                         .any(|(_, value)| value.0 >= self.next_value)
                     || phi.register_sources.len() != phi.sources.len()
                     || (phi.register_definition == phi.stack_home.is_some())
+                    || (phi.original_phi.is_none()
+                        && (!phi.register_definition || phi.stack_home.is_some()))
             }) {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.PHI_IDENTITY",
@@ -2400,6 +2633,26 @@ impl AllocationIr {
                     Vec::new(),
                     "allocation phi identity or destination differs from input MIR",
                 ));
+            }
+            for (phi_index, phi) in block.phis.iter().enumerate() {
+                if phi.original_phi.is_some() {
+                    continue;
+                }
+                if !synthetic_definitions.insert(phi.destination)
+                    || self.synthetic_definitions[phi.destination.0 as usize]
+                        != Some(SyntheticDefinitionRef::Phi {
+                            block: block.id,
+                            phi: phi_index,
+                        })
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.SYNTHETIC_PHI_IDENTITY",
+                        Some(block.id),
+                        None,
+                        vec![phi.destination],
+                        "synthetic phi definition differs from its stable value index",
+                    ));
+                }
             }
             let originals = block
                 .instructions
@@ -2519,7 +2772,7 @@ impl AllocationIr {
                     }
                     if let Some(definition) = instruction.definition
                         && self.synthetic_definitions[definition.0 as usize]
-                            != Some(SyntheticDefinitionRef {
+                            != Some(SyntheticDefinitionRef::Instruction {
                                 instruction: id,
                                 block: block.id,
                             })
@@ -2636,6 +2889,7 @@ fn machine_block_facts(
             }
             AllocationInstructionOrigin::Synthetic { operation, .. } => {
                 let copy = match operation {
+                    SyntheticOperation::Copy => copy_operands(block.id, position, instruction)?,
                     SyntheticOperation::RecipeNode { node, .. }
                         if matches!(
                             graph.recipe_nodes.get(node.0 as usize),
@@ -2763,6 +3017,20 @@ fn materialize_synthetic_instruction(
 ) -> Result<MInst, AllocationIrError> {
     let operands = uses.to_vec();
     match operation {
+        SyntheticOperation::Copy => {
+            let ([source], Some(destination)) = (operands.as_slice(), definition) else {
+                return Err(synthetic_signature_error(
+                    block,
+                    instruction,
+                    operation,
+                    operands,
+                ));
+            };
+            Ok(MInst::Mov {
+                dst: destination,
+                src: *source,
+            })
+        }
         SyntheticOperation::StackStore { home } => {
             let [source] = operands.as_slice() else {
                 return Err(synthetic_signature_error(
@@ -3045,6 +3313,7 @@ fn verify_stack_home_reaching_definitions(
                 continue;
             };
             match operation {
+                SyntheticOperation::Copy => {}
                 SyntheticOperation::StackStore { home } => {
                     definition_blocks.entry(home).or_default().insert(block);
                 }
@@ -3159,6 +3428,7 @@ fn verify_stack_home_reaching_definitions(
                 continue;
             };
             match operation {
+                SyntheticOperation::Copy => {}
                 SyntheticOperation::StackStore { home } if required_homes.contains(&home) => {
                     set_stack_definition(&mut current, &mut changes, home, StackDefinition::True);
                 }
@@ -3398,6 +3668,120 @@ mod tests {
 
         assert!(actual.equivalent_program_order(&expected, &cfg));
         assert_eq!(allocation_ir.value_count(), function.vregs.count());
+    }
+
+    #[test]
+    fn split_copies_and_merge_phi_preserve_strict_ssa_and_exact_liveness() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(1),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        merge.push(MInst::Return);
+        let mut function = function(3, vec![entry, left, right, merge]);
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let mut intervals = allocation_ir.analyze(&cfg).unwrap();
+        let mut incremental = super::super::live_interval::IncrementalLiveness::build(
+            &allocation_ir,
+            &cfg,
+            &intervals,
+        )
+        .unwrap();
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let left_copy = allocation_ir
+            .insert_before_use(
+                UseSite::Instruction {
+                    block: BlockId(1),
+                    instruction: 0,
+                    slot: intervals.block_slots[1].instruction_use(0).unwrap(),
+                },
+                SyntheticOperation::Copy,
+                Uses::one(VReg(0)),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        let right_copy = allocation_ir
+            .insert_before_use(
+                UseSite::Instruction {
+                    block: BlockId(2),
+                    instruction: 0,
+                    slot: intervals.block_slots[2].instruction_use(0).unwrap(),
+                },
+                SyntheticOperation::Copy,
+                Uses::one(VReg(0)),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+        let merge_phi = allocation_ir.insert_synthetic_phi(BlockId(3)).unwrap();
+        allocation_ir
+            .set_synthetic_phi_sources(
+                BlockId(3),
+                merge_phi.phi,
+                vec![(BlockId(1), left_copy), (BlockId(2), right_copy)],
+            )
+            .unwrap();
+        let original_use = intervals.intervals[VReg(0).0 as usize]
+            .as_ref()
+            .unwrap()
+            .uses
+            .iter()
+            .copied()
+            .find(|site| site.block() == BlockId(3))
+            .unwrap();
+        allocation_ir
+            .rewrite_use(original_use, VReg(0), merge_phi.definition)
+            .unwrap();
+
+        let delta = allocation_ir.take_liveness_delta();
+        incremental
+            .update_fact_delta(&allocation_ir, &cfg, &mut intervals, delta)
+            .unwrap();
+        let rebuilt = allocation_ir.analyze(&cfg).unwrap();
+        assert_eq!(intervals, rebuilt);
+        assert!(
+            !intervals.intervals[VReg(0).0 as usize]
+                .as_ref()
+                .unwrap()
+                .segments
+                .iter()
+                .any(|segment| segment.block == BlockId(3))
+        );
+
+        let lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
+        lowered.verify_result().unwrap();
+        assert_eq!(lowered.blocks[cfg.block_index[&BlockId(3)]].phis.len(), 1);
+        let lowered_phi = &lowered.blocks[cfg.block_index[&BlockId(3)]].phis[0];
+        assert_eq!(lowered_phi.dst, merge_phi.definition);
+        assert_eq!(
+            lowered_phi.sources.iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([(BlockId(1), left_copy), (BlockId(2), right_copy)])
+        );
     }
 
     #[test]

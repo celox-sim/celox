@@ -3685,6 +3685,26 @@ non-LTO full run completed through `reboot: Power down` and exactly one
 simulation (182.285 s total).  Focused register-allocation tests pass 253/253
 and the complete library passes 873/873.
 
+Step 30c adds the machine-IR prerequisite for a real `LiveRangeEdit`.  Since
+Celox keeps allocation IR in strict SSA, split boundaries are represented by
+ordinary synthetic copies and pruned-IDF joins by synthetic merge phis.  Both
+have real VRegs, liveness, copy/phi affinities, and final MIR rows.  The focused
+diamond regression proves that incremental def/use publication equals an
+independent liveness reconstruction and that atomic materialization remains
+valid strict SSA.  This substrate is deliberately not yet called by the
+production split planner; production output must remain unchanged until cut
+placement and root-use ownership are connected as one edit.
+
+The complete Step 30c trace at
+`target/heliodor/analysis/step30c-split-ssa-ir-20260719` took 58.254 s.  All
+four files are byte-identical to Step 30b and retain the same hashes, including
+MIR SHA-256
+`504d46eb9ea3d5a5f876b0afcdbd4d9ba664b63dddfa63b34f21cfa4cb028106`.
+The non-LTO full run completed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 56.754 s code generation and 119.546 s
+simulation (176.312 s total).  The complete library passes 874/874.  Because
+the generated code is identical, this checkpoint makes no speed claim.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3763,7 +3783,8 @@ and the complete library passes 873/873.
 | 29c symbolic child-fragment coloring | this step | planned matrix occupancy; round-boundary blocking; disjoint child-color reuse; conservative-to-exact range/color transfer; regalloc 247/247 | interval lib 867/867; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and pre-RA identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 60.819 s; full compile 55.871 s; execute 129.836 s | every selected register child participates in the current physical matrix before its VReg exists; integrated MemorySSA/home selection remains open |
 | 29d root-wide deferred home partition | this step | same-root disjoint ownership; incremental home-cost identity; shared stack creation; one-transaction publication; regalloc 248/248 | interval lib 868/868; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and exact MIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 57.599 s; full compile 56.025 s; execute 130.024 s | duplicate-root publication boundary removed with incremental root costs; Heliodor MIR unchanged; joint topology/color/home alternatives remain open |
 | 30a greedy live-range driver | `6251aef5` | staged queue, eviction cascade, split-child requeue, and matrix ownership regressions | lib 875/875; non-LTO build, format, and diff checks pass | complete SIR/MIR byte-identical to Step 28b | trace-only compile recorded separately; no timing claim | production allocation follows staged greedy control flow; legacy symbolic spill ownership remains for removal |
-| 30b dedicated spiller boundary | this step | regalloc 253/253 including concrete Spill-stage and topology-only child regressions | lib 873/873; non-LTO build, format, and diff checks pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 28b | trace 58.203 s; full code generation 57.321 s; simulation 124.955 s | split topology and spill policy are separated; partial spill remainder and base-driver replacement remain open |
+| 30b dedicated spiller boundary | `ce398251` | regalloc 253/253 including concrete Spill-stage and topology-only child regressions | lib 873/873; non-LTO build, format, and diff checks pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 28b | trace 58.203 s; full code generation 57.321 s; simulation 124.955 s | split topology and spill policy are separated; partial spill remainder and base-driver replacement remain open |
+| 30c strict-SSA live-range-edit substrate | this step | split-copy/merge-phi incremental-versus-full liveness and atomic-materialization regression | lib 874/874; non-LTO build and allocation-IR 12/12 pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30b | trace 58.254 s; full code generation 56.754 s; simulation 119.546 s | real copy and merge-phi values are representable; production cut editing and child ownership remain open |
 
 ## Related design records
 
