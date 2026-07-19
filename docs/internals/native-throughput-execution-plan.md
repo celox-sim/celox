@@ -3785,6 +3785,13 @@ This is therefore exactly the generated code already observed through
 add a code-semantic distinction.  The single trace timing is noisy and makes
 no code-generation speed claim.
 
+The final release/LTO run at
+`target/heliodor/results/20260719T113800Z_celox_test_soc_linux_boot.log` also
+completed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`.  Code generation took 51.122 s and simulation took
+131.346 s (182.479 s reported total).  This is a qualification run, not a
+speed comparison: it is one noisy sample and the generated MIR is unchanged.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3868,7 +3875,7 @@ no code-generation speed claim.
 | 30d strict-SSA SplitEditor topology | this step | diamond and loop pruned-IDF/dominator-rename regressions 2/2; regalloc 256/256 | lib 876/876; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | legal copy cuts, loop phis, and exact child ranges are constructed; ownership/work-queue connection remains open |
 | 30e machine-interval representative ownership | this step | empty-semantic-use split representative rebuild; regalloc 257/257 | lib 877/877; strict clippy and format pass | production path is intentionally unchanged; no Linux or timing claim yet | n/a | machine uses, not root-use subsets, own live ranges; generic machine spilling remains before production switch |
 | 30f production strict-SSA splitting and machine spilling | this step | production split-to-machine-spill lowering regression; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 29e | trace 53.926 s; full code generation 52.491 s; simulation 116.325 s | every useful split product re-enters the queue and only `Spill` materializes it; `JointAllocationSession` removal remains |
-| 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy gates pass | complete SIR/MIR byte-identical to boot-qualified Step 30f | trace 56.072 s; simulation not repeated for identical MIR | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
+| 30g conventional interval/matrix/base ownership | this step | greedy owner retention 1/1; allocation reallocate 12/12; allocation split 14/14; regalloc 259/259 | lib 879/879; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO format/check/clippy/docs gates pass | release/LTO pass through `reboot: Power down` and exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 30f | trace 56.072 s; release code generation 51.122 s; simulation 131.346 s | `JointAllocationSession` and production legacy split context removed; machine intervals, matrix, base queue, and spiller have separate owners |
 
 ## Related design records
 

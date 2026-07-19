@@ -335,6 +335,11 @@ the same base queue.  A focused regression rebuilds the function with a new
 VReg and proves that unchanged ranges retain both their dense assignment and
 their exact sparse matrix membership.
 
+The final release/LTO qualification completes through kernel power-down at the
+same `cy=9ae070 x3=aa pass=1` marker.  This qualifies the replacement
+architecture; it does not establish a throughput gain because its emitted MIR
+is byte-identical to the preceding boot-qualified checkpoint.
+
 ### Legacy allocation algorithm
 
 The implementation below records the joint allocator being removed.  It is
