@@ -21,7 +21,8 @@ use super::allocation_ir::{
 use super::cfg::NormalizedCfg;
 use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalUnionError};
 use super::live_interval::{
-    LiveIntervalError, LiveIntervals, LivenessProgram, UseSite, analyze_program,
+    BlockSlots, LiveIntervalError, LiveIntervals, LivenessProgram, SlotIndex, UseSite,
+    analyze_program,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +157,7 @@ struct StackBlock {
 struct StackLivenessProgram {
     home_count: u32,
     blocks: Vec<StackBlock>,
+    block_slots: Vec<BlockSlots>,
 }
 
 impl StackLivenessProgram {
@@ -185,6 +187,10 @@ impl StackLivenessProgram {
         }
 
         let facts = expanded.ir.stack_facts().map_err(StackColorError::ir)?;
+        let synthetic_instruction_index = expanded
+            .ir
+            .index_synthetic_instructions()
+            .map_err(StackColorError::ir)?;
         if facts.blocks.len() != cfg.successors.len()
             || facts
                 .blocks
@@ -230,11 +236,12 @@ impl StackLivenessProgram {
                     }
                     expanded
                         .ir
-                        .resolve_stack_store_use_site(
+                        .resolve_stack_store_use_site_indexed(
                             instruction,
                             home.id,
                             value,
                             &expanded.intervals,
+                            &synthetic_instruction_index,
                         )
                         .map_err(StackColorError::ir)?;
                 }
@@ -504,7 +511,11 @@ impl StackLivenessProgram {
             block.edge_uses.sort_unstable();
         }
 
-        Ok(Self { home_count, blocks })
+        Ok(Self {
+            home_count,
+            blocks,
+            block_slots: expanded.intervals.block_slots.clone(),
+        })
     }
 }
 
@@ -556,6 +567,22 @@ impl LivenessProgram for StackLivenessProgram {
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {
         self.blocks[block].instructions[instruction].definition
+    }
+
+    fn block_entry_slot(&self, block: usize) -> Option<SlotIndex> {
+        self.block_slots.get(block).map(|slots| slots.entry)
+    }
+
+    fn phi_definition_slot(&self, block: usize) -> Option<SlotIndex> {
+        self.block_slots.get(block).map(|slots| slots.phi_def)
+    }
+
+    fn instruction_use_slot(&self, block: usize, instruction: usize) -> Option<SlotIndex> {
+        self.block_slots.get(block)?.instruction_use(instruction)
+    }
+
+    fn block_exit_slot(&self, block: usize) -> Option<SlotIndex> {
+        self.block_slots.get(block).map(|slots| slots.exit)
     }
 }
 
@@ -800,7 +827,7 @@ mod tests {
     };
 
     use super::super::allocation_expand::{
-        ExpandedRoot, ExpandedStackHome, ExpandedStackHomeKind, ExpandedUse, ExpandedUseIndex,
+        ExpandedRoot, ExpandedStackHome, ExpandedStackHomeKind, ExpandedUse,
     };
     use super::super::allocation_ir::{AllocationIr, SyntheticOperation};
     use super::super::cfg;
@@ -873,7 +900,6 @@ mod tests {
             ir,
             intervals,
             incremental_liveness,
-            use_index: ExpandedUseIndex::build(&[], cfg).unwrap(),
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots: Vec::new(),
             register_regions: Vec::new(),
@@ -1052,13 +1078,11 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let use_index = ExpandedUseIndex::build(&roots, &cfg).unwrap();
         let expanded = ExpandedAllocationProblem {
             incremental_liveness: live_interval::IncrementalLiveness::build(&ir, &cfg, &intervals)
                 .unwrap(),
             ir,
             intervals,
-            use_index,
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots,
             register_regions: Vec::new(),

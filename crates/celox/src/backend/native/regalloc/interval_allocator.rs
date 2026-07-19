@@ -603,6 +603,17 @@ impl RootHomePlan {
         totals.finish_with_existing_stack(self.root, stack_exists)
     }
 
+    /// Exact displacement cost used by the physical-allocation worklist.
+    /// This is a priority only: the eventual split still chooses and verifies
+    /// concrete per-use homes at its exact pressure frontier.
+    pub(super) fn spill_cost(
+        &self,
+        uses: &[BundleUseId],
+        stack_exists: bool,
+    ) -> Result<u64, IntervalAllocationError> {
+        Ok(self.cost_for_with_existing_stack(uses, stack_exists)?.total)
+    }
+
     pub(super) fn partition(
         &self,
         uses: &[BundleUseId],

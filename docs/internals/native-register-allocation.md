@@ -150,8 +150,26 @@ Physical interval-union bundle identity is the same stable VReg identity, not
 the compact row of currently active values. The joint allocator retains its
 matrix and assignments across split transactions; unchanged ranges stay
 resident while dead, rewritten, displaced, and new values re-enter the work
-queue. Whole-program liveness replacement is still required before this
-persistent session satisfies the actual-scale complexity contract.
+queue.
+
+Allocation-session liveness uses immutable original-instruction identities,
+monotonic synthetic identities, and stable physical slots. A changed block is
+rescanned once and its sorted old/new facts are differenced; all use changes
+for one VReg are applied by one linear merge. Unchanged stable ranges retain
+their matrix token and assignment. The stable allocation IR therefore needs no
+dense value-by-block membership relation, while ordinary dense-slot MIR keeps
+one because inserting a dense position genuinely relabels crossing ranges.
+Copy/phi affinity weights and fixed-register reservations are likewise
+session-owned sparse indexes with explicit revision publication. Complete
+liveness, machine facts, and allocation are still rebuilt independently at the
+publication boundary.
+
+This removes the split loop's known whole-program liveness and affinity scans,
+but it does not yet satisfy the actual-scale complexity contract. The retained
+Linux workload still spends most compilation time inside joint allocation and
+uses several GiB. Remaining work must replace all-range interference and
+ownership operations with persistent sparse indexes before integrated SSA
+spill placement is considered complete.
 
 ### Allocation algorithm
 
@@ -200,9 +218,10 @@ lexicographically.  A root may move all uses once from its original definition
 to a later explicit transition; an existing synthetic region may not recreate
 the same use set at the same immutable entry use.  Otherwise a split creates
 strictly smaller disjoint regions or exact materialized uses, and regions never
-merge.  Dead replaced reload/recipe DAGs are removed and identities compacted
-before liveness is rebuilt, so they cannot accumulate as artificial fixed
-pressure.  Stack-home placement is a monotone sparse dataflow problem.  MIR is
+merge.  Dead replaced reload/recipe DAGs are removed without compacting
+surviving allocation-session identities, so they cannot accumulate as
+artificial fixed pressure or invalidate persistent indexes.  Stack-home
+placement is a monotone sparse dataflow problem.  MIR is
 materialized once after this finite process; there is no unbounded production-
 MIR rewrite/reanalyse loop.
 

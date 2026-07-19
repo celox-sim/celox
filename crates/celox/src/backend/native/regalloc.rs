@@ -245,20 +245,6 @@ fn home_graph_error(phase: &'static str, error: home_graph::HomeGraphError) -> R
     )
 }
 
-fn interval_allocation_error(
-    phase: &'static str,
-    error: interval_allocator::IntervalAllocationError,
-) -> RegallocError {
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        None,
-        Vec::new(),
-        error.message,
-    )
-}
-
 fn allocation_expand_error(
     phase: &'static str,
     error: allocation_expand::AllocationExpandError,
@@ -506,30 +492,14 @@ fn run_regalloc_in_place(
                 start.elapsed()
             );
         }
-        let allocation_start = timing.then(crate::timing::now);
-        let plan =
-            interval_allocator::allocate_roots(&homes, interval_cfg, assignment::ALLOCATABLE_REGS)
-                .map_err(|error| {
-                    interval_allocation_error("interval allocation diagnostics", error)
-                })?;
-        if let Some(start) = allocation_start {
+        let seed_start = timing.then(crate::timing::now);
+        let mut expanded =
+            allocation_expand::expand_unallocated(&interval_func, interval_cfg, &homes).map_err(
+                |error| allocation_expand_error("interval unallocated SSA construction", error),
+            )?;
+        if let Some(start) = seed_start {
             eprintln!(
-                "[regalloc-timing] label={label} interval_allocation elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        let expand_start = timing.then(crate::timing::now);
-        let mut expanded = allocation_expand::expand(
-            &interval_func,
-            interval_cfg,
-            &homes,
-            &plan,
-            assignment::ALLOCATABLE_REGS,
-        )
-        .map_err(|error| allocation_expand_error("interval allocation expansion", error))?;
-        if let Some(start) = expand_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_expand elapsed={:?}",
+                "[regalloc-timing] label={label} interval_unallocated_seed elapsed={:?}",
                 start.elapsed()
             );
         }

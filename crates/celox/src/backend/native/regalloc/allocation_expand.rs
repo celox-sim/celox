@@ -26,7 +26,9 @@ use super::interval_allocator::{
     AllocatedBundle, AllocationPlan, BundleAssignment, HomeSelection, IntervalAllocationError,
 };
 use super::interval_union::AllocationBundleId;
-use super::live_interval::{IncrementalLiveness, LiveIntervalError, LiveIntervals, UseSite};
+use super::live_interval::{
+    IncrementalLiveness, IncrementalLivenessUpdate, LiveIntervalError, LiveIntervals, UseSite,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct RegisterRegionId(pub u32);
@@ -47,11 +49,11 @@ pub(super) enum ExpandedMaterialization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ExpandedUseSource {
     OriginalRegister {
-        preferred_register: PhysReg,
+        preferred_register: Option<PhysReg>,
     },
     RegisterRegion {
         region: RegisterRegionId,
-        preferred_register: PhysReg,
+        preferred_register: Option<PhysReg>,
     },
     Materialized(ExpandedMaterialization),
     /// A semantic phi source resolved directly by out-of-SSA translation.
@@ -91,7 +93,7 @@ pub(super) struct ExpandedRegisterRegion {
     pub id: RegisterRegionId,
     pub root: LiveBundleId,
     pub value: VReg,
-    pub preferred_register: PhysReg,
+    pub preferred_register: Option<PhysReg>,
     /// Exact immutable root use before which this region is materialized.
     /// Keeping the boundary identity separate from shifted allocation-IR slots
     /// makes repeated splitting provably monotonic.
@@ -128,53 +130,11 @@ pub(super) enum ExpandedStackHomeKind {
     EdgeRecipe { use_id: BundleUseId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExpandedUseRef {
-    root: usize,
-    use_: usize,
-}
-
-/// Immutable index from a physical original-use block to expanded metadata.
-/// Synthetic insertion shifts slots, but never changes this ownership.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ExpandedUseIndex {
-    by_block: Vec<Vec<ExpandedUseRef>>,
-}
-
-impl ExpandedUseIndex {
-    pub(super) fn build(
-        roots: &[ExpandedRoot],
-        cfg: &NormalizedCfg,
-    ) -> Result<Self, AllocationExpandError> {
-        let mut by_block = vec![Vec::new(); cfg.successors.len()];
-        for (root_index, root) in roots.iter().enumerate() {
-            for (use_index, use_) in root.uses.iter().enumerate() {
-                let block = use_.original_site.block();
-                let row = cfg.block_index.get(&block).copied().ok_or_else(|| {
-                    AllocationExpandError::new(
-                        "ALLOCATION_EXPAND.USE_INDEX_BLOCK",
-                        Some(block),
-                        Some(root.id),
-                        Some(use_.id),
-                        "original expanded use is outside the normalized CFG",
-                    )
-                })?;
-                by_block[row].push(ExpandedUseRef {
-                    root: root_index,
-                    use_: use_index,
-                });
-            }
-        }
-        Ok(Self { by_block })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExpandedAllocationProblem {
     pub ir: AllocationIr,
     pub intervals: LiveIntervals,
     pub incremental_liveness: IncrementalLiveness,
-    pub use_index: ExpandedUseIndex,
     pub shift_encoding: VariableShiftEncoding,
     pub roots: Vec<ExpandedRoot>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
@@ -376,7 +336,7 @@ pub(super) fn expand(
                                 site: use_.site,
                                 value: root.origin,
                                 source: ExpandedUseSource::OriginalRegister {
-                                    preferred_register: *register,
+                                    preferred_register: Some(*register),
                                 },
                             },
                         )?;
@@ -429,7 +389,7 @@ pub(super) fn expand(
                         id: region_id,
                         root: root.id,
                         value: region_value,
-                        preferred_register: *register,
+                        preferred_register: Some(*register),
                         entry_use: entry_use.id,
                         entry: lowered.source,
                     });
@@ -447,7 +407,7 @@ pub(super) fn expand(
                                 value: region_value,
                                 source: ExpandedUseSource::RegisterRegion {
                                     region: region_id,
-                                    preferred_register: *register,
+                                    preferred_register: Some(*register),
                                 },
                             },
                         )?;
@@ -530,10 +490,65 @@ pub(super) fn expand(
         });
     }
 
+    finish_expansion(func, cfg, ir, roots, register_regions, stack_homes)
+}
+
+/// Seed joint allocation with the original SSA ranges and no preselected
+/// stack, recipe, or register homes. Physical interference is then the first
+/// mechanism allowed to split or materialize a range.
+pub(super) fn expand_unallocated(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    graph: &HomeGraph,
+) -> Result<ExpandedAllocationProblem, AllocationExpandError> {
+    graph
+        .verify(func, cfg)
+        .map_err(AllocationExpandError::graph)?;
+    let ir = AllocationIr::from_mir(func).map_err(AllocationExpandError::ir)?;
+    let mut roots = Vec::with_capacity(graph.bundles.len());
+    for (root_index, root) in graph.bundles.iter().enumerate() {
+        if root.id.0 as usize != root_index {
+            return Err(AllocationExpandError::new(
+                "ALLOCATION_EXPAND.ROOT_IDENTITY",
+                Some(root.definition.block()),
+                Some(root.id),
+                None,
+                "HomeGraph root differs from its dense unallocated row",
+            ));
+        }
+        let uses = root
+            .uses
+            .iter()
+            .map(|use_| ExpandedUse {
+                id: use_.id,
+                original_site: use_.site,
+                site: use_.site,
+                value: root.origin,
+                source: ExpandedUseSource::OriginalRegister {
+                    preferred_register: None,
+                },
+            })
+            .collect();
+        roots.push(ExpandedRoot {
+            id: root.id,
+            origin: root.origin,
+            uses,
+        });
+    }
+    finish_expansion(func, cfg, ir, roots, Vec::new(), Vec::new())
+}
+
+fn finish_expansion(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    ir: AllocationIr,
+    mut roots: Vec<ExpandedRoot>,
+    register_regions: Vec<ExpandedRegisterRegion>,
+    stack_homes: Vec<ExpandedStackHome>,
+) -> Result<ExpandedAllocationProblem, AllocationExpandError> {
     let intervals = analyze_and_resolve(&ir, &mut roots, cfg)?;
     let incremental_liveness =
         IncrementalLiveness::build(&ir, cfg, &intervals).map_err(AllocationExpandError::live)?;
-    let use_index = ExpandedUseIndex::build(&roots, cfg)?;
     let region_rows = register_regions
         .iter()
         .enumerate()
@@ -561,7 +576,6 @@ pub(super) fn expand(
         ir,
         intervals,
         incremental_liveness,
-        use_index,
         shift_encoding: func.target_features.variable_shift_encoding(),
         roots,
         register_regions,
@@ -575,56 +589,17 @@ pub(super) fn refresh(
     problem: &mut ExpandedAllocationProblem,
     cfg: &NormalizedCfg,
     changed_blocks: &BTreeSet<BlockId>,
-) -> Result<Vec<VReg>, AllocationExpandError> {
-    let changed_values = problem
+) -> Result<IncrementalLivenessUpdate, AllocationExpandError> {
+    let update = problem
         .incremental_liveness
-        .update(&problem.ir, cfg, &mut problem.intervals, changed_blocks)
+        .update_delta(&problem.ir, cfg, &mut problem.intervals, changed_blocks)
         .map_err(AllocationExpandError::live)?;
-    for block in changed_blocks {
-        let row = cfg.block_index.get(block).copied().ok_or_else(|| {
-            AllocationExpandError::new(
-                "ALLOCATION_EXPAND.USE_INDEX_BLOCK",
-                Some(*block),
-                None,
-                None,
-                "changed block is outside the expanded-use index",
-            )
-        })?;
-        for reference in &problem.use_index.by_block[row] {
-            let root = problem.roots.get_mut(reference.root).ok_or_else(|| {
-                AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.USE_INDEX_ROOT",
-                    Some(*block),
-                    None,
-                    None,
-                    "expanded-use index references a missing root",
-                )
-            })?;
-            let root_id = root.id;
-            let root_origin = root.origin;
-            let use_ = root.uses.get_mut(reference.use_).ok_or_else(|| {
-                AllocationExpandError::new(
-                    "ALLOCATION_EXPAND.USE_INDEX_ROW",
-                    Some(*block),
-                    Some(root_id),
-                    None,
-                    "expanded-use index references a missing use row",
-                )
-            })?;
-            use_.site = problem
-                .ir
-                .resolve_original_use_site(use_.original_site, &problem.intervals)
-                .map_err(AllocationExpandError::ir)?;
-            verify_expanded_use(
-                root_id,
-                root_origin,
-                reference.use_,
-                use_,
-                &problem.intervals,
-            )?;
-        }
-    }
-    Ok(changed_values)
+    // Expanded root uses retain immutable block/stable-slot coordinates.
+    // Synthetic insertion changes only dense lowering positions, which are
+    // resolved from `original_site` when the allocation IR is rewritten or
+    // finally lowered; eagerly relabeling every root use makes each split
+    // round proportional to the complete changed-block use population.
+    Ok(update)
 }
 
 fn analyze_and_resolve(
@@ -635,10 +610,21 @@ fn analyze_and_resolve(
     ir.verify_stack_homes(cfg)
         .map_err(AllocationExpandError::ir)?;
     let intervals = ir.analyze(cfg).map_err(AllocationExpandError::ir)?;
+    let original_blocks = roots
+        .iter()
+        .flat_map(|root| root.uses.iter().map(|use_| use_.original_site.block()))
+        .collect::<BTreeSet<_>>();
+    let original_use_sites = ir
+        .index_original_use_sites(original_blocks)
+        .map_err(AllocationExpandError::ir)?;
     for root in &mut *roots {
         for use_ in &mut root.uses {
             use_.site = ir
-                .resolve_original_use_site(use_.original_site, &intervals)
+                .resolve_original_use_site_indexed(
+                    use_.original_site,
+                    &intervals,
+                    &original_use_sites,
+                )
                 .map_err(AllocationExpandError::ir)?;
         }
     }
@@ -1137,7 +1123,7 @@ fn verify_expanded_use(
             .intervals
             .get(use_.value.0 as usize)
             .and_then(Option::as_ref)
-            .is_some_and(|interval| interval.uses.contains(&use_.site))
+            .is_some_and(|interval| interval.contains_use_coordinate(use_.site))
         {
             return Err(AllocationExpandError::new(
                 "ALLOCATION_EXPAND.EDGE_REGISTER_PRESSURE",
@@ -1162,7 +1148,7 @@ fn verify_expanded_use(
                 "expanded use value has no exact live interval",
             )
         })?;
-    if !interval.uses.contains(&use_.site) {
+    if !interval.contains_use_coordinate(use_.site) {
         return Err(AllocationExpandError::new(
             "ALLOCATION_EXPAND.USE_REWRITE",
             Some(use_.site.block()),
@@ -1204,6 +1190,61 @@ mod tests {
             .iter()
             .find(|root| root.origin == value)
             .unwrap()
+    }
+
+    #[test]
+    fn unallocated_seed_preserves_original_ssa_without_preselected_homes() {
+        let instructions = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 7,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 11,
+            },
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, instructions);
+        let (cfg, graph) = model(&mut function);
+        let before = format!("{function:?}");
+
+        let problem = expand_unallocated(&function, &cfg, &graph).unwrap();
+
+        assert_eq!(problem.ir.value_count(), function.vregs.count());
+        assert!(problem.stack_homes.is_empty());
+        assert!(problem.register_regions.is_empty());
+        let stack_facts = problem.ir.stack_facts().unwrap();
+        assert!(stack_facts.operations.is_empty());
+        assert!(stack_facts.phi_definitions.is_empty());
+        for root in &problem.roots {
+            for use_ in &root.uses {
+                assert_eq!(use_.value, root.origin);
+                assert_eq!(
+                    use_.site,
+                    problem
+                        .ir
+                        .resolve_original_use_site(use_.original_site, &problem.intervals)
+                        .unwrap()
+                );
+                assert!(matches!(
+                    use_.source,
+                    ExpandedUseSource::OriginalRegister {
+                        preferred_register: None
+                    }
+                ));
+            }
+        }
+        assert_eq!(format!("{function:?}"), before);
     }
 
     #[test]
@@ -1437,7 +1478,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(region.preferred_register, PhysReg::RAX);
+        assert_eq!(region.preferred_register, Some(PhysReg::RAX));
         assert_eq!(region_uses.len(), 2);
         assert!(region_uses.iter().all(|use_| use_.value == region.value));
         assert_eq!(

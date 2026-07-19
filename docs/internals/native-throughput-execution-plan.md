@@ -3291,6 +3291,70 @@ run rebuilt from the final source is
 Because the complete emitted code is byte-identical and host timing varied by
 19.8%, Step 28b makes neither an execution-speedup nor a regression claim.
 
+Step 28c makes the allocation-owned split fixed point genuinely incremental.
+The prior differential API still invalidated work by mutable dense instruction
+position: inserting one reload changed every later def/use fact in the block,
+and the liveness index removed each old use by scanning that value's complete
+global use vector. It also materialized a value-by-block membership relation
+for the stable allocation IR. On the large combinational units those structures
+made a nominally local split revisit most of the function.
+
+Allocation IR now gives every original instruction its immutable source
+identity and every synthetic instruction a monotonic identity disjoint from
+the original range. Stable order-maintenance slots remain the physical program
+coordinates. `UseSite` is ordered by `(block, slot, identity)`, so physical
+range queries and exact identity deltas share one total-order contract even
+when synthetic IDs do not follow emitted order. Complete liveness construction
+and the incremental fact scanner use the same identity mapping; a full
+independent rebuild therefore remains an exact oracle.
+
+Each changed block is scanned once. Its sorted old and new definition/use rows
+are differenced linearly, and all removals/additions for one VReg are merged
+with that VReg's global use row in one linear pass. Unchanged original facts do
+not enter the affected set. Stable Allocation IR no longer stores the enormous
+value-by-block membership relation; immutable slots guarantee that a value
+merely crossing an insertion block keeps the same physical range. Dense-slot
+MIR retains the membership relation because a dense relabel really does change
+its coordinates. Live-length cost is recomputed only when sparse geometry
+changes; a metadata-only relabel retains its interval-union token, assignment,
+and session priority.
+
+Target constraints now obey the same invalidation boundary. Block affinity
+facts remain reference counted, while a sparse bidirectional endpoint index
+and active pair-weight map update only edges incident to an activated,
+deactivated, added, or removed value. Stable clobber reservations are flattened
+only when a changed block's exact reservation row differs. The update publishes
+explicit affinity and reservation revisions, so the joint session no longer
+compares or rebuilds either complete vector on every split round. Focused tests
+require unchanged synthetic insertion to publish neither revision and a phi
+source rewrite to publish only the affinity revision; every incremental model
+must still equal a fresh complete rebuild.
+
+The first retained actual-scale sample before the stable fact delta is
+`target/heliodor/results/20260719T013959Z_celox_test_soc_linux_boot.log`:
+compile-only took 233.097 s, with joint allocation taking 130.419 s for
+`eval_comb` and 168.359 s for `eval_comb_apply_ff`. The stable liveness delta
+completed compile-only in 173.170 s at
+`target/heliodor/results/20260719T020012Z_celox_test_soc_linux_boot.log`.
+After incremental affinity/reservation publication, the timed compile-only run
+at `target/heliodor/results/20260719T020944Z_celox_test_soc_linux_boot.log`
+completed in 163.886 s; the two large joint-allocation intervals were 68.239 s
+and 97.147 s. This is a 29.7% reduction from the 233.097 s rejected updater,
+not an acceptance result.
+
+The full non-LTO run at
+`target/heliodor/results/20260719T021259Z_celox_test_soc_linux_boot.log` then
+printed the Linux kernel log through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1` marker. It reported compile 163.766 s and execute
+149.306 s. The compile time is still almost three times the final committed
+Step 28b sample and peak RSS remains roughly 5--7 GiB, so Step 28c does not
+claim the allocator's scale problem is solved or that generated-code throughput
+improved. The next compile-time slice must use optimized sampling to replace
+the remaining all-range interval-interference/session ownership work with
+persistent sparse indexes. It must preserve assignments for unchanged ranges
+and pass an independent final rebuild; local queue ordering, thresholds, or
+container substitutions are not substitutes.
+
 The next allocator slice must change the generated code at its primary spill
 boundary. Today `allocate_roots` chooses persistent homes, `expand` commits
 stores/reloads, and only then does joint physical allocation discover the
@@ -3381,6 +3445,7 @@ new allocator produces a substantial non-LTO execution win.
 | 27d9g semantic-only phi identities and canonical edge locations | `fa0ed954` | unused-phi physical liveness; semantic-only assignment/SSA-destruction boundaries; regalloc 228/228; SSA destruction 21/21 | candidate lib 848/848; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 456.876 s; full compile 442.109 s; execute 267.183 s | fixed-only false pressure removed and all units publish; runtime is 2.33x Step 26a, exposing whole-live-set constraint permutations as the next rejected design |
 | 28a local fixed-use fragments without whole-live-set permutations | this step | fixed-operand isolation and clobber non-mutation; legalize 10/10; regalloc 230/230 | candidate lib 850/850; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | CPU-0 non-LTO full run passes: `cy=9ae070 x3=aa pass=1` | compile-only 384.401 s; full compile 382.284 s; execute 124.495 s | effective comb edge copies fall 98,037→1,334 and execute improves 53.4%; exact fixed-register interval reservations remain next |
 | 28b immutable fixed intervals and exact pressure cuts | this step | live interval 9/9; interval union 7/7; constraints 4/4; joint allocation 7/7; split 6/6; regalloc 232/232 | candidate lib 852/852; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, and format pass | three CPU-0 non-LTO full runs pass: `cy=9ae070 x3=aa pass=1`; complete Step 28a/final-28b SIR, MIR, assignments, and disassembly are byte-identical | adjacent compile-only 53.619 s (28a) / 52.540 s (28b); final-source compile 56.282 s; execute 141.988 / 118.501 / final 122.963 s | clobbers are exact immutable `[barrier, def)` occupancy and split requests carry owner-qualified cuts; no generated-code or speed claim; integrated fragment allocation/spill placement remains next |
+| 28c stable allocation-session deltas | this step | stable original/synthetic coordinates; exact block-fact diff; affinity/reservation revisions; regalloc 239/239 | interval lib 859/859; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, format, and diff checks pass | non-LTO full run passes once through kernel power-down with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 163.886 s; full compile 163.766 s; execute 149.306 s | rejected updater compile time reduced 29.7%; still far above committed Step 28b and 5--7 GiB RSS, so persistent interval/session indexing remains open |
 
 ## Related design records
 

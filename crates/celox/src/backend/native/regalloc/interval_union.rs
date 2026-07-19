@@ -374,6 +374,23 @@ impl IntervalUnion {
         false
     }
 
+    fn interferes_bundle_indexed(&self, segments: ValidatedSegments<'_>) -> bool {
+        for (segment, block) in segments.iter() {
+            let Some(entries) = self.blocks.get(&block) else {
+                continue;
+            };
+            for (&start, entry) in entries.range((Unbounded, Excluded(segment.end))).rev() {
+                if entry.end <= segment.start {
+                    break;
+                }
+                if start < segment.end && matches!(entry.owner, OccupancyOwner::Bundle(_)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn collect_conflicts_indexed(
         &self,
         segments: ValidatedSegments<'_>,
@@ -907,6 +924,15 @@ impl LiveIntervalMatrix {
     ) -> Result<bool, IntervalUnionError> {
         self.validate_token(segments)?;
         Ok(self.union(register)?.interferes_indexed(segments))
+    }
+
+    pub(super) fn interferes_bundle_validated(
+        &self,
+        register: PhysReg,
+        segments: ValidatedSegments<'_>,
+    ) -> Result<bool, IntervalUnionError> {
+        self.validate_token(segments)?;
+        Ok(self.union(register)?.interferes_bundle_indexed(segments))
     }
 
     pub(super) fn collect_conflicts(
@@ -1556,7 +1582,7 @@ mod tests {
         let mut function = function(5, vec![block]);
         let cfg = normalize(&mut function);
         let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        let slots = intervals.block_slots[0];
+        let slots = &intervals.block_slots[0];
         let reservation = FixedRegisterReservation {
             register: PhysReg::RAX,
             segment: LiveSegment {
@@ -1580,6 +1606,12 @@ mod tests {
         assert!(!matrix.interferes(PhysReg::RAX, &result.segments).unwrap());
 
         let range = matrix.make_range(live_through.segments.clone()).unwrap();
+        assert!(
+            !matrix
+                .interferes_bundle_validated(PhysReg::RAX, range.validated())
+                .unwrap(),
+            "immutable clobber occupancy must not masquerade as a movable resident"
+        );
         let mut collector = ConflictCollector::default();
         let mut conflicts = Vec::new();
         let mut cuts = Vec::new();
@@ -1602,6 +1634,15 @@ mod tests {
                 end: reservation.segment.end,
                 owner: OccupancyOwner::Fixed(FixedReservationId(0)),
             }]
+        );
+        let lhs_range = matrix.make_range(lhs.segments.clone()).unwrap();
+        matrix
+            .assign_validated(AllocationBundleId(0), PhysReg::RAX, lhs_range.validated())
+            .unwrap();
+        assert!(
+            matrix
+                .interferes_bundle_validated(PhysReg::RAX, lhs_range.validated())
+                .unwrap()
         );
         matrix.verify().unwrap();
     }

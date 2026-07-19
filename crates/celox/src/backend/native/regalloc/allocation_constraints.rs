@@ -87,8 +87,22 @@ pub(super) struct IncrementalConstraintModel {
     block_facts: Vec<AllocationMachineFacts>,
     reservations_by_block: Vec<Vec<FixedRegisterReservation>>,
     fixed_by_value: Vec<Vec<FixedConstraintPoint>>,
+    active_values: Vec<bool>,
     affinity_counts: BTreeMap<AllocationAffinity, u32>,
+    /// Sparse bidirectional index over unique affinity kinds. Most RTL values
+    /// have no copy/phi edge, so a dense Vec per VReg would dominate memory.
+    affinities_by_value: BTreeMap<VReg, Vec<AllocationAffinity>>,
+    /// Published active endpoint weights, maintained directly from block-fact
+    /// and liveness deltas instead of rescanning every affinity each round.
+    affinity_weights: BTreeMap<(VReg, VReg), u32>,
     model: AllocationConstraintModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct IncrementalConstraintUpdate {
+    pub changed_values: Vec<VReg>,
+    pub affinities_changed: bool,
+    pub fixed_reservations_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,7 +265,7 @@ impl AllocationConstraintModel {
                         "constrained instruction is outside the normalized CFG",
                     )
                 })?;
-            let slots = expanded.intervals.block_slots[block];
+            let slots = &expanded.intervals.block_slots[block];
             let clobber_slot = slots
                 .instruction_clobber(instruction.instruction)
                 .ok_or_else(|| {
@@ -391,20 +405,31 @@ impl IncrementalConstraintModel {
             block_facts,
             reservations_by_block: vec![Vec::new(); cfg.successors.len()],
             fixed_by_value: vec![Vec::new(); expanded.ir.value_count() as usize],
+            active_values: expanded
+                .intervals
+                .intervals
+                .iter()
+                .map(Option::is_some)
+                .collect(),
             affinity_counts: BTreeMap::new(),
+            affinities_by_value: BTreeMap::new(),
+            affinity_weights: BTreeMap::new(),
             model,
         };
-        for (block, facts) in result.block_facts.clone().into_iter().enumerate() {
+        for (block, &block_id) in block_ids.iter().enumerate() {
+            let facts = result.block_facts[block].clone();
             result.add_facts(&facts)?;
             result.reservations_by_block[block] = reservations_for_block(
-                block_ids[block],
+                block_id,
                 &facts,
-                expanded.intervals.block_slots[block],
+                &expanded.intervals.block_slots[block],
                 &result.registers,
             )?;
         }
         let rebuilt_affinities = weighted_affinities(&result.affinity_counts, &expanded.intervals)?;
-        if result.model.affinities != rebuilt_affinities {
+        if result.model.affinities != rebuilt_affinities
+            || result.model.affinities != result.published_affinities()
+        {
             return Err(AllocationConstraintError::new(
                 "ALLOCATION_CONSTRAINT.BLOCK_FACT_IDENTITY",
                 None,
@@ -436,11 +461,13 @@ impl IncrementalConstraintModel {
         cfg: &NormalizedCfg,
         graph: &HomeGraph,
         changed_blocks: &BTreeSet<BlockId>,
-        changed_values: &[VReg],
-    ) -> Result<Vec<VReg>, AllocationConstraintError> {
+        range_changed_values: &[VReg],
+    ) -> Result<IncrementalConstraintUpdate, AllocationConstraintError> {
         if self.registers.is_empty()
             || self.block_facts.len() != cfg.successors.len()
             || self.reservations_by_block.len() != cfg.successors.len()
+            || self.active_values.len() != self.model.value_count as usize
+            || expanded.intervals.intervals.len() != expanded.ir.value_count() as usize
             || expanded.ir.value_count() < self.model.value_count
         {
             return Err(AllocationConstraintError::new(
@@ -453,11 +480,39 @@ impl IncrementalConstraintModel {
         }
         let target = RegisterMask::from_registers(&self.registers);
         let value_count = expanded.ir.value_count() as usize;
+        let previous_value_count = self.active_values.len();
         self.fixed_by_value.resize_with(value_count, Vec::new);
+        self.active_values.resize(value_count, false);
         self.model.allowed.resize(value_count, target);
         self.model.value_count = expanded.ir.value_count();
 
-        let mut affected = changed_values.iter().copied().collect::<BTreeSet<_>>();
+        let mut affinities_changed = false;
+        for index in previous_value_count..value_count {
+            let value = VReg(index as u32);
+            affinities_changed |=
+                self.set_value_active(value, expanded.intervals.intervals[index].is_some())?;
+        }
+        for &value in range_changed_values {
+            let index = value.0 as usize;
+            let active = expanded
+                .intervals
+                .intervals
+                .get(index)
+                .ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.VALUE_RANGE",
+                        None,
+                        None,
+                        vec![value],
+                        "changed live range is outside the allocation session",
+                    )
+                })?
+                .is_some();
+            affinities_changed |= self.set_value_active(value, active)?;
+        }
+
+        let mut affected = BTreeSet::new();
+        let mut fixed_reservations_changed = false;
         for block in changed_blocks {
             let row = cfg.block_index.get(block).copied().ok_or_else(|| {
                 AllocationConstraintError::new(
@@ -469,20 +524,30 @@ impl IncrementalConstraintModel {
                 )
             })?;
             let old = self.block_facts[row].clone();
-            affected.extend(fact_values(&old));
-            self.remove_facts(&old)?;
+            affected.extend(fixed_fact_values(&old));
             let next = expanded
                 .ir
                 .machine_facts_for_block(*block, graph, expanded.shift_encoding)
                 .map_err(machine_fact_error)?;
-            affected.extend(fact_values(&next));
-            self.add_facts(&next)?;
-            self.reservations_by_block[row] = reservations_for_block(
+            affected.extend(fixed_fact_values(&next));
+
+            self.remove_fixed_facts(&old)?;
+            self.add_fixed_facts(&next)?;
+            if old.affinities != next.affinities {
+                affinities_changed |= self.remove_affinity_facts(&old)?;
+                affinities_changed |= self.add_affinity_facts(&next)?;
+            }
+
+            let next_reservations = reservations_for_block(
                 *block,
                 &next,
-                expanded.intervals.block_slots[row],
+                &expanded.intervals.block_slots[row],
                 &self.registers,
             )?;
+            if self.reservations_by_block[row] != next_reservations {
+                self.reservations_by_block[row] = next_reservations;
+                fixed_reservations_changed = true;
+            }
             self.block_facts[row] = next;
         }
 
@@ -504,12 +569,29 @@ impl IncrementalConstraintModel {
                 self.model.allowed[index] = next;
             }
         }
-        self.model.affinities = weighted_affinities(&self.affinity_counts, &expanded.intervals)?;
-        self.model.fixed_reservations = flatten_reservations(&self.reservations_by_block)?;
-        Ok(changed)
+        if affinities_changed {
+            self.model.affinities = self.published_affinities();
+        }
+        if fixed_reservations_changed {
+            self.model.fixed_reservations = flatten_reservations(&self.reservations_by_block)?;
+        }
+        Ok(IncrementalConstraintUpdate {
+            changed_values: changed,
+            affinities_changed,
+            fixed_reservations_changed,
+        })
     }
 
     fn add_facts(
+        &mut self,
+        facts: &AllocationMachineFacts,
+    ) -> Result<(), AllocationConstraintError> {
+        self.add_fixed_facts(facts)?;
+        self.add_affinity_facts(facts)?;
+        Ok(())
+    }
+
+    fn add_fixed_facts(
         &mut self,
         facts: &AllocationMachineFacts,
     ) -> Result<(), AllocationConstraintError> {
@@ -534,22 +616,10 @@ impl IncrementalConstraintModel {
                 });
             }
         }
-        for &affinity in &facts.affinities {
-            let count = self.affinity_counts.entry(affinity).or_default();
-            *count = count.checked_add(1).ok_or_else(|| {
-                AllocationConstraintError::new(
-                    "ALLOCATION_CONSTRAINT.AFFINITY_COUNT",
-                    None,
-                    None,
-                    vec![affinity.left, affinity.right],
-                    "block affinity reference count exceeds u32",
-                )
-            })?;
-        }
         Ok(())
     }
 
-    fn remove_facts(
+    fn remove_fixed_facts(
         &mut self,
         facts: &AllocationMachineFacts,
     ) -> Result<(), AllocationConstraintError> {
@@ -587,22 +657,301 @@ impl IncrementalConstraintModel {
                 row.swap_remove(position);
             }
         }
+        Ok(())
+    }
+
+    fn add_affinity_facts(
+        &mut self,
+        facts: &AllocationMachineFacts,
+    ) -> Result<bool, AllocationConstraintError> {
+        let mut changed = false;
         for &affinity in &facts.affinities {
-            let count = self.affinity_counts.get_mut(&affinity).ok_or_else(|| {
+            self.validate_affinity_range(affinity)?;
+            let previous = self.affinity_counts.get(&affinity).copied().unwrap_or(0);
+            let next = previous.checked_add(1).ok_or_else(|| {
                 AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.AFFINITY_COUNT",
+                    None,
+                    None,
+                    vec![affinity.left, affinity.right],
+                    "block affinity reference count exceeds u32",
+                )
+            })?;
+            if previous == 0 {
+                self.insert_affinity_adjacency(affinity)?;
+            }
+            self.affinity_counts.insert(affinity, next);
+            if self.affinity_is_active(affinity)? {
+                self.add_affinity_weight(affinity, 1)?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    fn remove_affinity_facts(
+        &mut self,
+        facts: &AllocationMachineFacts,
+    ) -> Result<bool, AllocationConstraintError> {
+        let mut changed = false;
+        for &affinity in &facts.affinities {
+            let previous = self
+                .affinity_counts
+                .get(&affinity)
+                .copied()
+                .ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.AFFINITY_IDENTITY",
+                        None,
+                        None,
+                        vec![affinity.left, affinity.right],
+                        "cached block affinity is absent from the global index",
+                    )
+                })?;
+            if previous == 0 {
+                return Err(AllocationConstraintError::new(
                     "ALLOCATION_CONSTRAINT.AFFINITY_IDENTITY",
                     None,
                     None,
                     vec![affinity.left, affinity.right],
-                    "cached block affinity is absent from the global index",
-                )
-            })?;
-            *count -= 1;
-            if *count == 0 {
+                    "cached block affinity has a zero reference count",
+                ));
+            }
+            if self.affinity_is_active(affinity)? {
+                self.remove_affinity_weight(affinity, 1)?;
+                changed = true;
+            }
+            if previous == 1 {
                 self.affinity_counts.remove(&affinity);
+                self.remove_affinity_adjacency(affinity)?;
+            } else {
+                self.affinity_counts.insert(affinity, previous - 1);
+            }
+        }
+        Ok(changed)
+    }
+
+    fn set_value_active(
+        &mut self,
+        value: VReg,
+        active: bool,
+    ) -> Result<bool, AllocationConstraintError> {
+        let index = value.0 as usize;
+        let previous = *self.active_values.get(index).ok_or_else(|| {
+            AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.VALUE_RANGE",
+                None,
+                None,
+                vec![value],
+                "live-range activation is outside the affinity value domain",
+            )
+        })?;
+        if previous == active {
+            return Ok(false);
+        }
+        let incident = self
+            .affinities_by_value
+            .get(&value)
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = false;
+        for affinity in incident {
+            let other = if affinity.left == value {
+                affinity.right
+            } else if affinity.right == value {
+                affinity.left
+            } else {
+                return Err(AllocationConstraintError::new(
+                    "ALLOCATION_CONSTRAINT.AFFINITY_ADJACENCY",
+                    None,
+                    None,
+                    vec![value, affinity.left, affinity.right],
+                    "affinity adjacency row contains a non-incident edge",
+                ));
+            };
+            if self
+                .active_values
+                .get(other.0 as usize)
+                .copied()
+                .ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.VALUE_RANGE",
+                        None,
+                        None,
+                        vec![other],
+                        "affinity endpoint is outside the active-value table",
+                    )
+                })?
+            {
+                let count = self
+                    .affinity_counts
+                    .get(&affinity)
+                    .copied()
+                    .ok_or_else(|| {
+                        AllocationConstraintError::new(
+                            "ALLOCATION_CONSTRAINT.AFFINITY_ADJACENCY",
+                            None,
+                            None,
+                            vec![affinity.left, affinity.right],
+                            "affinity adjacency edge has no global reference count",
+                        )
+                    })?;
+                if active {
+                    self.add_affinity_weight(affinity, count)?;
+                } else {
+                    self.remove_affinity_weight(affinity, count)?;
+                }
+                changed = true;
+            }
+        }
+        self.active_values[index] = active;
+        Ok(changed)
+    }
+
+    fn validate_affinity_range(
+        &self,
+        affinity: AllocationAffinity,
+    ) -> Result<(), AllocationConstraintError> {
+        if affinity.left == affinity.right
+            || affinity.left.0 as usize >= self.active_values.len()
+            || affinity.right.0 as usize >= self.active_values.len()
+        {
+            return Err(AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.AFFINITY_RANGE",
+                None,
+                None,
+                vec![affinity.left, affinity.right],
+                "affinity endpoints are equal or outside the allocation value domain",
+            ));
+        }
+        Ok(())
+    }
+
+    fn affinity_is_active(
+        &self,
+        affinity: AllocationAffinity,
+    ) -> Result<bool, AllocationConstraintError> {
+        self.validate_affinity_range(affinity)?;
+        Ok(self.active_values[affinity.left.0 as usize]
+            && self.active_values[affinity.right.0 as usize])
+    }
+
+    fn insert_affinity_adjacency(
+        &mut self,
+        affinity: AllocationAffinity,
+    ) -> Result<(), AllocationConstraintError> {
+        for value in [affinity.left, affinity.right] {
+            let row = self.affinities_by_value.entry(value).or_default();
+            match row.binary_search(&affinity) {
+                Ok(_) => {
+                    return Err(AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.AFFINITY_ADJACENCY",
+                        None,
+                        None,
+                        vec![affinity.left, affinity.right],
+                        "new global affinity already exists in an endpoint adjacency row",
+                    ));
+                }
+                Err(position) => row.insert(position, affinity),
             }
         }
         Ok(())
+    }
+
+    fn remove_affinity_adjacency(
+        &mut self,
+        affinity: AllocationAffinity,
+    ) -> Result<(), AllocationConstraintError> {
+        for value in [affinity.left, affinity.right] {
+            let remove_row = {
+                let row = self.affinities_by_value.get_mut(&value).ok_or_else(|| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.AFFINITY_ADJACENCY",
+                        None,
+                        None,
+                        vec![affinity.left, affinity.right],
+                        "removed affinity has no endpoint adjacency row",
+                    )
+                })?;
+                let position = row.binary_search(&affinity).map_err(|_| {
+                    AllocationConstraintError::new(
+                        "ALLOCATION_CONSTRAINT.AFFINITY_ADJACENCY",
+                        None,
+                        None,
+                        vec![affinity.left, affinity.right],
+                        "removed affinity is absent from an endpoint adjacency row",
+                    )
+                })?;
+                row.remove(position);
+                row.is_empty()
+            };
+            if remove_row {
+                self.affinities_by_value.remove(&value);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_affinity_weight(
+        &mut self,
+        affinity: AllocationAffinity,
+        count: u32,
+    ) -> Result<(), AllocationConstraintError> {
+        let delta = affinity_weight(affinity.kind)
+            .checked_mul(count)
+            .ok_or_else(|| affinity_weight_error(affinity))?;
+        let weight = self
+            .affinity_weights
+            .entry((affinity.left, affinity.right))
+            .or_default();
+        *weight = weight
+            .checked_add(delta)
+            .ok_or_else(|| affinity_weight_error(affinity))?;
+        Ok(())
+    }
+
+    fn remove_affinity_weight(
+        &mut self,
+        affinity: AllocationAffinity,
+        count: u32,
+    ) -> Result<(), AllocationConstraintError> {
+        let delta = affinity_weight(affinity.kind)
+            .checked_mul(count)
+            .ok_or_else(|| affinity_weight_error(affinity))?;
+        let pair = (affinity.left, affinity.right);
+        let weight = self.affinity_weights.get_mut(&pair).ok_or_else(|| {
+            AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.AFFINITY_WEIGHT_IDENTITY",
+                None,
+                None,
+                vec![affinity.left, affinity.right],
+                "active affinity has no published pair weight",
+            )
+        })?;
+        *weight = weight.checked_sub(delta).ok_or_else(|| {
+            AllocationConstraintError::new(
+                "ALLOCATION_CONSTRAINT.AFFINITY_WEIGHT_IDENTITY",
+                None,
+                None,
+                vec![affinity.left, affinity.right],
+                "active affinity pair weight is smaller than its removed contribution",
+            )
+        })?;
+        if *weight == 0 {
+            self.affinity_weights.remove(&pair);
+        }
+        Ok(())
+    }
+
+    fn published_affinities(&self) -> Vec<WeightedAffinity> {
+        self.affinity_weights
+            .iter()
+            .map(|(&(left, right), &weight)| WeightedAffinity {
+                left,
+                right,
+                weight,
+            })
+            .collect()
     }
 
     fn allowed_for_value(&self, value: VReg) -> Result<RegisterMask, AllocationConstraintError> {
@@ -670,17 +1019,28 @@ fn machine_fact_error(error: super::allocation_ir::AllocationIrError) -> Allocat
     )
 }
 
-fn fact_values(facts: &AllocationMachineFacts) -> impl Iterator<Item = VReg> + '_ {
+fn fixed_fact_values(facts: &AllocationMachineFacts) -> impl Iterator<Item = VReg> + '_ {
     facts
         .instructions
         .iter()
         .flat_map(|instruction| instruction.fixed_uses.iter().map(|(value, _)| *value))
-        .chain(
-            facts
-                .affinities
-                .iter()
-                .flat_map(|affinity| [affinity.left, affinity.right]),
-        )
+}
+
+fn affinity_weight(kind: AllocationAffinityKind) -> u32 {
+    match kind {
+        AllocationAffinityKind::Copy => 2,
+        AllocationAffinityKind::Phi => 1,
+    }
+}
+
+fn affinity_weight_error(affinity: AllocationAffinity) -> AllocationConstraintError {
+    AllocationConstraintError::new(
+        "ALLOCATION_CONSTRAINT.AFFINITY_WEIGHT",
+        None,
+        None,
+        vec![affinity.left, affinity.right],
+        "copy/phi affinity weight exceeds u32",
+    )
 }
 
 fn weighted_affinities(
@@ -703,10 +1063,7 @@ fn weighted_affinities(
         {
             continue;
         }
-        let weight = match affinity.kind {
-            AllocationAffinityKind::Copy => 2,
-            AllocationAffinityKind::Phi => 1,
-        };
+        let weight = affinity_weight(affinity.kind);
         let entry = weights.entry((affinity.left, affinity.right)).or_default();
         *entry = entry.checked_add(weight).ok_or_else(|| {
             AllocationConstraintError::new(
@@ -731,7 +1088,7 @@ fn weighted_affinities(
 fn reservations_for_block(
     block: BlockId,
     facts: &AllocationMachineFacts,
-    slots: super::live_interval::BlockSlots,
+    slots: &super::live_interval::BlockSlots,
     registers: &[PhysReg],
 ) -> Result<Vec<FixedRegisterReservation>, AllocationConstraintError> {
     let register_set = registers.iter().copied().collect::<BTreeSet<_>>();
@@ -949,7 +1306,7 @@ mod tests {
             .position(|instruction| matches!(instruction, MInst::UDiv { .. }))
             .unwrap();
         let block = cfg.block_index[&division_block.id];
-        let slots = expanded.intervals.block_slots[block];
+        let slots = &expanded.intervals.block_slots[block];
         assert_eq!(
             model.fixed_reservations,
             vec![
@@ -1112,9 +1469,11 @@ mod tests {
             .incremental_liveness
             .update(&expanded.ir, &cfg, &mut expanded.intervals, &changed_blocks)
             .unwrap();
-        incremental
+        let constraint_update = incremental
             .update(&expanded, &cfg, &graph, &changed_blocks, &changed_values)
             .unwrap();
+        assert!(!constraint_update.affinities_changed);
+        assert!(!constraint_update.fixed_reservations_changed);
 
         assert_eq!(
             incremental.model(),
@@ -1197,7 +1556,7 @@ mod tests {
                 &liveness_blocks,
             )
             .unwrap();
-        incremental
+        let constraint_update = incremental
             .update(
                 &expanded,
                 &cfg,
@@ -1206,6 +1565,8 @@ mod tests {
                 &changed_values,
             )
             .unwrap();
+        assert!(constraint_update.affinities_changed);
+        assert!(!constraint_update.fixed_reservations_changed);
 
         assert_eq!(
             incremental.model(),

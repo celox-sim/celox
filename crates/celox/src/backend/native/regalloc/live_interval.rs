@@ -6,8 +6,11 @@
 //! A value may have one segment per block; mutually exclusive CFG arms do not
 //! interfere merely because their blocks are adjacent in layout.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+
+use fxhash::FxHashSet;
 
 use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
 
@@ -17,49 +20,152 @@ use super::cfg::NormalizedCfg;
 pub(super) struct SlotIndex(u64);
 
 impl SlotIndex {
+    const STABLE_MARKER: u64 = 1_u64 << 63;
+    const STABLE_ZONE_SHIFT: u32 = 34;
+    const STABLE_SEQUENCE_SHIFT: u32 = 2;
+    const STABLE_ZONE_LIMIT: u64 = 1_u64 << 29;
+
     pub(super) fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }
 
     pub(super) fn distance_to(self, end: Self) -> Option<u64> {
-        end.0.checked_sub(self.0)
+        if self.0 & Self::STABLE_MARKER == 0 || end.0 & Self::STABLE_MARKER == 0 {
+            return end.0.checked_sub(self.0);
+        }
+        let (start_zone, start_sequence, start_phase) = self.stable_parts()?;
+        let (end_zone, end_sequence, end_phase) = end.stable_parts()?;
+        if start_zone == end_zone {
+            let start = u64::from(start_sequence)
+                .checked_mul(4)?
+                .checked_add(u64::from(start_phase))?;
+            let end = u64::from(end_sequence)
+                .checked_mul(4)?
+                .checked_add(u64::from(end_phase))?;
+            end.checked_sub(start)
+        } else {
+            // Stable labels deliberately reserve a large numeric namespace for
+            // future insertions. Spill priority must measure program order,
+            // not those empty label gaps, so cross-anchor distance uses only
+            // the immutable anchor zones.
+            end_zone.checked_sub(start_zone)?.checked_mul(4)
+        }
+    }
+
+    pub(super) fn stable(zone: u64, sequence: u32, phase: u8) -> Option<Self> {
+        if zone >= Self::STABLE_ZONE_LIMIT || phase >= 4 {
+            return None;
+        }
+        Some(Self(
+            Self::STABLE_MARKER
+                | (zone << Self::STABLE_ZONE_SHIFT)
+                | (u64::from(sequence) << Self::STABLE_SEQUENCE_SHIFT)
+                | u64::from(phase),
+        ))
+    }
+
+    pub(super) fn stable_entry() -> Self {
+        Self(Self::STABLE_MARKER)
+    }
+
+    pub(super) fn stable_phi_def() -> Self {
+        Self(Self::STABLE_MARKER | 1)
+    }
+
+    fn stable_parts(self) -> Option<(u64, u32, u8)> {
+        (self.0 & Self::STABLE_MARKER != 0).then(|| {
+            let payload = self.0 & !Self::STABLE_MARKER;
+            (
+                payload >> Self::STABLE_ZONE_SHIFT,
+                ((payload >> Self::STABLE_SEQUENCE_SHIFT) & u64::from(u32::MAX)) as u32,
+                (payload & 3) as u8,
+            )
+        })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstructionSlots {
+    use_: SlotIndex,
+    clobber: SlotIndex,
+    def: SlotIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BlockSlots {
     pub entry: SlotIndex,
     pub phi_def: SlotIndex,
     pub exit: SlotIndex,
-    instruction_count: usize,
+    instructions: Vec<InstructionSlots>,
 }
 
 impl BlockSlots {
-    pub fn instruction_use(self, instruction: usize) -> Option<SlotIndex> {
-        (instruction < self.instruction_count)
-            .then(|| {
-                u64::try_from(instruction)
-                    .ok()?
-                    .checked_mul(3)?
-                    .checked_add(2)?
-                    .checked_add(self.entry.0)
-                    .map(SlotIndex)
-            })
-            .flatten()
+    pub fn instruction_use(&self, instruction: usize) -> Option<SlotIndex> {
+        self.instructions.get(instruction).map(|slots| slots.use_)
     }
 
     /// Target resources clobbered after operands are consumed and before the
     /// instruction result becomes available.
-    pub fn instruction_clobber(self, instruction: usize) -> Option<SlotIndex> {
-        self.instruction_use(instruction)?.next()
+    pub fn instruction_clobber(&self, instruction: usize) -> Option<SlotIndex> {
+        self.instructions
+            .get(instruction)
+            .map(|slots| slots.clobber)
     }
 
-    pub fn instruction_def(self, instruction: usize) -> Option<SlotIndex> {
-        self.instruction_clobber(instruction)?.next()
+    pub fn instruction_def(&self, instruction: usize) -> Option<SlotIndex> {
+        self.instructions.get(instruction).map(|slots| slots.def)
+    }
+
+    fn program_order_rank(&self, slot: SlotIndex) -> Option<u64> {
+        if slot == self.entry {
+            return Some(0);
+        }
+        if slot == self.phi_def {
+            return Some(1);
+        }
+        let instruction = self
+            .instructions
+            .partition_point(|candidate| candidate.use_ <= slot)
+            .checked_sub(1);
+        if let Some(instruction) = instruction {
+            let slots = &self.instructions[instruction];
+            let base = u64::try_from(instruction)
+                .ok()?
+                .checked_mul(3)?
+                .checked_add(2)?;
+            if slot == slots.use_ {
+                return Some(base);
+            }
+            if slot == slots.clobber {
+                return base.checked_add(1);
+            }
+            if slot == slots.def {
+                return base.checked_add(2);
+            }
+            if slots.def.next() == Some(slot) {
+                return base.checked_add(3);
+            }
+        }
+        let exit = u64::try_from(self.instructions.len())
+            .ok()?
+            .checked_mul(3)?
+            .checked_add(2)?;
+        if slot == self.exit {
+            Some(exit)
+        } else if self.exit.next() == Some(slot) {
+            exit.checked_add(1)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn program_order_distance(&self, start: SlotIndex, end: SlotIndex) -> Option<u64> {
+        let start = self.program_order_rank(start)?;
+        self.program_order_rank(end)?.checked_sub(start)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum DefinitionSite {
     Phi {
         block: BlockId,
@@ -87,7 +193,7 @@ impl DefinitionSite {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UseSite {
     Instruction {
         block: BlockId,
@@ -102,6 +208,56 @@ pub(super) enum UseSite {
     },
 }
 
+impl Ord for UseSite {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (*self, *other) {
+            (
+                Self::Instruction {
+                    block: left_block,
+                    instruction: left_instruction,
+                    slot: left_slot,
+                },
+                Self::Instruction {
+                    block: right_block,
+                    instruction: right_instruction,
+                    slot: right_slot,
+                },
+            ) => (left_block, left_slot, left_instruction).cmp(&(
+                right_block,
+                right_slot,
+                right_instruction,
+            )),
+            (Self::Instruction { .. }, Self::PhiEdge { .. }) => Ordering::Less,
+            (Self::PhiEdge { .. }, Self::Instruction { .. }) => Ordering::Greater,
+            (
+                Self::PhiEdge {
+                    predecessor: left_predecessor,
+                    successor: left_successor,
+                    phi: left_phi,
+                    slot: left_slot,
+                },
+                Self::PhiEdge {
+                    predecessor: right_predecessor,
+                    successor: right_successor,
+                    phi: right_phi,
+                    slot: right_slot,
+                },
+            ) => (left_predecessor, left_successor, left_phi, left_slot).cmp(&(
+                right_predecessor,
+                right_successor,
+                right_phi,
+                right_slot,
+            )),
+        }
+    }
+}
+
+impl PartialOrd for UseSite {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl UseSite {
     pub(super) fn block(self) -> BlockId {
         match self {
@@ -114,6 +270,50 @@ impl UseSite {
         match self {
             Self::Instruction { slot, .. } | Self::PhiEdge { slot, .. } => slot,
         }
+    }
+
+    /// Compare immutable allocation coordinates while ignoring the mutable
+    /// dense lowering position carried by instruction uses.
+    fn coordinate_cmp(self, other: Self) -> Ordering {
+        match (self, other) {
+            (
+                Self::Instruction {
+                    block: left_block,
+                    slot: left_slot,
+                    ..
+                },
+                Self::Instruction {
+                    block: right_block,
+                    slot: right_slot,
+                    ..
+                },
+            ) => (left_block, left_slot).cmp(&(right_block, right_slot)),
+            (Self::Instruction { .. }, Self::PhiEdge { .. }) => Ordering::Less,
+            (Self::PhiEdge { .. }, Self::Instruction { .. }) => Ordering::Greater,
+            (
+                Self::PhiEdge {
+                    predecessor: left_predecessor,
+                    successor: left_successor,
+                    phi: left_phi,
+                    slot: left_slot,
+                },
+                Self::PhiEdge {
+                    predecessor: right_predecessor,
+                    successor: right_successor,
+                    phi: right_phi,
+                    slot: right_slot,
+                },
+            ) => (left_predecessor, left_successor, left_phi, left_slot).cmp(&(
+                right_predecessor,
+                right_successor,
+                right_phi,
+                right_slot,
+            )),
+        }
+    }
+
+    pub(super) fn same_coordinate(self, other: Self) -> bool {
+        self.coordinate_cmp(other) == Ordering::Equal
     }
 }
 
@@ -166,12 +366,185 @@ impl LiveInterval {
         }
         false
     }
+
+    pub(super) fn contains_use_coordinate(&self, site: UseSite) -> bool {
+        self.uses
+            .binary_search_by(|candidate| candidate.coordinate_cmp(site))
+            .is_ok()
+    }
+
+    /// Whether two interval rows describe the same physical allocation
+    /// geometry. Dense instruction indices are lowering metadata; stable
+    /// definition/use slots and sparse segments are the allocation identity.
+    pub(super) fn same_range_geometry(&self, other: &Self) -> bool {
+        self.value == other.value
+            && same_definition_coordinate(self.definition, other.definition)
+            && self.segments == other.segments
+            && self.uses.len() == other.uses.len()
+            && self
+                .uses
+                .iter()
+                .copied()
+                .zip(other.uses.iter().copied())
+                .all(|(left, right)| same_use_coordinate(left, right))
+    }
+
+    /// Publish current lowering coordinates while retaining allocation-owned
+    /// sparse geometry and its interval-union token.
+    pub(super) fn relabel_from(&mut self, other: &Self) -> bool {
+        if !self.same_range_geometry(other) {
+            return false;
+        }
+        self.definition = other.definition;
+        self.uses.clone_from(&other.uses);
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LiveIntervals {
     pub block_slots: Vec<BlockSlots>,
     pub intervals: Vec<Option<LiveInterval>>,
+}
+
+impl LiveIntervals {
+    /// Compare exact physical liveness after mapping two legal slot-label
+    /// namespaces onto their emitted instruction order. Allocation IR uses
+    /// stable labels with insertion gaps; materialized MIR uses compact labels.
+    pub(super) fn equivalent_program_order(&self, other: &Self, cfg: &NormalizedCfg) -> bool {
+        if self.block_slots.len() != other.block_slots.len()
+            || self.block_slots.len() != cfg.block_index.len()
+            || self.intervals.len() != other.intervals.len()
+        {
+            return false;
+        }
+        self.intervals
+            .iter()
+            .zip(&other.intervals)
+            .all(|(left, right)| match (left, right) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.value == right.value
+                        && equivalent_definition(
+                            left.definition,
+                            right.definition,
+                            &self.block_slots,
+                            &other.block_slots,
+                            cfg,
+                        )
+                        && left.uses.len() == right.uses.len()
+                        && left
+                            .uses
+                            .iter()
+                            .copied()
+                            .zip(right.uses.iter().copied())
+                            .all(|(left, right)| {
+                                equivalent_use(
+                                    left,
+                                    right,
+                                    &self.block_slots,
+                                    &other.block_slots,
+                                    cfg,
+                                )
+                            })
+                        && left.segments.len() == right.segments.len()
+                        && left
+                            .segments
+                            .iter()
+                            .zip(&right.segments)
+                            .all(|(left, right)| {
+                                if left.block != right.block {
+                                    return false;
+                                }
+                                let Some(&block) = cfg.block_index.get(&left.block) else {
+                                    return false;
+                                };
+                                self.block_slots[block].program_order_rank(left.start)
+                                    == other.block_slots[block].program_order_rank(right.start)
+                                    && self.block_slots[block].program_order_rank(left.end)
+                                        == other.block_slots[block].program_order_rank(right.end)
+                            })
+                }
+                _ => false,
+            })
+    }
+}
+
+fn equivalent_definition(
+    left: DefinitionSite,
+    right: DefinitionSite,
+    left_slots: &[BlockSlots],
+    right_slots: &[BlockSlots],
+    cfg: &NormalizedCfg,
+) -> bool {
+    let (left_block, left_identity, left_slot) = match left {
+        DefinitionSite::Phi { block, phi, slot } => (block, Some(phi), slot),
+        DefinitionSite::Instruction { block, slot, .. } => (block, None, slot),
+    };
+    let (right_block, right_identity, right_slot) = match right {
+        DefinitionSite::Phi { block, phi, slot } => (block, Some(phi), slot),
+        DefinitionSite::Instruction { block, slot, .. } => (block, None, slot),
+    };
+    let Some(&block) = cfg.block_index.get(&left_block) else {
+        return false;
+    };
+    left_block == right_block
+        && left_identity == right_identity
+        && left_slots[block].program_order_rank(left_slot)
+            == right_slots[block].program_order_rank(right_slot)
+}
+
+fn equivalent_use(
+    left: UseSite,
+    right: UseSite,
+    left_slots: &[BlockSlots],
+    right_slots: &[BlockSlots],
+    cfg: &NormalizedCfg,
+) -> bool {
+    match (left, right) {
+        (
+            UseSite::Instruction {
+                block: left_block,
+                slot: left_slot,
+                ..
+            },
+            UseSite::Instruction {
+                block: right_block,
+                slot: right_slot,
+                ..
+            },
+        ) => {
+            let Some(&block) = cfg.block_index.get(&left_block) else {
+                return false;
+            };
+            left_block == right_block
+                && left_slots[block].program_order_rank(left_slot)
+                    == right_slots[block].program_order_rank(right_slot)
+        }
+        (
+            UseSite::PhiEdge {
+                predecessor: left_predecessor,
+                successor: left_successor,
+                phi: left_phi,
+                slot: left_slot,
+            },
+            UseSite::PhiEdge {
+                predecessor: right_predecessor,
+                successor: right_successor,
+                phi: right_phi,
+                slot: right_slot,
+            },
+        ) => {
+            let Some(&block) = cfg.block_index.get(&left_predecessor) else {
+                return false;
+            };
+            (left_predecessor, left_successor, left_phi)
+                == (right_predecessor, right_successor, right_phi)
+                && left_slots[block].program_order_rank(left_slot)
+                    == right_slots[block].program_order_rank(right_slot)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,8 +625,45 @@ pub(super) struct IncrementalLiveness {
     block_facts: Vec<IndexedBlockFacts>,
     definitions: Vec<Option<DefinitionSite>>,
     uses: Vec<Vec<UseSite>>,
-    block_members: Vec<BTreeSet<VReg>>,
+    /// Dense-slot programs must revisit values crossing a relabeled block.
+    /// Stable allocation IR never renumbers physical coordinates, so it does
+    /// not materialize this potentially enormous value-by-block relation.
+    block_members: Option<Vec<FxHashSet<VReg>>>,
     dominators: DominatorIntervals,
+    /// Exact emitted-order length for every active sparse interval. A changed
+    /// block updates only its resident segment contribution; changed geometry
+    /// is rebuilt once from the new sparse range.
+    program_order_lengths: Vec<Option<u64>>,
+}
+
+/// Exact result of one allocation-IR liveness update.
+///
+/// `changed_values` includes rows whose dense lowering coordinates changed.
+/// `range_changed_values` is the strict subset whose physical sparse range
+/// changed and therefore must be removed from and reinserted into regalloc.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct IncrementalLivenessUpdate {
+    pub changed_values: Vec<VReg>,
+    pub range_changed_values: Vec<VReg>,
+    /// Current absolute emitted-order length for every exact row change.
+    /// `None` represents an interval removed by the update.
+    pub live_lengths: Vec<(VReg, Option<u64>)>,
+}
+
+impl IncrementalLivenessUpdate {
+    pub(super) fn extend(&mut self, other: Self) {
+        self.changed_values.extend(other.changed_values);
+        self.changed_values.sort_unstable();
+        self.changed_values.dedup();
+        self.range_changed_values.extend(other.range_changed_values);
+        self.range_changed_values.sort_unstable();
+        self.range_changed_values.dedup();
+        let mut lengths = std::mem::take(&mut self.live_lengths)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        lengths.extend(other.live_lengths);
+        self.live_lengths = lengths.into_iter().collect();
+    }
 }
 
 /// Minimal strict-SSA program view required by exact live-interval analysis.
@@ -286,8 +696,39 @@ pub(super) trait LivenessProgram {
         unreachable!("program reports no additional phi-edge uses")
     }
     fn instruction_count(&self, block: usize) -> usize;
+    /// Stable semantic identity stored in def/use metadata. Immutable MIR uses
+    /// its dense position; allocation IR overrides this with original or
+    /// synthetic instruction identity so insertions do not relabel all facts.
+    fn instruction_identity(&self, _block: usize, instruction: usize) -> Option<usize> {
+        Some(instruction)
+    }
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses;
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg>;
+    /// Allocation IR overrides these points with stable order-maintenance
+    /// labels. Ordinary immutable MIR uses compact block-local coordinates.
+    fn block_entry_slot(&self, _block: usize) -> Option<SlotIndex> {
+        Some(SlotIndex(0))
+    }
+    fn phi_definition_slot(&self, _block: usize) -> Option<SlotIndex> {
+        Some(SlotIndex(1))
+    }
+    fn instruction_use_slot(&self, _block: usize, instruction: usize) -> Option<SlotIndex> {
+        u64::try_from(instruction)
+            .ok()?
+            .checked_mul(3)?
+            .checked_add(2)
+            .map(SlotIndex)
+    }
+    fn block_exit_slot(&self, block: usize) -> Option<SlotIndex> {
+        u64::try_from(self.instruction_count(block))
+            .ok()?
+            .checked_mul(3)?
+            .checked_add(2)
+            .map(SlotIndex)
+    }
+    fn has_stable_instruction_slots(&self) -> bool {
+        false
+    }
 }
 
 impl LivenessProgram for MFunction {
@@ -520,6 +961,59 @@ pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
     Ok(result)
 }
 
+fn checked_program_order_length(
+    interval: &LiveInterval,
+    intervals: &LiveIntervals,
+    cfg: &NormalizedCfg,
+) -> Result<u64, LiveIntervalError> {
+    let mut total = 0_u64;
+    for segment in &interval.segments {
+        let block = cfg
+            .block_index
+            .get(&segment.block)
+            .copied()
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.LENGTH_BLOCK",
+                    Some(segment.block),
+                    None,
+                    vec![interval.value],
+                    "live segment is outside the normalized CFG",
+                )
+            })?;
+        let length = intervals.block_slots[block]
+            .program_order_distance(segment.start, segment.end)
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.LENGTH_SLOT",
+                    Some(segment.block),
+                    None,
+                    vec![interval.value],
+                    "live segment endpoints are outside emitted instruction order",
+                )
+            })?;
+        total = total.checked_add(length).ok_or_else(|| {
+            LiveIntervalError::new(
+                "LIVE_INTERVAL.LENGTH_RANGE",
+                Some(segment.block),
+                None,
+                vec![interval.value],
+                "program-order live length exceeds u64",
+            )
+        })?;
+    }
+    if total == 0 {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.LENGTH_RANGE",
+            Some(interval.definition.block()),
+            None,
+            vec![interval.value],
+            "active interval has zero program-order length",
+        ));
+    }
+    Ok(total)
+}
+
 impl IncrementalLiveness {
     pub(super) fn build<P: LivenessProgram + ?Sized>(
         program: &P,
@@ -576,22 +1070,45 @@ impl IncrementalLiveness {
             }
         }
 
-        let mut block_members = (0..program.block_count())
-            .map(|_| BTreeSet::new())
-            .collect::<Vec<_>>();
-        for interval in intervals.intervals.iter().flatten() {
-            for segment in &interval.segments {
-                let block = cfg.block_index[&segment.block];
-                block_members[block].insert(interval.value);
+        let block_members = if program.has_stable_instruction_slots() {
+            None
+        } else {
+            let mut block_members = (0..program.block_count())
+                .map(|_| FxHashSet::default())
+                .collect::<Vec<_>>();
+            for interval in intervals.intervals.iter().flatten() {
+                for segment in &interval.segments {
+                    let block = cfg.block_index[&segment.block];
+                    block_members[block].insert(interval.value);
+                }
             }
-        }
+            Some(block_members)
+        };
+        let program_order_lengths = intervals
+            .intervals
+            .iter()
+            .map(|interval| {
+                interval
+                    .as_ref()
+                    .map(|interval| checked_program_order_length(interval, intervals, cfg))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             block_facts,
             definitions,
             uses,
             block_members,
             dominators: DominatorIntervals::build(program, cfg)?,
+            program_order_lengths,
         })
+    }
+
+    pub(super) fn program_order_length(&self, value: VReg) -> Option<u64> {
+        self.program_order_lengths
+            .get(value.0 as usize)
+            .copied()
+            .flatten()
     }
 
     /// Update exact intervals for blocks whose allocation-IR rows changed.
@@ -605,9 +1122,27 @@ impl IncrementalLiveness {
         intervals: &mut LiveIntervals,
         changed_blocks: &BTreeSet<BlockId>,
     ) -> Result<Vec<VReg>, LiveIntervalError> {
+        Ok(self
+            .update_delta(program, cfg, intervals, changed_blocks)?
+            .changed_values)
+    }
+
+    /// Update liveness while preserving the distinction between lowering-only
+    /// relabels and physical sparse-range changes.
+    pub(super) fn update_delta<P: LivenessProgram + ?Sized>(
+        &mut self,
+        program: &P,
+        cfg: &NormalizedCfg,
+        intervals: &mut LiveIntervals,
+        changed_blocks: &BTreeSet<BlockId>,
+    ) -> Result<IncrementalLivenessUpdate, LiveIntervalError> {
         check_model_shape(program, cfg)?;
         if self.block_facts.len() != program.block_count()
-            || self.block_members.len() != program.block_count()
+            || self
+                .block_members
+                .as_ref()
+                .is_some_and(|members| members.len() != program.block_count())
+            || self.block_members.is_none() != program.has_stable_instruction_slots()
             || intervals.block_slots.len() != program.block_count()
             || program.value_count() < self.definitions.len() as u32
         {
@@ -620,12 +1155,13 @@ impl IncrementalLiveness {
             ));
         }
         if changed_blocks.is_empty() {
-            return Ok(Vec::new());
+            return Ok(IncrementalLivenessUpdate::default());
         }
 
         let next_value_count = program.value_count() as usize;
         self.definitions.resize(next_value_count, None);
         self.uses.resize_with(next_value_count, Vec::new);
+        self.program_order_lengths.resize(next_value_count, None);
         intervals.intervals.resize(next_value_count, None);
 
         let mut changed_rows = Vec::with_capacity(changed_blocks.len());
@@ -644,71 +1180,182 @@ impl IncrementalLiveness {
         changed_rows.sort_unstable();
         changed_rows.dedup();
 
-        let mut affected = BTreeSet::<VReg>::new();
+        let mut affected = Vec::<VReg>::new();
+        let mut affected_marks = vec![false; next_value_count];
         let mut replacements = Vec::with_capacity(changed_rows.len());
+        let mut previous_slots = Vec::with_capacity(changed_rows.len());
+        let mut removed_definitions = Vec::new();
+        let mut added_definitions = Vec::new();
+        let mut removed_uses = Vec::new();
+        let mut added_uses = Vec::new();
         for &block in &changed_rows {
-            affected.extend(self.block_members[block].iter().copied());
-            for &(value, definition) in &self.block_facts[block].definitions {
-                affected.insert(value);
-                let slot = self
-                    .definitions
-                    .get_mut(value.0 as usize)
-                    .ok_or_else(|| value_range_error(definition.block(), value, "definition"))?;
-                if *slot != Some(definition) {
-                    return Err(LiveIntervalError::new(
-                        "LIVE_INTERVAL.INCREMENTAL_DEFINITION",
-                        Some(definition.block()),
-                        None,
-                        vec![value],
-                        "cached block definition differs from the global fact index",
-                    ));
-                }
-                *slot = None;
-            }
-            for &(value, site) in &self.block_facts[block].uses {
-                affected.insert(value);
-                let value_uses = self
-                    .uses
-                    .get_mut(value.0 as usize)
-                    .ok_or_else(|| value_range_error(site.block(), value, "use"))?;
-                let before = value_uses.len();
-                value_uses.retain(|candidate| *candidate != site);
-                if value_uses.len() == before {
-                    return Err(LiveIntervalError::new(
-                        "LIVE_INTERVAL.INCREMENTAL_USE",
-                        Some(site.block()),
-                        None,
-                        vec![value],
-                        "cached block use is absent from the global fact index",
-                    ));
+            let block_id = program.block_id(block);
+            if let Some(block_members) = &self.block_members {
+                for &value in &block_members[block] {
+                    mark_affected_value(&mut affected, &mut affected_marks, value, block_id)?;
                 }
             }
             let slots = assign_block_slots(program, block)?;
-            intervals.block_slots[block] = slots;
+            let old_slots = std::mem::replace(&mut intervals.block_slots[block], slots);
+            if self.block_members.is_some() {
+                previous_slots.push((block, old_slots));
+            }
             let facts = scan_indexed_block(program, cfg, &intervals.block_slots, block)?;
-            affected.extend(facts.definitions.iter().map(|(value, _)| *value));
-            affected.extend(facts.uses.iter().map(|(value, _)| *value));
+            append_sorted_difference(
+                &mut removed_definitions,
+                &self.block_facts[block].definitions,
+                &facts.definitions,
+            );
+            append_sorted_difference(
+                &mut added_definitions,
+                &facts.definitions,
+                &self.block_facts[block].definitions,
+            );
+            append_sorted_difference(
+                &mut removed_uses,
+                &self.block_facts[block].uses,
+                &facts.uses,
+            );
+            append_sorted_difference(&mut added_uses, &facts.uses, &self.block_facts[block].uses);
             replacements.push((block, facts));
         }
 
+        removed_definitions.sort_unstable();
+        added_definitions.sort_unstable();
+        removed_uses.sort_unstable();
+        added_uses.sort_unstable();
+
+        for &(value, definition) in &removed_definitions {
+            mark_affected_value(
+                &mut affected,
+                &mut affected_marks,
+                value,
+                definition.block(),
+            )?;
+            let slot = self
+                .definitions
+                .get_mut(value.0 as usize)
+                .ok_or_else(|| value_range_error(definition.block(), value, "definition"))?;
+            if *slot != Some(definition) {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.INCREMENTAL_DEFINITION",
+                    Some(definition.block()),
+                    None,
+                    vec![value],
+                    "cached block definition differs from the global fact index",
+                ));
+            }
+            *slot = None;
+        }
+        for &(value, definition) in &added_definitions {
+            mark_affected_value(
+                &mut affected,
+                &mut affected_marks,
+                value,
+                definition.block(),
+            )?;
+            record_definition(&mut self.definitions, value, definition)?;
+        }
+        apply_sorted_use_fact_delta(
+            &mut self.uses,
+            &removed_uses,
+            &added_uses,
+            &mut affected,
+            &mut affected_marks,
+        )?;
+
         for (block, facts) in replacements {
-            add_indexed_facts(&mut self.definitions, &mut self.uses, &facts)?;
             self.block_facts[block] = facts;
         }
-        for value in &affected {
-            self.uses[value.0 as usize].sort_unstable();
-            self.uses[value.0 as usize].dedup();
-        }
+        affected.sort_unstable();
 
-        for value in &affected {
-            if let Some(previous) = intervals.intervals[value.0 as usize].as_ref() {
-                for segment in &previous.segments {
-                    self.block_members[cfg.block_index[&segment.block]].remove(value);
+        if let Some(block_members) = &self.block_members {
+            for (block, old_slots) in &previous_slots {
+                let block_id = program.block_id(*block);
+                let new_slots = &intervals.block_slots[*block];
+                for &value in &block_members[*block] {
+                    let Some(interval) = intervals.intervals[value.0 as usize].as_ref() else {
+                        continue;
+                    };
+                    let Ok(segment) = interval
+                        .segments
+                        .binary_search_by_key(&block_id, |segment| segment.block)
+                        .map(|row| interval.segments[row])
+                    else {
+                        continue;
+                    };
+                    let Some(old_length) =
+                        old_slots.program_order_distance(segment.start, segment.end)
+                    else {
+                        continue;
+                    };
+                    let Some(new_length) =
+                        new_slots.program_order_distance(segment.start, segment.end)
+                    else {
+                        continue;
+                    };
+                    let delta = i128::from(new_length) - i128::from(old_length);
+                    if delta != 0 {
+                        let current =
+                            self.program_order_lengths[value.0 as usize].ok_or_else(|| {
+                                LiveIntervalError::new(
+                                    "LIVE_INTERVAL.LENGTH_CACHE",
+                                    Some(block_id),
+                                    None,
+                                    vec![value],
+                                    "active block member has no cached program-order length",
+                                )
+                            })?;
+                        self.program_order_lengths[value.0 as usize] = Some(
+                            i128::from(current)
+                                .checked_add(delta)
+                                .and_then(|length| u64::try_from(length).ok())
+                                .filter(|length| *length != 0)
+                                .ok_or_else(|| {
+                                    LiveIntervalError::new(
+                                        "LIVE_INTERVAL.LENGTH_CACHE",
+                                        Some(block_id),
+                                        None,
+                                        vec![value],
+                                        "incremental program-order length is zero or outside u64",
+                                    )
+                                })?,
+                        );
+                    }
                 }
             }
         }
-        let mut changed_values = Vec::new();
+
+        let mut update = IncrementalLivenessUpdate::default();
         for value in affected {
+            let definition = self.definitions[value.0 as usize];
+            let value_uses = &self.uses[value.0 as usize];
+            let row = value.0 as usize;
+            let can_relabel = program.has_stable_instruction_slots()
+                && intervals.intervals[row].as_ref().is_some_and(|previous| {
+                    can_relabel_unchanged_interval(previous, definition, value_uses)
+                });
+            if can_relabel {
+                let previous = intervals.intervals[row]
+                    .as_mut()
+                    .expect("stable relabel candidate disappeared");
+                let definition = definition.expect("stable relabel has no definition");
+                if previous.definition != definition || previous.uses != *value_uses {
+                    previous.definition = definition;
+                    previous.uses.clone_from(value_uses);
+                    update.changed_values.push(value);
+                }
+                continue;
+            }
+
+            if let (Some(block_members), Some(previous)) = (
+                self.block_members.as_mut(),
+                intervals.intervals[row].as_ref(),
+            ) {
+                for segment in &previous.segments {
+                    block_members[cfg.block_index[&segment.block]].remove(&value);
+                }
+            }
             let next = build_sparse_value_interval(
                 program,
                 cfg,
@@ -718,18 +1365,90 @@ impl IncrementalLiveness {
                 &self.dominators,
                 value,
             )?;
-            if intervals.intervals[value.0 as usize] != next {
-                changed_values.push(value);
+            if intervals.intervals[row] != next {
+                update.changed_values.push(value);
+                update.range_changed_values.push(value);
             }
-            intervals.intervals[value.0 as usize] = next;
-            if let Some(interval) = intervals.intervals[value.0 as usize].as_ref() {
-                for segment in &interval.segments {
-                    self.block_members[cfg.block_index[&segment.block]].insert(value);
+            intervals.intervals[row] = next;
+            self.program_order_lengths[row] = intervals.intervals[row]
+                .as_ref()
+                .map(|interval| checked_program_order_length(interval, intervals, cfg))
+                .transpose()?;
+            if let Some(interval) = intervals.intervals[row].as_ref() {
+                if let Some(block_members) = self.block_members.as_mut() {
+                    for segment in &interval.segments {
+                        block_members[cfg.block_index[&segment.block]].insert(value);
+                    }
                 }
             }
         }
-        Ok(changed_values)
+        update.live_lengths = update
+            .changed_values
+            .iter()
+            .copied()
+            .map(|value| (value, self.program_order_length(value)))
+            .collect();
+        Ok(update)
     }
+}
+
+/// Dense allocation-IR positions are diagnostics/lowering coordinates, not
+/// live-range geometry. Stable slots let an insertion relabel those positions
+/// without solving CFG liveness again for every value crossing the block.
+fn can_relabel_unchanged_interval(
+    previous: &LiveInterval,
+    definition: Option<DefinitionSite>,
+    uses: &[UseSite],
+) -> bool {
+    let Some(definition) = definition else {
+        return false;
+    };
+    if !same_definition_coordinate(previous.definition, definition)
+        || previous.uses.len() != uses.len()
+        || previous
+            .uses
+            .iter()
+            .copied()
+            .zip(uses.iter().copied())
+            .any(|(left, right)| !same_use_coordinate(left, right))
+    {
+        return false;
+    }
+    true
+}
+
+fn same_definition_coordinate(left: DefinitionSite, right: DefinitionSite) -> bool {
+    match (left, right) {
+        (
+            DefinitionSite::Phi {
+                block: left_block,
+                phi: left_phi,
+                slot: left_slot,
+            },
+            DefinitionSite::Phi {
+                block: right_block,
+                phi: right_phi,
+                slot: right_slot,
+            },
+        ) => (left_block, left_phi, left_slot) == (right_block, right_phi, right_slot),
+        (
+            DefinitionSite::Instruction {
+                block: left_block,
+                slot: left_slot,
+                ..
+            },
+            DefinitionSite::Instruction {
+                block: right_block,
+                slot: right_slot,
+                ..
+            },
+        ) => (left_block, left_slot) == (right_block, right_slot),
+        _ => false,
+    }
+}
+
+fn same_use_coordinate(left: UseSite, right: UseSite) -> bool {
+    left.same_coordinate(right)
 }
 
 fn value_range_error(block: BlockId, value: VReg, kind: &str) -> LiveIntervalError {
@@ -740,6 +1459,179 @@ fn value_range_error(block: BlockId, value: VReg, kind: &str) -> LiveIntervalErr
         vec![value],
         format!("incremental {kind} is outside the allocation VReg table"),
     )
+}
+
+fn mark_affected_value(
+    affected: &mut Vec<VReg>,
+    marks: &mut [bool],
+    value: VReg,
+    block: BlockId,
+) -> Result<(), LiveIntervalError> {
+    let mark = marks
+        .get_mut(value.0 as usize)
+        .ok_or_else(|| value_range_error(block, value, "changed-block membership"))?;
+    if !*mark {
+        *mark = true;
+        affected.push(value);
+    }
+    Ok(())
+}
+
+fn append_sorted_difference<T: Copy + Ord>(output: &mut Vec<T>, left: &[T], right: &[T]) {
+    let mut left_index = 0;
+    let mut right_index = 0;
+    while left_index < left.len() {
+        while right_index < right.len() && right[right_index] < left[left_index] {
+            right_index += 1;
+        }
+        if right_index == right.len() || left[left_index] < right[right_index] {
+            output.push(left[left_index]);
+        }
+        left_index += 1;
+    }
+}
+
+/// Apply all changed-block use facts once per value. The previous updater ran
+/// `retain` over the complete global use row for every removed site, making a
+/// split round quadratic in a heavily used RTL value. Both sides are ordered,
+/// so removal and insertion are exact linear merges.
+fn apply_sorted_use_fact_delta(
+    uses: &mut [Vec<UseSite>],
+    removed: &[(VReg, UseSite)],
+    added: &[(VReg, UseSite)],
+    affected: &mut Vec<VReg>,
+    affected_marks: &mut [bool],
+) -> Result<(), LiveIntervalError> {
+    let mut removed_index = 0;
+    let mut added_index = 0;
+    while removed_index < removed.len() || added_index < added.len() {
+        let value = match (removed.get(removed_index), added.get(added_index)) {
+            (Some((removed, _)), Some((added, _))) => (*removed).min(*added),
+            (Some((removed, _)), None) => *removed,
+            (None, Some((added, _))) => *added,
+            (None, None) => break,
+        };
+        let removed_end = removed_index
+            + removed[removed_index..].partition_point(|(candidate, _)| *candidate == value);
+        let added_end = added_index
+            + added[added_index..].partition_point(|(candidate, _)| *candidate == value);
+        let block = removed
+            .get(removed_index)
+            .filter(|(candidate, _)| *candidate == value)
+            .or_else(|| {
+                added
+                    .get(added_index)
+                    .filter(|(candidate, _)| *candidate == value)
+            })
+            .map(|(_, site)| site.block())
+            .expect("use fact delta value has no site");
+        mark_affected_value(affected, affected_marks, value, block)?;
+        let value_uses = uses
+            .get_mut(value.0 as usize)
+            .ok_or_else(|| value_range_error(block, value, "use"))?;
+        replace_sorted_uses(
+            value_uses,
+            &removed[removed_index..removed_end],
+            &added[added_index..added_end],
+            value,
+        )?;
+        removed_index = removed_end;
+        added_index = added_end;
+    }
+    Ok(())
+}
+
+fn replace_sorted_uses(
+    existing: &mut Vec<UseSite>,
+    removed: &[(VReg, UseSite)],
+    added: &[(VReg, UseSite)],
+    value: VReg,
+) -> Result<(), LiveIntervalError> {
+    if let Some(duplicate) = removed.windows(2).find(|pair| pair[0].1 == pair[1].1) {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.INCREMENTAL_USE",
+            Some(duplicate[0].1.block()),
+            None,
+            vec![value],
+            "changed blocks remove the same cached use more than once",
+        ));
+    }
+    if let Some(duplicate) = added.windows(2).find(|pair| pair[0].1 == pair[1].1) {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.INCREMENTAL_USE",
+            Some(duplicate[0].1.block()),
+            None,
+            vec![value],
+            "changed blocks add the same use more than once",
+        ));
+    }
+
+    let mut retained = Vec::with_capacity(existing.len().saturating_sub(removed.len()));
+    let mut existing_index = 0;
+    let mut removed_index = 0;
+    while removed_index < removed.len() {
+        let removed_site = removed[removed_index].1;
+        let Some(&existing_site) = existing.get(existing_index) else {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.INCREMENTAL_USE",
+                Some(removed_site.block()),
+                None,
+                vec![value],
+                "cached block use is absent from the global fact index",
+            ));
+        };
+        match existing_site.cmp(&removed_site) {
+            Ordering::Less => {
+                retained.push(existing_site);
+                existing_index += 1;
+            }
+            Ordering::Equal => {
+                existing_index += 1;
+                removed_index += 1;
+            }
+            Ordering::Greater => {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.INCREMENTAL_USE",
+                    Some(removed_site.block()),
+                    None,
+                    vec![value],
+                    "cached block use is absent from the global fact index",
+                ));
+            }
+        }
+    }
+    retained.extend_from_slice(&existing[existing_index..]);
+
+    let mut merged = Vec::with_capacity(retained.len().saturating_add(added.len()));
+    let mut retained_index = 0;
+    let mut added_index = 0;
+    while retained_index < retained.len() && added_index < added.len() {
+        let retained_site = retained[retained_index];
+        let added_site = added[added_index].1;
+        match retained_site.cmp(&added_site) {
+            Ordering::Less => {
+                merged.push(retained_site);
+                retained_index += 1;
+            }
+            Ordering::Greater => {
+                merged.push(added_site);
+                added_index += 1;
+            }
+            Ordering::Equal => {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.INCREMENTAL_USE",
+                    Some(added_site.block()),
+                    None,
+                    vec![value],
+                    "new block use already exists in the global fact index",
+                ));
+            }
+        }
+    }
+    merged.extend_from_slice(&retained[retained_index..]);
+    merged.extend(added[added_index..].iter().map(|(_, site)| *site));
+    *existing = merged;
+    Ok(())
 }
 
 fn add_indexed_facts(
@@ -763,7 +1655,7 @@ fn scan_indexed_block<P: LivenessProgram + ?Sized>(
     block: usize,
 ) -> Result<IndexedBlockFacts, LiveIntervalError> {
     let block_id = program.block_id(block);
-    let block_slots = slots.get(block).copied().ok_or_else(|| {
+    let block_slots = slots.get(block).ok_or_else(|| {
         LiveIntervalError::new(
             "LIVE_INTERVAL.INCREMENTAL_BLOCK",
             Some(block_id),
@@ -787,6 +1679,17 @@ fn scan_indexed_block<P: LivenessProgram + ?Sized>(
         }
     }
     for instruction in 0..program.instruction_count(block) {
+        let instruction_identity = program
+            .instruction_identity(block, instruction)
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.INSTRUCTION_IDENTITY",
+                    Some(block_id),
+                    Some(instruction),
+                    Vec::new(),
+                    "instruction has no stable liveness identity",
+                )
+            })?;
         let use_slot = block_slots.instruction_use(instruction).ok_or_else(|| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
@@ -804,7 +1707,7 @@ fn scan_indexed_block<P: LivenessProgram + ?Sized>(
                 value,
                 UseSite::Instruction {
                     block: block_id,
-                    instruction,
+                    instruction: instruction_identity,
                     slot: use_slot,
                 },
             )
@@ -814,7 +1717,7 @@ fn scan_indexed_block<P: LivenessProgram + ?Sized>(
                 value,
                 DefinitionSite::Instruction {
                     block: block_id,
-                    instruction,
+                    instruction: instruction_identity,
                     slot: block_slots.instruction_def(instruction).unwrap(),
                 },
             ));
@@ -877,9 +1780,7 @@ fn scan_indexed_block<P: LivenessProgram + ?Sized>(
             }
         }
     }
-    facts
-        .definitions
-        .sort_unstable_by_key(|(value, site)| (*value, site.block(), site.slot()));
+    facts.definitions.sort_unstable();
     facts.uses.sort_unstable();
     facts.uses.dedup();
     Ok(facts)
@@ -964,7 +1865,7 @@ fn build_sparse_value_interval<P: LivenessProgram + ?Sized>(
     live_blocks.extend(last_use.keys().copied());
     let mut segments = Vec::with_capacity(live_blocks.len());
     for block in live_blocks {
-        let block_slots = slots[block];
+        let block_slots = &slots[block];
         let start = if block == definition_block {
             definition.slot()
         } else {
@@ -1052,42 +1953,100 @@ fn assign_block_slots<P: LivenessProgram + ?Sized>(
 ) -> Result<BlockSlots, LiveIntervalError> {
     let block_id = program.block_id(block);
     let block_instruction_count = program.instruction_count(block);
-    let instruction_count = u64::try_from(block_instruction_count).map_err(|_| {
+    let entry = program.block_entry_slot(block).ok_or_else(|| {
         LiveIntervalError::new(
             "LIVE_INTERVAL.SLOT_RANGE",
             Some(block_id),
             None,
             Vec::new(),
-            "instruction count exceeds the slot-index domain",
+            "block entry is outside the slot-index domain",
         )
     })?;
-    // Slot coordinates are block-local. LiveSegment already carries its
-    // BlockId, so adding instructions to one allocation-IR block must not
-    // renumber every interval in all later blocks.
-    let entry = 0u64;
-    let phi_def = 1u64;
-    // Each instruction has distinct use, clobber, and definition subslots.
-    // This lets a fixed target reservation overlap only values live through
-    // the instruction: a last use ends at the clobber slot, while a result
-    // begins at the later definition slot.
-    let exit = instruction_count
-        .checked_mul(3)
-        .and_then(|width| entry.checked_add(width))
-        .and_then(|slot| slot.checked_add(2))
-        .ok_or_else(|| {
+    let phi_def = program.phi_definition_slot(block).ok_or_else(|| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.SLOT_RANGE",
+            Some(block_id),
+            None,
+            Vec::new(),
+            "phi definition is outside the slot-index domain",
+        )
+    })?;
+    let mut instructions = Vec::with_capacity(block_instruction_count);
+    for instruction in 0..block_instruction_count {
+        let use_ = program
+            .instruction_use_slot(block, instruction)
+            .ok_or_else(|| {
+                LiveIntervalError::new(
+                    "LIVE_INTERVAL.SLOT_RANGE",
+                    Some(block_id),
+                    Some(instruction),
+                    Vec::new(),
+                    "instruction use is outside the slot-index domain",
+                )
+            })?;
+        let clobber = use_.next().ok_or_else(|| {
             LiveIntervalError::new(
                 "LIVE_INTERVAL.SLOT_RANGE",
                 Some(block_id),
-                None,
+                Some(instruction),
                 Vec::new(),
-                "block slot range overflows u64",
+                "instruction clobber is outside the slot-index domain",
             )
         })?;
+        let def = clobber.next().ok_or_else(|| {
+            LiveIntervalError::new(
+                "LIVE_INTERVAL.SLOT_RANGE",
+                Some(block_id),
+                Some(instruction),
+                Vec::new(),
+                "instruction definition is outside the slot-index domain",
+            )
+        })?;
+        if instructions
+            .last()
+            .is_some_and(|previous: &InstructionSlots| previous.def >= use_)
+        {
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.SLOT_ORDER",
+                Some(block_id),
+                Some(instruction),
+                Vec::new(),
+                "instruction program points are duplicated or out of order",
+            ));
+        }
+        instructions.push(InstructionSlots { use_, clobber, def });
+    }
+    let exit = program.block_exit_slot(block).ok_or_else(|| {
+        LiveIntervalError::new(
+            "LIVE_INTERVAL.SLOT_RANGE",
+            Some(block_id),
+            None,
+            Vec::new(),
+            "block exit is outside the slot-index domain",
+        )
+    })?;
+    if entry >= phi_def
+        || instructions
+            .first()
+            .is_some_and(|instruction| phi_def >= instruction.use_)
+        || instructions
+            .last()
+            .is_some_and(|instruction| instruction.def >= exit)
+        || (instructions.is_empty() && phi_def >= exit)
+    {
+        return Err(LiveIntervalError::new(
+            "LIVE_INTERVAL.SLOT_ORDER",
+            Some(block_id),
+            None,
+            Vec::new(),
+            "block boundary and instruction program points are out of order",
+        ));
+    }
     Ok(BlockSlots {
-        entry: SlotIndex(entry),
-        phi_def: SlotIndex(phi_def),
-        exit: SlotIndex(exit),
-        instruction_count: block_instruction_count,
+        entry,
+        phi_def,
+        exit,
+        instructions,
     })
 }
 
@@ -1164,7 +2123,7 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
 
     for block_index in 0..program.block_count() {
         let block_id = program.block_id(block_index);
-        let block_slots = slots[block_index];
+        let block_slots = &slots[block_index];
         for phi_index in 0..program.phi_count(block_index) {
             let destination = program.phi_definition(block_index, phi_index);
             if !program.phi_definition_in_register(block_index, phi_index) {
@@ -1182,6 +2141,17 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
 
         let mut seen_definitions = blocks[block_index].definitions.clone();
         for instruction in 0..program.instruction_count(block_index) {
+            let instruction_identity = program
+                .instruction_identity(block_index, instruction)
+                .ok_or_else(|| {
+                    LiveIntervalError::new(
+                        "LIVE_INTERVAL.INSTRUCTION_IDENTITY",
+                        Some(block_id),
+                        Some(instruction),
+                        Vec::new(),
+                        "instruction has no stable liveness identity",
+                    )
+                })?;
             let use_slot = block_slots.instruction_use(instruction).ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.SLOT_RANGE",
@@ -1197,7 +2167,7 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
             for value in instruction_uses {
                 let site = UseSite::Instruction {
                     block: block_id,
-                    instruction,
+                    instruction: instruction_identity,
                     slot: use_slot,
                 };
                 record_use(&mut uses, value, site)?;
@@ -1213,7 +2183,7 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
             if let Some(value) = program.instruction_definition(block_index, instruction) {
                 let site = DefinitionSite::Instruction {
                     block: block_id,
-                    instruction,
+                    instruction: instruction_identity,
                     slot: block_slots.instruction_def(instruction).ok_or_else(|| {
                         LiveIntervalError::new(
                             "LIVE_INTERVAL.SLOT_RANGE",
@@ -1397,7 +2367,7 @@ fn build_intervals<P: LivenessProgram + ?Sized>(
         values.extend(live_out[block_index].iter().copied());
         values.extend(facts.blocks[block_index].definitions.iter().copied());
         values.extend(facts.blocks[block_index].last_use.keys().copied());
-        let block_slots = slots[block_index];
+        let block_slots = &slots[block_index];
         for value in values {
             let Some(definition) = facts.definitions.get(value.0 as usize).copied().flatten()
             else {
@@ -1583,7 +2553,7 @@ impl LiveIntervals {
                         "segment references a missing block",
                     ));
                 };
-                let slots = expected_slots[block];
+                let slots = &expected_slots[block];
                 let limit = slots.exit.next().ok_or_else(|| {
                     LiveIntervalError::new(
                         "LIVE_INTERVAL.SLOT_RANGE",
@@ -1945,7 +2915,7 @@ mod tests {
         let cfg = normalize(&mut function);
         let mut intervals = analyze(&function, &cfg).unwrap();
         let mut incremental = IncrementalLiveness::build(&function, &cfg, &intervals).unwrap();
-        let unchanged_successor_slots = intervals.block_slots[1];
+        let unchanged_successor_slots = intervals.block_slots[1].clone();
 
         function.blocks[0].insts.insert(
             1,

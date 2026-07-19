@@ -211,7 +211,7 @@ pub(super) fn lower(
         &nonregister_definitions,
     )
     .map_err(AllocationLowerError::live)?;
-    if rebuilt != expanded.intervals {
+    if !rebuilt.equivalent_program_order(&expanded.intervals, cfg) {
         return Err(AllocationLowerError::new(
             "ALLOCATION_LOWER.LIVENESS_IDENTITY",
             None,
@@ -574,7 +574,7 @@ mod tests {
                 && u32::try_from(*offset).unwrap() < lowered.spill_frame_size
         }));
         let rebuilt = live_interval::analyze(&lowered.function, &cfg).unwrap();
-        assert_eq!(rebuilt, expanded.intervals);
+        assert!(rebuilt.equivalent_program_order(&expanded.intervals, &cfg));
         assert_eq!(
             lowered.assignment.sorted_entries().len(),
             expanded
