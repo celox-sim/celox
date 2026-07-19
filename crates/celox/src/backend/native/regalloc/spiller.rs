@@ -1,0 +1,736 @@
+//! Concrete spill policy and allocation-IR edits.
+//!
+//! Split analysis owns only live-range topology.  This module owns every
+//! decision that turns a logical spill remainder into stack, State-MemorySSA,
+//! or pure-rematerialization operations.  Register children produced by a
+//! reload are returned to ordinary greedy allocation; only exact one-use
+//! transition products are terminal allocation ranges.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use crate::backend::native::mir::{BlockId, Uses, VReg};
+
+use super::allocation_expand::{
+    self, ExpandedAllocationProblem, ExpandedRegisterRegion, ExpandedStackHome, ExpandedUseSource,
+    RegisterRegionId,
+};
+use super::allocation_ir::{StackHomeId, SyntheticOperation};
+use super::assignment::PhysReg;
+use super::home_graph::{
+    BundleUseId, HomeGraph, HomeKind, LiveBundle, LiveBundleId, STACK_HOME_CREATION_COST,
+    STACK_HOME_MATERIALIZATION_COST,
+};
+use super::interval_allocator::{HomeSelection, IntervalAllocationError, RootHomePlan};
+use super::live_interval::{DefinitionSite, UseSite};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpillEntryKind {
+    Materialized,
+    RegisterRegion,
+}
+
+/// Topology handed from SplitEditor to the spiller.  It deliberately contains
+/// no home choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpillEntry {
+    pub entry: BundleUseId,
+    pub uses: Vec<BundleUseId>,
+    pub kind: SpillEntryKind,
+    pub preferred_register: Option<PhysReg>,
+}
+
+/// Concrete home decisions for one logical spill remainder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpillPlan {
+    pub root: LiveBundleId,
+    pub value: VReg,
+    selections: BTreeMap<BundleUseId, HomeSelection>,
+    pub total_cost: u64,
+}
+
+impl SpillPlan {
+    pub(super) fn selection(&self, entry: BundleUseId) -> Option<&HomeSelection> {
+        self.selections.get(&entry)
+    }
+
+    #[cfg(test)]
+    pub(super) fn selections(&self) -> &BTreeMap<BundleUseId, HomeSelection> {
+        &self.selections
+    }
+}
+
+/// Allocation facts changed while one spill remainder is materialized.
+#[derive(Debug, Default)]
+pub(super) struct SpillEdit {
+    pub liveness_blocks: BTreeSet<BlockId>,
+    pub constraint_blocks: BTreeSet<BlockId>,
+}
+
+impl SpillEdit {
+    fn record_block(&mut self, block: BlockId) {
+        self.liveness_blocks.insert(block);
+        self.constraint_blocks.insert(block);
+    }
+
+    fn record_use(&mut self, use_: UseSite) {
+        self.record_block(use_.block());
+        if let UseSite::PhiEdge { successor, .. } = use_ {
+            self.constraint_blocks.insert(successor);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpillerError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub value: Option<VReg>,
+    pub root: Option<LiveBundleId>,
+    pub message: String,
+}
+
+impl SpillerError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        value: Option<VReg>,
+        root: Option<LiveBundleId>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            value,
+            root,
+            message: message.into(),
+        }
+    }
+
+    fn home(error: IntervalAllocationError, root: LiveBundleId) -> Self {
+        Self::new(error.rule, error.block, None, Some(root), error.message)
+    }
+
+    fn expand(error: allocation_expand::AllocationExpandError) -> Self {
+        Self::new(error.rule, error.block, None, error.root, error.message)
+    }
+}
+
+impl fmt::Display for SpillerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.rule)?;
+        if let Some(block) = self.block {
+            write!(formatter, " at {block}")?;
+        }
+        if let Some(value) = self.value {
+            write!(formatter, " value={value}")?;
+        }
+        if let Some(root) = self.root {
+            write!(formatter, " root={root:?}")?;
+        }
+        write!(formatter, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for SpillerError {}
+
+/// Function-lifetime spill cost model and concrete editor.
+#[derive(Debug)]
+pub(super) struct Spiller {
+    home_plans: Vec<RootHomePlan>,
+}
+
+impl Spiller {
+    pub(super) fn build(graph: &HomeGraph) -> Result<Self, SpillerError> {
+        let mut home_plans = Vec::with_capacity(graph.bundles.len());
+        for (row, root) in graph.bundles.iter().enumerate() {
+            if root.id.0 as usize != row {
+                return Err(SpillerError::new(
+                    "SPILLER.ROOT_IDENTITY",
+                    Some(root.definition.block()),
+                    Some(root.origin),
+                    Some(root.id),
+                    "HomeGraph root differs from its function-lifetime spill row",
+                ));
+            }
+            home_plans.push(
+                RootHomePlan::build(graph, root)
+                    .map_err(|error| SpillerError::home(error, root.id))?,
+            );
+        }
+        Ok(Self { home_plans })
+    }
+
+    pub(super) fn home_plans(&self) -> &[RootHomePlan] {
+        &self.home_plans
+    }
+
+    pub(super) fn home_plan(&self, root: LiveBundleId) -> Result<&RootHomePlan, SpillerError> {
+        self.home_plans.get(root.0 as usize).ok_or_else(|| {
+            SpillerError::new(
+                "SPILLER.HOME_ROOT",
+                None,
+                None,
+                Some(root),
+                "spill root has no function-lifetime home-cost row",
+            )
+        })
+    }
+
+    pub(super) fn stack_home_exists(
+        &self,
+        expanded: &ExpandedAllocationProblem,
+        root: LiveBundleId,
+    ) -> Result<bool, SpillerError> {
+        Ok(stack_home(expanded, root)?.is_some())
+    }
+
+    pub(super) fn plan(
+        &self,
+        expanded: &ExpandedAllocationProblem,
+        root: LiveBundleId,
+        value: VReg,
+        entries: &[SpillEntry],
+    ) -> Result<SpillPlan, SpillerError> {
+        let mut ordered = entries.iter().map(|entry| entry.entry).collect::<Vec<_>>();
+        ordered.sort_unstable();
+        if ordered.is_empty() || ordered.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SpillerError::new(
+                "SPILLER.ENTRY_ORDER",
+                None,
+                Some(value),
+                Some(root),
+                "spill entries are empty or contain duplicate use identities",
+            ));
+        }
+        let home_plan = self.home_plan(root)?;
+        let stack_exists = self.stack_home_exists(expanded, root)?;
+        let partition = home_plan
+            .partition_with_existing_stack(&ordered, stack_exists)
+            .map_err(|error| SpillerError::home(error, root))?;
+        let mut selections = BTreeMap::new();
+        let mut stack_creation_pending = !stack_exists;
+        let mut materialized_total = 0u64;
+        for piece in partition.pieces {
+            for use_id in piece.uses {
+                let selection = match piece.selection.kind {
+                    HomeKind::Stack => {
+                        let creation_cost = if stack_creation_pending {
+                            stack_creation_pending = false;
+                            STACK_HOME_CREATION_COST
+                        } else {
+                            0
+                        };
+                        HomeSelection {
+                            kind: HomeKind::Stack,
+                            materializations: Vec::new(),
+                            creation_cost,
+                            materialization_cost: STACK_HOME_MATERIALIZATION_COST,
+                        }
+                    }
+                    HomeKind::Rematerialize(_) | HomeKind::State(_) => {
+                        let materialization = piece
+                            .selection
+                            .materializations
+                            .iter()
+                            .find(|materialization| materialization.use_id == use_id)
+                            .copied()
+                            .ok_or_else(|| {
+                                SpillerError::new(
+                                    "SPILLER.HOME_COVERAGE",
+                                    None,
+                                    Some(value),
+                                    Some(root),
+                                    format!(
+                                        "non-stack home has no exact recipe for entry {use_id:?}"
+                                    ),
+                                )
+                            })?;
+                        HomeSelection {
+                            kind: piece.selection.kind,
+                            materializations: vec![materialization],
+                            creation_cost: 0,
+                            materialization_cost: materialization.cost,
+                        }
+                    }
+                    HomeKind::Register => {
+                        return Err(SpillerError::new(
+                            "SPILLER.HOME_CLASS",
+                            None,
+                            Some(value),
+                            Some(root),
+                            "home partition returned allocator-owned register residency",
+                        ));
+                    }
+                };
+                materialized_total = materialized_total
+                    .checked_add(selection.total_cost())
+                    .ok_or_else(|| {
+                        SpillerError::new(
+                            "SPILLER.HOME_COST_OVERFLOW",
+                            None,
+                            Some(value),
+                            Some(root),
+                            "entry home cost exceeds u64",
+                        )
+                    })?;
+                if selections.insert(use_id, selection).is_some() {
+                    return Err(SpillerError::new(
+                        "SPILLER.HOME_COVERAGE",
+                        None,
+                        Some(value),
+                        Some(root),
+                        "home partition selected the same entry more than once",
+                    ));
+                }
+            }
+        }
+        if selections.len() != ordered.len() || materialized_total != partition.total_cost {
+            return Err(SpillerError::new(
+                "SPILLER.HOME_COST_IDENTITY",
+                None,
+                Some(value),
+                Some(root),
+                format!(
+                    "materialized entries cost {materialized_total}, indexed partition cost {}",
+                    partition.total_cost
+                ),
+            ));
+        }
+        Ok(SpillPlan {
+            root,
+            value,
+            selections,
+            total_cost: partition.total_cost,
+        })
+    }
+
+    pub(super) fn verify(
+        &self,
+        expanded: &ExpandedAllocationProblem,
+        entries: &[SpillEntry],
+        plan: &SpillPlan,
+    ) -> Result<(), SpillerError> {
+        let expected = self.plan(expanded, plan.root, plan.value, entries)?;
+        if expected != *plan
+            || plan
+                .selections
+                .values()
+                .any(|selection| selection.kind == HomeKind::Register)
+        {
+            return Err(SpillerError::new(
+                "SPILLER.PLAN_IDENTITY",
+                None,
+                Some(plan.value),
+                Some(plan.root),
+                "concrete spill plan differs from the exact HomeGraph partition",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Materialize one already-verified spill remainder.  No register is
+    /// assigned here: persistent reload children only receive an affinity.
+    pub(super) fn materialize(
+        &self,
+        expanded: &mut ExpandedAllocationProblem,
+        graph: &HomeGraph,
+        value: VReg,
+        root: LiveBundleId,
+        entries: &[SpillEntry],
+        plan: &SpillPlan,
+        replaces_complete_origin: bool,
+    ) -> Result<SpillEdit, SpillerError> {
+        if plan.root != root || plan.value != value {
+            return Err(SpillerError::new(
+                "SPILLER.PLAN_IDENTITY",
+                None,
+                Some(value),
+                Some(root),
+                "spill edit and concrete home plan have different identities",
+            ));
+        }
+        self.verify(expanded, entries, plan)?;
+        let graph_root = graph_root(graph, root)?;
+        let needs_stack = plan
+            .selections
+            .values()
+            .any(|selection| selection.kind == HomeKind::Stack);
+        let existing_stack_home = stack_home(expanded, root)?;
+        let mut edit = SpillEdit::default();
+        let stack_home = if needs_stack {
+            if existing_stack_home.is_none() {
+                edit.record_block(graph_root.definition.block());
+            }
+            Some(ensure_stack_home(
+                expanded,
+                graph_root,
+                replaces_complete_origin,
+            )?)
+        } else {
+            existing_stack_home
+        };
+
+        for entry in entries {
+            let entry_use = expanded_use(expanded, root, entry.entry)?.clone();
+            edit.record_use(entry_use.original_site);
+            let selection = plan.selection(entry.entry).ok_or_else(|| {
+                SpillerError::new(
+                    "SPILLER.HOME_COVERAGE",
+                    Some(entry_use.site.block()),
+                    Some(value),
+                    Some(root),
+                    "spill plan omitted one topology entry",
+                )
+            })?;
+            let lowered = allocation_expand::lower_use_materialization(
+                &mut expanded.ir,
+                graph,
+                graph_root,
+                value,
+                entry.entry,
+                entry_use.original_site,
+                selection,
+                stack_home,
+                &mut expanded.stack_homes,
+            )
+            .map_err(SpillerError::expand)?;
+            match entry.kind {
+                SpillEntryKind::Materialized => {
+                    if entry.uses.as_slice() != [entry.entry] {
+                        return Err(SpillerError::new(
+                            "SPILLER.SINGLETON_SHAPE",
+                            Some(entry_use.site.block()),
+                            Some(value),
+                            Some(root),
+                            "materialized spill entry owns more than its exact entry use",
+                        ));
+                    }
+                    match lowered {
+                        allocation_expand::LoweredUseMaterialization::Register(lowered) => {
+                            rewrite_expanded_use(
+                                expanded,
+                                root,
+                                entry.entry,
+                                value,
+                                lowered.value,
+                                ExpandedUseSource::Materialized(lowered.source),
+                                &mut edit,
+                            )?;
+                        }
+                        allocation_expand::LoweredUseMaterialization::Edge(location) => {
+                            let target = expanded
+                                .roots
+                                .get_mut(root.0 as usize)
+                                .and_then(|root| root.uses.get_mut(entry.entry.0 as usize))
+                                .ok_or_else(|| {
+                                    SpillerError::new(
+                                        "SPILLER.USE_RANGE",
+                                        Some(entry_use.site.block()),
+                                        Some(value),
+                                        Some(root),
+                                        "phi-edge home references a missing expanded use",
+                                    )
+                                })?;
+                            if target.value != value {
+                                return Err(SpillerError::new(
+                                    "SPILLER.USE_OWNERSHIP",
+                                    Some(target.site.block()),
+                                    Some(target.value),
+                                    Some(root),
+                                    "phi-edge home no longer belongs to the spilled region",
+                                ));
+                            }
+                            target.value = graph_root.origin;
+                            target.source = ExpandedUseSource::Edge(location);
+                        }
+                    }
+                }
+                SpillEntryKind::RegisterRegion => {
+                    let allocation_expand::LoweredUseMaterialization::Register(lowered) = lowered
+                    else {
+                        return Err(SpillerError::new(
+                            "SPILLER.REGION_EDGE_ENTRY",
+                            Some(entry_use.site.block()),
+                            Some(value),
+                            Some(root),
+                            "multi-use reload region cannot start from a non-register phi-edge location",
+                        ));
+                    };
+                    let region = fresh_region_id(expanded)?;
+                    let region_row = expanded.register_regions.len();
+                    if expanded.region_rows.insert(region, region_row).is_some() {
+                        return Err(SpillerError::new(
+                            "SPILLER.REGION_IDENTITY",
+                            Some(entry_use.site.block()),
+                            Some(lowered.value),
+                            Some(root),
+                            "new register region duplicates an existing stable identity",
+                        ));
+                    }
+                    expanded.register_regions.push(ExpandedRegisterRegion {
+                        id: region,
+                        root,
+                        value: lowered.value,
+                        preferred_register: entry.preferred_register,
+                        entry_use: entry.entry,
+                        entry: lowered.source,
+                    });
+                    for &use_id in &entry.uses {
+                        rewrite_expanded_use(
+                            expanded,
+                            root,
+                            use_id,
+                            value,
+                            lowered.value,
+                            ExpandedUseSource::RegisterRegion {
+                                region,
+                                preferred_register: entry.preferred_register,
+                            },
+                            &mut edit,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(edit)
+    }
+}
+
+fn stack_home(
+    expanded: &ExpandedAllocationProblem,
+    root: LiveBundleId,
+) -> Result<Option<StackHomeId>, SpillerError> {
+    let homes = expanded
+        .stack_homes
+        .iter()
+        .filter(|home| {
+            home.root == root && home.kind == allocation_expand::ExpandedStackHomeKind::Root
+        })
+        .collect::<Vec<_>>();
+    match homes.as_slice() {
+        [] => Ok(None),
+        [home] => Ok(Some(home.id)),
+        _ => Err(SpillerError::new(
+            "SPILLER.STACK_HOME_IDENTITY",
+            None,
+            None,
+            Some(root),
+            "one root owns more than one explicit stack home",
+        )),
+    }
+}
+
+fn ensure_stack_home(
+    expanded: &mut ExpandedAllocationProblem,
+    root: &LiveBundle,
+    replaces_complete_origin: bool,
+) -> Result<StackHomeId, SpillerError> {
+    if let Some(home) = stack_home(expanded, root.id)? {
+        return Ok(home);
+    }
+    if expanded
+        .stack_homes
+        .iter()
+        .enumerate()
+        .any(|(index, home)| home.id.0 as usize != index)
+    {
+        return Err(SpillerError::new(
+            "SPILLER.STACK_HOME_IDENTITY",
+            Some(root.definition.block()),
+            Some(root.origin),
+            Some(root.id),
+            "expanded stack homes are not densely identified",
+        ));
+    }
+    let id = StackHomeId(u32::try_from(expanded.stack_homes.len()).map_err(|_| {
+        SpillerError::new(
+            "SPILLER.STACK_HOME_ID_RANGE",
+            Some(root.definition.block()),
+            Some(root.origin),
+            Some(root.id),
+            "expanded stack-home count exceeds u32",
+        )
+    })?);
+    let definition = match root.definition {
+        DefinitionSite::Phi { block, phi, .. } if replaces_complete_origin => {
+            expanded
+                .ir
+                .assign_phi_definition_home(root.definition, root.origin, id)
+                .map_err(|error| {
+                    SpillerError::new(
+                        error.rule,
+                        error.block,
+                        error.values.first().copied(),
+                        Some(root.id),
+                        error.message,
+                    )
+                })?;
+            allocation_expand::ExpandedStackDefinition::Phi {
+                block,
+                phi,
+                destination: root.origin,
+            }
+        }
+        _ => {
+            let instruction = expanded
+                .ir
+                .insert_after_definition(
+                    root.definition,
+                    SyntheticOperation::StackStore { home: id },
+                    Uses::one(root.origin),
+                    false,
+                )
+                .map_err(|error| {
+                    SpillerError::new(
+                        error.rule,
+                        error.block,
+                        error.values.first().copied(),
+                        Some(root.id),
+                        error.message,
+                    )
+                })?
+                .instruction;
+            allocation_expand::ExpandedStackDefinition::Store {
+                instruction,
+                value: root.origin,
+            }
+        }
+    };
+    expanded.stack_homes.push(ExpandedStackHome {
+        id,
+        root: root.id,
+        definition,
+        kind: allocation_expand::ExpandedStackHomeKind::Root,
+    });
+    Ok(id)
+}
+
+fn fresh_region_id(
+    expanded: &mut ExpandedAllocationProblem,
+) -> Result<RegisterRegionId, SpillerError> {
+    let id = RegisterRegionId(expanded.next_register_region);
+    expanded.next_register_region =
+        expanded
+            .next_register_region
+            .checked_add(1)
+            .ok_or_else(|| {
+                SpillerError::new(
+                    "SPILLER.REGION_ID_RANGE",
+                    None,
+                    None,
+                    None,
+                    "expanded register-region identity exceeds u32",
+                )
+            })?;
+    Ok(id)
+}
+
+fn rewrite_expanded_use(
+    expanded: &mut ExpandedAllocationProblem,
+    root: LiveBundleId,
+    use_id: BundleUseId,
+    original: VReg,
+    replacement: VReg,
+    source: ExpandedUseSource,
+    edit: &mut SpillEdit,
+) -> Result<(), SpillerError> {
+    let root_index = root.0 as usize;
+    let use_index = use_id.0 as usize;
+    let use_ = expanded
+        .roots
+        .get(root_index)
+        .and_then(|root| root.uses.get(use_index))
+        .ok_or_else(|| {
+            SpillerError::new(
+                "SPILLER.USE_RANGE",
+                None,
+                Some(original),
+                Some(root),
+                format!("rewritten use {use_id:?} is outside its expanded root"),
+            )
+        })?
+        .clone();
+    if use_.value != original {
+        return Err(SpillerError::new(
+            "SPILLER.USE_OWNERSHIP",
+            Some(use_.site.block()),
+            Some(original),
+            Some(root),
+            "rewritten use no longer belongs to the selected spill region",
+        ));
+    }
+    edit.record_use(use_.original_site);
+    expanded
+        .ir
+        .rewrite_use(use_.original_site, original, replacement)
+        .map_err(|error| {
+            SpillerError::new(
+                error.rule,
+                error.block,
+                error.values.first().copied(),
+                Some(root),
+                error.message,
+            )
+        })?;
+    let target = &mut expanded.roots[root_index].uses[use_index];
+    target.value = replacement;
+    target.source = source;
+    Ok(())
+}
+
+fn graph_root(graph: &HomeGraph, root: LiveBundleId) -> Result<&LiveBundle, SpillerError> {
+    let row = graph.bundles.get(root.0 as usize).ok_or_else(|| {
+        SpillerError::new(
+            "SPILLER.ROOT_RANGE",
+            None,
+            None,
+            Some(root),
+            "spill root is outside the immutable HomeGraph",
+        )
+    })?;
+    if row.id != root {
+        return Err(SpillerError::new(
+            "SPILLER.ROOT_IDENTITY",
+            Some(row.definition.block()),
+            Some(row.origin),
+            Some(root),
+            "HomeGraph root differs from its dense identity",
+        ));
+    }
+    Ok(row)
+}
+
+fn expanded_use(
+    expanded: &ExpandedAllocationProblem,
+    root: LiveBundleId,
+    use_id: BundleUseId,
+) -> Result<&allocation_expand::ExpandedUse, SpillerError> {
+    let row = expanded.roots.get(root.0 as usize).ok_or_else(|| {
+        SpillerError::new(
+            "SPILLER.ROOT_RANGE",
+            None,
+            None,
+            Some(root),
+            "spill root is outside the expanded allocation problem",
+        )
+    })?;
+    if row.id != root {
+        return Err(SpillerError::new(
+            "SPILLER.ROOT_IDENTITY",
+            None,
+            Some(row.origin),
+            Some(root),
+            "expanded root differs from its dense identity",
+        ));
+    }
+    row.uses.get(use_id.0 as usize).ok_or_else(|| {
+        SpillerError::new(
+            "SPILLER.USE_RANGE",
+            None,
+            Some(row.origin),
+            Some(root),
+            format!("spill use {use_id:?} is outside its root"),
+        )
+    })
+}

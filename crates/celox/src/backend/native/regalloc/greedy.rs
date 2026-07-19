@@ -95,7 +95,6 @@ impl GreedyLiveRanges {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn require_spill(&mut self, value: VReg) {
         let row = self.row_mut(value);
         if row.stage < LiveRangeStage::Spill {

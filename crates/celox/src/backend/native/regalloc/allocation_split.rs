@@ -12,48 +12,26 @@ use std::cell::OnceCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::ops::Deref;
 
-use crate::backend::native::mir::{BlockId, Uses, VReg};
+use crate::backend::native::mir::{BlockId, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedRegisterRegion, ExpandedStackHome, ExpandedUseSource,
-    RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedUseSource, RegisterRegionId,
 };
-use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::allocation_reallocate::{
     AllocationPressurePoint, AllocationValue, AllocationValueClass, JointAllocation,
     JointAllocationError, JointAllocationOutcome, JointAllocationProblem, JointAllocationSession,
-    PlannedFragmentAssignment, RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
+    RegionSpillRequest, RegionSplitCandidate, RegionSplitRequest, RegisterPressureFrontier,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
-use super::home_graph::{
-    BundleUseId, HomeGraph, HomeKind, LiveBundle, LiveBundleId, STACK_HOME_CREATION_COST,
-    STACK_HOME_MATERIALIZATION_COST,
-};
-use super::interval_allocator::{
-    HomeSelection, IntervalAllocationError, RootHomeCostAccumulator, RootHomePlan,
-};
-use super::live_interval::{
-    DefinitionSite, IncrementalLivenessUpdate, LiveSegment, SlotIndex, UseSite,
-};
+use super::home_graph::{BundleUseId, HomeGraph, LiveBundle, LiveBundleId};
+use super::live_interval::{IncrementalLivenessUpdate, LiveSegment, SlotIndex, UseSite};
+use super::spiller::{SpillEdit, SpillEntry, SpillEntryKind, SpillPlan, Spiller, SpillerError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SplitEntryKind {
-    Materialized,
-    RegisterRegion,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SplitEntry {
-    pub entry: BundleUseId,
-    pub uses: Vec<BundleUseId>,
-    pub kind: SplitEntryKind,
-    pub home: HomeSelection,
-    /// Physical color reserved before this synthetic region has a machine
-    /// VReg. Singleton materializations have no persistent region to reserve.
-    pub register: Option<PhysReg>,
-}
+type SplitEntry = SpillEntry;
+type SplitEntryKind = SpillEntryKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RegionSplitPlan {
@@ -67,12 +45,28 @@ pub(super) struct RegionSplitPlan {
     pub retained: Vec<BundleUseId>,
     pub moved: Vec<BundleUseId>,
     pub entries: Vec<SplitEntry>,
-    pub transition_cost: u64,
 }
 
 impl RegionSplitPlan {
     fn primary_cut(&self) -> AllocationPressurePoint {
         self.cuts[0]
+    }
+}
+
+/// SplitAnalysis output and the independent concrete spill decision for its
+/// complement.  Keeping these as sibling values prevents SplitEditor from
+/// silently choosing stack/rematerialization policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PlannedRegionSplit {
+    pub split: RegionSplitPlan,
+    pub spill: SpillPlan,
+}
+
+impl Deref for PlannedRegionSplit {
+    type Target = RegionSplitPlan;
+
+    fn deref(&self) -> &Self::Target {
+        &self.split
     }
 }
 
@@ -110,8 +104,14 @@ impl AllocationSplitError {
         Self::new(error.rule, error.block, None, error.root, error.message)
     }
 
-    fn home(error: IntervalAllocationError, root: LiveBundleId) -> Self {
-        Self::new(error.rule, error.block, None, Some(root), error.message)
+    fn spill(error: SpillerError) -> Self {
+        Self::new(
+            error.rule,
+            error.block,
+            error.value,
+            error.root,
+            error.message,
+        )
     }
 }
 
@@ -288,7 +288,7 @@ impl Dominance {
 #[derive(Debug)]
 struct SplitPlanningContext {
     dominance: Dominance,
-    home_plans: Vec<RootHomePlan>,
+    spiller: Spiller,
     use_topologies: Vec<OnceCell<RootUseTopology>>,
 }
 
@@ -393,41 +393,14 @@ impl RootUseTopology {
 impl SplitPlanningContext {
     fn build(graph: &HomeGraph, cfg: &NormalizedCfg) -> Result<Self, AllocationSplitError> {
         let dominance = Dominance::build(cfg)?;
-        let mut home_plans = Vec::with_capacity(graph.bundles.len());
-        for (row, root) in graph.bundles.iter().enumerate() {
-            if root.id.0 as usize != row {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROOT_IDENTITY",
-                    Some(root.definition.block()),
-                    Some(root.origin),
-                    Some(root.id),
-                    "HomeGraph root differs from its function-lifetime planning row",
-                ));
-            }
-            home_plans.push(
-                RootHomePlan::build(graph, root)
-                    .map_err(|error| AllocationSplitError::home(error, root.id))?,
-            );
-        }
+        let spiller = Spiller::build(graph).map_err(AllocationSplitError::spill)?;
         let use_topologies = std::iter::repeat_with(OnceCell::new)
             .take(graph.bundles.len())
             .collect();
         Ok(Self {
             dominance,
-            home_plans,
+            spiller,
             use_topologies,
-        })
-    }
-
-    fn home_plan(&self, root: LiveBundleId) -> Result<&RootHomePlan, AllocationSplitError> {
-        self.home_plans.get(root.0 as usize).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.HOME_ROOT",
-                None,
-                None,
-                Some(root),
-                "split root has no function-lifetime home-cost row",
-            )
         })
     }
 
@@ -471,110 +444,6 @@ impl SplitPlanningContext {
     }
 }
 
-/// Home-placement state accumulated while physical coloring is deferred.
-///
-/// Same-root machine regions own disjoint immutable root uses, so they may be
-/// split in one allocation-IR transaction. Their entry homes must nevertheless
-/// be chosen as one root-wide MemorySSA/rematerialization/stack partition:
-/// stack creation is shared and a newly added entry can change the cheapest
-/// policy for earlier entries. Candidate ranking therefore extends this small
-/// additive state and leaves concrete home publication until the round closes.
-#[derive(Debug)]
-struct RootRoundHomeState {
-    entries: BTreeSet<BundleUseId>,
-    costs: RootHomeCostAccumulator,
-}
-
-#[derive(Debug, Default)]
-struct SplitRoundPlanningState {
-    roots: BTreeMap<LiveBundleId, RootRoundHomeState>,
-}
-
-impl SplitRoundPlanningState {
-    fn home_cost_delta(
-        &self,
-        expanded: &ExpandedAllocationProblem,
-        context: &SplitPlanningContext,
-        candidate: &RegionSplitPlan,
-    ) -> Result<i128, AllocationSplitError> {
-        let entries = split_entry_ids(candidate)?;
-        let home_plan = context.home_plan(candidate.root)?;
-        let mut combined = if let Some(state) = self.roots.get(&candidate.root) {
-            if entries.iter().any(|entry| state.entries.contains(entry)) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROUND_HOME_ENTRY",
-                    None,
-                    Some(candidate.value),
-                    Some(candidate.root),
-                    "same-root split candidates materialize an already reserved entry use",
-                ));
-            }
-            state.costs
-        } else {
-            home_plan.cost_accumulator(stack_home(expanded, candidate.root)?.is_some())
-        };
-        let baseline = home_plan
-            .accumulator_total(combined)
-            .map_err(|error| AllocationSplitError::home(error, candidate.root))?;
-        home_plan
-            .extend_cost_accumulator(&mut combined, &entries)
-            .map_err(|error| AllocationSplitError::home(error, candidate.root))?;
-        let combined = home_plan
-            .accumulator_total(combined)
-            .map_err(|error| AllocationSplitError::home(error, candidate.root))?;
-        Ok(i128::from(combined) - i128::from(baseline))
-    }
-
-    fn commit(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        context: &SplitPlanningContext,
-        plan: &RegionSplitPlan,
-    ) -> Result<(), AllocationSplitError> {
-        let entries = split_entry_ids(plan)?;
-        let home_plan = context.home_plan(plan.root)?;
-        let mut costs = if let Some(state) = self.roots.get(&plan.root) {
-            if entries.iter().any(|entry| state.entries.contains(entry)) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROUND_HOME_ENTRY",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "same-root split plans materialize the same immutable entry use",
-                ));
-            }
-            state.costs
-        } else {
-            home_plan.cost_accumulator(stack_home(expanded, plan.root)?.is_some())
-        };
-        home_plan
-            .extend_cost_accumulator(&mut costs, &entries)
-            .map_err(|error| AllocationSplitError::home(error, plan.root))?;
-
-        if let Some(state) = self.roots.get_mut(&plan.root) {
-            state.costs = costs;
-            state.entries.extend(entries);
-        } else {
-            self.roots.insert(
-                plan.root,
-                RootRoundHomeState {
-                    entries: entries.into_iter().collect(),
-                    costs,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    fn clear(&mut self) {
-        self.roots.clear();
-    }
-
-    fn is_empty(&self) -> bool {
-        self.roots.is_empty()
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct RegionSource {
     preferred_register: Option<PhysReg>,
@@ -605,16 +474,6 @@ struct AppliedSplit {
     live_lengths: Vec<(VReg, Option<u64>)>,
 }
 
-#[derive(Debug)]
-struct AppliedSplitRound {
-    roots: Vec<LiveBundleId>,
-    retained_fragments: Vec<PlannedFragmentAssignment>,
-    constraint_blocks: BTreeSet<BlockId>,
-    changed_values: Vec<VReg>,
-    range_changed_values: Vec<VReg>,
-    live_lengths: Vec<(VReg, Option<u64>)>,
-}
-
 /// Physical and semantic fact owners touched by one private split transaction.
 ///
 /// A register region may enter in one block and rewrite uses in many later
@@ -626,7 +485,6 @@ struct AppliedSplitRound {
 struct SplitMutationJournal {
     liveness_blocks: BTreeSet<BlockId>,
     constraint_blocks: BTreeSet<BlockId>,
-    planned_fragments: Vec<PlannedFragmentAssignment>,
 }
 
 impl SplitMutationJournal {
@@ -643,412 +501,6 @@ impl SplitMutationJournal {
     }
 }
 
-/// Reused sparse liveness workspace for register fragments whose transition
-/// instructions and VRegs do not exist yet. It projects one exact definition
-/// and use subset through the normalized CFG, then the joint session reserves
-/// the chosen color in its ordinary physical matrix.
-#[derive(Debug)]
-struct SymbolicFragmentPlanner {
-    block_ids: Vec<BlockId>,
-    epoch: u32,
-    touched: Vec<u32>,
-    live_in: Vec<u32>,
-    live_out: Vec<u32>,
-    last_use_epoch: Vec<u32>,
-    last_use: Vec<SlotIndex>,
-    queue: VecDeque<usize>,
-    live_blocks: Vec<usize>,
-}
-
-impl SymbolicFragmentPlanner {
-    fn new(cfg: &NormalizedCfg) -> Result<Self, AllocationSplitError> {
-        let block_count = cfg.successors.len();
-        if block_count == 0 || cfg.block_index.len() != block_count {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                None,
-                None,
-                None,
-                "symbolic fragment planner requires a complete non-empty CFG index",
-            ));
-        }
-        let mut block_ids = vec![None; block_count];
-        for (&block, &index) in &cfg.block_index {
-            let slot = block_ids.get_mut(index).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                    Some(block),
-                    None,
-                    None,
-                    "symbolic fragment CFG index is outside the block table",
-                )
-            })?;
-            if slot.replace(block).is_some() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                    Some(block),
-                    None,
-                    None,
-                    "two CFG blocks share one symbolic fragment row",
-                ));
-            }
-        }
-        let block_ids = block_ids
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                    None,
-                    None,
-                    None,
-                    "symbolic fragment CFG index does not name every block",
-                )
-            })?;
-        Ok(Self {
-            block_ids,
-            epoch: 0,
-            touched: vec![0; block_count],
-            live_in: vec![0; block_count],
-            live_out: vec![0; block_count],
-            last_use_epoch: vec![0; block_count],
-            last_use: vec![SlotIndex::stable_entry(); block_count],
-            queue: VecDeque::new(),
-            live_blocks: Vec::new(),
-        })
-    }
-
-    fn begin(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 {
-            self.touched.fill(0);
-            self.live_in.fill(0);
-            self.live_out.fill(0);
-            self.last_use_epoch.fill(0);
-            self.epoch = 1;
-        }
-        self.queue.clear();
-        self.live_blocks.clear();
-    }
-
-    fn touch(&mut self, block: usize) {
-        if self.touched[block] != self.epoch {
-            self.touched[block] = self.epoch;
-            self.live_blocks.push(block);
-        }
-    }
-
-    fn mark_live_in(&mut self, block: usize) -> bool {
-        self.touch(block);
-        if self.live_in[block] == self.epoch {
-            false
-        } else {
-            self.live_in[block] = self.epoch;
-            true
-        }
-    }
-
-    fn mark_live_out(&mut self, block: usize) {
-        self.touch(block);
-        self.live_out[block] = self.epoch;
-    }
-
-    fn record_last_use(&mut self, block: usize, slot: SlotIndex) {
-        self.touch(block);
-        if self.last_use_epoch[block] == self.epoch {
-            self.last_use[block] = self.last_use[block].max(slot);
-        } else {
-            self.last_use_epoch[block] = self.epoch;
-            self.last_use[block] = slot;
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_range(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        cfg: &NormalizedCfg,
-        root: &super::allocation_expand::ExpandedRoot,
-        value: VReg,
-        definition_block: BlockId,
-        definition_slot: SlotIndex,
-        uses: &[BundleUseId],
-    ) -> Result<Vec<LiveSegment>, AllocationSplitError> {
-        if uses.is_empty() || uses.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_USES",
-                Some(definition_block),
-                Some(value),
-                Some(root.id),
-                "symbolic fragment has empty, duplicated, or unordered uses",
-            ));
-        }
-        let definition = cfg
-            .block_index
-            .get(&definition_block)
-            .copied()
-            .ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_DEFINITION",
-                    Some(definition_block),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic fragment definition is outside the CFG",
-                )
-            })?;
-        if expanded.intervals.block_slots.len() != self.block_ids.len() {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_CFG",
-                Some(definition_block),
-                Some(value),
-                Some(root.id),
-                "symbolic fragment slot rows differ from the normalized CFG",
-            ));
-        }
-
-        self.begin();
-        self.touch(definition);
-        for &use_id in uses {
-            let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.USE_RANGE",
-                    Some(definition_block),
-                    Some(value),
-                    Some(root.id),
-                    format!("symbolic fragment use {use_id:?} is outside its root"),
-                )
-            })?;
-            if use_.value != value {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_OWNERSHIP",
-                    Some(use_.site.block()),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic fragment use belongs to a different machine value",
-                ));
-            }
-            let block = cfg
-                .block_index
-                .get(&use_.site.block())
-                .copied()
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.USE_BLOCK",
-                        Some(use_.site.block()),
-                        Some(value),
-                        Some(root.id),
-                        "symbolic fragment use is outside the normalized CFG",
-                    )
-                })?;
-            if block == definition && use_.site.slot() < definition_slot {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_DOMINANCE",
-                    Some(use_.site.block()),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic fragment has a same-block use before its entry",
-                ));
-            }
-            self.record_last_use(block, use_.site.slot());
-            match use_.site {
-                UseSite::Instruction { .. } if block == definition => {}
-                UseSite::Instruction { .. } => {
-                    if self.mark_live_in(block) {
-                        self.queue.push_back(block);
-                    }
-                }
-                UseSite::PhiEdge { .. } => {
-                    self.mark_live_out(block);
-                    if block != definition && self.mark_live_in(block) {
-                        self.queue.push_back(block);
-                    }
-                }
-            }
-        }
-        while let Some(block) = self.queue.pop_front() {
-            for &predecessor in &cfg.predecessors[block] {
-                self.mark_live_out(predecessor);
-                if predecessor != definition && self.mark_live_in(predecessor) {
-                    self.queue.push_back(predecessor);
-                }
-            }
-        }
-
-        self.live_blocks
-            .sort_unstable_by_key(|&block| self.block_ids[block]);
-        let mut segments = Vec::with_capacity(self.live_blocks.len());
-        for &block in &self.live_blocks {
-            let slots = &expanded.intervals.block_slots[block];
-            let start = if block == definition {
-                definition_slot
-            } else {
-                slots.entry
-            };
-            let end = if self.live_out[block] == self.epoch {
-                slots.exit.next()
-            } else if self.last_use_epoch[block] == self.epoch {
-                self.last_use[block].next()
-            } else if block == definition {
-                definition_slot.next()
-            } else {
-                None
-            }
-            .ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_RANGE",
-                    Some(self.block_ids[block]),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic fragment segment has no finite end",
-                )
-            })?;
-            if start >= end {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_RANGE",
-                    Some(self.block_ids[block]),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic fragment segment is empty or reversed",
-                ));
-            }
-            segments.push(LiveSegment {
-                block: self.block_ids[block],
-                start,
-                end,
-            });
-        }
-        for &use_id in uses {
-            let site = root.uses[use_id.0 as usize].site;
-            if !segments
-                .iter()
-                .any(|segment| segment.block == site.block() && segment.contains(site.slot()))
-            {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_COVERAGE",
-                    Some(site.block()),
-                    Some(value),
-                    Some(root.id),
-                    "symbolic sparse range does not cover one of its exact uses",
-                ));
-            }
-        }
-        Ok(segments)
-    }
-
-    fn reserve_plan(
-        &mut self,
-        expanded: &ExpandedAllocationProblem,
-        cfg: &NormalizedCfg,
-        registers: &[PhysReg],
-        session: &mut JointAllocationSession,
-        plan: &mut RegionSplitPlan,
-    ) -> Result<(), AllocationSplitError> {
-        let source = session.problem().value(plan.value).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.SYMBOLIC_SOURCE",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "symbolic split source disappeared before fragment reservation",
-            )
-        })?;
-        let definition_block = source.interval.definition.block();
-        let definition_slot = source.interval.definition.slot();
-        let root = expanded_root(expanded, plan.root)?;
-
-        if !plan.retained.is_empty() {
-            let segments = self.build_range(
-                expanded,
-                cfg,
-                root,
-                plan.value,
-                definition_block,
-                definition_slot,
-                &plan.retained,
-            )?;
-            let available = session
-                .available_symbolic_fragment_registers(plan.value, &segments, registers)
-                .map_err(AllocationSplitError::joint)?;
-            if !available.contains(&plan.register) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_PREFIX_COLOR",
-                    Some(plan.primary_cut().block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    format!(
-                        "frontier selected {}, but the projected retained prefix is occupied",
-                        plan.register
-                    ),
-                ));
-            }
-            session
-                .reserve_symbolic_fragment(plan.value, plan.register, &segments)
-                .map_err(AllocationSplitError::joint)?;
-        }
-
-        for entry in &mut plan.entries {
-            if entry.register.is_some() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.SYMBOLIC_ENTRY_STATE",
-                    root.uses
-                        .get(entry.entry.0 as usize)
-                        .map(|use_| use_.site.block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    "split entry was colored more than once",
-                ));
-            }
-            if entry.kind == SplitEntryKind::Materialized {
-                continue;
-            }
-            let entry_site = root
-                .uses
-                .get(entry.entry.0 as usize)
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.USE_RANGE",
-                        None,
-                        Some(plan.value),
-                        Some(plan.root),
-                        "symbolic register entry is outside its root",
-                    )
-                })?
-                .site;
-            let segments = self.build_range(
-                expanded,
-                cfg,
-                root,
-                plan.value,
-                entry_site.block(),
-                expanded
-                    .ir
-                    .earliest_insert_before_use_slot(entry_site)
-                    .map_err(|error| {
-                        AllocationSplitError::new(
-                            error.rule,
-                            error.block,
-                            Some(plan.value),
-                            Some(plan.root),
-                            error.message,
-                        )
-                    })?,
-                &entry.uses,
-            )?;
-            let available = session
-                .available_symbolic_fragment_registers(plan.value, &segments, registers)
-                .map_err(AllocationSplitError::joint)?;
-            let Some(register) = available.first().copied() else {
-                continue;
-            };
-            session
-                .reserve_symbolic_fragment(plan.value, register, &segments)
-                .map_err(AllocationSplitError::joint)?;
-            entry.register = Some(register);
-        }
-        Ok(())
-    }
-}
-
 /// Select one exact resident region and one owner-qualified occupancy cut with
 /// minimum proved transition cost. The returned topology is colored only
 /// after the source is removed from the current matrix; exact materialized
@@ -1059,10 +511,9 @@ pub(super) fn plan_split(
     joint: &JointAllocationProblem,
     request: &RegionSplitRequest,
     cfg: &NormalizedCfg,
-) -> Result<RegionSplitPlan, AllocationSplitError> {
+) -> Result<PlannedRegionSplit, AllocationSplitError> {
     let context = SplitPlanningContext::build(graph, cfg)?;
-    let round = SplitRoundPlanningState::default();
-    plan_split_with_context(expanded, graph, joint, request, cfg, &context, &round)
+    plan_split_with_context(expanded, graph, joint, request, cfg, &context)
 }
 
 fn plan_split_with_context(
@@ -1072,8 +523,7 @@ fn plan_split_with_context(
     request: &RegionSplitRequest,
     cfg: &NormalizedCfg,
     context: &SplitPlanningContext,
-    round: &SplitRoundPlanningState,
-) -> Result<RegionSplitPlan, AllocationSplitError> {
+) -> Result<PlannedRegionSplit, AllocationSplitError> {
     let blocked = joint.value(request.blocked_value).ok_or_else(|| {
         AllocationSplitError::new(
             "ALLOCATION_SPLIT.BLOCKED_VALUE",
@@ -1117,9 +567,8 @@ fn plan_split_with_context(
         }
     }
 
-    let mut best = None::<(i128, RegionSplitPlan)>;
+    let mut best = None::<(i128, PlannedRegionSplit)>;
     for candidate in &request.candidates {
-        let home_plan = context.home_plan(candidate.root)?;
         let use_topology = context.use_topology(graph, cfg, candidate.root)?;
         for plan in plan_candidate_frontiers(
             expanded,
@@ -1128,28 +577,28 @@ fn plan_split_with_context(
             candidate,
             cfg,
             &context.dominance,
-            home_plan,
+            &context.spiller,
             use_topology,
         )? {
-            let home_delta = round.home_cost_delta(expanded, context, &plan)?;
+            let home_delta = i128::from(plan.spill.total_cost);
             let key = (
                 home_delta,
-                plan.moved.len(),
-                Reverse(plan.retained.len()),
-                plan.value,
-                plan.root,
-                plan.register,
-                &plan.cuts,
+                plan.split.moved.len(),
+                Reverse(plan.split.retained.len()),
+                plan.split.value,
+                plan.split.root,
+                plan.split.register,
+                &plan.split.cuts,
             );
             let replace = if let Some((current_home_delta, current)) = &best {
                 key < (
                     *current_home_delta,
-                    current.moved.len(),
-                    Reverse(current.retained.len()),
-                    current.value,
-                    current.root,
-                    current.register,
-                    &current.cuts,
+                    current.split.moved.len(),
+                    Reverse(current.split.retained.len()),
+                    current.split.value,
+                    current.split.root,
+                    current.split.register,
+                    &current.split.cuts,
                 )
             } else {
                 true
@@ -1178,9 +627,9 @@ fn plan_candidate_frontiers(
     candidate: &RegionSplitCandidate,
     cfg: &NormalizedCfg,
     dominance: &Dominance,
-    home_plan: &RootHomePlan,
+    spiller: &Spiller,
     use_topology: &RootUseTopology,
-) -> Result<Vec<RegionSplitPlan>, AllocationSplitError> {
+) -> Result<Vec<PlannedRegionSplit>, AllocationSplitError> {
     let first_frontier = candidate.frontiers.first().ok_or_else(|| {
         AllocationSplitError::new(
             "ALLOCATION_SPLIT.PRESSURE_POINTS",
@@ -1214,7 +663,7 @@ fn plan_candidate_frontiers(
             frontier,
             cfg,
             dominance,
-            home_plan,
+            spiller,
             use_topology,
             root,
             source,
@@ -1233,13 +682,12 @@ fn plan_candidate_from_moved(
     frontier: &RegisterPressureFrontier,
     cfg: &NormalizedCfg,
     dominance: &Dominance,
-    home_plan: &RootHomePlan,
+    spiller: &Spiller,
     use_topology: &RootUseTopology,
     root: &super::allocation_expand::ExpandedRoot,
     source: RegionSource,
     moved: Vec<BundleUseId>,
-) -> Result<RegionSplitPlan, AllocationSplitError> {
-    let cut = frontier.points[0];
+) -> Result<PlannedRegionSplit, AllocationSplitError> {
     let clusters = partition_moved_uses(
         root,
         candidate,
@@ -1250,47 +698,20 @@ fn plan_candidate_from_moved(
         dominance,
         use_topology,
     )?;
-    let entry_uses = clusters
-        .iter()
-        .map(|cluster| cluster.entry)
-        .collect::<Vec<_>>();
-    let stack_exists = stack_home(expanded, candidate.root)?.is_some();
-    let (mut selections, transition_cost) =
-        entry_selections(home_plan, &entry_uses, stack_exists, candidate.root)?;
     let entries = clusters
         .into_iter()
         .map(|cluster| {
-            let home = selections.remove(&cluster.entry).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.HOME_COVERAGE",
-                    root.uses
-                        .get(cluster.entry.0 as usize)
-                        .map(|use_| use_.site.block()),
-                    Some(candidate.value),
-                    Some(candidate.root),
-                    "home partition did not select a transition for a region entry",
-                )
-            })?;
             Ok(SplitEntry {
                 entry: cluster.entry,
                 uses: cluster.uses,
                 kind: cluster.kind,
-                home,
-                register: None,
+                preferred_register: (cluster.kind == SplitEntryKind::RegisterRegion)
+                    .then_some(frontier.register),
             })
         })
         .collect::<Result<Vec<_>, AllocationSplitError>>()?;
-    if !selections.is_empty() {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.HOME_COVERAGE",
-            Some(cut.block()),
-            Some(candidate.value),
-            Some(candidate.root),
-            "home partition selected an entry not owned by the split plan",
-        ));
-    }
     let retained = sorted_difference(&candidate.uses, &moved);
-    let plan = RegionSplitPlan {
+    let split = RegionSplitPlan {
         blocked_value,
         register: frontier.register,
         cuts: frontier.points.clone(),
@@ -1301,10 +722,13 @@ fn plan_candidate_from_moved(
         retained,
         moved,
         entries,
-        transition_cost,
     };
+    let spill = spiller
+        .plan(expanded, split.root, split.value, &split.entries)
+        .map_err(AllocationSplitError::spill)?;
+    let plan = PlannedRegionSplit { split, spill };
     if super::exhaustive_verification_enabled() {
-        verify_plan(expanded, joint, candidate, &plan, cfg, dominance, home_plan)?;
+        verify_plan(expanded, joint, candidate, &plan, cfg, dominance, spiller)?;
     }
     Ok(plan)
 }
@@ -1317,7 +741,7 @@ fn apply_split(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
     joint: &JointAllocationProblem,
-    plan: &RegionSplitPlan,
+    plan: &PlannedRegionSplit,
     cfg: &NormalizedCfg,
 ) -> Result<AppliedSplit, AllocationSplitError> {
     let context = SplitPlanningContext::build(graph, cfg)?;
@@ -1328,11 +752,11 @@ fn apply_split_with_context(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
     joint: &JointAllocationProblem,
-    plan: &RegionSplitPlan,
+    plan: &PlannedRegionSplit,
     cfg: &NormalizedCfg,
     context: &SplitPlanningContext,
 ) -> Result<AppliedSplit, AllocationSplitError> {
-    let candidate = candidate_from_plan(joint, plan)?;
+    let candidate = candidate_from_plan(joint, &plan.split)?;
     verify_plan(
         expanded,
         joint,
@@ -1340,7 +764,7 @@ fn apply_split_with_context(
         plan,
         cfg,
         &context.dominance,
-        context.home_plan(plan.root)?,
+        &context.spiller,
     )?;
     expanded
         .ir
@@ -1355,10 +779,137 @@ fn apply_split_with_context(
             )
         })?;
     let mut journal = SplitMutationJournal::default();
-    mutate_verified_split(expanded, graph, plan, &mut journal)?;
-    let liveness = finish_split_mutations(expanded, cfg, &mut journal, std::slice::from_ref(plan))?;
+    mutate_verified_split(expanded, graph, plan, &mut journal, &context.spiller)?;
+    let replacement = (plan.value, plan.root);
+    let liveness = finish_split_mutations(
+        expanded,
+        cfg,
+        &mut journal,
+        std::slice::from_ref(&replacement),
+    )?;
     Ok(AppliedSplit {
         root: plan.root,
+        constraint_blocks: journal.constraint_blocks,
+        changed_values: liveness.changed_values,
+        range_changed_values: liveness.range_changed_values,
+        live_lengths: liveness.live_lengths,
+    })
+}
+
+/// Rewrite one interval only after both split stages have failed to produce a
+/// shorter register range.  The spiller owns the concrete home choices and
+/// returns only short transition ranges to the allocation session.
+fn apply_spill_with_context(
+    expanded: &mut ExpandedAllocationProblem,
+    graph: &HomeGraph,
+    joint: &JointAllocationProblem,
+    request: &RegionSpillRequest,
+    cfg: &NormalizedCfg,
+    context: &SplitPlanningContext,
+) -> Result<AppliedSplit, AllocationSplitError> {
+    let value = joint.value(request.value).ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPILL.VALUE_RANGE",
+            None,
+            Some(request.value),
+            Some(request.root),
+            "spill request references a value outside joint allocation",
+        )
+    })?;
+    let AllocationValueClass::Region { root, uses } = &value.class else {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPILL.VALUE_CLASS",
+            Some(value.interval.definition.block()),
+            Some(request.value),
+            Some(request.root),
+            "spill request no longer references a register live interval",
+        ));
+    };
+    if *root != request.root || *uses != request.uses || request.uses.is_empty() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPILL.REQUEST_IDENTITY",
+            Some(value.interval.definition.block()),
+            Some(request.value),
+            Some(request.root),
+            "spill request and current live interval own different root uses",
+        ));
+    }
+    let candidate = RegionSplitCandidate {
+        value: request.value,
+        root: request.root,
+        uses: request.uses.clone(),
+        frontiers: Vec::new(),
+    };
+    let root_row = expanded_root(expanded, request.root)?;
+    let source = region_source(expanded, root_row, &candidate, value)?;
+    let entries = request
+        .uses
+        .iter()
+        .copied()
+        .map(|entry| SpillEntry {
+            entry,
+            uses: vec![entry],
+            kind: SpillEntryKind::Materialized,
+            preferred_register: None,
+        })
+        .collect::<Vec<_>>();
+    let spill = context
+        .spiller
+        .plan(expanded, request.root, request.value, &entries)
+        .map_err(AllocationSplitError::spill)?;
+    expanded
+        .ir
+        .begin_instruction_transaction()
+        .map_err(|error| {
+            AllocationSplitError::new(
+                error.rule,
+                error.block,
+                error.values.first().copied(),
+                Some(request.root),
+                error.message,
+            )
+        })?;
+    let before = root_split_progress(expanded_root(expanded, request.root)?);
+    let graph_root = graph_root(graph, request.root)?;
+    let SpillEdit {
+        liveness_blocks,
+        constraint_blocks,
+    } = context
+        .spiller
+        .materialize(
+            expanded,
+            graph,
+            request.value,
+            request.root,
+            &entries,
+            &spill,
+            request.value == graph_root.origin,
+        )
+        .map_err(AllocationSplitError::spill)?;
+    let mut journal = SplitMutationJournal {
+        liveness_blocks,
+        constraint_blocks,
+    };
+    prune_replaced_register_region(expanded, request.root, request.value, source.region)?;
+    let after = root_split_progress(expanded_root(expanded, request.root)?);
+    if after >= before {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPILL.NON_MONOTONIC",
+            Some(value.interval.definition.block()),
+            Some(request.value),
+            Some(request.root),
+            format!("spill progress {before:?} did not decrease: {after:?}"),
+        ));
+    }
+    let replacement = (request.value, request.root);
+    let liveness = finish_split_mutations(
+        expanded,
+        cfg,
+        &mut journal,
+        std::slice::from_ref(&replacement),
+    )?;
+    Ok(AppliedSplit {
+        root: request.root,
         constraint_blocks: journal.constraint_blocks,
         changed_values: liveness.changed_values,
         range_changed_values: liveness.range_changed_values,
@@ -1372,155 +923,31 @@ fn apply_split_with_context(
 fn mutate_verified_split(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
-    plan: &RegionSplitPlan,
+    plan: &PlannedRegionSplit,
     journal: &mut SplitMutationJournal,
+    spiller: &Spiller,
 ) -> Result<(), AllocationSplitError> {
     let before = root_split_progress(expanded_root(expanded, plan.root)?);
     let graph_root = graph_root(graph, plan.root)?;
-    let needs_stack = plan
-        .entries
-        .iter()
-        .any(|entry| entry.home.kind == HomeKind::Stack);
-    let existing_stack_home = stack_home(expanded, plan.root)?;
-    let stack_home = if needs_stack {
-        if existing_stack_home.is_none() {
-            journal.record_block(graph_root.definition.block());
-        }
-        let replaces_complete_origin = plan.value == graph_root.origin && plan.retained.is_empty();
-        Some(ensure_stack_home(
+    let replaces_complete_origin = plan.value == graph_root.origin && plan.retained.is_empty();
+    let SpillEdit {
+        liveness_blocks,
+        constraint_blocks,
+    } = spiller
+        .materialize(
             expanded,
-            graph_root,
-            replaces_complete_origin,
-        )?)
-    } else {
-        existing_stack_home
-    };
-
-    for entry in &plan.entries {
-        let entry_use = expanded_use(expanded, plan.root, entry.entry)?.clone();
-        journal.record_use(entry_use.original_site);
-        let lowered = allocation_expand::lower_use_materialization(
-            &mut expanded.ir,
             graph,
-            graph_root,
             plan.value,
-            entry.entry,
-            entry_use.original_site,
-            &entry.home,
-            stack_home,
-            &mut expanded.stack_homes,
+            plan.root,
+            &plan.entries,
+            &plan.spill,
+            replaces_complete_origin,
         )
-        .map_err(AllocationSplitError::expand)?;
-        match entry.kind {
-            SplitEntryKind::Materialized => {
-                if entry.uses.as_slice() != [entry.entry] {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SINGLETON_SHAPE",
-                        Some(entry_use.site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "materialized split entry owns more than its exact entry use",
-                    ));
-                }
-                match lowered {
-                    allocation_expand::LoweredUseMaterialization::Register(lowered) => {
-                        rewrite_expanded_use(
-                            expanded,
-                            plan.root,
-                            entry.entry,
-                            plan.value,
-                            lowered.value,
-                            ExpandedUseSource::Materialized(lowered.source),
-                            journal,
-                        )?;
-                    }
-                    allocation_expand::LoweredUseMaterialization::Edge(location) => {
-                        let target = expanded
-                            .roots
-                            .get_mut(plan.root.0 as usize)
-                            .and_then(|root| root.uses.get_mut(entry.entry.0 as usize))
-                            .ok_or_else(|| {
-                                AllocationSplitError::new(
-                                    "ALLOCATION_SPLIT.USE_RANGE",
-                                    Some(entry_use.site.block()),
-                                    Some(plan.value),
-                                    Some(plan.root),
-                                    "phi-edge home references a missing expanded use",
-                                )
-                            })?;
-                        if target.value != plan.value {
-                            return Err(AllocationSplitError::new(
-                                "ALLOCATION_SPLIT.USE_OWNERSHIP",
-                                Some(target.site.block()),
-                                Some(target.value),
-                                Some(plan.root),
-                                "phi-edge home no longer belongs to the split register region",
-                            ));
-                        }
-                        target.value = graph_root.origin;
-                        target.source = ExpandedUseSource::Edge(location);
-                    }
-                }
-            }
-            SplitEntryKind::RegisterRegion => {
-                let allocation_expand::LoweredUseMaterialization::Register(lowered) = lowered
-                else {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.REGION_EDGE_ENTRY",
-                        Some(entry_use.site.block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "multi-use register region cannot start from a non-register phi-edge location",
-                    ));
-                };
-                let region = fresh_region_id(expanded)?;
-                // Split analysis may provide a useful color, but SplitEditor
-                // never hard-assigns a child. The exact child interval returns
-                // to ordinary allocation with this as a hint only.
-                let preferred_register = entry.register.or(Some(plan.register));
-                let region_row = expanded.register_regions.len();
-                if expanded.region_rows.insert(region, region_row).is_some() {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.REGION_IDENTITY",
-                        Some(entry_use.site.block()),
-                        Some(lowered.value),
-                        Some(plan.root),
-                        "new register region duplicates an existing stable identity",
-                    ));
-                }
-                expanded.register_regions.push(ExpandedRegisterRegion {
-                    id: region,
-                    root: plan.root,
-                    value: lowered.value,
-                    preferred_register,
-                    entry_use: entry.entry,
-                    entry: lowered.source,
-                });
-                for &use_id in &entry.uses {
-                    rewrite_expanded_use(
-                        expanded,
-                        plan.root,
-                        use_id,
-                        plan.value,
-                        lowered.value,
-                        ExpandedUseSource::RegisterRegion {
-                            region,
-                            preferred_register,
-                        },
-                        journal,
-                    )?;
-                }
-                if let Some(register) = entry.register {
-                    journal.planned_fragments.push(PlannedFragmentAssignment {
-                        value: lowered.value,
-                        register,
-                    });
-                }
-            }
-        }
-    }
+        .map_err(AllocationSplitError::spill)?;
+    journal.liveness_blocks.extend(liveness_blocks);
+    journal.constraint_blocks.extend(constraint_blocks);
 
-    retarget_retained_fragment(expanded, plan)?;
+    retarget_retained_fragment(expanded, &plan.split)?;
     prune_replaced_register_region(expanded, plan.root, plan.value, plan.source_region)?;
     let after = root_split_progress(expanded_root(expanded, plan.root)?);
     if after >= before {
@@ -1641,20 +1068,23 @@ fn finish_split_mutations(
     expanded: &mut ExpandedAllocationProblem,
     cfg: &NormalizedCfg,
     journal: &mut SplitMutationJournal,
-    plans: &[RegionSplitPlan],
+    replacements: &[(VReg, LiveBundleId)],
 ) -> Result<IncrementalLivenessUpdate, AllocationSplitError> {
     let mut liveness = allocation_expand::refresh(expanded, cfg, &journal.liveness_blocks)
         .map_err(AllocationSplitError::expand)?;
-    let replaced = plans.iter().map(|plan| plan.value).collect::<Vec<_>>();
+    let replaced = replacements
+        .iter()
+        .map(|(value, _)| *value)
+        .collect::<Vec<_>>();
     let pruned_blocks = expanded
         .ir
         .prune_dead_materializations_from(&expanded.intervals, replaced)
         .map_err(|error| {
             let root = error.values.first().and_then(|value| {
-                plans
+                replacements
                     .iter()
-                    .find(|plan| plan.value == *value)
-                    .map(|plan| plan.root)
+                    .find(|(replaced, _)| replaced == value)
+                    .map(|(_, root)| *root)
             });
             AllocationSplitError::new(
                 error.rule,
@@ -1676,150 +1106,57 @@ fn finish_split_mutations(
     Ok(liveness)
 }
 
-fn apply_split_round(
-    expanded: &mut ExpandedAllocationProblem,
-    graph: &HomeGraph,
+fn cheapest_spill_candidate(
     joint: &JointAllocationProblem,
-    plans: &[RegionSplitPlan],
-    cfg: &NormalizedCfg,
-    context: &SplitPlanningContext,
-) -> Result<AppliedSplitRound, AllocationSplitError> {
-    if plans.is_empty() {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.EMPTY_ROUND",
-            None,
-            None,
-            None,
-            "allocation round has no symbolic spill plans to materialize",
-        ));
-    }
-    let mut roots = BTreeSet::new();
-    let mut source_values = BTreeSet::new();
-    let mut root_uses = BTreeMap::<LiveBundleId, BTreeSet<BundleUseId>>::new();
-    let mut retained_fragments = Vec::new();
-    for plan in plans {
-        roots.insert(plan.root);
-        if !source_values.insert(plan.value) {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_SOURCE_IDENTITY",
-                Some(plan.primary_cut().block()),
-                Some(plan.value),
-                Some(plan.root),
-                "one allocation round splits the same machine region twice",
-            ));
-        }
-        let candidate = candidate_from_plan(joint, plan)?;
-        let owned = root_uses.entry(plan.root).or_default();
-        for &use_id in &candidate.uses {
-            if !owned.insert(use_id) {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROUND_USE_OWNERSHIP",
-                    Some(plan.primary_cut().block()),
-                    Some(plan.value),
-                    Some(plan.root),
-                    "two same-root plans split overlapping immutable use ownership",
-                ));
-            }
-        }
-        if super::exhaustive_verification_enabled() {
-            verify_plan_structure(expanded, joint, &candidate, plan, cfg, &context.dominance)?;
-        }
-        if !plan.retained.is_empty() {
-            retained_fragments.push(PlannedFragmentAssignment {
-                value: plan.value,
-                register: plan.register,
-            });
-        }
-    }
-    if super::exhaustive_verification_enabled() {
-        verify_round_home_selections(expanded, context, plans)?;
-    }
-    retained_fragments.sort_unstable();
-    if retained_fragments
-        .windows(2)
-        .any(|pair| pair[0].value == pair[1].value)
-    {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ROUND_FRAGMENT_IDENTITY",
-            None,
-            retained_fragments.first().map(|fragment| fragment.value),
-            None,
-            "one allocation round assigns two retained fragments of the same machine value",
-        ));
-    }
-
-    expanded
-        .ir
-        .begin_instruction_transaction()
-        .map_err(|error| {
+    request: &RegionSplitRequest,
+) -> Result<VReg, AllocationSplitError> {
+    let mut best = None::<(VReg, u64, u64, usize)>;
+    for candidate in &request.candidates {
+        let value = joint.value(candidate.value).ok_or_else(|| {
             AllocationSplitError::new(
-                error.rule,
-                error.block,
-                error.values.first().copied(),
-                plans.first().map(|plan| plan.root),
-                error.message,
+                "ALLOCATION_SPILL.CANDIDATE_RANGE",
+                Some(request.definition.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "spill candidate is outside joint allocation",
             )
         })?;
-    let mut journal = SplitMutationJournal::default();
-    for plan in plans {
-        mutate_verified_split(expanded, graph, plan, &mut journal)?;
+        let cost = value.spill_cost.ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPILL.CANDIDATE_CLASS",
+                Some(value.interval.definition.block()),
+                Some(candidate.value),
+                Some(candidate.root),
+                "fixed transition was selected as a spill candidate",
+            )
+        })?;
+        let candidate_key = (
+            candidate.value,
+            cost,
+            value.live_length,
+            candidate.uses.len(),
+        );
+        let replace = best.is_none_or(|(best_value, best_cost, best_length, best_uses)| {
+            let candidate_density = u128::from(cost) * u128::from(best_length);
+            let best_density = u128::from(best_cost) * u128::from(value.live_length);
+            candidate_density < best_density
+                || (candidate_density == best_density
+                    && (candidate.uses.len() < best_uses
+                        || (candidate.uses.len() == best_uses && candidate.value < best_value)))
+        });
+        if replace {
+            best = Some(candidate_key);
+        }
     }
-    let liveness = finish_split_mutations(expanded, cfg, &mut journal, plans)?;
-    retained_fragments.extend(journal.planned_fragments);
-    retained_fragments.sort_unstable();
-    if retained_fragments
-        .windows(2)
-        .any(|pair| pair[0].value == pair[1].value)
-    {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ROUND_FRAGMENT_IDENTITY",
+    best.map(|(value, _, _, _)| value).ok_or_else(|| {
+        AllocationSplitError::new(
+            "ALLOCATION_SPILL.NO_CANDIDATE",
+            Some(request.definition.block()),
+            Some(request.blocked_value),
             None,
-            retained_fragments.first().map(|fragment| fragment.value),
-            None,
-            "one allocation round assigns a machine value more than once",
-        ));
-    }
-    Ok(AppliedSplitRound {
-        roots: roots.into_iter().collect(),
-        retained_fragments,
-        constraint_blocks: journal.constraint_blocks,
-        changed_values: liveness.changed_values,
-        range_changed_values: liveness.range_changed_values,
-        live_lengths: liveness.live_lengths,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_and_refresh_split_round(
-    expanded: &mut ExpandedAllocationProblem,
-    graph: &HomeGraph,
-    cfg: &NormalizedCfg,
-    registers: &[PhysReg],
-    planning: &SplitPlanningContext,
-    session: &mut JointAllocationSession,
-    plans: &[RegionSplitPlan],
-) -> Result<(), AllocationSplitError> {
-    let applied = apply_split_round(expanded, graph, session.problem(), plans, cfg, planning)?;
-    session
-        .clear_symbolic_fragments()
-        .map_err(AllocationSplitError::joint)?;
-    session
-        .update_from_expanded_round(
-            expanded,
-            cfg,
-            graph,
-            registers,
-            &applied.constraint_blocks,
-            &applied.changed_values,
-            &applied.range_changed_values,
-            &applied.live_lengths,
-            &applied.roots,
-            &planning.home_plans,
+            "failed split request contains no interval that can advance to Spill",
         )
-        .map_err(AllocationSplitError::joint)?;
-    session
-        .assign_planned_fragments(&applied.retained_fragments)
-        .map_err(AllocationSplitError::joint)
+    })
 }
 
 /// Iterate exact splitting and joint coloring to a fixed point.  The bound is
@@ -1861,7 +1198,7 @@ pub(super) fn allocate_with_splitting(
         cfg,
         graph,
         registers,
-        &planning.home_plans,
+        planning.spiller.home_plans(),
     )
     .map_err(AllocationSplitError::joint)?;
     loop {
@@ -1870,25 +1207,7 @@ pub(super) fn allocate_with_splitting(
             .map_err(AllocationSplitError::joint)?
         {
             JointAllocationOutcome::Complete(allocation) => {
-                if session.has_symbolic_fragments() {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.ROUND_PUBLICATION",
-                        None,
-                        None,
-                        None,
-                        "allocation published while a legacy symbolic fragment reservation remained active",
-                    ));
-                }
                 return Ok(allocation);
-            }
-            JointAllocationOutcome::DeferredRound => {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.DEFERRED_ROUND",
-                    None,
-                    None,
-                    None,
-                    "greedy allocation reached the removed symbolic-round boundary",
-                ));
             }
             JointAllocationOutcome::NeedsSplit(request) => {
                 if steps >= max_steps {
@@ -1900,17 +1219,27 @@ pub(super) fn allocate_with_splitting(
                         "monotonic split sequence exceeded its ownership-derived bound",
                     ));
                 }
-                let plan = plan_split_with_context(
+                let plan = match plan_split_with_context(
                     expanded,
                     graph,
                     session.problem(),
                     &request,
                     cfg,
                     &planning,
-                    &SplitRoundPlanningState::default(),
-                )?;
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) if error.rule == "ALLOCATION_SPLIT.NO_PROGRESS" => {
+                        let value = cheapest_spill_candidate(session.problem(), &request)?;
+                        session
+                            .require_spill(value)
+                            .map_err(AllocationSplitError::joint)?;
+                        steps += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 session
-                    .defer_split(plan.value)
+                    .unassign_for_split(plan.value)
                     .map_err(AllocationSplitError::joint)?;
                 let applied = apply_split_with_context(
                     expanded,
@@ -1931,18 +1260,46 @@ pub(super) fn allocate_with_splitting(
                         &applied.range_changed_values,
                         &applied.live_lengths,
                         std::slice::from_ref(&applied.root),
-                        &planning.home_plans,
+                        planning.spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
-                if session.has_symbolic_fragments() {
+                steps += 1;
+            }
+            JointAllocationOutcome::NeedsSpill(request) => {
+                if steps >= max_steps {
                     return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.SYMBOLIC_FRAGMENT",
-                        Some(plan.primary_cut().block()),
-                        Some(plan.value),
-                        Some(plan.root),
-                        "SplitEditor created a legacy symbolic color reservation",
+                        "ALLOCATION_SPILL.ITERATION_BOUND",
+                        session
+                            .problem()
+                            .value(request.value)
+                            .map(|value| value.interval.definition.block()),
+                        Some(request.value),
+                        Some(request.root),
+                        "monotonic split/spill sequence exceeded its ownership-derived bound",
                     ));
                 }
+                let applied = apply_spill_with_context(
+                    expanded,
+                    graph,
+                    session.problem(),
+                    &request,
+                    cfg,
+                    &planning,
+                )?;
+                session
+                    .update_from_expanded_round(
+                        expanded,
+                        cfg,
+                        graph,
+                        registers,
+                        &applied.constraint_blocks,
+                        &applied.changed_values,
+                        &applied.range_changed_values,
+                        &applied.live_lengths,
+                        std::slice::from_ref(&applied.root),
+                        planning.spiller.home_plans(),
+                    )
+                    .map_err(AllocationSplitError::joint)?;
                 steps += 1;
             }
         }
@@ -2658,375 +2015,6 @@ fn sorted_difference(left: &[BundleUseId], removed: &[BundleUseId]) -> Vec<Bundl
     result
 }
 
-fn entry_selections(
-    home_plan: &RootHomePlan,
-    entries: &[BundleUseId],
-    stack_exists: bool,
-    root: LiveBundleId,
-) -> Result<(BTreeMap<BundleUseId, HomeSelection>, u64), AllocationSplitError> {
-    let mut ordered = entries.to_vec();
-    ordered.sort_unstable();
-    if ordered.is_empty() || ordered.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ENTRY_ORDER",
-            None,
-            None,
-            Some(root),
-            "split entries are empty or contain duplicate use identities",
-        ));
-    }
-    let partition = home_plan
-        .partition_with_existing_stack(&ordered, stack_exists)
-        .map_err(|error| AllocationSplitError::home(error, root))?;
-    let mut selections = BTreeMap::new();
-    let mut stack_creation_pending = !stack_exists;
-    let mut materialized_total = 0u64;
-    for piece in partition.pieces {
-        for use_id in piece.uses {
-            let selection = match piece.selection.kind {
-                HomeKind::Stack => {
-                    let creation_cost = if stack_creation_pending {
-                        stack_creation_pending = false;
-                        STACK_HOME_CREATION_COST
-                    } else {
-                        0
-                    };
-                    HomeSelection {
-                        kind: HomeKind::Stack,
-                        materializations: Vec::new(),
-                        creation_cost,
-                        materialization_cost: STACK_HOME_MATERIALIZATION_COST,
-                    }
-                }
-                HomeKind::Rematerialize(_) | HomeKind::State(_) => {
-                    let materialization = piece
-                        .selection
-                        .materializations
-                        .iter()
-                        .find(|materialization| materialization.use_id == use_id)
-                        .copied()
-                        .ok_or_else(|| {
-                            AllocationSplitError::new(
-                                "ALLOCATION_SPLIT.HOME_COVERAGE",
-                                None,
-                                None,
-                                Some(root),
-                                format!("non-stack home has no exact recipe for entry {use_id:?}"),
-                            )
-                        })?;
-                    HomeSelection {
-                        kind: piece.selection.kind,
-                        materializations: vec![materialization],
-                        creation_cost: 0,
-                        materialization_cost: materialization.cost,
-                    }
-                }
-                HomeKind::Register => {
-                    return Err(AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.HOME_CLASS",
-                        None,
-                        None,
-                        Some(root),
-                        "home partition returned allocator-owned register residency",
-                    ));
-                }
-            };
-            materialized_total = materialized_total
-                .checked_add(selection.total_cost())
-                .ok_or_else(|| {
-                    AllocationSplitError::new(
-                        "ALLOCATION_SPLIT.HOME_COST_OVERFLOW",
-                        None,
-                        None,
-                        Some(root),
-                        "entry home cost exceeds u64",
-                    )
-                })?;
-            if selections.insert(use_id, selection).is_some() {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.HOME_COVERAGE",
-                    None,
-                    None,
-                    Some(root),
-                    "home partition selected the same entry more than once",
-                ));
-            }
-        }
-    }
-    if selections.len() != ordered.len() || materialized_total != partition.total_cost {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.HOME_COST_IDENTITY",
-            None,
-            None,
-            Some(root),
-            format!(
-                "materialized entries cost {materialized_total}, indexed partition cost {}",
-                partition.total_cost
-            ),
-        ));
-    }
-    Ok((selections, partition.total_cost))
-}
-
-fn split_entry_ids(plan: &RegionSplitPlan) -> Result<Vec<BundleUseId>, AllocationSplitError> {
-    let mut entries = plan
-        .entries
-        .iter()
-        .map(|entry| entry.entry)
-        .collect::<Vec<_>>();
-    entries.sort_unstable();
-    if entries.is_empty() || entries.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ROUND_HOME_ENTRY",
-            None,
-            Some(plan.value),
-            Some(plan.root),
-            "split plan has no entries or repeats one immutable entry use",
-        ));
-    }
-    Ok(entries)
-}
-
-fn round_entries_by_root(
-    plans: &[RegionSplitPlan],
-) -> Result<BTreeMap<LiveBundleId, Vec<BundleUseId>>, AllocationSplitError> {
-    let mut grouped = BTreeMap::<LiveBundleId, Vec<BundleUseId>>::new();
-    for plan in plans {
-        grouped
-            .entry(plan.root)
-            .or_default()
-            .extend(split_entry_ids(plan)?);
-    }
-    for (&root, entries) in &mut grouped {
-        entries.sort_unstable();
-        if entries.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_ENTRY",
-                None,
-                None,
-                Some(root),
-                "two same-root split plans materialize the same immutable entry use",
-            ));
-        }
-    }
-    Ok(grouped)
-}
-
-fn round_home_selections(
-    expanded: &ExpandedAllocationProblem,
-    context: &SplitPlanningContext,
-    root: LiveBundleId,
-    entries: &[BundleUseId],
-) -> Result<(BTreeMap<BundleUseId, HomeSelection>, u64), AllocationSplitError> {
-    if entries.is_empty() {
-        return Ok((BTreeMap::new(), 0));
-    }
-    let stack_exists = stack_home(expanded, root)?.is_some();
-    entry_selections(context.home_plan(root)?, entries, stack_exists, root)
-}
-
-fn assign_round_home_selections(
-    expanded: &ExpandedAllocationProblem,
-    context: &SplitPlanningContext,
-    plans: &mut [RegionSplitPlan],
-) -> Result<(), AllocationSplitError> {
-    let grouped = round_entries_by_root(plans)?;
-    let mut partitions =
-        BTreeMap::<LiveBundleId, (BTreeMap<BundleUseId, HomeSelection>, u64, u64)>::new();
-    for (&root, entries) in &grouped {
-        let (selections, expected_total) = round_home_selections(expanded, context, root, entries)?;
-        partitions.insert(root, (selections, expected_total, 0));
-    }
-    for plan in plans {
-        let (selections, _, assigned_total) = partitions.get_mut(&plan.root).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_ROOT",
-                None,
-                Some(plan.value),
-                Some(plan.root),
-                "round home partition omitted one semantic root",
-            )
-        })?;
-        plan.transition_cost = 0;
-        for entry in &mut plan.entries {
-            entry.home = selections.remove(&entry.entry).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROUND_HOME_COVERAGE",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "round home partition omitted one split entry",
-                )
-            })?;
-            let cost = entry.home.total_cost();
-            plan.transition_cost = plan.transition_cost.checked_add(cost).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.HOME_COST_OVERFLOW",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "one split plan's round home cost exceeds u64",
-                )
-            })?;
-            *assigned_total = assigned_total.checked_add(cost).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.HOME_COST_OVERFLOW",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "one root's round home cost exceeds u64",
-                )
-            })?;
-        }
-    }
-    for (root, (selections, expected_total, assigned_total)) in partitions {
-        if !selections.is_empty() || assigned_total != expected_total {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_COST",
-                None,
-                None,
-                Some(root),
-                format!("assigned round homes cost {assigned_total}, expected {expected_total}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn verify_round_planning_state(
-    expanded: &ExpandedAllocationProblem,
-    context: &SplitPlanningContext,
-    plans: &[RegionSplitPlan],
-    round: &SplitRoundPlanningState,
-) -> Result<(), AllocationSplitError> {
-    let grouped = round_entries_by_root(plans)?;
-    if grouped.len() != round.roots.len() {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.ROUND_HOME_STATE",
-            None,
-            None,
-            None,
-            "incremental round-home roots differ from deferred split plans",
-        ));
-    }
-    for (&root, entries) in &grouped {
-        let state = round.roots.get(&root).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_STATE",
-                None,
-                None,
-                Some(root),
-                "deferred split root has no incremental home-cost state",
-            )
-        })?;
-        if !state.entries.iter().copied().eq(entries.iter().copied()) {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_STATE",
-                None,
-                None,
-                Some(root),
-                "incremental home-cost state owns different entry uses than its split plans",
-            ));
-        }
-        let home_plan = context.home_plan(root)?;
-        let mut expected = home_plan.cost_accumulator(stack_home(expanded, root)?.is_some());
-        home_plan
-            .extend_cost_accumulator(&mut expected, entries)
-            .map_err(|error| AllocationSplitError::home(error, root))?;
-        if expected != state.costs {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_STATE",
-                None,
-                None,
-                Some(root),
-                "incremental home-cost totals differ from the deferred entry ownership",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn verify_round_home_selections(
-    expanded: &ExpandedAllocationProblem,
-    context: &SplitPlanningContext,
-    plans: &[RegionSplitPlan],
-) -> Result<(), AllocationSplitError> {
-    let grouped = round_entries_by_root(plans)?;
-    let mut expected = BTreeMap::<LiveBundleId, (BTreeMap<BundleUseId, HomeSelection>, u64)>::new();
-    for (&root, entries) in &grouped {
-        expected.insert(
-            root,
-            round_home_selections(expanded, context, root, entries)?,
-        );
-    }
-    let mut actual_totals = BTreeMap::<LiveBundleId, u64>::new();
-    for plan in plans {
-        let (expected_homes, _) = expected.get(&plan.root).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_ROOT",
-                None,
-                Some(plan.value),
-                Some(plan.root),
-                "verified split plan has no root-wide home partition",
-            )
-        })?;
-        let entry_total = plan.entries.iter().try_fold(0u64, |total, entry| {
-            if expected_homes.get(&entry.entry) != Some(&entry.home)
-                || entry.home.kind == HomeKind::Register
-            {
-                return Err(AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.ROUND_HOME_IDENTITY",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "split entry differs from the root-wide home partition",
-                ));
-            }
-            total.checked_add(entry.home.total_cost()).ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.HOME_COST_OVERFLOW",
-                    None,
-                    Some(plan.value),
-                    Some(plan.root),
-                    "verified split-plan home cost exceeds u64",
-                )
-            })
-        })?;
-        if entry_total != plan.transition_cost {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_COST",
-                None,
-                Some(plan.value),
-                Some(plan.root),
-                "split-plan cost differs from its root-wide entry homes",
-            ));
-        }
-        let actual_total = actual_totals.entry(plan.root).or_default();
-        *actual_total = actual_total.checked_add(entry_total).ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.HOME_COST_OVERFLOW",
-                None,
-                Some(plan.value),
-                Some(plan.root),
-                "verified root-wide home cost exceeds u64",
-            )
-        })?;
-    }
-    for (root, (_, expected_total)) in expected {
-        let actual_total = actual_totals.get(&root).copied().unwrap_or_default();
-        if actual_total != expected_total {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.ROUND_HOME_COST",
-                None,
-                None,
-                Some(root),
-                format!("verified round cost {actual_total}, expected {expected_total}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn verify_plan_structure(
     expanded: &ExpandedAllocationProblem,
     joint: &JointAllocationProblem,
@@ -3145,7 +2133,7 @@ fn verify_plan_structure(
                     ));
                 }
                 if entry
-                    .register
+                    .preferred_register
                     .is_some_and(|register| !value.allowed_registers.contains(register))
                 {
                     return Err(AllocationSplitError::new(
@@ -3158,7 +2146,7 @@ fn verify_plan_structure(
                 }
             }
             SplitEntryKind::Materialized => {
-                if entry.register.is_some() {
+                if entry.preferred_register.is_some() {
                     return Err(AllocationSplitError::new(
                         "ALLOCATION_SPLIT.SYMBOLIC_SINGLETON",
                         Some(plan.primary_cut().block()),
@@ -3211,216 +2199,15 @@ fn verify_plan(
     expanded: &ExpandedAllocationProblem,
     joint: &JointAllocationProblem,
     candidate: &RegionSplitCandidate,
-    plan: &RegionSplitPlan,
+    plan: &PlannedRegionSplit,
     cfg: &NormalizedCfg,
     dominance: &Dominance,
-    home_plan: &RootHomePlan,
+    spiller: &Spiller,
 ) -> Result<(), AllocationSplitError> {
-    verify_plan_structure(expanded, joint, candidate, plan, cfg, dominance)?;
-    let entry_ids = plan
-        .entries
-        .iter()
-        .map(|entry| entry.entry)
-        .collect::<Vec<_>>();
-    let stack_exists = stack_home(expanded, plan.root)?.is_some();
-    let (expected_homes, expected_cost) =
-        entry_selections(home_plan, &entry_ids, stack_exists, plan.root)?;
-    if plan.transition_cost != expected_cost
-        || plan.entries.iter().any(|entry| {
-            expected_homes.get(&entry.entry) != Some(&entry.home)
-                || entry.home.kind == HomeKind::Register
-        })
-    {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.HOME_IDENTITY",
-            Some(plan.primary_cut().block()),
-            Some(plan.value),
-            Some(plan.root),
-            "split transitions differ from the exact HomeGraph partition",
-        ));
-    }
-    Ok(())
-}
-
-fn stack_home(
-    expanded: &ExpandedAllocationProblem,
-    root: LiveBundleId,
-) -> Result<Option<StackHomeId>, AllocationSplitError> {
-    let homes = expanded
-        .stack_homes
-        .iter()
-        .filter(|home| {
-            home.root == root && home.kind == super::allocation_expand::ExpandedStackHomeKind::Root
-        })
-        .collect::<Vec<_>>();
-    match homes.as_slice() {
-        [] => Ok(None),
-        [home] => Ok(Some(home.id)),
-        _ => Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.STACK_HOME_IDENTITY",
-            None,
-            None,
-            Some(root),
-            "one root owns more than one explicit stack home",
-        )),
-    }
-}
-
-fn ensure_stack_home(
-    expanded: &mut ExpandedAllocationProblem,
-    root: &LiveBundle,
-    replaces_complete_origin: bool,
-) -> Result<StackHomeId, AllocationSplitError> {
-    if let Some(home) = stack_home(expanded, root.id)? {
-        return Ok(home);
-    }
-    if expanded
-        .stack_homes
-        .iter()
-        .enumerate()
-        .any(|(index, home)| home.id.0 as usize != index)
-    {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.STACK_HOME_IDENTITY",
-            Some(root.definition.block()),
-            Some(root.origin),
-            Some(root.id),
-            "expanded stack homes are not densely identified",
-        ));
-    }
-    let id = StackHomeId(u32::try_from(expanded.stack_homes.len()).map_err(|_| {
-        AllocationSplitError::new(
-            "ALLOCATION_SPLIT.STACK_HOME_ID_RANGE",
-            Some(root.definition.block()),
-            Some(root.origin),
-            Some(root.id),
-            "expanded stack-home count exceeds u32",
-        )
-    })?);
-    let definition = match root.definition {
-        DefinitionSite::Phi { block, phi, .. } if replaces_complete_origin => {
-            expanded
-                .ir
-                .assign_phi_definition_home(root.definition, root.origin, id)
-                .map_err(|error| {
-                    AllocationSplitError::new(
-                        error.rule,
-                        error.block,
-                        error.values.first().copied(),
-                        Some(root.id),
-                        error.message,
-                    )
-                })?;
-            super::allocation_expand::ExpandedStackDefinition::Phi {
-                block,
-                phi,
-                destination: root.origin,
-            }
-        }
-        _ => {
-            let instruction = expanded
-                .ir
-                .insert_after_definition(
-                    root.definition,
-                    SyntheticOperation::StackStore { home: id },
-                    Uses::one(root.origin),
-                    false,
-                )
-                .map_err(|error| {
-                    AllocationSplitError::new(
-                        error.rule,
-                        error.block,
-                        error.values.first().copied(),
-                        Some(root.id),
-                        error.message,
-                    )
-                })?
-                .instruction;
-            super::allocation_expand::ExpandedStackDefinition::Store {
-                instruction,
-                value: root.origin,
-            }
-        }
-    };
-    expanded.stack_homes.push(ExpandedStackHome {
-        id,
-        root: root.id,
-        definition,
-        kind: super::allocation_expand::ExpandedStackHomeKind::Root,
-    });
-    Ok(id)
-}
-
-fn fresh_region_id(
-    expanded: &mut ExpandedAllocationProblem,
-) -> Result<RegisterRegionId, AllocationSplitError> {
-    let id = RegisterRegionId(expanded.next_register_region);
-    expanded.next_register_region =
-        expanded
-            .next_register_region
-            .checked_add(1)
-            .ok_or_else(|| {
-                AllocationSplitError::new(
-                    "ALLOCATION_SPLIT.REGION_ID_RANGE",
-                    None,
-                    None,
-                    None,
-                    "expanded register-region identity exceeds u32",
-                )
-            })?;
-    Ok(id)
-}
-
-fn rewrite_expanded_use(
-    expanded: &mut ExpandedAllocationProblem,
-    root: LiveBundleId,
-    use_id: BundleUseId,
-    original: VReg,
-    replacement: VReg,
-    source: ExpandedUseSource,
-    journal: &mut SplitMutationJournal,
-) -> Result<(), AllocationSplitError> {
-    let root_index = root.0 as usize;
-    let use_index = use_id.0 as usize;
-    let use_ = expanded
-        .roots
-        .get(root_index)
-        .and_then(|root| root.uses.get(use_index))
-        .ok_or_else(|| {
-            AllocationSplitError::new(
-                "ALLOCATION_SPLIT.USE_RANGE",
-                None,
-                Some(original),
-                Some(root),
-                format!("rewritten use {use_id:?} is outside its expanded root"),
-            )
-        })?
-        .clone();
-    if use_.value != original {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPLIT.USE_OWNERSHIP",
-            Some(use_.site.block()),
-            Some(original),
-            Some(root),
-            "rewritten use no longer belongs to the selected region",
-        ));
-    }
-    journal.record_use(use_.original_site);
-    expanded
-        .ir
-        .rewrite_use(use_.original_site, original, replacement)
-        .map_err(|error| {
-            AllocationSplitError::new(
-                error.rule,
-                error.block,
-                error.values.first().copied(),
-                Some(root),
-                error.message,
-            )
-        })?;
-    let target = &mut expanded.roots[root_index].uses[use_index];
-    target.value = replacement;
-    target.source = source;
+    verify_plan_structure(expanded, joint, candidate, &plan.split, cfg, dominance)?;
+    spiller
+        .verify(expanded, &plan.entries, &plan.spill)
+        .map_err(AllocationSplitError::spill)?;
     Ok(())
 }
 
@@ -3971,7 +2758,7 @@ mod tests {
     }
 
     #[test]
-    fn one_register_multi_cut_frontier_colors_disjoint_child_regions_atomically() {
+    fn multi_cut_children_reenter_ordinary_allocation_without_hard_colors() {
         let mut values = VRegAllocator::new();
         for _ in 0..6 {
             values.alloc();
@@ -4045,7 +2832,7 @@ mod tests {
             candidates: vec![candidate.clone()],
         };
 
-        let mut plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
+        let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
         assert_eq!(plan.register, PhysReg::RAX);
         assert_eq!(plan.cuts, points);
         assert_eq!(plan.moved, candidate.uses);
@@ -4054,98 +2841,44 @@ mod tests {
         assert!(plan.entries.iter().all(|entry| {
             entry.kind == SplitEntryKind::RegisterRegion && entry.uses.len() == 2
         }));
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.preferred_register == Some(PhysReg::RAX))
+        );
 
         let mut session =
             JointAllocationSession::new_persistent(joint, &expanded, &cfg, &graph, &registers)
                 .unwrap();
-        session.defer_split(plan.value).unwrap();
-        let mut symbolic = SymbolicFragmentPlanner::new(&cfg).unwrap();
-        symbolic
-            .reserve_plan(&expanded, &cfg, &registers, &mut session, &mut plan)
+        session.unassign_for_split(plan.value).unwrap();
+        let update = apply_split(&mut expanded, &graph, session.problem(), &plan, &cfg).unwrap();
+        session
+            .update_from_expanded(
+                &expanded,
+                &cfg,
+                &graph,
+                &registers,
+                &update.constraint_blocks,
+                &update.changed_values,
+                &update.range_changed_values,
+                &update.live_lengths,
+                update.root,
+            )
             .unwrap();
-        assert!(session.has_symbolic_fragments());
-        let child_colors = plan
-            .entries
-            .iter()
-            .map(|entry| (entry.entry, entry.register.unwrap()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            child_colors
-                .iter()
-                .map(|(_, register)| *register)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            1,
-            "mutually exclusive child ranges should reuse one physical color"
-        );
-
-        let root = root_for(&expanded, VReg(0));
-        let mut projected_ranges = Vec::new();
-        for entry in &plan.entries {
-            let entry_site = root.uses[entry.entry.0 as usize].site;
-            let definition_slot = expanded
-                .ir
-                .earliest_insert_before_use_slot(entry_site)
-                .unwrap();
-            projected_ranges.push((
-                entry.entry,
-                symbolic
-                    .build_range(
-                        &expanded,
-                        &cfg,
-                        root,
-                        plan.value,
-                        entry_site.block(),
-                        definition_slot,
-                        &entry.uses,
-                    )
-                    .unwrap(),
-            ));
-        }
-
-        let planning = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        apply_and_refresh_split_round(
-            &mut expanded,
-            &graph,
-            &cfg,
-            &registers,
-            &planning,
-            &mut session,
-            std::slice::from_ref(&plan),
-        )
-        .unwrap();
-        assert!(!session.has_symbolic_fragments());
         assert!(
             root_for(&expanded, VReg(0))
                 .uses
                 .iter()
                 .all(|use_| use_.value != VReg(0))
         );
-        for (entry_use, register) in child_colors {
+        for entry in &plan.entries {
             let region = expanded
                 .register_regions
                 .iter()
-                .find(|region| region.root == plan.root && region.entry_use == entry_use)
+                .find(|region| region.root == plan.root && region.entry_use == entry.entry)
                 .unwrap();
-            assert_eq!(region.preferred_register, Some(register));
-            assert_eq!(session.assigned_register(region.value), Some(register));
-            let projected = projected_ranges
-                .iter()
-                .find(|(entry, _)| *entry == entry_use)
-                .unwrap();
-            let actual = &session
-                .problem()
-                .value(region.value)
-                .unwrap()
-                .interval
-                .segments;
-            assert!(actual.iter().all(|segment| {
-                projected.1.iter().any(|reserved| {
-                    reserved.block == segment.block
-                        && reserved.start <= segment.start
-                        && segment.end <= reserved.end
-                })
-            }));
+            assert_eq!(region.preferred_register, Some(PhysReg::RAX));
+            assert_eq!(session.assigned_register(region.value), None);
         }
 
         let JointAllocationOutcome::Complete(allocation) =
@@ -4250,156 +2983,6 @@ mod tests {
     }
 
     #[test]
-    fn same_root_regions_share_one_round_home_partition_and_publication() {
-        let mut values = VRegAllocator::new();
-        for _ in 0..8 {
-            values.alloc();
-        }
-        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 8]);
-        let mut entry = MBlock::new(BlockId(0));
-        entry.push(MInst::LoadImm {
-            dst: VReg(0),
-            value: 7,
-        });
-        entry.push(MInst::LoadImm {
-            dst: VReg(1),
-            value: 1,
-        });
-        entry.push(MInst::Branch {
-            cond: VReg(1),
-            true_bb: BlockId(1),
-            false_bb: BlockId(2),
-        });
-        let mut left = MBlock::new(BlockId(1));
-        left.push(MInst::Mov {
-            dst: VReg(2),
-            src: VReg(0),
-        });
-        left.push(MInst::LoadImm {
-            dst: VReg(3),
-            value: 19,
-        });
-        left.push(MInst::Mov {
-            dst: VReg(4),
-            src: VReg(0),
-        });
-        left.push(MInst::Mov {
-            dst: VReg(5),
-            src: VReg(0),
-        });
-        left.push(MInst::Jump { target: BlockId(3) });
-        let mut right = MBlock::new(BlockId(2));
-        right.push(MInst::Mov {
-            dst: VReg(6),
-            src: VReg(0),
-        });
-        right.push(MInst::Mov {
-            dst: VReg(7),
-            src: VReg(0),
-        });
-        right.push(MInst::Jump { target: BlockId(3) });
-        let mut merge = MBlock::new(BlockId(3));
-        merge.push(MInst::Return);
-        function.blocks = vec![entry, left, right, merge];
-
-        let registers = [PhysReg::RAX, PhysReg::RDX, PhysReg::RCX, PhysReg::RBX];
-        let (cfg, mut graph, mut expanded) = model(&mut function, &registers);
-        let initial_joint =
-            JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        let initial_request = request(&initial_joint, VReg(3), candidate(&initial_joint, VReg(0)));
-        let initial_plan =
-            plan_split(&expanded, &graph, &initial_joint, &initial_request, &cfg).unwrap();
-        apply_split(&mut expanded, &graph, &initial_joint, &initial_plan, &cfg).unwrap();
-        let root = initial_plan.root;
-        let child = expanded
-            .register_regions
-            .iter()
-            .find(|region| region.root == root)
-            .unwrap()
-            .value;
-        assert_ne!(child, VReg(0));
-
-        // Force the next two exact entries to use the implicit stack
-        // alternative. Their independent costs are 2 + 2; the root-wide
-        // partition must share one creation and cost 3.
-        for homes in &mut graph.homes[root.0 as usize].uses {
-            homes.clear();
-        }
-        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-        let make_tail_plan = |value: VReg, block: BlockId| {
-            let mut candidate = candidate(&joint, value);
-            let root_row = root_for(&expanded, VReg(0));
-            let tail = candidate
-                .uses
-                .iter()
-                .copied()
-                .filter(|use_id| root_row.uses[use_id.0 as usize].site.block() == block)
-                .max_by_key(|use_id| root_row.uses[use_id.0 as usize].site.slot())
-                .unwrap();
-            let site = root_row.uses[tail.0 as usize].site;
-            candidate.frontiers = vec![RegisterPressureFrontier {
-                register: PhysReg::RAX,
-                points: vec![AllocationPressurePoint {
-                    register: PhysReg::RAX,
-                    block: site.block(),
-                    slot: site.slot(),
-                }],
-            }];
-            let request = RegionSplitRequest {
-                blocked_value: value,
-                definition: joint.value(value).unwrap().interval.definition,
-                conflicts: Vec::new(),
-                candidates: vec![candidate],
-            };
-            plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap()
-        };
-        let mut plans = vec![
-            make_tail_plan(child, BlockId(1)),
-            make_tail_plan(VReg(0), BlockId(2)),
-        ];
-        assert!(plans.iter().all(|plan| plan.root == root));
-        assert_eq!(
-            plans.iter().map(|plan| plan.transition_cost).sum::<u64>(),
-            4
-        );
-
-        let context = SplitPlanningContext::build(&graph, &cfg).unwrap();
-        let mut round = SplitRoundPlanningState::default();
-        assert_eq!(round.home_cost_delta(&expanded, &context, &plans[0]), Ok(2));
-        round.commit(&expanded, &context, &plans[0]).unwrap();
-        assert_eq!(round.home_cost_delta(&expanded, &context, &plans[1]), Ok(1));
-        round.commit(&expanded, &context, &plans[1]).unwrap();
-        verify_round_planning_state(&expanded, &context, &plans, &round).unwrap();
-        assign_round_home_selections(&expanded, &context, &mut plans).unwrap();
-        assert_eq!(
-            plans.iter().map(|plan| plan.transition_cost).sum::<u64>(),
-            3
-        );
-        assert_eq!(
-            plans
-                .iter()
-                .flat_map(|plan| &plan.entries)
-                .filter(|entry| entry.home.creation_cost != 0)
-                .count(),
-            1
-        );
-        verify_round_home_selections(&expanded, &context, &plans).unwrap();
-
-        let applied =
-            apply_split_round(&mut expanded, &graph, &joint, &plans, &cfg, &context).unwrap();
-        assert_eq!(applied.roots, vec![root]);
-        assert_eq!(
-            expanded
-                .stack_homes
-                .iter()
-                .filter(|home| home.root == root)
-                .count(),
-            1
-        );
-        JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
-    }
-
-    #[test]
     fn cross_block_region_updates_liveness_and_ownership_from_one_journal() {
         let mut values = VRegAllocator::new();
         for _ in 0..8 {
@@ -4493,16 +3076,18 @@ mod tests {
                 update.root,
             )
             .unwrap();
-        session
-            .assign_planned_fragments(&[PlannedFragmentAssignment {
-                value: plan.value,
-                register: plan.register,
-            }])
-            .unwrap();
-
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert_eq!(session.problem(), &rebuilt);
-        assert_eq!(session.assigned_register(plan.value), Some(plan.register));
+        assert_eq!(session.assigned_register(plan.value), None);
+        let JointAllocationOutcome::Complete(allocation) =
+            session.allocate(&cfg, &registers).unwrap()
+        else {
+            panic!("updated split children should reenter ordinary allocation");
+        };
+        session
+            .problem()
+            .verify(&cfg, &registers, &allocation)
+            .unwrap();
     }
 
     #[test]
@@ -4599,9 +3184,10 @@ mod tests {
         let plan = plan_split(&expanded, &graph, &joint, &request, &cfg).unwrap();
         assert!(plan.retained.is_empty());
         assert!(
-            plan.entries
-                .iter()
-                .all(|entry| entry.home.kind == HomeKind::Stack)
+            plan.spill
+                .selections()
+                .values()
+                .all(|selection| selection.kind == super::super::home_graph::HomeKind::Stack)
         );
 
         apply_split(&mut expanded, &graph, &joint, &plan, &cfg).unwrap();
@@ -4680,9 +3266,10 @@ mod tests {
         assert_eq!(plan.retained.len(), 1);
         assert_eq!(plan.moved.len(), 2);
         assert!(
-            plan.entries
-                .iter()
-                .all(|entry| entry.home.kind == HomeKind::Stack)
+            plan.spill
+                .selections()
+                .values()
+                .all(|selection| selection.kind == super::super::home_graph::HomeKind::Stack)
         );
 
         let mut session = JointAllocationSession::new_persistent(
@@ -4800,5 +3387,59 @@ mod tests {
             2,
             "both replacement recipes must remain live"
         );
+    }
+
+    #[test]
+    fn spill_stage_materializes_every_use_and_removes_the_register_interval() {
+        let instructions = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            },
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut function = function(3, instructions);
+        let (cfg, graph, mut expanded) = model(&mut function, &registers);
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let value = joint.value(VReg(0)).unwrap();
+        let AllocationValueClass::Region { root, uses } = &value.class else {
+            panic!("original SSA value should start as one register interval");
+        };
+        let request = RegionSpillRequest {
+            value: VReg(0),
+            root: *root,
+            uses: uses.clone(),
+        };
+        let context = SplitPlanningContext::build(&graph, &cfg).unwrap();
+        apply_spill_with_context(&mut expanded, &graph, &joint, &request, &cfg, &context).unwrap();
+
+        let root = root_for(&expanded, VReg(0));
+        assert!(root.uses.iter().all(|use_| {
+            use_.value != VReg(0)
+                && matches!(
+                    use_.source,
+                    ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_)
+                )
+        }));
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert!(!matches!(
+            rebuilt.value(VReg(0)).map(|value| &value.class),
+            Some(AllocationValueClass::Region { .. })
+        ));
+        assert!(rebuilt.values.iter().all(|value| {
+            matches!(value.class, AllocationValueClass::Fixed)
+                || !matches!(value.class, AllocationValueClass::Region { root: value_root, .. } if value_root == request.root)
+        }));
     }
 }

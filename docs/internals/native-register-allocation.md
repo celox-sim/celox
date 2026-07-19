@@ -235,6 +235,28 @@ exclusive RTL control-flow paths, and MemorySSA may prove a state load or pure
 expression cheaper than a stack reload.  Both fit behind the conventional
 matrix and spiller interfaces; neither changes the worklist protocol.
 
+The current Step 30 checkpoint has established the first production pieces of
+this boundary.  `GreedyLiveRanges` owns the staged priority queue and eviction
+cascades, physical occupancy is mutable, evicted ranges return to the queue,
+and stale queue entries are rejected against the range's current stage.
+Split plans now contain topology only.  A separate function-lifetime `Spiller`
+owns `RootHomePlan`, chooses stack, State-MemorySSA, or rematerialization homes,
+verifies those choices, and performs the corresponding private allocation-IR
+edit.  The old `DeferredRound`, symbolic fragment reservations, and hard child
+colors have been removed from the production allocation session.  A range for
+which both split stages make no progress now reaches `Spill`; the spiller
+materializes each concrete use and removes the exhausted source interval.
+
+This is an intermediate checkpoint, not completion of the normative design.
+A successful partial split still sends its moved complement directly to the
+spiller instead of returning an unmaterialized remainder interval to the work
+queue.  `JointAllocationSession` also remains as the base driver.  The next
+slice must give that remainder its own machine value and exact live range,
+requeue every split product, and invoke the spiller only after that remainder
+itself fails assignment and both split stages.  Once that path is in place,
+the remaining session/publication protocol can be replaced by the base driver
+and one final allocation-IR-to-MIR rewrite.
+
 ### Legacy allocation algorithm
 
 The implementation below records the joint allocator being removed.  It is

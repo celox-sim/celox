@@ -28,9 +28,9 @@ use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_allocator::{IntervalAllocationError, RootHomePlan};
 use super::interval_union::{
     AllocationBundleId, ConflictCollector, FixedRegisterReservation, IntervalUnionError,
-    LiveIntervalMatrix, OccupancyCut, OccupancyOwner, PlannedReservationId, SparseRange,
+    LiveIntervalMatrix, OccupancyCut, OccupancyOwner, SparseRange,
 };
-use super::live_interval::{DefinitionSite, LiveInterval, LiveSegment, SlotIndex, UseSite};
+use super::live_interval::{DefinitionSite, LiveInterval, SlotIndex, UseSite};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum AllocationValueClass {
@@ -242,19 +242,18 @@ pub(super) struct RegionSplitRequest {
     pub candidates: Vec<RegionSplitCandidate>,
 }
 
+/// A live interval that exhausted both split stages and must be rewritten by
+/// the spiller before physical allocation can continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RegionSpillRequest {
+    pub value: VReg,
+    pub root: LiveBundleId,
+    pub uses: Vec<BundleUseId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct JointAllocation {
     pub assignments: Vec<Option<PhysReg>>,
-}
-
-/// A register prefix whose exact color was selected together with its split
-/// frontier.  The split planner proves this color free before materializing
-/// the suffix homes; the persistent session revalidates the resulting live
-/// range before restoring that assignment after the allocation-IR update.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct PlannedFragmentAssignment {
-    pub value: VReg,
-    pub register: PhysReg,
 }
 
 /// Persistent physical allocation state across exact region splits.
@@ -276,8 +275,6 @@ pub(super) struct JointAllocationSession {
     /// is deliberately independent of semantic roots and memory homes.
     live_ranges: GreedyLiveRanges,
     home_plans: Option<Vec<RootHomePlan>>,
-    deferred: BTreeSet<VReg>,
-    next_planned_reservation: u32,
     frontier_workspace: FreePrefixWorkspace,
 }
 
@@ -421,10 +418,7 @@ impl PartialOrd for AllocationQueueItem {
 pub(super) enum JointAllocationOutcome {
     Complete(JointAllocation),
     NeedsSplit(RegionSplitRequest),
-    /// Every non-deferred value has a color. The caller must atomically
-    /// materialize the accumulated symbolic spill plans and start the next
-    /// allocation round before publication.
-    DeferredRound,
+    NeedsSpill(RegionSpillRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1709,8 +1703,6 @@ impl JointAllocationSession {
             pending,
             live_ranges,
             home_plans: None,
-            deferred: BTreeSet::new(),
-            next_planned_reservation: 0,
             frontier_workspace: FreePrefixWorkspace::new(cfg.successors.len()),
         })
     }
@@ -1919,7 +1911,6 @@ impl JointAllocationSession {
         self.relabel_intervals(expanded, changed_values)?;
         self.problem
             .update_block_boundaries(expanded, cfg, changed_blocks)?;
-        self.deferred.clear();
         Ok(())
     }
 
@@ -2270,17 +2261,16 @@ impl JointAllocationSession {
         Ok(())
     }
 
-    /// Remove one verified splittable region from the current coloring round
-    /// without mutating allocation IR. The caller retains its semantic split
-    /// plan and materializes all deferred regions together at the round
-    /// boundary.
-    pub(super) fn defer_split(&mut self, value: VReg) -> Result<(), JointAllocationError> {
+    /// Unassign the source before SplitEditor mutates private allocation IR.
+    /// The edited source and every new child are rebuilt and requeued by the
+    /// immediately following incremental publication.
+    pub(super) fn unassign_for_split(&mut self, value: VReg) -> Result<(), JointAllocationError> {
         let allocation = self.problem.value(value).cloned().ok_or_else(|| {
             JointAllocationError::new(
                 "JOINT_ALLOC.DEFER_RANGE",
                 None,
                 Some(value),
-                "deferred split value is outside the allocation problem",
+                "split source is outside the allocation problem",
             )
         })?;
         if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
@@ -2288,15 +2278,7 @@ impl JointAllocationSession {
                 "JOINT_ALLOC.DEFER_CLASS",
                 Some(allocation.interval.definition.block()),
                 Some(value),
-                "fixed transition cannot be deferred as a spill region",
-            ));
-        }
-        if !self.deferred.insert(value) {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.DEFER_IDENTITY",
-                Some(allocation.interval.definition.block()),
-                Some(value),
-                "register region was deferred twice in one allocation round",
+                "fixed transition cannot be edited as a split region",
             ));
         }
 
@@ -2307,7 +2289,7 @@ impl JointAllocationSession {
                     "JOINT_ALLOC.DEFER_RANGE",
                     Some(allocation.interval.definition.block()),
                     Some(value),
-                    "assigned deferred region has no validated sparse range",
+                    "assigned split source has no validated sparse range",
                 )
             })?;
             self.matrix
@@ -2318,245 +2300,38 @@ impl JointAllocationSession {
         Ok(())
     }
 
-    /// Query the colors available to a not-yet-materialized child fragment.
-    /// The source region must already be deferred, otherwise its own complete
-    /// range would make every projected subset appear occupied.  The result
-    /// uses the persistent target order with the source affinity first; final
-    /// constraints and exact synthetic slots are checked again after
-    /// publication.
-    pub(super) fn available_symbolic_fragment_registers(
-        &self,
-        source: VReg,
-        segments: &[LiveSegment],
-        registers: &[PhysReg],
-    ) -> Result<Vec<PhysReg>, JointAllocationError> {
-        if registers != self.problem.target_registers {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.TARGET_REGISTER_SET",
-                None,
-                Some(source),
-                "symbolic fragment query uses a different physical register set",
-            ));
-        }
-        let allocation = self.problem.value(source).ok_or_else(|| {
+    /// Advance an exhausted split interval to the spiller worklist.  This is
+    /// a stage transition, not an allocation fallback: the next queue visit
+    /// returns a concrete spill obligation to the driver.
+    pub(super) fn require_spill(&mut self, value: VReg) -> Result<(), JointAllocationError> {
+        let allocation = self.problem.value(value).ok_or_else(|| {
             JointAllocationError::new(
-                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                "JOINT_ALLOC.SPILL_RANGE",
                 None,
-                Some(source),
-                "symbolic fragment source is absent from the allocation problem",
+                Some(value),
+                "spill source is outside the allocation problem",
             )
         })?;
         if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
             return Err(JointAllocationError::new(
-                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_CLASS",
+                "JOINT_ALLOC.SPILL_CLASS",
                 Some(allocation.interval.definition.block()),
-                Some(source),
-                "fixed transition cannot produce a symbolic register fragment",
+                Some(value),
+                "only a register live interval can advance to the spill stage",
             ));
         }
-        if !self.deferred.contains(&source)
-            || self.assignments[source.0 as usize].is_some()
-            || self.matrix.register(allocation.id).is_some()
-        {
+        if self.live_ranges.stage(value) < LiveRangeStage::Split {
             return Err(JointAllocationError::new(
-                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE",
+                "JOINT_ALLOC.SPILL_STAGE",
                 Some(allocation.interval.definition.block()),
-                Some(source),
-                "symbolic fragment source remains resident in the physical matrix",
+                Some(value),
+                "live interval reached the spiller before split analysis",
             ));
         }
-        if segments.is_empty() {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_RANGE",
-                Some(allocation.interval.definition.block()),
-                Some(source),
-                "symbolic register fragment has an empty sparse range",
-            ));
-        }
-        let range = self
-            .matrix
-            .make_range(segments.to_vec())
-            .map_err(JointAllocationError::union)?;
-        let mut available = Vec::new();
-        for &register in registers {
-            if !allocation.allowed_registers.contains(register)
-                || self
-                    .matrix
-                    .first_interference_validated(register, range.validated())
-                    .map_err(JointAllocationError::union)?
-                    .is_some()
-            {
-                continue;
-            }
-            available.push(register);
-        }
-        available.sort_by_key(|register| {
-            (
-                Some(*register) != allocation.preferred_register,
-                registers
-                    .iter()
-                    .position(|candidate| candidate == register)
-                    .unwrap_or(usize::MAX),
-            )
-        });
-        Ok(available)
-    }
-
-    /// Publish one symbolic fragment into the same physical matrix used by
-    /// ordinary allocation. This prevents later queue values from taking a
-    /// color already selected for a not-yet-created machine VReg.
-    pub(super) fn reserve_symbolic_fragment(
-        &mut self,
-        source: VReg,
-        register: PhysReg,
-        segments: &[LiveSegment],
-    ) -> Result<(), JointAllocationError> {
-        let available = self.available_symbolic_fragment_registers(
-            source,
-            segments,
-            &self.problem.target_registers,
-        )?;
-        if !available.contains(&register) {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.SYMBOLIC_FRAGMENT_INTERFERENCE",
-                segments.first().map(|segment| segment.block),
-                Some(source),
-                format!("symbolic fragment cannot reserve occupied color {register}"),
-            ));
-        }
-        let id = PlannedReservationId(self.next_planned_reservation);
-        self.next_planned_reservation =
-            self.next_planned_reservation
-                .checked_add(1)
-                .ok_or_else(|| {
-                    JointAllocationError::new(
-                        "JOINT_ALLOC.SYMBOLIC_FRAGMENT_IDENTITY",
-                        segments.first().map(|segment| segment.block),
-                        Some(source),
-                        "symbolic fragment reservation identity exceeds u32",
-                    )
-                })?;
-        self.matrix
-            .reserve_planned(id, register, segments)
-            .map_err(JointAllocationError::union)
-    }
-
-    pub(super) fn clear_symbolic_fragments(&mut self) -> Result<(), JointAllocationError> {
-        self.matrix
-            .clear_planned()
-            .map_err(JointAllocationError::union)?;
-        self.next_planned_reservation = 0;
-        Ok(())
-    }
-
-    pub(super) fn has_symbolic_fragments(&self) -> bool {
-        self.matrix.has_planned()
-    }
-
-    /// Restore colors chosen as part of exact split planning after the whole
-    /// symbolic round has been materialized.  Fixed reservations and another
-    /// planned fragment can change while the round is being published, so the
-    /// final sparse range is checked against the updated matrix.  A newly
-    /// blocked fragment remains pending for ordinary allocation; it is never
-    /// inserted with an overlap.
-    pub(super) fn assign_planned_fragments(
-        &mut self,
-        fragments: &[PlannedFragmentAssignment],
-    ) -> Result<(), JointAllocationError> {
-        if self.matrix.has_planned() {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.PLANNED_PUBLICATION",
-                None,
-                fragments.first().map(|fragment| fragment.value),
-                "real fragment assignments cannot coexist with symbolic matrix occupancy",
-            ));
-        }
-        if fragments
-            .windows(2)
-            .any(|pair| pair[0].value >= pair[1].value)
-        {
-            return Err(JointAllocationError::new(
-                "JOINT_ALLOC.PLANNED_FRAGMENT_ORDER",
-                None,
-                fragments.first().map(|fragment| fragment.value),
-                "planned fragment assignments are duplicated or out of value order",
-            ));
-        }
-        for &fragment in fragments {
-            let allocation = self.problem.value(fragment.value).ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.PLANNED_FRAGMENT_VALUE",
-                    None,
-                    Some(fragment.value),
-                    "planned retained fragment is absent after the split round",
-                )
-            })?;
-            if !matches!(allocation.class, AllocationValueClass::Region { .. }) {
-                return Err(JointAllocationError::new(
-                    "JOINT_ALLOC.PLANNED_FRAGMENT_CLASS",
-                    Some(allocation.interval.definition.block()),
-                    Some(fragment.value),
-                    "planned retained fragment is no longer a splittable register region",
-                ));
-            }
-            if allocation.preferred_register != Some(fragment.register) {
-                return Err(JointAllocationError::new(
-                    "JOINT_ALLOC.PLANNED_FRAGMENT_PREFERENCE",
-                    Some(allocation.interval.definition.block()),
-                    Some(fragment.value),
-                    format!(
-                        "retained fragment preference {:?} differs from planned color {}",
-                        allocation.preferred_register, fragment.register
-                    ),
-                ));
-            }
-            let index = fragment.value.0 as usize;
-            if let Some(current) = self.assignments[index] {
-                if current != fragment.register
-                    || self.matrix.register(allocation.id) != Some(fragment.register)
-                {
-                    return Err(JointAllocationError::new(
-                        "JOINT_ALLOC.PLANNED_FRAGMENT_ASSIGNMENT",
-                        Some(allocation.interval.definition.block()),
-                        Some(fragment.value),
-                        "retained fragment has an inconsistent pre-existing assignment",
-                    ));
-                }
-                continue;
-            }
-            if self.matrix.register(allocation.id).is_some() {
-                return Err(JointAllocationError::new(
-                    "JOINT_ALLOC.PLANNED_FRAGMENT_ASSIGNMENT",
-                    Some(allocation.interval.definition.block()),
-                    Some(fragment.value),
-                    "matrix retained an assignment absent from the session table",
-                ));
-            }
-            let range = self.ranges[index].as_ref().ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.PLANNED_FRAGMENT_RANGE",
-                    Some(allocation.interval.definition.block()),
-                    Some(fragment.value),
-                    "planned retained fragment has no validated sparse range",
-                )
-            })?;
-            if !allocation.allowed_registers.contains(fragment.register) {
-                continue;
-            }
-            if self
-                .matrix
-                .first_interference_validated(fragment.register, range.validated())
-                .map_err(JointAllocationError::union)?
-                .is_some()
-            {
-                continue;
-            }
-            self.matrix
-                .assign_validated(allocation.id, fragment.register, range.validated())
-                .map_err(JointAllocationError::union)?;
-            self.assignments[index] = Some(fragment.register);
-        }
-        Ok(())
+        self.unassign_for_split(value)?;
+        self.live_ranges.require_split_progress(value);
+        self.live_ranges.require_spill(value);
+        self.queue_value(value)
     }
 
     #[cfg(test)]
@@ -2765,9 +2540,6 @@ impl JointAllocationSession {
         }
         while let Some(item) = self.pending.pop() {
             let id = item.id;
-            if self.deferred.contains(&VReg(id.0)) {
-                continue;
-            }
             let value = self.problem.bundle(id).cloned().ok_or_else(|| {
                 JointAllocationError::new(
                     "JOINT_ALLOC.ORDER_RANGE",
@@ -2778,12 +2550,24 @@ impl JointAllocationSession {
             })?;
             let stage = self.live_ranges.stage(value.value);
             if allocation_queue_item(&value, stage)? != item {
-                return Err(JointAllocationError::new(
-                    "JOINT_ALLOC.QUEUE_PRIORITY",
-                    Some(value.interval.definition.block()),
-                    Some(value.value),
-                    "pending allocation priority differs from the current semantic range",
-                ));
+                // Stage changes append a new heap item. The superseded key is
+                // discarded lazily, as in conventional priority worklists.
+                continue;
+            }
+            if stage == LiveRangeStage::Spill {
+                let AllocationValueClass::Region { root, uses } = &value.class else {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SPILL_CLASS",
+                        Some(value.interval.definition.block()),
+                        Some(value.value),
+                        "terminal transition reached the live-range spiller",
+                    ));
+                };
+                return Ok(JointAllocationOutcome::NeedsSpill(RegionSpillRequest {
+                    value: value.value,
+                    root: *root,
+                    uses: uses.clone(),
+                }));
             }
             if self.assignments[value.value.0 as usize].is_some() {
                 continue;
@@ -2869,7 +2653,6 @@ impl JointAllocationSession {
                 BTreeMap::<VReg, BTreeMap<PhysReg, BTreeSet<AllocationPressurePoint>>>::new();
             let blocked_is_region =
                 stage.may_split() && matches!(value.class, AllocationValueClass::Region { .. });
-            let mut planned_frontier = false;
             for register in blocked_registers {
                 let cuts = register_free_prefix_frontier(
                     &self.matrix,
@@ -2924,8 +2707,12 @@ impl JointAllocationSession {
                         }
                         OccupancyOwner::Fixed(_) => fixed_frontier = true,
                         OccupancyOwner::Planned(_) => {
-                            fixed_frontier = true;
-                            planned_frontier = true;
+                            return Err(JointAllocationError::new(
+                                "JOINT_ALLOC.LEGACY_PLANNED_OCCUPANCY",
+                                Some(segment.block),
+                                Some(value.value),
+                                "production greedy allocation encountered a removed symbolic reservation",
+                            ));
                         }
                     }
                 }
@@ -2963,13 +2750,6 @@ impl JointAllocationSession {
                 });
             }
             if split_frontiers.is_empty() {
-                if planned_frontier && !self.deferred.is_empty() {
-                    self.queue_value(value.value)?;
-                    if super::exhaustive_verification_enabled() {
-                        self.matrix.verify().map_err(JointAllocationError::union)?;
-                    }
-                    return Ok(JointAllocationOutcome::DeferredRound);
-                }
                 let resident_summary = conflicts
                     .iter()
                     .map(|conflict| {
@@ -3034,13 +2814,6 @@ impl JointAllocationSession {
                 conflicts,
                 candidates,
             }));
-        }
-
-        if !self.deferred.is_empty() {
-            if super::exhaustive_verification_enabled() {
-                self.matrix.verify().map_err(JointAllocationError::union)?;
-            }
-            return Ok(JointAllocationOutcome::DeferredRound);
         }
 
         if self.matrix.has_planned() {
@@ -3664,130 +3437,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_fragment_stays_pending_when_the_updated_matrix_blocks_its_color() {
-        let mut function = function(
-            2,
-            vec![
-                MInst::LoadImm {
-                    dst: VReg(0),
-                    value: 1,
-                },
-                MInst::LoadImm {
-                    dst: VReg(1),
-                    value: 2,
-                },
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 0,
-                    src: VReg(0),
-                    size: OpSize::S64,
-                },
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 8,
-                    src: VReg(1),
-                    size: OpSize::S64,
-                },
-                MInst::Return,
-            ],
-        );
-        let (cfg, _) = model(&mut function);
-        let registers = [PhysReg::RAX, PhysReg::RDX];
-        let mut problem = fixed_problem(&function, &cfg, &registers);
-        let planned = problem.value_mut(VReg(0)).unwrap();
-        planned.class = AllocationValueClass::Region {
-            root: LiveBundleId(0),
-            uses: vec![BundleUseId(0)],
-        };
-        planned.spill_cost = Some(1);
-        planned.preferred_register = Some(PhysReg::RAX);
-        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
-        let blocker = session.problem.value(VReg(1)).unwrap().clone();
-        let blocker_range = session.ranges[VReg(1).0 as usize].as_ref().unwrap();
-        session
-            .matrix
-            .assign_validated(blocker.id, PhysReg::RAX, blocker_range.validated())
-            .unwrap();
-        session.assignments[VReg(1).0 as usize] = Some(PhysReg::RAX);
-
-        session
-            .assign_planned_fragments(&[PlannedFragmentAssignment {
-                value: VReg(0),
-                register: PhysReg::RAX,
-            }])
-            .unwrap();
-
-        assert_eq!(session.assigned_register(VReg(0)), None);
-        assert_eq!(session.assigned_register(VReg(1)), Some(PhysReg::RAX));
-    }
-
-    #[test]
-    fn planned_occupancy_forces_an_ordinary_value_to_the_round_boundary() {
-        let mut function = function(
-            2,
-            vec![
-                MInst::LoadImm {
-                    dst: VReg(0),
-                    value: 1,
-                },
-                MInst::LoadImm {
-                    dst: VReg(1),
-                    value: 2,
-                },
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 0,
-                    src: VReg(0),
-                    size: OpSize::S64,
-                },
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 8,
-                    src: VReg(1),
-                    size: OpSize::S64,
-                },
-                MInst::Return,
-            ],
-        );
-        let (cfg, _) = model(&mut function);
-        let registers = [PhysReg::RAX];
-        let mut problem = fixed_problem(&function, &cfg, &registers);
-        let source = problem.value_mut(VReg(0)).unwrap();
-        source.class = AllocationValueClass::Region {
-            root: LiveBundleId(0),
-            uses: vec![BundleUseId(0)],
-        };
-        source.spill_cost = Some(1);
-        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
-        let blocked_segments = session
-            .problem
-            .value(VReg(1))
-            .unwrap()
-            .interval
-            .segments
-            .clone();
-
-        let error = session
-            .reserve_symbolic_fragment(VReg(0), PhysReg::RAX, &blocked_segments)
-            .unwrap_err();
-        assert_eq!(error.rule, "JOINT_ALLOC.SYMBOLIC_FRAGMENT_SOURCE");
-        session.defer_split(VReg(0)).unwrap();
-        session
-            .reserve_symbolic_fragment(VReg(0), PhysReg::RAX, &blocked_segments)
-            .unwrap();
-        assert!(session.has_symbolic_fragments());
-        let error = session.assign_planned_fragments(&[]).unwrap_err();
-        assert_eq!(error.rule, "JOINT_ALLOC.PLANNED_PUBLICATION");
-
-        assert!(matches!(
-            session.allocate(&cfg, &registers).unwrap(),
-            JointAllocationOutcome::DeferredRound
-        ));
-        assert_eq!(session.assigned_register(VReg(1)), None);
-    }
-
-    #[test]
-    fn deferred_region_uses_lazy_worklist_deletion_at_the_round_boundary() {
+    fn exhausted_split_advances_to_a_concrete_spill_obligation() {
         let instructions = vec![
             MInst::Load {
                 dst: VReg(0),
@@ -3829,28 +3479,37 @@ mod tests {
         let JointAllocationOutcome::NeedsSplit(request) =
             session.allocate(&cfg, &registers).unwrap()
         else {
-            panic!("three overlapping roots should require one deferred region");
+            panic!("three overlapping roots should require one split edit");
         };
-        let deferred = request.blocked_value;
+        let source = request.blocked_value;
         assert!(
             request
                 .candidates
                 .iter()
-                .any(|candidate| candidate.value == deferred)
+                .any(|candidate| candidate.value == source)
         );
         let pending_before = session.pending.len();
         assert!(
             session
                 .pending
                 .iter()
-                .any(|item| item.id == AllocationBundleId(deferred.0))
+                .any(|item| item.id == AllocationBundleId(source.0))
         );
-        session.defer_split(deferred).unwrap();
+        session.unassign_for_split(source).unwrap();
         assert_eq!(session.pending.len(), pending_before);
-        assert!(matches!(
-            session.allocate(&cfg, &registers).unwrap(),
-            JointAllocationOutcome::DeferredRound
-        ));
+        assert_eq!(session.assigned_register(source), None);
+        session.require_spill(source).unwrap();
+        let JointAllocationOutcome::NeedsSpill(spill) = session.allocate(&cfg, &registers).unwrap()
+        else {
+            panic!("Spill-stage interval should return a concrete spiller obligation");
+        };
+        assert_eq!(spill.value, source);
+        assert!(
+            request
+                .candidates
+                .iter()
+                .any(|candidate| candidate.root == spill.root && candidate.uses == spill.uses)
+        );
     }
 
     #[test]

@@ -3658,6 +3658,33 @@ verifier tests, common native tests, complete SIR/MIR inspection, and the exact
 `cy=9ae070 x3=aa pass=1` Linux marker.  Release/LTO remains deferred until the
 new allocator produces a substantial non-LTO execution win.
 
+The first Step 30 checkpoint (`6251aef5`) introduced the production staged
+queue, mutable matrix assignment, monotonic eviction cascades, and immediate
+requeueing of edited live children.  The following checkpoint separates spill
+policy from split topology: `RegionSplitPlan` no longer contains a home or
+transition cost, while a function-lifetime `Spiller` owns concrete stack,
+State-MemorySSA, and rematerialization decisions and their allocation-IR edits.
+The symbolic-round reservation protocol has been removed, and a no-progress
+range now advances through `Split2` to a concrete `Spill` obligation.
+
+This checkpoint does not yet satisfy the whole Step 30 architecture.  A
+successful partial split still materializes its moved complement immediately;
+that complement must become an ordinary unmaterialized interval, return to the
+queue, and reach the spiller only after its own assignment and split attempts
+fail.  `JointAllocationSession` must then be removed in favor of the base
+driver and final rewrite described above.
+
+The complete trace at
+`target/heliodor/analysis/step30b-spiller-separation-20260719` took 58.203 s.
+Its pre-optimized, post-optimized, and native-optimized SIR and complete MIR
+are byte-identical to
+`target/heliodor/analysis/step28b-fixed-intervals-final-20260718`; therefore
+this checkpoint makes no generated-code or execution-speed claim.  The
+non-LTO full run completed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 57.321 s code generation and 124.955 s
+simulation (182.285 s total).  Focused register-allocation tests pass 253/253
+and the complete library passes 873/873.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -3735,6 +3762,8 @@ new allocator produces a substantial non-LTO execution win.
 | 29b retained-fragment color ownership | this step | retained original/region affinity; rebuilt-row/matrix assignment; occupied-color fallback; regalloc 245/245 | interval lib 865/865; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and SIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 100.486 s; full compile 95.104 s; execute 133.710 s | selected frontier color now survives split publication and shortens both large emitted bodies; integrated symbolic fragment/home selection remains open |
 | 29c symbolic child-fragment coloring | this step | planned matrix occupancy; round-boundary blocking; disjoint child-color reuse; conservative-to-exact range/color transfer; regalloc 247/247 | interval lib 867/867; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and pre-RA identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 60.819 s; full compile 55.871 s; execute 129.836 s | every selected register child participates in the current physical matrix before its VReg exists; integrated MemorySSA/home selection remains open |
 | 29d root-wide deferred home partition | this step | same-root disjoint ownership; incremental home-cost identity; shared stack creation; one-transaction publication; regalloc 248/248 | interval lib 868/868; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and exact MIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 57.599 s; full compile 56.025 s; execute 130.024 s | duplicate-root publication boundary removed with incremental root costs; Heliodor MIR unchanged; joint topology/color/home alternatives remain open |
+| 30a greedy live-range driver | `6251aef5` | staged queue, eviction cascade, split-child requeue, and matrix ownership regressions | lib 875/875; non-LTO build, format, and diff checks pass | complete SIR/MIR byte-identical to Step 28b | trace-only compile recorded separately; no timing claim | production allocation follows staged greedy control flow; legacy symbolic spill ownership remains for removal |
+| 30b dedicated spiller boundary | this step | regalloc 253/253 including concrete Spill-stage and topology-only child regressions | lib 873/873; non-LTO build, format, and diff checks pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1`; complete SIR/MIR byte-identical to Step 28b | trace 58.203 s; full code generation 57.321 s; simulation 124.955 s | split topology and spill policy are separated; partial spill remainder and base-driver replacement remain open |
 
 ## Related design records
 

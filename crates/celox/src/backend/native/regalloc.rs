@@ -41,6 +41,7 @@ mod reconstruct;
 mod reload;
 mod schedule;
 mod spill_plan;
+mod spiller;
 #[cfg(test)]
 mod spilling;
 mod ssa;
