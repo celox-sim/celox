@@ -178,7 +178,67 @@ longer the blocker exposed by the earlier differential updater; integrated SSA
 fragment allocation and spill placement remain open, and peak memory has not
 yet been requalified.
 
-### Allocation algorithm
+### Replacement allocator architecture
+
+The production interval allocator is being replaced with the architecture of
+LLVM's greedy register allocator.  This is a structural constraint, not a list
+of heuristics to graft onto the existing joint solver.  The reference
+implementation is LLVM's
+[`RegAllocBase`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/CodeGen/RegAllocBase.cpp),
+[`RAGreedy`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/CodeGen/RegAllocGreedy.cpp),
+[`LiveRangeEdit`](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/CodeGen/LiveRangeEdit.h),
+and
+[`SplitKit`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/CodeGen/SplitKit.cpp).
+
+The ownership boundaries are normative:
+
+1. `LiveIntervals` owns every current machine live range.  A range is the unit
+   placed in the work queue; a semantic RTL root and a preselected memory home
+   are not allocation units.
+2. `LiveRegMatrix` owns current physical assignments and fixed target
+   interference.  An assignment may be removed.  Occupancy from an earlier
+   queue decision is never treated as an immutable global solution.
+3. The base driver dequeues one unassigned interval and calls
+   `select_or_split`.  That operation returns either one physical register or
+   a set of edited/new intervals.  The driver alone assigns the returned
+   register and requeues every live child.
+4. Each interval carries the stages `New`, `Assign`, `Split`, `Split2`,
+   `Spill`, and `Done`.  The first failed assignment is deferred at `Split`, so
+   splitting observes the matrix after the primary assignment queue has
+   settled.  `Split2` requires measurable range reduction.  Only spiller
+   products enter `Done`.
+5. Eviction uses a monotonically increasing cascade number.  Every victim is
+   unassigned and requeued at its existing stage.  A victim is not converted
+   to a terminal no-eviction leaf; equal or newer cascades alone prevent an
+   eviction cycle.
+6. `SplitAnalysis` reads block/use topology and physical interference.
+   `SplitEditor` performs one private allocation-IR edit, creates real child
+   VRegs and exact child intervals, and returns all children.  It does not
+   choose their final colors and does not finalize the complement to memory.
+7. The spiller runs only after assignment and both split stages fail.  It owns
+   stack placement and asks Celox's MemorySSA/rematerialization analysis for
+   the cheapest valid value reconstruction at each insertion point.  Those
+   HDL-specific recipes are spiller inputs; they are not physical-register
+   allocation states.
+8. Allocation IR remains private until every live interval has either a
+   physical assignment or a proved memory/rematerialization location.  MIR is
+   rewritten once, followed by an independent physical-liveness verifier.
+
+The following are therefore rejected designs: one global home decision per
+RTL root, final `Home` children created by splitting, immutable symbolic child
+colors, repeated whole-problem publication between split rounds, and a custom
+solver that simultaneously chooses topology, colors, and memory recipes.
+
+Celox differs from LLVM only where the source language provides additional
+facts.  CFG-sparse ranges may share a physical register across mutually
+exclusive RTL control-flow paths, and MemorySSA may prove a state load or pure
+expression cheaper than a stack reload.  Both fit behind the conventional
+matrix and spiller interfaces; neither changes the worklist protocol.
+
+### Legacy allocation algorithm
+
+The implementation below records the joint allocator being removed.  It is
+historical context and is not the design contract for new work.
 
 The allocator operates on immutable root liveness and creates allocation units
 without mutating MIR:

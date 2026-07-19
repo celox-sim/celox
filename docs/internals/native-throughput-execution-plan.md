@@ -3611,6 +3611,47 @@ allocation problem, rather than merely sharing home costs among split plans
 already selected by separate pressure requests. Stores, reloads, and copies
 must be published only after those joint alternatives have won.
 
+That proposed joint alternative solver is rejected.  The free-CFG preview and
+the later global-eviction experiments both made the exact accepted Heliodor
+input larger than the 194,315,959-byte Step 29e MIR.  More importantly, they
+kept the wrong ownership model: an earlier whole-function coloring was treated
+as fixed while one failed value selected topology, color, and memory homes in
+an external round.  Adding a better objective to that solver does not repair
+the allocation protocol.
+
+Step 30 replaces the protocol with the same decomposition used by LLVM's
+greedy allocator.  Work is split into independently testable commits:
+
+1. Introduce a production-used live-range state table and queue with
+   `New -> Assign -> Split -> Split2 -> Spill -> Done`, plus monotonic eviction
+   cascades.  Preserve the accepted output before enabling eviction or edits.
+2. Move assignment ownership into one mutable sparse live-register matrix.
+   A free assignment returns a physical register to the base driver.  Eviction
+   unassigns cheaper victims, copies the candidate cascade to them, and
+   requeues them without terminalizing their stages.
+3. Replace deferred symbolic rounds with `SplitAnalysis` and `SplitEditor`.
+   An edit unassigns the source, rewrites only private allocation IR, rebuilds
+   exact child intervals, and returns every surviving child to the same queue.
+   No child receives a hard color or a final home during the edit.
+4. Require strict progress for repeated global/local splits.  A remainder may
+   advance to `Spill`, but a useful child starts again at `New`; it is never a
+   `NoEvict` leaf.
+5. Add a spiller interface.  Stack, state-MemorySSA, and pure-rematerialization
+   choices are made there at concrete insertion points.  The resulting short
+   machine intervals are marked `Done` and requeued for physical assignment.
+6. Remove `JointAllocationSession`, symbolic reservations, root-round home
+   accumulation, and all publication outcomes from the production path.
+7. Perform one final allocation-IR-to-MIR rewrite and run the independent
+   assignment, stack-home, and physical-liveness verifiers.
+
+Every commit runs its focused state-machine and interval tests followed by the
+complete regalloc test group.  Every change that can affect allocation then
+uses the same Heliodor input to compare complete pre/post/native SIR and MIR.
+The production switch additionally runs the non-LTO Linux boot through
+`cy=9ae070 x3=aa pass=1`; the final gate is a release build and kernel power
+down.  Code-generation time and simulator execution time are reported
+separately.  No LTO build is used during iteration.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact

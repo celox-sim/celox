@@ -23,6 +23,7 @@ mod color;
 mod constraints;
 #[allow(dead_code)]
 mod cssa;
+mod greedy;
 #[allow(dead_code)]
 mod home_graph;
 #[allow(dead_code)]

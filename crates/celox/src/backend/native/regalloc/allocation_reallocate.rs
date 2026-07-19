@@ -8,7 +8,7 @@
 //! silently finalizes a value to memory.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt;
 
 use crate::backend::native::mir::{BlockId, VReg};
@@ -23,11 +23,12 @@ use super::allocation_expand::{
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
+use super::greedy::{GreedyLiveRanges, LiveRangeStage};
 use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_allocator::{IntervalAllocationError, RootHomePlan};
 use super::interval_union::{
-    AllocationBundleId, FixedRegisterReservation, IntervalUnionError, LiveIntervalMatrix,
-    OccupancyCut, OccupancyOwner, PlannedReservationId, SparseRange,
+    AllocationBundleId, ConflictCollector, FixedRegisterReservation, IntervalUnionError,
+    LiveIntervalMatrix, OccupancyCut, OccupancyOwner, PlannedReservationId, SparseRange,
 };
 use super::live_interval::{DefinitionSite, LiveInterval, LiveSegment, SlotIndex, UseSite};
 
@@ -267,12 +268,13 @@ pub(super) struct JointAllocationSession {
     ownership: Option<RegionOwnershipIndex>,
     definition_rank: Vec<usize>,
     matrix: LiveIntervalMatrix,
+    conflict_collector: ConflictCollector,
     ranges: Vec<Option<SparseRange>>,
     assignments: Vec<Option<PhysReg>>,
-    /// Static spill-priority order for the current semantic problem. Priority
-    /// keys do not change while coloring, so sorting once and popping from the
-    /// end avoids an O(log N) heap repair for every RTL value.
-    pending: Vec<AllocationQueueItem>,
+    pending: BinaryHeap<AllocationQueueItem>,
+    /// Conventional per-live-interval stage and eviction-cascade state. This
+    /// is deliberately independent of semantic roots and memory homes.
+    live_ranges: GreedyLiveRanges,
     home_plans: Option<Vec<RootHomePlan>>,
     deferred: BTreeSet<VReg>,
     next_planned_reservation: u32,
@@ -364,6 +366,7 @@ impl FreePrefixWorkspace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AllocationQueueItem {
     id: AllocationBundleId,
+    stage: LiveRangeStage,
     spill_cost: Option<u64>,
     live_length: u64,
     use_count: usize,
@@ -371,24 +374,39 @@ struct AllocationQueueItem {
 
 impl Ord for AllocationQueueItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (self.spill_cost, other.spill_cost) {
-            // Explicit transitions cannot be displaced. Coloring them first
-            // ensures pressure is paid by a splittable root region.
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-            (None, None) => self
-                .use_count
-                .cmp(&other.use_count)
-                .then_with(|| other.live_length.cmp(&self.live_length))
-                .then_with(|| other.id.cmp(&self.id)),
-            (Some(left_cost), Some(right_cost)) => {
-                let left = u128::from(left_cost) * u128::from(other.live_length);
-                let right = u128::from(right_cost) * u128::from(self.live_length);
-                left.cmp(&right)
-                    .then_with(|| left_cost.cmp(&right_cost))
-                    .then_with(|| self.use_count.cmp(&other.use_count))
-                    .then_with(|| other.id.cmp(&self.id))
-            }
+        // Like LLVM's greedy priority advisor, the first failed assignment is
+        // deferred below every primary-queue range. Splitting then observes a
+        // matrix containing the complete primary assignment round.
+        let stage_order =
+            (self.stage != LiveRangeStage::Split).cmp(&(other.stage != LiveRangeStage::Split));
+        if stage_order != Ordering::Equal {
+            return stage_order;
+        }
+        compare_allocation_weight(self, other)
+    }
+}
+
+fn compare_allocation_weight(
+    left_item: &AllocationQueueItem,
+    right_item: &AllocationQueueItem,
+) -> Ordering {
+    match (left_item.spill_cost, right_item.spill_cost) {
+        // Explicit transitions cannot be displaced. Coloring them first
+        // ensures pressure is paid by a splittable root region.
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (None, None) => left_item
+            .use_count
+            .cmp(&right_item.use_count)
+            .then_with(|| right_item.live_length.cmp(&left_item.live_length))
+            .then_with(|| right_item.id.cmp(&left_item.id)),
+        (Some(left_cost), Some(right_cost)) => {
+            let left = u128::from(left_cost) * u128::from(right_item.live_length);
+            let right = u128::from(right_cost) * u128::from(left_item.live_length);
+            left.cmp(&right)
+                .then_with(|| left_cost.cmp(&right_cost))
+                .then_with(|| left_item.use_count.cmp(&right_item.use_count))
+                .then_with(|| right_item.id.cmp(&left_item.id))
         }
     }
 }
@@ -1470,6 +1488,7 @@ impl RegionOwnershipIndex {
 
 fn allocation_queue_item(
     value: &AllocationValue,
+    stage: LiveRangeStage,
 ) -> Result<AllocationQueueItem, JointAllocationError> {
     if value.live_length == 0 {
         return Err(JointAllocationError::new(
@@ -1481,6 +1500,7 @@ fn allocation_queue_item(
     }
     Ok(AllocationQueueItem {
         id: value.id,
+        stage,
         spill_cost: value.spill_cost,
         live_length: value.live_length,
         use_count: value.interval.uses.len(),
@@ -1662,12 +1682,20 @@ impl JointAllocationSession {
             );
         }
         let assignments = vec![None; problem.value_count as usize];
-        let mut pending = problem
-            .values
-            .iter()
-            .map(allocation_queue_item)
-            .collect::<Result<Vec<_>, _>>()?;
-        pending.sort_unstable();
+        let mut live_ranges = GreedyLiveRanges::new(problem.value_count);
+        for value in &problem.values {
+            if matches!(value.class, AllocationValueClass::Fixed) {
+                // These are already explicit transition products. They still
+                // need a physical assignment, but cannot be split or spilled
+                // a second time.
+                live_ranges.mark_done(value.value);
+            }
+        }
+        let mut pending = BinaryHeap::new();
+        for value in &problem.values {
+            let stage = live_ranges.on_enqueue(value.value);
+            pending.push(allocation_queue_item(value, stage)?);
+        }
         let definition_rank = dominator_rank(cfg)?;
         Ok(Self {
             problem,
@@ -1675,9 +1703,11 @@ impl JointAllocationSession {
             ownership: None,
             definition_rank,
             matrix,
+            conflict_collector: ConflictCollector::default(),
             ranges,
             assignments,
             pending,
+            live_ranges,
             home_plans: None,
             deferred: BTreeSet::new(),
             next_planned_reservation: 0,
@@ -1997,6 +2027,7 @@ impl JointAllocationSession {
         self.problem.value_rows.resize(value_count as usize, None);
         self.assignments.resize(value_count as usize, None);
         self.ranges.resize_with(value_count as usize, || None);
+        self.live_ranges.grow(value_count);
 
         let mut changed = BTreeSet::new();
         for (value, replacement) in replacements {
@@ -2056,6 +2087,19 @@ impl JointAllocationSession {
             }
             self.problem.replace_value(value, replacement.clone())?;
             if let Some(replacement) = replacement {
+                if previous.is_none() {
+                    self.live_ranges.reset_new(value);
+                } else if self.live_ranges.stage(value) >= LiveRangeStage::Split
+                    && matches!(replacement.class, AllocationValueClass::Region { .. })
+                {
+                    // A surviving source interval may be split again only
+                    // under the strict-progress rules of the second split
+                    // stage. Newly created children take the `New` path above.
+                    self.live_ranges.require_split_progress(value);
+                }
+                if matches!(replacement.class, AllocationValueClass::Fixed) {
+                    self.live_ranges.mark_done(value);
+                }
                 validate_allocatable_value(&replacement, registers)?;
                 let entry = DefinitionOrderEntry {
                     key: definition_key(&replacement, cfg, &self.definition_rank)?,
@@ -2091,7 +2135,7 @@ impl JointAllocationSession {
 
         let mut pending = self
             .pending
-            .drain(..)
+            .drain()
             .map(|item| item.id)
             .collect::<BTreeSet<_>>();
         pending.retain(|id| {
@@ -2101,21 +2145,21 @@ impl JointAllocationSession {
             (self.problem.value(value).is_some() && self.assignments[value.0 as usize].is_none())
                 .then_some(AllocationBundleId(value.0))
         }));
-        self.pending = pending
-            .into_iter()
-            .map(|id| {
-                let value = self.problem.bundle(id).ok_or_else(|| {
-                    JointAllocationError::new(
-                        "JOINT_ALLOC.SESSION_PENDING_VALUE",
-                        None,
-                        Some(VReg(id.0)),
-                        "pending session value has no semantic allocation row",
-                    )
-                })?;
-                allocation_queue_item(value)
-            })
-            .collect::<Result<Vec<_>, JointAllocationError>>()?;
-        self.pending.sort_unstable();
+        let mut rebuilt = BinaryHeap::new();
+        for id in pending {
+            let value_id = VReg(id.0);
+            let stage = self.live_ranges.on_enqueue(value_id);
+            let value = self.problem.bundle(id).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_PENDING_VALUE",
+                    None,
+                    Some(value_id),
+                    "pending session value has no semantic allocation row",
+                )
+            })?;
+            rebuilt.push(allocation_queue_item(value, stage)?);
+        }
+        self.pending = rebuilt;
         Ok(())
     }
 
@@ -2176,6 +2220,7 @@ impl JointAllocationSession {
 
         self.assignments.resize(next.value_count as usize, None);
         self.ranges.resize_with(next.value_count as usize, || None);
+        self.live_ranges.grow(next.value_count);
         for value in &next.values {
             let index = value.value.0 as usize;
             if self.problem.value(value.value) == Some(value) {
@@ -2189,6 +2234,16 @@ impl JointAllocationSession {
                 }
                 continue;
             }
+            if self.problem.value(value.value).is_none() {
+                self.live_ranges.reset_new(value.value);
+            } else if self.live_ranges.stage(value.value) >= LiveRangeStage::Split
+                && matches!(value.class, AllocationValueClass::Region { .. })
+            {
+                self.live_ranges.require_split_progress(value.value);
+            }
+            if matches!(value.class, AllocationValueClass::Fixed) {
+                self.live_ranges.mark_done(value.value);
+            }
             validate_allocatable_value(value, registers)?;
             self.ranges[index] = Some(
                 self.matrix
@@ -2201,13 +2256,16 @@ impl JointAllocationSession {
             .replace_fixed_reservations(&next.fixed_reservations)
             .map_err(JointAllocationError::union)?;
 
-        self.pending = next
+        let mut pending = BinaryHeap::new();
+        for value in next
             .values
             .iter()
             .filter(|value| self.assignments[value.value.0 as usize].is_none())
-            .map(allocation_queue_item)
-            .collect::<Result<Vec<_>, _>>()?;
-        self.pending.sort_unstable();
+        {
+            let stage = self.live_ranges.on_enqueue(value.value);
+            pending.push(allocation_queue_item(value, stage)?);
+        }
+        self.pending = pending;
         self.problem = next;
         Ok(())
     }
@@ -2513,6 +2571,185 @@ impl JointAllocationSession {
         assignment
     }
 
+    fn queue_value(&mut self, value: VReg) -> Result<(), JointAllocationError> {
+        let stage = self.live_ranges.on_enqueue(value);
+        let allocation = self.problem.value(value).ok_or_else(|| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.QUEUE_VALUE",
+                None,
+                Some(value),
+                "queued live interval is absent from the allocation problem",
+            )
+        })?;
+        self.pending.push(allocation_queue_item(allocation, stage)?);
+        Ok(())
+    }
+
+    /// LLVM-style greedy eviction. The current matrix is mutable: cheaper
+    /// residents are unassigned and returned to the same queue. Cascade state,
+    /// rather than a terminal no-eviction stage, prevents the reverse move.
+    fn try_evict_interference(
+        &mut self,
+        candidate: &AllocationValue,
+        range: &SparseRange,
+        register_order: &[(usize, PhysReg, u64)],
+    ) -> Result<Option<PhysReg>, JointAllocationError> {
+        let candidate_stage = self.live_ranges.stage(candidate.value);
+        if candidate_stage == LiveRangeStage::Split {
+            return Ok(None);
+        }
+        let candidate_item = allocation_queue_item(candidate, candidate_stage)?;
+        let mut best = None::<(
+            usize,
+            AllocationQueueItem,
+            usize,
+            usize,
+            PhysReg,
+            Vec<AllocationBundleId>,
+        )>;
+
+        for (choice_order, (_, register, _)) in register_order.iter().enumerate() {
+            let mut conflicts = Vec::new();
+            let mut cuts = Vec::new();
+            self.matrix
+                .collect_interference_validated(
+                    *register,
+                    range.validated(),
+                    self.assignments.len(),
+                    &mut self.conflict_collector,
+                    &mut conflicts,
+                    &mut cuts,
+                )
+                .map_err(JointAllocationError::union)?;
+            if conflicts.is_empty()
+                || cuts
+                    .iter()
+                    .any(|cut| !matches!(cut.owner, OccupancyOwner::Bundle(_)))
+            {
+                continue;
+            }
+
+            let follows_hint = candidate.preferred_register == Some(*register);
+            let mut broken_hints = 0usize;
+            let mut heaviest = None::<AllocationQueueItem>;
+            let mut eligible = true;
+            for &conflict in &conflicts {
+                let victim = self.problem.bundle(conflict).ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.EVICTION_CONFLICT",
+                        Some(candidate.interval.definition.block()),
+                        Some(candidate.value),
+                        "physical matrix references a missing eviction victim",
+                    )
+                })?;
+                let victim_stage = self.live_ranges.stage(victim.value);
+                let victim_item = allocation_queue_item(victim, victim_stage)?;
+                let follows_unbroken_hint = follows_hint
+                    && candidate_stage < LiveRangeStage::Spill
+                    && victim_stage < LiveRangeStage::Spill
+                    && victim.preferred_register != Some(*register);
+                if victim_stage == LiveRangeStage::Done
+                    || !self.live_ranges.may_evict(candidate.value, victim.value)
+                    || (compare_allocation_weight(&candidate_item, &victim_item)
+                        != Ordering::Greater
+                        && !follows_unbroken_hint)
+                {
+                    eligible = false;
+                    break;
+                }
+                broken_hints += usize::from(victim.preferred_register == Some(*register));
+                if heaviest.as_ref().is_none_or(|current| {
+                    compare_allocation_weight(&victim_item, current) == Ordering::Greater
+                }) {
+                    heaviest = Some(victim_item);
+                }
+            }
+            if !eligible {
+                continue;
+            }
+            let heaviest = heaviest.ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.EVICTION_CONFLICT",
+                    Some(candidate.interval.definition.block()),
+                    Some(candidate.value),
+                    "non-empty conflict set has no heaviest eviction victim",
+                )
+            })?;
+            let replace = best.as_ref().is_none_or(
+                |(best_hints, best_heaviest, best_count, best_order, _, _)| {
+                    broken_hints < *best_hints
+                        || (broken_hints == *best_hints
+                            && (compare_allocation_weight(&heaviest, best_heaviest)
+                                == Ordering::Less
+                                || (compare_allocation_weight(&heaviest, best_heaviest)
+                                    == Ordering::Equal
+                                    && (conflicts.len() < *best_count
+                                        || (conflicts.len() == *best_count
+                                            && choice_order < *best_order)))))
+                },
+            );
+            if replace {
+                best = Some((
+                    broken_hints,
+                    heaviest,
+                    conflicts.len(),
+                    choice_order,
+                    *register,
+                    conflicts,
+                ));
+            }
+        }
+
+        let Some((_, _, _, _, register, victims)) = best else {
+            return Ok(None);
+        };
+        let cascade = self
+            .live_ranges
+            .begin_eviction(candidate.value)
+            .ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.EVICTION_CASCADE",
+                    Some(candidate.interval.definition.block()),
+                    Some(candidate.value),
+                    "eviction cascade identity exceeds u32",
+                )
+            })?;
+        for victim_id in victims {
+            let victim = self.problem.bundle(victim_id).cloned().ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.EVICTION_CONFLICT",
+                    Some(candidate.interval.definition.block()),
+                    Some(candidate.value),
+                    "selected eviction victim disappeared before commit",
+                )
+            })?;
+            let victim_range = self.ranges[victim.value.0 as usize]
+                .as_ref()
+                .ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.EVICTION_RANGE",
+                        Some(victim.interval.definition.block()),
+                        Some(victim.value),
+                        "selected eviction victim has no sparse range",
+                    )
+                })?;
+            self.matrix
+                .unassign_validated(victim.id, victim_range.validated())
+                .map_err(JointAllocationError::union)?;
+            self.assignments[victim.value.0 as usize] = None;
+            if !self.live_ranges.inherit_eviction(victim.value, cascade) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.EVICTION_CASCADE",
+                    Some(victim.interval.definition.block()),
+                    Some(victim.value),
+                    "eviction would preserve or decrease the victim cascade",
+                ));
+            }
+            self.queue_value(victim.value)?;
+        }
+        Ok(Some(register))
+    }
+
     pub(super) fn allocate(
         &mut self,
         cfg: &NormalizedCfg,
@@ -2539,7 +2776,8 @@ impl JointAllocationSession {
                     "definition order references a missing allocation value",
                 )
             })?;
-            if allocation_queue_item(&value)? != item {
+            let stage = self.live_ranges.stage(value.value);
+            if allocation_queue_item(&value, stage)? != item {
                 return Err(JointAllocationError::new(
                     "JOINT_ALLOC.QUEUE_PRIORITY",
                     Some(value.interval.definition.block()),
@@ -2559,7 +2797,8 @@ impl JointAllocationSession {
                         Some(value.value),
                         "allocation value has no validated sparse range",
                     )
-                })?;
+                })?
+                .clone();
             let mut register_order = registers
                 .iter()
                 .copied()
@@ -2587,7 +2826,7 @@ impl JointAllocationSession {
             );
             let mut selected = None;
             let mut blocked_registers = Vec::with_capacity(register_order.len());
-            for (_, register, _) in register_order {
+            for &(_, register, _) in &register_order {
                 let interference = self
                     .matrix
                     .first_interference_validated(register, range.validated())
@@ -2608,18 +2847,35 @@ impl JointAllocationSession {
                 continue;
             }
 
-            self.frontier_workspace.index_range(range)?;
+            if let Some(register) = self.try_evict_interference(&value, &range, &register_order)? {
+                self.matrix
+                    .assign_validated(value.id, register, range.validated())
+                    .map_err(JointAllocationError::union)?;
+                self.assignments[value.value.0 as usize] = Some(register);
+                continue;
+            }
+
+            // The first failed primary assignment is deliberately delayed.
+            // All remaining primary ranges settle before this interval is
+            // reconsidered for splitting.
+            if self.live_ranges.defer_for_split(value.value) {
+                self.queue_value(value.value)?;
+                continue;
+            }
+
+            self.frontier_workspace.index_range(&range)?;
             let mut conflicts = Vec::with_capacity(blocked_registers.len());
             let mut split_frontiers =
                 BTreeMap::<VReg, BTreeMap<PhysReg, BTreeSet<AllocationPressurePoint>>>::new();
-            let blocked_is_region = matches!(value.class, AllocationValueClass::Region { .. });
+            let blocked_is_region =
+                stage.may_split() && matches!(value.class, AllocationValueClass::Region { .. });
             let mut planned_frontier = false;
             for register in blocked_registers {
                 let cuts = register_free_prefix_frontier(
                     &self.matrix,
                     &self.problem,
                     cfg,
-                    range,
+                    &range,
                     &value,
                     register,
                     &mut self.frontier_workspace,
@@ -2708,7 +2964,7 @@ impl JointAllocationSession {
             }
             if split_frontiers.is_empty() {
                 if planned_frontier && !self.deferred.is_empty() {
-                    self.pending.push(allocation_queue_item(&value)?);
+                    self.queue_value(value.value)?;
                     if super::exhaustive_verification_enabled() {
                         self.matrix.verify().map_err(JointAllocationError::union)?;
                     }
@@ -2771,7 +3027,7 @@ impl JointAllocationSession {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            self.pending.push(allocation_queue_item(&value)?);
+            self.queue_value(value.value)?;
             return Ok(JointAllocationOutcome::NeedsSplit(RegionSplitRequest {
                 blocked_value: value.value,
                 definition: value.interval.definition,
@@ -3336,6 +3592,75 @@ mod tests {
         reprioritized.live_length += 3;
 
         assert!(same_allocation_geometry(original, &reprioritized));
+    }
+
+    #[test]
+    fn eviction_requeues_the_victim_and_the_cascade_blocks_the_reverse_move() {
+        let mut function = function(
+            2,
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+        );
+        let (cfg, _) = model(&mut function);
+        let registers = [PhysReg::RAX];
+        let mut problem = fixed_problem(&function, &cfg, &registers);
+        for (value, cost) in [(VReg(0), 1), (VReg(1), 100)] {
+            let row = problem.value_mut(value).unwrap();
+            row.class = AllocationValueClass::Region {
+                root: LiveBundleId(value.0),
+                uses: vec![BundleUseId(0)],
+            };
+            row.spill_cost = Some(cost);
+        }
+        let mut session = JointAllocationSession::new(problem, &cfg, &registers).unwrap();
+
+        // Seed the cheaper range as a resident to exercise eviction rather
+        // than allocation-order luck.
+        let resident = session.problem.value(VReg(0)).unwrap().clone();
+        let resident_range = session.ranges[VReg(0).0 as usize].as_ref().unwrap();
+        session
+            .matrix
+            .assign_validated(resident.id, PhysReg::RAX, resident_range.validated())
+            .unwrap();
+        session.assignments[VReg(0).0 as usize] = Some(PhysReg::RAX);
+        session.pending.clear();
+        session.queue_value(VReg(1)).unwrap();
+
+        let JointAllocationOutcome::NeedsSplit(request) =
+            session.allocate(&cfg, &registers).unwrap()
+        else {
+            panic!("the evicted range must reenter the split queue");
+        };
+        assert_eq!(request.blocked_value, VReg(0));
+        assert_eq!(session.assigned_register(VReg(0)), None);
+        assert_eq!(session.assigned_register(VReg(1)), Some(PhysReg::RAX));
+        assert_eq!(
+            session.live_ranges.cascade(VReg(0)),
+            session.live_ranges.cascade(VReg(1))
+        );
+        assert_eq!(session.live_ranges.stage(VReg(0)), LiveRangeStage::Split);
+        assert!(!session.live_ranges.may_evict(VReg(0), VReg(1)));
     }
 
     #[test]

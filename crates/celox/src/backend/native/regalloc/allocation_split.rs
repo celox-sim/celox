@@ -1474,7 +1474,10 @@ fn mutate_verified_split(
                     ));
                 };
                 let region = fresh_region_id(expanded)?;
-                let preferred_register = entry.register.or(plan.preferred_register);
+                // Split analysis may provide a useful color, but SplitEditor
+                // never hard-assigns a child. The exact child interval returns
+                // to ordinary allocation with this as a hint only.
+                let preferred_register = entry.register.or(Some(plan.register));
                 let region_row = expanded.register_regions.len();
                 if expanded.region_rows.insert(region, region_row).is_some() {
                     return Err(AllocationSplitError::new(
@@ -1852,7 +1855,6 @@ pub(super) fn allocate_with_splitting(
             )
         })?;
     let planning = SplitPlanningContext::build(graph, cfg)?;
-    let mut symbolic_fragments = SymbolicFragmentPlanner::new(cfg)?;
     let mut steps = 0u128;
     let mut session = JointAllocationSession::new_cached_persistent(
         expanded,
@@ -1862,39 +1864,31 @@ pub(super) fn allocate_with_splitting(
         &planning.home_plans,
     )
     .map_err(AllocationSplitError::joint)?;
-    let mut plans = Vec::<RegionSplitPlan>::new();
-    let mut round = SplitRoundPlanningState::default();
     loop {
         match session
             .allocate(cfg, registers)
             .map_err(AllocationSplitError::joint)?
         {
             JointAllocationOutcome::Complete(allocation) => {
-                if !plans.is_empty() || !round.is_empty() || session.has_symbolic_fragments() {
+                if session.has_symbolic_fragments() {
                     return Err(AllocationSplitError::new(
                         "ALLOCATION_SPLIT.ROUND_PUBLICATION",
                         None,
                         None,
                         None,
-                        "allocation published while symbolic spill plans or fragment reservations remained deferred",
+                        "allocation published while a legacy symbolic fragment reservation remained active",
                     ));
                 }
                 return Ok(allocation);
             }
             JointAllocationOutcome::DeferredRound => {
-                verify_round_planning_state(expanded, &planning, &plans, &round)?;
-                assign_round_home_selections(expanded, &planning, &mut plans)?;
-                apply_and_refresh_split_round(
-                    expanded,
-                    graph,
-                    cfg,
-                    registers,
-                    &planning,
-                    &mut session,
-                    &plans,
-                )?;
-                plans.clear();
-                round.clear();
+                return Err(AllocationSplitError::new(
+                    "ALLOCATION_SPLIT.DEFERRED_ROUND",
+                    None,
+                    None,
+                    None,
+                    "greedy allocation reached the removed symbolic-round boundary",
+                ));
             }
             JointAllocationOutcome::NeedsSplit(request) => {
                 if steps >= max_steps {
@@ -1906,27 +1900,49 @@ pub(super) fn allocate_with_splitting(
                         "monotonic split sequence exceeded its ownership-derived bound",
                     ));
                 }
-                let mut plan = plan_split_with_context(
+                let plan = plan_split_with_context(
                     expanded,
                     graph,
                     session.problem(),
                     &request,
                     cfg,
                     &planning,
-                    &round,
+                    &SplitRoundPlanningState::default(),
                 )?;
                 session
                     .defer_split(plan.value)
                     .map_err(AllocationSplitError::joint)?;
-                symbolic_fragments.reserve_plan(
+                let applied = apply_split_with_context(
                     expanded,
+                    graph,
+                    session.problem(),
+                    &plan,
                     cfg,
-                    registers,
-                    &mut session,
-                    &mut plan,
+                    &planning,
                 )?;
-                round.commit(expanded, &planning, &plan)?;
-                plans.push(plan);
+                session
+                    .update_from_expanded_round(
+                        expanded,
+                        cfg,
+                        graph,
+                        registers,
+                        &applied.constraint_blocks,
+                        &applied.changed_values,
+                        &applied.range_changed_values,
+                        &applied.live_lengths,
+                        std::slice::from_ref(&applied.root),
+                        &planning.home_plans,
+                    )
+                    .map_err(AllocationSplitError::joint)?;
+                if session.has_symbolic_fragments() {
+                    return Err(AllocationSplitError::new(
+                        "ALLOCATION_SPLIT.SYMBOLIC_FRAGMENT",
+                        Some(plan.primary_cut().block()),
+                        Some(plan.value),
+                        Some(plan.root),
+                        "SplitEditor created a legacy symbolic color reservation",
+                    ));
+                }
                 steps += 1;
             }
         }
