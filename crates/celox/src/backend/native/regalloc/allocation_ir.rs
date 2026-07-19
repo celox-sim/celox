@@ -909,6 +909,63 @@ impl AllocationIr {
         self.insert_synthetic(anchor, operation, uses, defines_value)
     }
 
+    /// Return a conservative lower bound for any synthetic definition
+    /// inserted immediately before `site`.  A materialization can contain
+    /// several instructions and the exact defining sequence does not exist
+    /// until publication, so symbolic allocation reserves from the first
+    /// currently unused sequence in the immutable anchor zone. Every eventual
+    /// definition in that transaction is therefore covered without
+    /// predicting its instruction count or conflicting with older insertions.
+    pub(super) fn earliest_insert_before_use_slot(
+        &self,
+        site: UseSite,
+    ) -> Result<SlotIndex, AllocationIrError> {
+        let anchor = match site {
+            UseSite::Instruction {
+                block, instruction, ..
+            } => SyntheticAnchor::BeforeInstruction { block, instruction },
+            UseSite::PhiEdge {
+                predecessor,
+                successor,
+                phi,
+                ..
+            } => SyntheticAnchor::BeforePhiEdge {
+                predecessor,
+                successor,
+                phi,
+            },
+        };
+        let block = self.block(anchor.block())?;
+        let zone = self.stable_anchor_zone(block, anchor)?;
+        let sequence = self
+            .next_sequence_by_zone
+            .get(&(block, zone))
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                    Some(anchor.block()),
+                    None,
+                    Vec::new(),
+                    "synthetic use-anchor sequence exceeds u32",
+                )
+            })?;
+        SlotIndex::stable(zone, sequence, 0).ok_or_else(|| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(anchor.block()),
+                match site {
+                    UseSite::Instruction { instruction, .. } => Some(instruction),
+                    UseSite::PhiEdge { .. } => None,
+                },
+                Vec::new(),
+                "synthetic use anchor exceeds the stable slot domain",
+            )
+        })
+    }
+
     pub(super) fn insert_after_definition(
         &mut self,
         site: DefinitionSite,
@@ -3421,6 +3478,12 @@ mod tests {
         let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
         let intervals = allocation_ir.analyze(&cfg).unwrap();
         let interval = intervals.intervals[0].as_ref().unwrap();
+        assert_eq!(
+            allocation_ir
+                .earliest_insert_before_use_slot(interval.uses[0])
+                .unwrap(),
+            SlotIndex::stable(4, 1, 0).unwrap()
+        );
 
         allocation_ir.begin_instruction_transaction().unwrap();
         allocation_ir
@@ -3454,6 +3517,12 @@ mod tests {
             )
             .unwrap();
         allocation_ir.publish_instruction_transaction().unwrap();
+        assert_eq!(
+            allocation_ir
+                .earliest_insert_before_use_slot(interval.uses[0])
+                .unwrap(),
+            SlotIndex::stable(4, 2, 0).unwrap()
+        );
 
         let coordinates = allocation_ir.blocks[0]
             .instructions

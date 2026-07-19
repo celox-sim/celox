@@ -24,17 +24,24 @@ pub(super) struct AllocationBundleId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct FixedReservationId(pub u32);
 
+/// Allocation-round identity for a fragment whose machine VReg does not exist
+/// yet. Planned occupancy participates in every ordinary interference query
+/// and is replaced by the materialized VReg range at the round boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct PlannedReservationId(pub u32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) enum OccupancyOwner {
     Bundle(AllocationBundleId),
     Fixed(FixedReservationId),
+    Planned(PlannedReservationId),
 }
 
 impl OccupancyOwner {
     fn bundle(self) -> Option<AllocationBundleId> {
         match self {
             Self::Bundle(bundle) => Some(bundle),
-            Self::Fixed(_) => None,
+            Self::Fixed(_) | Self::Planned(_) => None,
         }
     }
 }
@@ -754,6 +761,7 @@ pub(super) struct LiveIntervalMatrix {
     unions: BTreeMap<PhysReg, IntervalUnion>,
     assignments: BTreeMap<AllocationBundleId, PhysReg>,
     fixed_reservations: Vec<FixedRegisterReservation>,
+    planned_reservations: BTreeMap<PlannedReservationId, (PhysReg, SparseRange)>,
 }
 
 impl LiveIntervalMatrix {
@@ -790,6 +798,7 @@ impl LiveIntervalMatrix {
             unions,
             assignments: BTreeMap::new(),
             fixed_reservations: Vec::new(),
+            planned_reservations: BTreeMap::new(),
         })
     }
 
@@ -830,6 +839,14 @@ impl LiveIntervalMatrix {
         &mut self,
         reservations: &[FixedRegisterReservation],
     ) -> Result<(), IntervalUnionError> {
+        if !self.planned_reservations.is_empty() {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.PLANNED_PUBLICATION",
+                None,
+                [],
+                "fixed reservations cannot change while symbolic fragments occupy the matrix",
+            ));
+        }
         let mut canonical = reservations.to_vec();
         canonical.sort_unstable_by_key(|reservation| {
             (
@@ -930,6 +947,50 @@ impl LiveIntervalMatrix {
         }
         self.fixed_reservations = canonical;
         Ok(())
+    }
+
+    /// Reserve one exact sparse range before its synthetic machine value is
+    /// materialized. Planned ranges are immutable blockers during the current
+    /// allocation round and therefore cannot be evicted as resident bundles.
+    pub(super) fn reserve_planned(
+        &mut self,
+        id: PlannedReservationId,
+        register: PhysReg,
+        segments: &[LiveSegment],
+    ) -> Result<(), IntervalUnionError> {
+        if self.planned_reservations.contains_key(&id) {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.PLANNED_IDENTITY",
+                segments.first().map(|segment| segment.block),
+                [],
+                "symbolic fragment reservation identity is already active",
+            ));
+        }
+        let range = self.make_range(segments.to_vec())?;
+        self.union_mut(register)?
+            .insert_indexed(OccupancyOwner::Planned(id), range.validated())?;
+        self.planned_reservations.insert(id, (register, range));
+        Ok(())
+    }
+
+    /// Remove every symbolic range immediately before the corresponding
+    /// allocation-IR transaction publishes real VRegs and exact liveness.
+    pub(super) fn clear_planned(&mut self) -> Result<(), IntervalUnionError> {
+        let reservations = self
+            .planned_reservations
+            .iter()
+            .map(|(&id, (register, range))| (id, *register, range.clone()))
+            .collect::<Vec<_>>();
+        for (id, register, range) in reservations {
+            self.union_mut(register)?
+                .remove_indexed(OccupancyOwner::Planned(id), range.validated())?;
+        }
+        self.planned_reservations.clear();
+        Ok(())
+    }
+
+    pub(super) fn has_planned(&self) -> bool {
+        !self.planned_reservations.is_empty()
     }
 
     pub(super) fn make_range(
@@ -1185,6 +1246,7 @@ impl LiveIntervalMatrix {
         }
         let mut rebuilt = BTreeMap::new();
         let mut fixed = BTreeMap::<FixedReservationId, FixedRegisterReservation>::new();
+        let mut planned = BTreeMap::<PlannedReservationId, (PhysReg, Vec<LiveSegment>)>::new();
         for (&register, union) in &self.unions {
             for (&block, entries) in &union.blocks {
                 let block_id = self.index.block_ids[block];
@@ -1219,6 +1281,22 @@ impl LiveIntervalMatrix {
                                     "one fixed reservation identity owns multiple intervals",
                                 ));
                             }
+                        }
+                        OccupancyOwner::Planned(id) => {
+                            let row = planned.entry(id).or_insert_with(|| (register, Vec::new()));
+                            if row.0 != register {
+                                return Err(IntervalUnionError::new(
+                                    "INTERVAL_UNION.PLANNED_IDENTITY",
+                                    Some(block_id),
+                                    [],
+                                    "one symbolic fragment occupies more than one register",
+                                ));
+                            }
+                            row.1.push(LiveSegment {
+                                block: block_id,
+                                start,
+                                end: entry.end,
+                            });
                         }
                     }
                 }
@@ -1257,6 +1335,22 @@ impl LiveIntervalMatrix {
                 None,
                 [],
                 "fixed union memberships differ from the immutable reservation table",
+            ));
+        }
+        for (_, segments) in planned.values_mut() {
+            segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+        }
+        let expected_planned = self
+            .planned_reservations
+            .iter()
+            .map(|(&id, (register, range))| (id, (*register, range.as_slice().to_vec())))
+            .collect::<BTreeMap<_, _>>();
+        if planned != expected_planned {
+            return Err(IntervalUnionError::new(
+                "INTERVAL_UNION.PLANNED_MAP",
+                None,
+                [],
+                "symbolic union memberships differ from the planned reservation table",
             ));
         }
         Ok(())
@@ -1544,6 +1638,70 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.rule, "INTERVAL_UNION.EMPTY_ASSIGNMENT");
         assert_eq!(matrix.register(AllocationBundleId(0)), None);
+        matrix.verify().unwrap();
+    }
+
+    #[test]
+    fn planned_range_blocks_ordinary_assignment_until_atomic_publication() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        block.push(MInst::Return);
+        let mut function = function(2, vec![block]);
+        let cfg = normalize(&mut function);
+        let intervals = live_interval::analyze(&function, &cfg).unwrap();
+        let source = intervals.intervals[0].as_ref().unwrap();
+        let mut matrix = LiveIntervalMatrix::new(&cfg, &[PhysReg::RAX]).unwrap();
+        let id = PlannedReservationId(7);
+
+        matrix
+            .reserve_planned(id, PhysReg::RAX, &source.segments)
+            .unwrap();
+        let range = matrix.make_range(source.segments.clone()).unwrap();
+        assert_eq!(
+            matrix
+                .first_interference_validated(PhysReg::RAX, range.validated())
+                .unwrap(),
+            Some(OccupancyCut {
+                segment: 0,
+                start: source.segments[0].start,
+                end: source.segments[0].end,
+                owner: OccupancyOwner::Planned(id),
+            })
+        );
+        assert!(
+            matrix
+                .conflicts_validated(PhysReg::RAX, range.validated())
+                .unwrap()
+                .is_empty(),
+            "symbolic occupancy is immutable, not an evictable bundle"
+        );
+        let error = matrix
+            .assign_validated(AllocationBundleId(0), PhysReg::RAX, range.validated())
+            .unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_UNION.INTERFERENCE");
+        assert_eq!(matrix.register(AllocationBundleId(0)), None);
+        let error = matrix.replace_fixed_reservations(&[]).unwrap_err();
+        assert_eq!(error.rule, "INTERVAL_UNION.PLANNED_PUBLICATION");
+        matrix.verify().unwrap();
+
+        matrix.clear_planned().unwrap();
+        assert!(!matrix.has_planned());
+        assert!(
+            matrix
+                .first_interference_validated(PhysReg::RAX, range.validated())
+                .unwrap()
+                .is_none()
+        );
+        matrix
+            .assign_validated(AllocationBundleId(0), PhysReg::RAX, range.validated())
+            .unwrap();
         matrix.verify().unwrap();
     }
 

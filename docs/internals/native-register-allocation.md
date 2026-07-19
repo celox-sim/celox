@@ -206,8 +206,30 @@ without mutating MIR:
    the updated matrix before restoring that exact color. If another fragment
    published in the same round now occupies it, the retained fragment stays
    unassigned and returns to ordinary coloring rather than overlapping the
-   matrix. A value may consequently own any finite number of disjoint register
-   regions.
+   matrix.
+
+   The moved multi-use regions are colored in the same round even though their
+   synthetic VRegs do not exist yet. An epoch-marked sparse liveness projector
+   maps each planned definition and exact use subset through the normalized
+   CFG. Synthetic definitions reserve from the first unused sequence in their
+   immutable insertion-anchor zone, so the later exact range is contained by
+   the symbolic range without predicting how many recipe instructions will be
+   emitted. The selected colors are inserted in the ordinary interval matrix
+   as immutable planned occupancy. Subsequent original values and sibling
+   split plans therefore see those ranges; mutually exclusive child regions
+   may still reserve the same color because their CFG-sparse ranges do not
+   overlap.
+
+   At the publication boundary, planned occupancy is removed before fixed
+   reservations and exact liveness change. Split mutation creates the real
+   VRegs, carries each selected color in register-region ownership metadata,
+   and the session inserts the exact rebuilt ranges into those colors. A new
+   target constraint or fixed interval may invalidate the symbolic choice; in
+   that case only that child remains pending for ordinary allocation. Updating
+   allocation facts or installing real assignments while planned occupancy is
+   live is a state-machine error. A value may consequently own any finite
+   number of disjoint register regions without a side table that ordinary
+   allocation can ignore.
 4. Solve stack availability as sparse SSA dataflow over the selected home
    demands.  Place explicit stores at the latest legal dominating points or
    predecessor edges while the source location is available.  Materialize

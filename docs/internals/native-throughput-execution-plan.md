@@ -3504,6 +3504,69 @@ Focused regalloc tests now pass 245/245. The complete library passes 865/865,
 native testbench 60 passed with 1 ignored, counter 9 passed with 3 ignored, and
 all-target strict clippy and formatting pass.
 
+Step 29c extends the frontier transaction to every register-resident child,
+not only the retained prefix. Before this step a multi-use moved cluster had
+no VReg until its reload or recipe was emitted. The split planner therefore
+selected its topology and home, but left its physical color to a later generic
+allocation round. Ordinary values allocated between planning and publication
+could consume the intended sparse region, and branch-exclusive children could
+not share one round-wide color decision. The retained-prefix repair alone did
+not make split topology and coloring one problem.
+
+The persistent interval matrix now has allocation-round `Planned` owners.
+After the source region is deferred and removed from the matrix, a reused
+epoch-marked CFG projector constructs the sparse range of the retained prefix
+and each multi-use child. A child definition starts at the first unused stable
+sequence of its immutable insert-before-use anchor; this conservatively covers
+the eventual synthetic definition while excluding older synthetic rows at the
+same anchor. The session queries the same allowed-register masks and physical
+unions used by ordinary allocation, reserves each selected color in those
+unions, and leaves a child uncolored when no color is currently free. Planned
+owners are immutable blockers rather than evictable bundles, so a later fixed
+value ends the round and a later register region receives an exact split
+frontier. CFG-exclusive child ranges can reserve the same physical register.
+
+Round publication first materializes every plan, then removes symbolic
+occupancy, incrementally publishes exact liveness and target facts, and maps
+the resulting VRegs back to the selected colors. Exact ranges and final masks
+are checked again; a changed fixed reservation or constraint leaves only the
+affected fragment pending instead of installing an overlap. Tests require
+planned occupancy to block an ordinary value, prohibit fact publication while
+symbolic owners are live, share one color between two diamond-arm children,
+cover each materialized range with its conservative symbolic range, and retain
+the selected colors in both region metadata and the real matrix.
+
+All three SIR dumps are byte-identical to Step 29b. The complete optimized and
+pressure-scheduled pre-allocation MIR stages are also byte-identical, so the
+generated-code delta begins at allocation. The complete non-LTO trace is at
+`target/heliodor/analysis/step29d-symbolic-fragment-interval-20260718`: its MIR
+falls from 196,265,123 to 194,315,959 bytes. The emitted fused
+`eval_comb_apply_ff` endpoint falls from `0x3106be` to `0x2ec15e`; the latter is
+within 55 bytes of the established Step 28b output. `eval_apply_ff` falls from
+`0x27245c` to `0x253697`, and `eval_only_ff` from `0x1d6ceb` to `0x1b5542`.
+The fused spill frame grows from `0x4000` to `0x93b0`, so this does not claim
+that spill placement is solved. The dump compile took 60.819 s versus 100.486
+s for Step 29b.
+
+The full run at
+`target/heliodor/results/step29d-symbolic-fragment-20260718/20260719T061321Z_celox_test_soc_linux_boot.log`
+printed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`, with 55.871 s compile and 129.836 s execute. The
+independent dump and full-run compile intervals both remove roughly forty
+seconds of split/reallocation work. The single execution sample is not a
+repeat-qualified speed claim. Focused regalloc tests pass 247/247, the complete
+library passes 867/867, native testbench passes 60 with 1 ignored, counter
+passes 9 with 3 ignored, and all-target strict clippy passes.
+
+This completes atomic coloring of already-selected register fragments; it is
+not yet integrated spill placement. Home kind, transition placement, and the
+register-region partition are still selected before all child alternatives
+are visible together, and a second plan for the same semantic root still
+forces a publication boundary. The next architectural slice must represent
+all child fragments and MemorySSA/stack/rematerialization alternatives in one
+allocation problem, then publish stores, reloads, and copies only after the
+winning colors and homes are known.
+
 No slice is accepted from frame size, instruction counts, compile-only output,
 or a partial kernel log.  Every code-changing slice must pass the focused
 verifier tests, common native tests, complete SIR/MIR inspection, and the exact
@@ -3585,6 +3648,7 @@ new allocator produces a substantial non-LTO execution win.
 | 28d block-transaction allocation publication | this step | exact producer journal vs changed-block oracle; staged dense-row publication; anchor-local stable sequences; shared immutable use rows; regalloc 240/240 | interval lib 860/860; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | non-LTO full run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | final full compile 56.294 s; execute 127.017 s | per-insertion dense shifts and duplicate fact/use-row reconstruction removed; compile interval returns to the Step 28b range; integrated fragment allocation remains next |
 | 29a register-specific multi-cut frontiers | this step | interval suffix query; two-arm free-prefix frontier; one-transaction multi-cut split; regalloc 244/244 | interval lib 864/864; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, and complete IR dump pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | compile-only 98.538 s; full compile 94.492 s; execute 138.064 s | joint allocator completes at scale without mixing colors; no execution-speed claim; integrated multi-fragment spill placement remains open |
 | 29b retained-fragment color ownership | this step | retained original/region affinity; rebuilt-row/matrix assignment; occupied-color fallback; regalloc 245/245 | interval lib 865/865; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and SIR identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 100.486 s; full compile 95.104 s; execute 133.710 s | selected frontier color now survives split publication and shortens both large emitted bodies; integrated symbolic fragment/home selection remains open |
+| 29c symbolic child-fragment coloring | this step | planned matrix occupancy; round-boundary blocking; disjoint child-color reuse; conservative-to-exact range/color transfer; regalloc 247/247 | interval lib 867/867; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target strict clippy, format, complete IR dump, and pre-RA identity checks pass | optimized non-LTO `interval` run passes through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | dump compile 60.819 s; full compile 55.871 s; execute 129.836 s | every selected register child participates in the current physical matrix before its VReg exists; integrated MemorySSA/home selection remains open |
 
 ## Related design records
 
