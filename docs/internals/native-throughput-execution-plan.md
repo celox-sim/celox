@@ -4807,6 +4807,82 @@ Status: **redundant machine-width normalization is removed without constraining
 RTL scheduling freedom; Linux semantics and tick count are preserved and the
 two final-source release execution samples improve by 2.1--3.4%**.
 
+### Step 45: Allocator-visible same-block value sharing
+
+The complete Step 44 MIR and disassembly exposed a second ordinary-compiler
+defect in a hot indexed-access loop. Four loads using the same dynamic bit
+index independently computed both parts of that index:
+
+```text
+v115577 = shr v25816, 3
+v115578 = and.w32 v25816, 0x7
+load.i8 [sim + 33900268 + v115577]
+v115581 = shr v25816, 3
+v115582 = and.w32 v25816, 0x7
+load.i8 [sim + 33900444 + v115581]
+...
+```
+
+GVN already assigned equal value numbers to these expressions, but its old
+Step 15 pressure guard deliberately replaced a dead same-block leader with
+each later recomputation. Constant operands also remained in register-register
+form until after the final GVN invocation, so a shift or mask looked like an
+arbitrary two-input expression instead of a target operation for which the
+allocator has an exact rematerialization recipe.
+
+The final high-pressure optimization iteration now lowers constant operands
+before GVN. GVN may reuse a dead same-block leader for exact one-source
+rematerializable operations and for an exact-version `SimState` load; arbitrary
+binary operations and cross-block live-range extension retain the previous
+policy. `AndImm32` has its own GVN opcode so its zero-extending 32-bit semantics
+cannot be confused with 64-bit `AndImm`. A state load is still keyed by its
+structural MemorySSA version, and allocator reconstruction independently
+checks the version at each selected use.
+
+The corresponding hot block now contains one byte index and one bit index:
+
+```text
+v115577 = shr v25816, 3
+v115578 = and.w32 v25816, 0x7
+load.i8 [sim + 33900268 + v115577]
+load.i8 [sim + 33900444 + v115577]
+load.i8 [sim + 33900272 + v115577]
+load.i8 [sim + 33900448 + v115577]
+```
+
+Its x86-64 body likewise computes `shr index, 3` and `and index, 7` once and
+feeds all four indexed loads. No scheduler rule, source order, RTL padding, or
+effect order was added. The only semantic conditions are value equality and,
+for loads, the existing MemorySSA version. Pressure scheduling and allocation
+remain free to carry, split, rematerialize, or home the shared value.
+
+All three SIR dumps are byte-identical to Step 44. Full MIR falls from
+62,953,833 to 61,343,441 bytes, and the final fused function's emitted code
+falls from 1,003,128 to 980,233 bytes. This is not uniformly free: two smaller
+spill frames rise from 88 to 240 bytes and from 40 to 232 bytes, while the
+final frame rises from 5,368 to 5,376 bytes. The retained result is therefore
+a value-representation improvement, not evidence that register pressure is
+solved.
+
+Every full run reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`. Unpinned candidate execution samples ranged from
+99.986 to 107.090 s. A fixed-CPU non-LTO A/B/A/B comparison separated compile
+and execute time: Step 44 executed in 101.001 and 101.731 s, while this step
+executed in 98.888 and 104.028 s. Their means, 101.366 and 101.458 s, establish
+no throughput improvement. No runtime-speed claim is made from this step.
+
+The complete final trace is at
+`target/heliodor/analysis/step45-rematerializable-gvn-final`. Focused MIR
+optimization tests pass 64/64, the optimized library passes 965/965, native
+testbench passes 60 with one upstream ignore, and counter passes 9 with three
+Veryl ignores. Package all-target check, strict clippy, format, and diff checks
+pass.
+
+Status: **same-block target-rematerializable values are represented once,
+without adding a non-semantic RTL order; Linux semantics and tick count are
+preserved, but measured execution throughput is unchanged and the allocator
+pressure problem remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4907,6 +4983,7 @@ two final-source release execution samples improve by 2.1--3.4%**.
 | 42 direct whole-element indexed access | this step | executable 12-bit indexed load/store and padding canonicalization | lib 947/947; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | final non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace byte-identical after target scoping | trace 110.122 s; full compile 107.693 s; execute 105.529 s | direct indexed scalar access; MIR 133,426,760 bytes; historical timing variance prevents a large speed claim; scheduler unchanged |
 | 43 commit-independent sparse whole-zero fill | this step | demand-driven exact-zero, coverage/visibility, `MemFill` effects/emission, eval-only integration, scheduler overlap regressions | lib 957/957; native backend 450/450; all-target check; strict clippy; format and diff checks | final-source release/LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | intermediate non-LTO/release compile-only 64.899 / 62.750 s; final release compile 62.047 s / execute 111.351 s | Step 42 compile 107.693→about 62--65 s; 208,896-bit zero construction never enters MIR; no runtime-speed claim |
 | 44 machine-width known-bits mask elimination | this step | MIR mask/constant/32-bit zero-extension 61/61 | lib 962/962; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks | final non-LTO and two release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | final non-LTO compile 68.337 s / execute 107.693 s; final release compile 61.215 / 62.130 s, execute 109.005 / 107.524 s | redundant register/immediate 32/64-bit mask chains removed without scheduler changes; final release execute -2.1% / -3.4% versus Step 43 |
+| 45 allocator-visible same-block value sharing | this step | MIR GVN/rematerialization/MemorySSA 64/64 | lib 965/965; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | all candidate and fixed-CPU A/B/A/B runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | fixed-CPU Step 44 execute 101.001 / 101.731 s; candidate 98.888 / 104.028 s | hot repeated byte/bit indices share one value; final code -22,895 bytes; execute mean unchanged, so no speed claim |
 
 ## Related design records
 

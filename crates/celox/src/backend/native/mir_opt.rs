@@ -24,7 +24,7 @@ pub fn optimize(func: &mut MFunction) {
     if func.vregs.count() > 40 {
         // High-pressure: full pipeline
         pass!("fold_proven_comparisons", fold_proven_comparisons(func));
-        for _ in 0..2 {
+        for iteration in 0..2 {
             pass!("constant_fold", constant_fold(func));
             pass!("constant_dedup", constant_dedup(func));
             pass!("copy_propagate", copy_propagate(func));
@@ -36,10 +36,18 @@ pub fn optimize(func: &mut MFunction) {
             pass!("algebraic_simplify", algebraic_simplify(func));
             pass!("redundant_mask_eliminate", redundant_mask_eliminate(func));
             pass!("fold_bit_toggle_insert", fold_bit_toggle_insert(func));
+            // Expose target-rematerializable one-source operations to the
+            // final GVN iteration.  Keeping these as register-register forms
+            // until after GVN made equal index calculations look like
+            // arbitrary two-input expressions, so GVN deliberately
+            // recomputed them instead of leaving the carry/rematerialize
+            // choice to allocation.
+            if iteration == 1 {
+                pass!("pre_gvn_lower_to_imm_forms", lower_to_imm_forms(func));
+            }
             pass!("global_gvn", global_gvn(func));
             pass!("dead_code_eliminate", dead_code_eliminate(func));
         }
-        pass!("lower_to_imm_forms", lower_to_imm_forms(func));
         pass!(
             "fold_boolean_normalizations",
             fold_boolean_normalizations(func)
@@ -1243,6 +1251,7 @@ enum GvnOpcode {
     Shl,
     Sar,
     AndImm,
+    AndImm32,
     OrImm,
     ShrImm,
     ShlImm,
@@ -1330,6 +1339,36 @@ fn gvn_is_commutative(op: GvnOpcode) -> bool {
     )
 }
 
+/// Whether allocation has target-level recovery choices for a same-block GVN
+/// leader whose range is extended.
+///
+/// The one-source operations have exact allocator rematerialization recipes.
+/// A SimState load instead has a versioned MemorySSA recipe at each valid use;
+/// if a later write makes that recipe invalid, ordinary register or stack
+/// residency remains available. GVN may therefore expose one shared value
+/// even when its old leader has no later source-order use: pressure scheduling
+/// can place users together, and allocation retains carry/split/home choices.
+/// This is a cost freedom, not an ordering constraint.
+fn allocator_can_recover_extended_gvn_leader(inst: &MInst) -> bool {
+    matches!(
+        inst,
+        MInst::AndImm { .. }
+            | MInst::AndImm32 { .. }
+            | MInst::OrImm { .. }
+            | MInst::ShrImm { .. }
+            | MInst::ShlImm { .. }
+            | MInst::SarImm { .. }
+            | MInst::AddImm { .. }
+            | MInst::SubImm { .. }
+            | MInst::BitNot { .. }
+            | MInst::Neg { .. }
+            | MInst::Load {
+                base: BaseReg::SimState,
+                ..
+            }
+    )
+}
+
 fn gvn_value(value_numbers: &[ValueNumber], vreg: VReg) -> ValueNumber {
     value_numbers[vreg.0 as usize]
 }
@@ -1361,6 +1400,11 @@ fn gvn_key(
         MInst::AndImm { src, imm, .. } => {
             Some(GvnKey::BinaryImmU64(GvnOpcode::AndImm, value(*src), *imm))
         }
+        MInst::AndImm32 { src, imm, .. } => Some(GvnKey::BinaryImmU64(
+            GvnOpcode::AndImm32,
+            value(*src),
+            u64::from(*imm),
+        )),
         MInst::OrImm { src, imm, .. } => {
             Some(GvnKey::BinaryImmU64(GvnOpcode::OrImm, value(*src), *imm))
         }
@@ -1895,7 +1939,9 @@ fn global_gvn(func: &mut MFunction) {
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
-                    if dst != leader && reuse_does_not_extend_live_range {
+                    let allocator_can_choose = leader_block == Some(node)
+                        && allocator_can_recover_extended_gvn_leader(inst);
+                    if dst != leader && (reuse_does_not_extend_live_range || allocator_can_choose) {
                         replacements.push((node, inst_idx, MInst::Mov { dst, src: leader }));
                     } else if dst != leader {
                         // The expression is available, but reusing its original
@@ -6310,6 +6356,216 @@ mod tests {
             func.blocks[0].insts[4],
             MInst::Add { dst: VReg(3), .. }
         ));
+    }
+
+    #[test]
+    fn global_gvn_reuses_a_dead_same_block_rematerializable_leader() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 3,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 3,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(2),
+                src: VReg(1),
+            }
+        );
+    }
+
+    #[test]
+    fn global_gvn_reuses_a_dead_same_block_versioned_load_leader() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        global_gvn(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            }
+        );
+    }
+
+    #[test]
+    fn optimize_shares_repeated_immediate_index_calculation() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 3,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 7,
+                },
+                MInst::Shr {
+                    dst: VReg(3),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::And32 {
+                    dst: VReg(4),
+                    lhs: VReg(0),
+                    rhs: VReg(2),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(4),
+                    size: OpSize::S64,
+                },
+                MInst::Shr {
+                    dst: VReg(5),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(5),
+                    size: OpSize::S64,
+                },
+                MInst::And32 {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(2),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    src: VReg(6),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            41,
+        );
+
+        optimize(&mut func);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::ShrImm { imm: 3, .. }))
+                .count(),
+            1
+        );
+        let stored = func.blocks[0]
+            .insts
+            .iter()
+            .filter_map(|inst| match inst {
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16 | 32,
+                    src,
+                    size: OpSize::S64,
+                } => Some(*src),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0], stored[1]);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::AndImm32 { imm: 7, .. }))
+                .count(),
+            1
+        );
+        let stored = func.blocks[0]
+            .insts
+            .iter()
+            .filter_map(|inst| match inst {
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24 | 40,
+                    src,
+                    size: OpSize::S64,
+                } => Some(*src),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0], stored[1]);
     }
 
     #[test]
