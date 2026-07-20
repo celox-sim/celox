@@ -238,6 +238,12 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
+        MInst::OrStoreIndexed {
+            base, alias_range, ..
+        } => alias_range
+            .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
         MInst::LoadPtr { .. } | MInst::LoadPtrIndexed { .. } => {
             MemoryEffects::unknown(UnknownMemory::Indirect)
         }
@@ -291,6 +297,9 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
             MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
         }
         MInst::StoreIndexed {
+            base, alias_range, ..
+        }
+        | MInst::OrStoreIndexed {
             base, alias_range, ..
         } => alias_range
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
@@ -484,6 +493,28 @@ mod tests {
             }]
         );
         assert_eq!(reads(&inst).unknown_memory(), None);
+    }
+
+    #[test]
+    fn bounded_indexed_or_store_is_both_a_read_and_a_write() {
+        let inst = MInst::OrStoreIndexed {
+            base: BaseReg::SimState,
+            offset: 120,
+            index: VReg(0),
+            src: VReg(1),
+            size: OpSize::S64,
+            alias_range: MemoryAliasRange::new(100, 64),
+        };
+        let expected = vec![MemoryRange {
+            base: BaseReg::SimState,
+            offset: 100,
+            byte_len: 64,
+        }];
+
+        assert_eq!(reads(&inst).ranges().collect::<Vec<_>>(), expected);
+        assert_eq!(writes(&inst).ranges().collect::<Vec<_>>(), expected);
+        assert_eq!(reads(&inst).unknown_memory(), None);
+        assert_eq!(writes(&inst).unknown_memory(), None);
     }
 
     #[test]

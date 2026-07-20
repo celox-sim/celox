@@ -10,7 +10,9 @@ use crate::ir::{
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 
 use super::mir::*;
-use super::sparse_write_state::{SparseChunkState, SparseWriteState, SparseWriteStates};
+use super::sparse_write_state::{
+    SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
+};
 use crate::backend::MemoryLayout;
 #[cfg(test)]
 use crate::backend::memory_layout::MemoryLayoutMode;
@@ -433,6 +435,7 @@ pub fn lower_execution_unit(
                     sparse_write_states.state(sir_block_id, inst_idx),
                     sparse_write_states.chunk_state(sir_block_id, inst_idx),
                     sparse_write_states.dirty_word_state(sir_block_id, inst_idx),
+                    sparse_write_states.metadata_action(sir_block_id, inst_idx),
                 );
             }
             if cfg!(debug_assertions) {
@@ -3496,6 +3499,7 @@ fn prepare_sparse_clean_single_chunk(
     summary_alias_range: Option<MemoryAliasRange>,
     write_state: SparseWriteState,
     dirty_word_state: SparseChunkState,
+    metadata_action: SparseMetadataAction,
 ) {
     let bit_offset = memory_offset_vreg(ctx, block, addr, offset);
     let chunk = ctx.alloc_vreg(SpillDesc::transient());
@@ -3503,29 +3507,6 @@ fn prepare_sparse_clean_single_chunk(
         dst: chunk,
         src: bit_offset,
         imm: 6,
-    });
-
-    let dirty_word = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::ShrImm {
-        dst: dirty_word,
-        src: chunk,
-        imm: 6,
-    });
-    let dirty_index = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::ShlImm {
-        dst: dirty_index,
-        src: dirty_word,
-        imm: 3,
-    });
-    let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
-    ctx.emit_and_imm(block, bit_in_word, chunk, 63);
-    let one = ctx.alloc_vreg(SpillDesc::remat(1));
-    block.push(MInst::LoadImm { dst: one, value: 1 });
-    let dirty_mask = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Shl {
-        dst: dirty_mask,
-        lhs: one,
-        rhs: bit_in_word,
     });
 
     let data_index = ctx.alloc_vreg(SpillDesc::transient());
@@ -3559,36 +3540,93 @@ fn prepare_sparse_clean_single_chunk(
         });
     }
 
+    match metadata_action {
+        SparseMetadataAction::Immediate => emit_sparse_metadata_update(
+            ctx,
+            block,
+            chunk,
+            dirty_words_offset,
+            summary_words_offset,
+            dirty_alias_range,
+            summary_alias_range,
+            write_state,
+            dirty_word_state,
+        ),
+        SparseMetadataAction::Deferred => {}
+        SparseMetadataAction::Batch {
+            dirty_word,
+            dirty_mask,
+            initial_write_state,
+            initial_dirty_word_state,
+        } => emit_sparse_metadata_batch(
+            ctx,
+            block,
+            dirty_words_offset,
+            summary_words_offset,
+            dirty_word,
+            dirty_mask,
+            initial_write_state,
+            initial_dirty_word_state,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_sparse_metadata_update(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    chunk: VReg,
+    dirty_words_offset: i32,
+    summary_words_offset: i32,
+    dirty_alias_range: Option<MemoryAliasRange>,
+    summary_alias_range: Option<MemoryAliasRange>,
+    write_state: SparseWriteState,
+    dirty_word_state: SparseChunkState,
+) {
+    let dirty_word = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm {
+        dst: dirty_word,
+        src: chunk,
+        imm: 6,
+    });
+    let dirty_index = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShlImm {
+        dst: dirty_index,
+        src: dirty_word,
+        imm: 3,
+    });
+    let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(block, bit_in_word, chunk, 63);
+    let one = ctx.alloc_vreg(SpillDesc::remat(1));
+    block.push(MInst::LoadImm { dst: one, value: 1 });
+    let dirty_mask = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Shl {
+        dst: dirty_mask,
+        lhs: one,
+        rhs: bit_in_word,
+    });
+
     let preserve_dirty_word =
         write_state == SparseWriteState::Active && dirty_word_state != SparseChunkState::Clean;
-    let dirty_value = if preserve_dirty_word {
-        let previous = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::LoadIndexed {
-            dst: previous,
+    if preserve_dirty_word {
+        block.push(MInst::OrStoreIndexed {
             base: BaseReg::SimState,
             offset: dirty_words_offset,
             index: dirty_index,
+            src: dirty_mask,
             size: OpSize::S64,
             alias_range: dirty_alias_range,
         });
-        let merged = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Or {
-            dst: merged,
-            lhs: previous,
-            rhs: dirty_mask,
-        });
-        merged
     } else {
-        dirty_mask
-    };
-    block.push(MInst::StoreIndexed {
-        base: BaseReg::SimState,
-        offset: dirty_words_offset,
-        index: dirty_index,
-        src: dirty_value,
-        size: OpSize::S64,
-        alias_range: dirty_alias_range,
-    });
+        block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: dirty_words_offset,
+            index: dirty_index,
+            src: dirty_mask,
+            size: OpSize::S64,
+            alias_range: dirty_alias_range,
+        });
+    }
 
     if write_state != SparseWriteState::Active || dirty_word_state != SparseChunkState::Dirty {
         let summary_word = ctx.alloc_vreg(SpillDesc::transient());
@@ -3611,35 +3649,115 @@ fn prepare_sparse_clean_single_chunk(
             lhs: one,
             rhs: summary_bit,
         });
-        let summary_value = if write_state == SparseWriteState::Active {
-            let previous = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::LoadIndexed {
-                dst: previous,
+        if write_state == SparseWriteState::Active {
+            block.push(MInst::OrStoreIndexed {
                 base: BaseReg::SimState,
                 offset: summary_words_offset,
                 index: summary_index,
+                src: summary_mask,
                 size: OpSize::S64,
                 alias_range: summary_alias_range,
             });
-            let merged = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Or {
-                dst: merged,
-                lhs: previous,
-                rhs: summary_mask,
-            });
-            merged
         } else {
-            summary_mask
-        };
-        block.push(MInst::StoreIndexed {
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: summary_words_offset,
+                index: summary_index,
+                src: summary_mask,
+                size: OpSize::S64,
+                alias_range: summary_alias_range,
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_sparse_metadata_batch(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dirty_words_offset: i32,
+    summary_words_offset: i32,
+    dirty_word: usize,
+    dirty_mask: u64,
+    initial_write_state: SparseWriteState,
+    initial_dirty_word_state: SparseChunkState,
+) {
+    let dirty_word_offset = dirty_words_offset
+        .checked_add(
+            i32::try_from(
+                dirty_word
+                    .checked_mul(8)
+                    .expect("dirty word offset overflow"),
+            )
+            .expect("dirty word offset exceeds MIR displacement"),
+        )
+        .expect("dirty word offset exceeds MIR displacement");
+    let mask = ctx.alloc_vreg(SpillDesc::remat(dirty_mask));
+    block.push(MInst::LoadImm {
+        dst: mask,
+        value: dirty_mask,
+    });
+    if initial_write_state == SparseWriteState::Active
+        && initial_dirty_word_state != SparseChunkState::Clean
+    {
+        emit_sparse_or_store(ctx, block, dirty_word_offset, mask);
+    } else {
+        block.push(MInst::Store {
             base: BaseReg::SimState,
-            offset: summary_words_offset,
-            index: summary_index,
-            src: summary_value,
+            offset: dirty_word_offset,
+            src: mask,
             size: OpSize::S64,
-            alias_range: summary_alias_range,
         });
     }
+
+    if initial_write_state == SparseWriteState::Active
+        && initial_dirty_word_state == SparseChunkState::Dirty
+    {
+        return;
+    }
+    let summary_word = dirty_word / 64;
+    let summary_word_offset = summary_words_offset
+        .checked_add(
+            i32::try_from(
+                summary_word
+                    .checked_mul(8)
+                    .expect("summary word offset overflow"),
+            )
+            .expect("summary word offset exceeds MIR displacement"),
+        )
+        .expect("summary word offset exceeds MIR displacement");
+    let summary_mask_value = 1u64 << (dirty_word % 64);
+    let summary_mask = ctx.alloc_vreg(SpillDesc::remat(summary_mask_value));
+    block.push(MInst::LoadImm {
+        dst: summary_mask,
+        value: summary_mask_value,
+    });
+    if initial_write_state == SparseWriteState::Active {
+        emit_sparse_or_store(ctx, block, summary_word_offset, summary_mask);
+    } else {
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: summary_word_offset,
+            src: summary_mask,
+            size: OpSize::S64,
+        });
+    }
+}
+
+fn emit_sparse_or_store(ctx: &mut ISelContext, block: &mut MBlock, offset: i32, src: VReg) {
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    block.push(MInst::OrStoreIndexed {
+        base: BaseReg::SimState,
+        offset,
+        index: zero,
+        src,
+        size: OpSize::S64,
+        alias_range: MemoryAliasRange::new(offset, 8),
+    });
 }
 
 fn prepare_sparse_store(
@@ -3651,6 +3769,7 @@ fn prepare_sparse_store(
     write_state: SparseWriteState,
     chunk_state: SparseChunkState,
     dirty_word_state: SparseChunkState,
+    metadata_action: SparseMetadataAction,
 ) {
     let abs = addr.absolute_addr();
     let sparse = ctx.layout.sparse_layouts[&abs].clone();
@@ -3770,7 +3889,8 @@ fn prepare_sparse_store(
     if write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Dirty {
         return;
     }
-    let clean_single_chunk = write_state == SparseWriteState::First && max_chunks == 1
+    let clean_single_chunk = metadata_action != SparseMetadataAction::Immediate
+        || write_state == SparseWriteState::First && max_chunks == 1
         || write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Clean;
     if clean_single_chunk {
         prepare_sparse_clean_single_chunk(
@@ -3788,9 +3908,11 @@ fn prepare_sparse_store(
             summary_alias_range,
             write_state,
             dirty_word_state,
+            metadata_action,
         );
         return;
     }
+    debug_assert_eq!(metadata_action, SparseMetadataAction::Immediate);
 
     let bit_offset = memory_offset_vreg(ctx, block, addr, offset);
     let start_chunk = ctx.alloc_vreg(SpillDesc::transient());
@@ -4355,6 +4477,7 @@ fn lower_instruction(
     sparse_write_state: SparseWriteState,
     sparse_chunk_state: SparseChunkState,
     sparse_dirty_word_state: SparseChunkState,
+    sparse_metadata_action: SparseMetadataAction,
 ) {
     if let SIRInstruction::Commit(src, dst, _, _, _) = inst
         && src.region == crate::ir::SPARSE_WORKING_REGION
@@ -5086,6 +5209,7 @@ fn lower_instruction(
                     sparse_write_state,
                     sparse_chunk_state,
                     sparse_dirty_word_state,
+                    sparse_metadata_action,
                 );
             }
             // width=0: identity Store optimized away; only emit triggers.
@@ -12289,13 +12413,13 @@ mod tests {
     #[test]
     fn chunk_memoryssa_preserves_disjoint_and_repeated_sparse_writes() {
         const STABLE: usize = 0;
-        const SPARSE: usize = 24;
-        const DIRTY: usize = 48;
-        const SUMMARY: usize = 56;
-        const ACTIVE_COUNT: usize = 64;
-        const ACTIVE_FLAGS: usize = 72;
-        const ACTIVE_LIST: usize = 76;
-        const STATE_SIZE: usize = 80;
+        const SPARSE: usize = 32;
+        const DIRTY: usize = 64;
+        const SUMMARY: usize = 72;
+        const ACTIVE_COUNT: usize = 80;
+        const ACTIVE_FLAGS: usize = 88;
+        const ACTIVE_LIST: usize = 92;
+        const STATE_SIZE: usize = 96;
 
         let absolute = AbsoluteAddr {
             instance_id: InstanceId(0),
@@ -12331,7 +12455,23 @@ mod tests {
                             vec![],
                             vec![],
                         ),
-                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 192, vec![]),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(128),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(192),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 256, vec![]),
                     ],
                     terminator: SIRTerminator::Return,
                 },
@@ -12352,7 +12492,7 @@ mod tests {
 
         let mut layout = empty_layout();
         layout.offsets.insert(absolute, STABLE);
-        layout.widths.insert(absolute, 192);
+        layout.widths.insert(absolute, 256);
         layout.is_4states.insert(absolute, false);
         layout.total_size = SPARSE;
         layout.working_base_offset = SPARSE;
@@ -12362,7 +12502,7 @@ mod tests {
             absolute,
             crate::backend::memory_layout::SparseWorkingLayout {
                 active_index: 0,
-                chunk_count: 3,
+                chunk_count: 4,
                 dirty_words_offset: DIRTY,
                 dirty_word_count: 1,
                 summary_words_offset: SUMMARY,
@@ -12397,7 +12537,17 @@ mod tests {
                 .filter(|instruction| {
                     matches!(
                         instruction,
-                        MInst::StoreIndexed {
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::StoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::OrStoreIndexed {
                             base: BaseReg::SimState,
                             offset,
                             ..
@@ -12406,7 +12556,7 @@ mod tests {
                 })
                 .count(),
             1,
-            "a dirty word needs its summary bit only on the word's first write"
+            "one dirty-word run needs one summary update"
         );
         assert_eq!(
             function
@@ -12424,8 +12574,86 @@ mod tests {
                     )
                 })
                 .count(),
-            1,
-            "only the first clean chunk after an existing dirty bit preserves the dirty word"
+            0,
+            "preserving a dirty word must not materialize it in a VReg"
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| {
+                    matches!(
+                        instruction,
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::StoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::OrStoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        } if *offset == DIRTY as i32
+                    )
+                })
+                .count(),
+            2,
+            "each straight-line clean-chunk run needs one bitmap update"
+        );
+        let dirty_mask = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|instruction| match instruction {
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    src,
+                    size: OpSize::S64,
+                } if *offset == DIRTY as i32 => Some(*src),
+                _ => None,
+            })
+            .expect("clean entry should use a direct batched dirty-word store");
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadImm { dst, value: 0b11 } if *dst == dirty_mask
+                ))
+        );
+        let dirty_or_mask = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|instruction| match instruction {
+                MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    src,
+                    size: OpSize::S64,
+                    ..
+                } if *offset == DIRTY as i32 => Some(*src),
+                _ => None,
+            })
+            .expect("an active dirty word should preserve the first batch");
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadImm { dst, value: 0b1100 } if *dst == dirty_or_mask
+                ))
         );
         assert!(
             function
@@ -12453,7 +12681,8 @@ mod tests {
         state[STABLE..STABLE + 8].copy_from_slice(&0x10u64.to_le_bytes());
         state[STABLE + 8..STABLE + 16].copy_from_slice(&0x20u64.to_le_bytes());
         state[STABLE + 16..STABLE + 24].copy_from_slice(&0x30u64.to_le_bytes());
-        state[SPARSE..SPARSE + 24].fill(0xff);
+        state[STABLE + 24..STABLE + 32].copy_from_slice(&0x40u64.to_le_bytes());
+        state[SPARSE..SPARSE + 32].fill(0xff);
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(
             u64::from_le_bytes(state[STABLE..STABLE + 8].try_into().unwrap()),
@@ -12465,7 +12694,11 @@ mod tests {
         );
         assert_eq!(
             u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()),
-            0x30
+            0x31
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 24..STABLE + 32].try_into().unwrap()),
+            0x41
         );
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
@@ -12863,7 +13096,8 @@ mod tests {
             |mut accesses, inst| {
                 match inst {
                     MInst::LoadIndexed { alias_range, .. } => accesses.0.push(alias_range),
-                    MInst::StoreIndexed { alias_range, .. } => accesses.1.push(alias_range),
+                    MInst::StoreIndexed { alias_range, .. }
+                    | MInst::OrStoreIndexed { alias_range, .. } => accesses.1.push(alias_range),
                     _ => {}
                 }
                 accesses

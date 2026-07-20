@@ -422,6 +422,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StoreIndexed { .. }
+        | MInst::OrStoreIndexed { .. }
         | MInst::StorePtrIndexed { .. }
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::MemCopy { .. }

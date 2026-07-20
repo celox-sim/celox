@@ -659,6 +659,20 @@ pub enum MInst {
         size: OpSize,
         alias_range: Option<MemoryAliasRange>,
     },
+    /// [base + offset + index] |= src.
+    ///
+    /// This is a non-atomic read-modify-write used for simulator-owned
+    /// metadata.  Its memory effect is both a read and a write; keeping the
+    /// operation explicit avoids extending a loaded metadata value through
+    /// the surrounding RTL dataflow graph.
+    OrStoreIndexed {
+        base: BaseReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
+    },
     /// dst = load [ptr + offset + index] in the runtime-owned indirect-memory
     /// domain, which is disjoint from SimState and StackFrame.
     LoadPtrIndexed {
@@ -950,6 +964,20 @@ impl fmt::Display for MInst {
                 }
                 Ok(())
             }
+            MInst::OrStoreIndexed {
+                base,
+                offset,
+                index,
+                src,
+                size,
+                alias_range,
+            } => {
+                write!(f, "or_store.{size} [{base} + {offset} + {index}], {src}")?;
+                if let Some(range) = alias_range {
+                    write!(f, " ; aliases [{base} + {}..{})", range.offset, range.end())?;
+                }
+                Ok(())
+            }
             MInst::LoadPtrIndexed {
                 dst,
                 ptr,
@@ -1230,6 +1258,7 @@ impl MInst {
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
+            | MInst::OrStoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
             | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::MemCopy { .. }
@@ -1261,7 +1290,9 @@ impl MInst {
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
-            MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
+            MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
+                Uses::two(*index, *src)
+            }
             MInst::LoadPtrIndexed { ptr, index, .. } => Uses::two(*ptr, *index),
             MInst::StorePtrIndexed {
                 ptr, index, src, ..
@@ -1376,7 +1407,7 @@ impl MInst {
                     *index = new;
                 }
             }
-            MInst::StoreIndexed { index, src, .. } => {
+            MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 if *index == old {
                     *index = new;
                 }
@@ -1856,6 +1887,18 @@ mod tests {
                 expected: vec![a, b],
             },
             UseCase {
+                name: "OrStoreIndexed",
+                inst: MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    index: a,
+                    src: b,
+                    size: OpSize::S64,
+                    alias_range: None,
+                },
+                expected: vec![a, b],
+            },
+            UseCase {
                 name: "LoadPtrIndexed",
                 inst: MInst::LoadPtrIndexed {
                     dst,
@@ -2244,7 +2287,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            54,
+            55,
             "the MInst variant table must stay exhaustive"
         );
 

@@ -40,6 +40,25 @@ pub(super) enum SparseChunkState {
     Unknown,
 }
 
+/// Placement of a sparse dirty-word update relative to its SIR Store.
+///
+/// A batch is formed only from a straight-line run of stores whose clean
+/// chunks were independently proved by MemorySSA.  Data stores keep their SIR
+/// order; only simulator-private dirty metadata is delayed to the run's final
+/// Store, where one mask covers the complete run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SparseMetadataAction {
+    #[default]
+    Immediate,
+    Deferred,
+    Batch {
+        dirty_word: usize,
+        dirty_mask: u64,
+        initial_write_state: SparseWriteState,
+        initial_dirty_word_state: SparseChunkState,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MemoryDefinitionKind {
     Store,
@@ -109,6 +128,7 @@ pub(super) struct SparseWriteStates {
     states: HashMap<(BlockId, usize), SparseWriteState>,
     chunk_states: HashMap<(BlockId, usize), SparseChunkState>,
     dirty_word_states: HashMap<(BlockId, usize), SparseChunkState>,
+    metadata_actions: HashMap<(BlockId, usize), SparseMetadataAction>,
 }
 
 impl SparseWriteStates {
@@ -416,10 +436,13 @@ impl SparseWriteStates {
             states.insert((block_id, point.1), object_state);
             chunk_states.insert((block_id, point.1), chunk_state);
         }
+        let metadata_actions =
+            plan_metadata_batches(eu, layout, &states, &chunk_states, &dirty_word_states);
         Some(Self {
             states,
             chunk_states,
             dirty_word_states,
+            metadata_actions,
         })
     }
 
@@ -443,6 +466,151 @@ impl SparseWriteStates {
             .copied()
             .unwrap_or(SparseChunkState::Unknown)
     }
+
+    pub(super) fn metadata_action(
+        &self,
+        block: BlockId,
+        instruction: usize,
+    ) -> SparseMetadataAction {
+        self.metadata_actions
+            .get(&(block, instruction))
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingMetadataBatch {
+    object: AbsoluteAddr,
+    dirty_word: usize,
+    last: (BlockId, usize),
+    count: usize,
+    dirty_mask: u64,
+    initial_write_state: SparseWriteState,
+    initial_dirty_word_state: SparseChunkState,
+}
+
+fn finish_metadata_batch(
+    pending: &mut Option<PendingMetadataBatch>,
+    actions: &mut HashMap<(BlockId, usize), SparseMetadataAction>,
+) {
+    let Some(batch) = pending.take() else {
+        return;
+    };
+    if batch.count > 1 {
+        actions.insert(
+            batch.last,
+            SparseMetadataAction::Batch {
+                dirty_word: batch.dirty_word,
+                dirty_mask: batch.dirty_mask,
+                initial_write_state: batch.initial_write_state,
+                initial_dirty_word_state: batch.initial_dirty_word_state,
+            },
+        );
+    }
+}
+
+/// Coalesce only a single straight-line `(object, dirty word)` run.  Changing
+/// object/word or crossing any Store, Commit, or event which is not part of
+/// the proved run closes it.  This keeps the scan linear and prevents batches
+/// for different summary bits from being interleaved or reordered.
+fn plan_metadata_batches(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    states: &HashMap<(BlockId, usize), SparseWriteState>,
+    chunk_states: &HashMap<(BlockId, usize), SparseChunkState>,
+    dirty_word_states: &HashMap<(BlockId, usize), SparseChunkState>,
+) -> HashMap<(BlockId, usize), SparseMetadataAction> {
+    let mut actions = HashMap::default();
+    for (&block_id, block) in &eu.blocks {
+        let mut pending = None::<PendingMetadataBatch>;
+        for (instruction, inst) in block.instructions.iter().enumerate() {
+            let point = (block_id, instruction);
+            let candidate = match inst {
+                SIRInstruction::Store(address, offset, width, _, triggers, capture_sites)
+                    if address.region == crate::ir::SPARSE_WORKING_REGION
+                        && *width != 0
+                        && triggers.is_empty()
+                        && capture_sites.is_empty() =>
+                {
+                    let object = address.absolute_addr();
+                    let multi_chunk_object = layout
+                        .sparse_layouts
+                        .get(&object)
+                        .is_some_and(|sparse| sparse.chunk_count > 1);
+                    let write_state = states
+                        .get(&point)
+                        .copied()
+                        .unwrap_or(SparseWriteState::Unknown);
+                    let chunk_state = chunk_states
+                        .get(&point)
+                        .copied()
+                        .unwrap_or(SparseChunkState::Unknown);
+                    (multi_chunk_object
+                        && matches!(
+                            write_state,
+                            SparseWriteState::First | SparseWriteState::Active
+                        )
+                        && chunk_state == SparseChunkState::Clean)
+                        .then(|| {
+                            let chunk = static_single_chunk(layout, object, offset, *width)?;
+                            Some((
+                                object,
+                                chunk / 64,
+                                chunk % 64,
+                                write_state,
+                                dirty_word_states
+                                    .get(&point)
+                                    .copied()
+                                    .unwrap_or(SparseChunkState::Unknown),
+                            ))
+                        })
+                        .flatten()
+                }
+                _ => None,
+            };
+
+            if let Some((object, dirty_word, bit, write_state, dirty_word_state)) = candidate {
+                let same_run = pending
+                    .is_some_and(|batch| batch.object == object && batch.dirty_word == dirty_word);
+                if !same_run {
+                    finish_metadata_batch(&mut pending, &mut actions);
+                    pending = Some(PendingMetadataBatch {
+                        object,
+                        dirty_word,
+                        last: point,
+                        count: 1,
+                        dirty_mask: 1u64 << bit,
+                        initial_write_state: write_state,
+                        initial_dirty_word_state: dirty_word_state,
+                    });
+                    continue;
+                }
+
+                let batch = pending
+                    .as_mut()
+                    .expect("same metadata run requires a pending batch");
+                actions.insert(batch.last, SparseMetadataAction::Deferred);
+                batch.last = point;
+                batch.count += 1;
+                batch.dirty_mask |= 1u64 << bit;
+                continue;
+            }
+
+            if matches!(
+                inst,
+                SIRInstruction::Store(..)
+                    | SIRInstruction::Commit(..)
+                    | SIRInstruction::RuntimeEvent { .. }
+                    | SIRInstruction::CombCaptureEvent { .. }
+                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
+            ) {
+                finish_metadata_batch(&mut pending, &mut actions);
+            }
+        }
+        finish_metadata_batch(&mut pending, &mut actions);
+    }
+    actions
 }
 
 fn static_single_chunk(
@@ -1009,6 +1177,120 @@ mod tests {
     }
 
     #[test]
+    fn straight_line_clean_chunks_share_one_deferred_metadata_update() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store_at(0, 0, RegisterId(0)),
+                    store_at(0, 64, RegisterId(0)),
+                    store_at(0, 128, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 3);
+
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 0),
+            SparseMetadataAction::Deferred
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 1),
+            SparseMetadataAction::Deferred
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 2),
+            SparseMetadataAction::Batch {
+                dirty_word: 0,
+                dirty_mask: 0b111,
+                initial_write_state: SparseWriteState::First,
+                initial_dirty_word_state: SparseChunkState::Clean,
+            }
+        );
+    }
+
+    #[test]
+    fn commit_closes_a_metadata_batch() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store_at(0, 0, RegisterId(0)),
+                    commit(0),
+                    store_at(0, 64, RegisterId(0)),
+                    store_at(0, 128, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 4);
+
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 0),
+            SparseMetadataAction::Immediate
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 2),
+            SparseMetadataAction::Deferred
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 3),
+            SparseMetadataAction::Batch {
+                dirty_word: 0,
+                dirty_mask: 0b110,
+                initial_write_state: SparseWriteState::First,
+                initial_dirty_word_state: SparseChunkState::Clean,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_event_closes_a_metadata_batch() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store_at(0, 0, RegisterId(0)),
+                    SIRInstruction::RuntimeEvent {
+                        site_id: 0,
+                        args: vec![],
+                    },
+                    store_at(0, 64, RegisterId(0)),
+                    store_at(0, 128, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 4);
+
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 0),
+            SparseMetadataAction::Immediate
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 2),
+            SparseMetadataAction::Deferred
+        );
+        assert!(matches!(
+            facts.metadata_action(BlockId(0), 3),
+            SparseMetadataAction::Batch {
+                dirty_mask: 0b110,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn mutually_exclusive_arm_stores_are_both_first_writes() {
         let unit = eu([
             (
@@ -1242,6 +1524,14 @@ mod tests {
         assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Clean);
         assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Unknown);
         assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Unknown);
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 0),
+            SparseMetadataAction::Immediate
+        );
+        assert_eq!(
+            facts.metadata_action(BlockId(0), 2),
+            SparseMetadataAction::Immediate
+        );
     }
 
     #[test]

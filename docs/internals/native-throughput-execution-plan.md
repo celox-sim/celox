@@ -4536,6 +4536,60 @@ Status: **hierarchical summary updates are eliminated where proved redundant;
 Linux semantics and tick count are preserved; dirty-word update coalescing
 remains open**.
 
+### Step 39: Explicit indexed metadata RMW
+
+Step 38 still represented every preserved dirty bitmap update as a separate
+indexed Load, register OR, and indexed Store.  The loaded metadata value then
+participated in the surrounding RTL live-range problem even though the value
+is simulator-private and has no SIR consumer.
+
+Native MIR now has an explicit non-atomic `OrStoreIndexed` operation for
+`[base + offset + index] |= value`.  Its shared memory-effect description is
+both a read and a write over the exact alias envelope.  The MIR scheduler
+treats it as a scheduling-region barrier, so an earlier read, the RMW, and a
+later read cannot be reordered.  Emission uses one x86 memory-destination OR;
+no RTL Store, CFG edge, scheduler decision, or commit point is changed.
+
+The complete trace at
+`target/heliodor/analysis/step39-indexed-or-rmw` has 141,698,513 bytes of MIR,
+down from 143,093,464 bytes in Step 38.  The trace-free non-LTO Linux run at
+`target/heliodor/results/20260720T072104Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`; compilation took 110.487 s and execution took
+110.961 s.  This establishes correctness and shorter metadata live ranges,
+not a stable execution-speed gain.
+
+Status: **explicit indexed bitmap RMW is complete; scheduler memory order and
+Linux semantics are preserved**.
+
+### Step 40: Straight-line dirty-word batching
+
+Complete MIR after Step 39 still contained one dirty-word RMW for every clean
+chunk.  Range MemorySSA already proves the exact clean state of each chunk, so
+several straight-line Stores to chunks in one dirty word can share one bitmap
+mask without keeping a loaded metadata value live.
+
+The sparse write analysis now records a metadata placement action at each SIR
+Store.  A batch is formed only inside one basic block for one
+`(object, dirty-word)` run whose chunks are independently proved clean.  Data
+Stores remain at their original SIR positions.  Only inaccessible simulator
+metadata is deferred to the final Store in the run, where one constant mask is
+stored or ORed.  A different Store, commit, runtime/capture event, block end,
+unknown range, or changed object/word closes the batch.  The scan is linear in
+the block's instructions and creates no pairwise dependence relation.
+
+The complete trace at
+`target/heliodor/analysis/step40-dirty-word-batches` has 133,989,572 bytes of
+MIR.  The non-LTO run at
+`target/heliodor/results/20260720T074044Z_celox_test_soc_linux_boot.log`
+completed through kernel power-down with exactly `cy=9ae070 x3=aa pass=1`;
+compilation took 108.349 s and execution took 112.165 s.  MIR and compile time
+shrank, but this execution sample is slower than Step 38's range, so no runtime
+gain is claimed.
+
+Status: **proved straight-line metadata batches are complete; RTL Store order,
+the MIR scheduler, and the Linux tick count are unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4630,6 +4684,8 @@ remains open**.
 | 36 sparse object MemorySSA write state | `84fd5861` | sparse CFG/SSA 5/5; executable ISel state/metadata 2/2 | lib 934/934; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 143.852 s; execute 108.252 s | first and dominating-active object states remove redundant lowering; gain is small and disjoint chunk first-write proof remains open |
 | 37 range-aware sparse chunk MemorySSA | `85952b9d` | sparse CFG/range SSA 8/8; executable chunk/data/metadata 1/1 | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 118.702 s; full compile 117.173 s; execute 107.836 s | full MIR -13.8% and compile -18.5% versus Step 36; execute -0.4%, so repeated dirty/summary word updates remain open |
 | 38 hierarchical sparse metadata state | this step | dirty-word assertions in range SSA 8/8; executable one-summary-update regression | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 113.106 s; compile 111.882 / 111.514 s; execute 109.449 / 105.793 s | summary updates collapse to one per proved dirty word; MIR -6.4%; runtime effect varies and dirty-word update coalescing remains open |
+| 39 explicit indexed metadata RMW | this step | MIR operands/emission; exact read+write effects; scheduler barrier | native backend 442/442 in the final combined source | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 110.487 s; execute 110.961 s | x86 memory-destination OR removes the loaded metadata VReg; MIR 141,698,513 bytes; no stable runtime claim |
+| 40 straight-line dirty-word batching | this step | sparse batch close/run 3/3; executable multi-run bitmap regression | native backend 442/442 in the final combined source | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 108.349 s; execute 112.165 s | one proved same-word run emits one metadata mask; MIR 133,989,572 bytes; scheduler and data-Store order unchanged |
 
 ## Related design records
 

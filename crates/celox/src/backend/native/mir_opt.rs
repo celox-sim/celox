@@ -3398,6 +3398,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
+                | MInst::OrStoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. } => {
                     available.clear();
@@ -3568,6 +3569,7 @@ fn eliminate_redundant_local_stores(func: &mut MFunction) {
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
                 | MInst::StoreIndexed { .. }
+                | MInst::OrStoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. }
                 | MInst::LoadPtr { .. }
@@ -3739,6 +3741,7 @@ fn dead_code_eliminate(func: &mut MFunction) {
                                 | MInst::StorePtr { .. }
                                 | MInst::ReleaseStorePtr { .. }
                                 | MInst::StoreIndexed { .. }
+                                | MInst::OrStoreIndexed { .. }
                                 | MInst::StorePtrIndexed { .. }
                                 | MInst::ReleaseStorePtrIndexed { .. }
                                 | MInst::Branch { .. }

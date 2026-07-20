@@ -631,6 +631,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StoreIndexed { .. }
+        | MInst::OrStoreIndexed { .. }
         | MInst::LoadPtrIndexed { .. }
         | MInst::StorePtrIndexed { .. }
         | MInst::ReleaseStorePtrIndexed { .. }
@@ -653,7 +654,9 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{BaseReg, BlockId, MBlock, OpSize, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{
+        BaseReg, BlockId, MBlock, MemoryAliasRange, OpSize, SpillDesc, VRegAllocator,
+    };
     #[test]
     fn indexed_buckets_do_not_scan_a_long_ready_set() {
         const INSTRUCTIONS: usize = 4096;
@@ -1123,6 +1126,61 @@ mod tests {
 
         assert!(scheduled.dependency_verified);
         assert!(positions[0] < positions[2]);
+        assert!(positions[1] < positions[2]);
+    }
+
+    #[test]
+    fn indexed_or_store_preserves_read_and_write_dependencies() {
+        let before = VReg(0);
+        let index = VReg(1);
+        let mask = VReg(2);
+        let after = VReg(3);
+        let region = vec![
+            MInst::Load {
+                dst: before,
+                base: BaseReg::SimState,
+                offset: 32,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: index,
+                value: 0,
+            },
+            MInst::LoadImm {
+                dst: mask,
+                value: 4,
+            },
+            MInst::OrStoreIndexed {
+                base: BaseReg::SimState,
+                offset: 32,
+                index,
+                src: mask,
+                size: OpSize::S64,
+                alias_range: MemoryAliasRange::new(32, 8),
+            },
+            MInst::Load {
+                dst: after,
+                base: BaseReg::SimState,
+                offset: 32,
+                size: OpSize::S64,
+            },
+        ];
+
+        assert!(
+            !is_pressure_schedulable_kind(&region[3]),
+            "indexed memory RMW must remain a scheduling-region barrier"
+        );
+        let scheduled = schedule_region(&region, BTreeSet::from([before, after]));
+        let positions = [0, 3, 4].map(|original| {
+            scheduled
+                .instructions
+                .iter()
+                .position(|candidate| candidate == &region[original])
+                .unwrap()
+        });
+
+        assert!(scheduled.dependency_verified);
+        assert!(positions[0] < positions[1]);
         assert!(positions[1] < positions[2]);
     }
 

@@ -1158,6 +1158,10 @@ fn verify_emission_inputs(
                 | MInst::StoreIndexed {
                     base: BaseReg::StackFrame,
                     ..
+                }
+                | MInst::OrStoreIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
                 } => {
                     return Err(EmitInputError::new(
                         "EMIT.STACK_FRAME_INDEXED",
@@ -2386,6 +2390,25 @@ fn emit_inst(
                 OpSize::S64 => {
                     asm.mov(qword_ptr(mem), preg_to_reg64(s_preg))?;
                 }
+            }
+        }
+
+        MInst::OrStoreIndexed {
+            base,
+            offset,
+            index,
+            src,
+            size,
+            ..
+        } => {
+            let s_preg = resolve(assignment, *src);
+            let idx = preg_to_reg64(resolve(assignment, *index));
+            let mem = mem_operand_indexed(*base, *offset, idx);
+            match size {
+                OpSize::S8 => asm.or(byte_ptr(mem), preg_to_reg8(s_preg))?,
+                OpSize::S16 => asm.or(word_ptr(mem), preg_to_reg16(s_preg))?,
+                OpSize::S32 => asm.or(dword_ptr(mem), preg_to_reg32(s_preg))?,
+                OpSize::S64 => asm.or(qword_ptr(mem), preg_to_reg64(s_preg))?,
             }
         }
 
@@ -3840,6 +3863,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => store_ptr += 1,
                 MInst::LoadIndexed { .. } | MInst::LoadPtrIndexed { .. } => indexed_load += 1,
                 MInst::StoreIndexed { .. }
+                | MInst::OrStoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. } => indexed_store += 1,
                 MInst::MemCopy { .. }
@@ -3930,6 +3954,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     MInst::LoadIndexed { .. }
                     | MInst::LoadPtrIndexed { .. }
                     | MInst::StoreIndexed { .. }
+                    | MInst::OrStoreIndexed { .. }
                     | MInst::StorePtrIndexed { .. }
                     | MInst::ReleaseStorePtrIndexed { .. } => indexed_mem += 1,
                     MInst::MemCopy { .. } => memcopy += 1,
