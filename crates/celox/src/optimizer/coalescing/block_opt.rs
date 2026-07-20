@@ -814,24 +814,6 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             continue;
         }
 
-        let mut sorted = seg.loads.clone();
-        sorted.sort_by_key(|x| x.offset);
-
-        let mut overlap = false;
-        for i in 1..sorted.len() {
-            let Some(prev_end) = sorted[i - 1].offset.checked_add(sorted[i - 1].width) else {
-                overlap = true;
-                break;
-            };
-            if sorted[i].offset < prev_end {
-                overlap = true;
-                break;
-            }
-        }
-        if overlap {
-            continue;
-        }
-
         let mut by_word: HashMap<usize, Vec<LoadInfo>> = HashMap::default();
         for ld in seg.loads {
             if ld.width == 0 || ld.width > 64 {
@@ -1151,7 +1133,10 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 
 #[cfg(test)]
 mod tests {
-    use super::{optimize_block, subsume_static_loads as subsume_static_loads_with_types};
+    use super::{
+        coalesce_static_loads as coalesce_static_loads_with_types, optimize_block,
+        subsume_static_loads as subsume_static_loads_with_types,
+    };
     use crate::HashMap;
     use crate::ir::{
         BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
@@ -1230,6 +1215,42 @@ mod tests {
             1_018
         );
         verify(instructions, registers);
+    }
+
+    #[test]
+    fn covering_wide_load_does_not_disable_word_load_coalescing() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 128),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(65), 3),
+            SIRInstruction::Load(RegisterId(2), 7, SIROffset::Static(66), 2),
+        ];
+        let mut register_map = [
+            (RegisterId(0), logic(128)),
+            (RegisterId(1), logic(3)),
+            (RegisterId(2), logic(2)),
+        ]
+        .into_iter()
+        .collect();
+        let mut reg_counter = 2;
+
+        coalesce_static_loads_with_types(&mut instructions, &mut register_map, &mut reg_counter);
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            2
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, 7, SIROffset::Static(64), 64)
+        )));
+        assert!(instructions.iter().all(|instruction| !matches!(
+            instruction,
+            SIRInstruction::Load(RegisterId(1) | RegisterId(2), _, _, _)
+        )));
+        verify(instructions, register_map);
     }
 
     #[test]
