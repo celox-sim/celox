@@ -9,6 +9,7 @@ pub mod cost_model;
 mod dead_working_stores;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
+mod pass_circular_priority;
 mod pass_coalesce_stores;
 mod pass_commit_sinking;
 mod pass_concat_folding;
@@ -146,6 +147,7 @@ pub(crate) fn optimize_rooted_comb_memory(
 
 use pass_bit_extract_peephole::BitExtractPeepholePass;
 use pass_branchify_mux::BranchifyMuxPass;
+use pass_circular_priority::CircularPriorityPass;
 use pass_coalesce_stores::CoalesceStoresPass;
 use pass_commit_sinking::CommitSinkingPass;
 use pass_concat_folding::ConcatFoldingPass;
@@ -706,6 +708,9 @@ fn optimize_with_options(
     }
     if on(SirPass::MaskedArrayAny) {
         comb_passes.add_pass(MaskedArrayAnyPass::for_program(program));
+    }
+    if on(SirPass::CircularPriority) {
+        comb_passes.add_pass(CircularPriorityPass::for_program(program));
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization

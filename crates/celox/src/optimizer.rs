@@ -173,6 +173,7 @@ pub enum SirPass {
     XorChainFolding,
     VectorizeConcat,
     MaskedArrayAny,
+    CircularPriority,
     BranchifyMux,
     SplitCoalescedStores,
     PartialForward,
@@ -199,6 +200,7 @@ impl SirPass {
         SirPass::XorChainFolding,
         SirPass::VectorizeConcat,
         SirPass::MaskedArrayAny,
+        SirPass::CircularPriority,
         SirPass::BranchifyMux,
         SirPass::SplitCoalescedStores,
         SirPass::PartialForward,
@@ -225,6 +227,7 @@ impl SirPass {
             SirPass::XorChainFolding => "xor_chain_folding",
             SirPass::VectorizeConcat => "vectorize_concat",
             SirPass::MaskedArrayAny => "masked_array_any",
+            SirPass::CircularPriority => "circular_priority",
             SirPass::BranchifyMux => "branchify_mux",
             SirPass::SplitCoalescedStores => "split_coalesced_stores",
             SirPass::PartialForward => "partial_forward",
@@ -252,6 +255,7 @@ impl SirPass {
             "xor_chain_folding" => Some(SirPass::XorChainFolding),
             "vectorize_concat" => Some(SirPass::VectorizeConcat),
             "masked_array_any" => Some(SirPass::MaskedArrayAny),
+            "circular_priority" => Some(SirPass::CircularPriority),
             "branchify_mux" => Some(SirPass::BranchifyMux),
             "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
             "partial_forward" => Some(SirPass::PartialForward),
@@ -463,5 +467,17 @@ mod tests {
         assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::MaskedArrayAny));
         assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::MaskedArrayAny));
         assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::MaskedArrayAny));
+    }
+
+    #[test]
+    fn circular_priority_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("circular_priority"),
+            Some(SirPass::CircularPriority)
+        );
+        assert_eq!(SirPass::CircularPriority.as_str(), "circular_priority");
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::CircularPriority));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::CircularPriority));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::CircularPriority));
     }
 }

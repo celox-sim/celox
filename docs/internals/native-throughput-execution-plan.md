@@ -4939,6 +4939,59 @@ control-dependent search without constraining RTL scheduling freedom;
 Linux semantics and tick count are preserved and fixed-CPU execution improves
 by 4.8%**.
 
+### Step 47: CFG circular-priority recovery
+
+The complete optimized SIR exposed another unconditional hot loop at the
+start of every combinational evaluation. It scanned all 32 ROB lanes, loaded
+five one-bit arrays per iteration, formed
+`valid & ((is_store & is_amo) | is_fence | is_cbo_zero)`, and retained the
+smallest `(lane - head_idx) & 31` age. In two-state logic this is exactly a
+packed candidate mask rotated by `head_idx`, followed by a nonzero test and
+CTZ.
+
+The new `circular_priority` SIR pass discovers this from the natural CFG loop
+and its SSA recurrences. It does not preserve source, layer, block, or branch
+arm order: those remain optimization freedom. Legality depends only on the
+observable RTL semantics. The loop must be a pure counted power-of-two scan;
+the index, found flag, best age, update predicate, and circular age expression
+must match; the counter and index widths must enumerate the full domain; the
+packed predicate may contain declared one-bit unpacked-array loads and pure
+Boolean operations; and four-state execution is left unchanged. Definitions
+used after a removed loop are found by one whole-EU linear use walk. Pure
+loop-invariant dependency closures are moved out of the loop, while escaping
+induction values, memory reads, or effects reject the rewrite. This avoids both
+the former blanket escape rejection and a loop-count-times-EU-size analysis.
+The scheduler and its dependency graph are unchanged.
+
+The complete final trace is at
+`target/heliodor/analysis/step47-circular-priority-final`. In both standalone
+`eval_comb` and scheduler-used `eval_comb_apply_ff`, the old 32-iteration
+backedge and dynamic bit loads are gone. The optimized SIR and MIR contain five
+32-bit static loads, packed mask operations, a rotate by `head_idx`, a nonempty
+branch, and CTZ. Ten focused tests exhaustively compare the original and
+rewritten four-lane CFG, cover redundant index normalization and
+escaped-invariant hoisting, and reject four-state, narrow or non-unit
+induction, undersized arrays, side effects, and escaping loop-variant values;
+the CLI/default test is included. The optimized library passes 982/982, native
+testbench passes 60 with one upstream ignore, and counter passes 9 with three
+Veryl ignores. All-target check, strict clippy, format, and diff checks pass.
+
+All four fixed-CPU non-LTO parent/candidate/parent/candidate runs reached
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`. Parent execution was
+98.925 and 106.973 s; candidate execution was 102.461 and 101.181 s. Their
+means are 102.949 and 101.821 s, a 1.127 s or 1.1% reduction, but the paired
+changes have opposite signs: candidate is 3.537 s slower in the first pair and
+5.791 s faster in the second. Compile times were recorded separately: parent
+90.882 and 92.263 s, candidate 93.047 and 91.607 s. No compile-speed or
+execution-speed claim is made from these samples. The one final release/LTO
+qualification compiled Heliodor in 85.770 s and executed it in 101.637 s with
+the same tick and power-down markers.
+
+Status: **the unconditional 32-lane circular-priority scan is represented by
+its packed dataflow meaning without adding a non-semantic order; Linux meaning
+and tick count are preserved, while the measured runtime effect remains
+unconfirmed because paired samples disagree**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5041,6 +5094,7 @@ by 4.8%**.
 | 44 machine-width known-bits mask elimination | this step | MIR mask/constant/32-bit zero-extension 61/61 | lib 962/962; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks | final non-LTO and two release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | final non-LTO compile 68.337 s / execute 107.693 s; final release compile 61.215 / 62.130 s, execute 109.005 / 107.524 s | redundant register/immediate 32/64-bit mask chains removed without scheduler changes; final release execute -2.1% / -3.4% versus Step 43 |
 | 45 allocator-visible same-block value sharing | this step | MIR GVN/rematerialization/MemorySSA 64/64 | lib 965/965; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | all candidate and fixed-CPU A/B/A/B runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | fixed-CPU Step 44 execute 101.001 / 101.731 s; candidate 98.888 / 104.028 s | hot repeated byte/bit indices share one value; final code -22,895 bytes; execute mean unchanged, so no speed claim |
 | 46 control-dependent masked array search | this step | masked-array search and CLI 7/7 | lib 972/972; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final-source run all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | Step 45 execute 106.589 / 102.699 s; candidate 100.532 / 98.778 s; final source 99.781 s | 32 eager element loads and 96 comparisons become a set-bit search; scheduler unchanged; execute mean -4.8% |
+| 47 CFG circular-priority recovery | this step | circular-priority and CLI 10/10 | lib 982/982; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final release/LTO all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | parent execute 98.925 / 106.973 s; candidate 102.461 / 101.181 s; final release 101.637 s | 32 scalar priority iterations become packed rotate and CTZ; scheduler unchanged; mean -1.1% but paired directions disagree, so runtime effect is unconfirmed |
 
 ## Related design records
 
