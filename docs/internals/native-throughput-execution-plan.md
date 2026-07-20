@@ -4401,8 +4401,81 @@ therefore range-aware sparse MemorySSA with conservative dynamic-range kills,
 not a scheduler change.
 
 Status: **object-level first/active state is structurally complete and Linux
-correct; the measured gain is small; chunk-range first-write proof remains
-open**.
+correct in `84fd5861`; the measured gain is small; chunk-range first-write
+proof remains open**.
+
+### Step 37: Range-aware sparse chunk MemorySSA
+
+Step 36 still lowered every Store to a different chunk of an active object as
+if that chunk might already be dirty.  It loaded the dirty word, tested its bit,
+loaded both stable and working data, selected one, and only then wrote the new
+value.  Complete MIR showed this sequence repeated for hundreds of consecutive
+static chunks.
+
+The first chunk implementation used one pruned-SSA variable per physical
+64-bit chunk, but globally disabled that partition when the same object had any
+dynamic or multi-chunk Store.  The exact target block was therefore unchanged;
+its complete MIR remained 177,366,490 bytes.  Although Linux passed, execution
+took 110.316 s.  That trial was rejected before commit because a definition on
+an unrelated CFG path must not invalidate all static range facts for an object.
+
+The retained design has two paths over the same object MemorySSA:
+
+- objects containing only static single-chunk Stores use pruned chunk SSA,
+  whose construction is linear in CFG edges, Stores, and phi inputs;
+- mixed objects use an access-chain range solver.  Exact Store ranges either
+  clobber or forward the preceding memory version, a dynamic range yields
+  `Unknown` only when it actually reaches the query, reset yields `Clean`, and
+  a MemoryPhi unions the states of its incoming edges.
+
+The range solver processes all query points for one `(object, chunk)` together.
+For an object with `D` definitions, `F` phi inputs, and `Q` queried static
+chunks, its worst-case query time is `O(Q(D + F))`; reusable state is
+`O(D + F)`.  The exact-only fast path avoids this product for the common case.
+Neither path expands a dynamic Store over every possible chunk or allocates
+storage proportional to an RTL numerical width.  Phi propagation is a
+two-state monotone worklist, so each clean/dirty bit reaches an edge at most
+once.
+
+ISel consumes three chunk states.  `Clean` initializes working data directly
+from stable storage, `Dirty` uses existing working data without preparation,
+and `Unknown` retains the previous dirty test and stable/working select.  The
+object active-list proof remains separate.  No SIR instruction, CFG edge,
+scheduler decision, Store order, or commit order is changed.
+
+Eight focused CFG/MemorySSA regressions cover straight-line clean and dirty
+chunks, all-dirty and mixed diamond joins, a loop backedge, commit reset,
+reaching dynamic alias, a dynamic Store on a mutually exclusive sibling path,
+and exact multi-chunk overlap.  An executable JIT regression performs both
+disjoint first writes and a repeated write, then verifies stable data and the
+cleared dirty, summary, and active metadata.  Common gates pass with library
+938/938, native testbench 60 passed with one ignore, counter 9 passed with
+three Veryl ignores, all-target check, and strict clippy.
+
+The complete trace is retained at
+`target/heliodor/analysis/step37-range-memoryssa`.  Pre/post/native SIR is
+unchanged from Step 36.  Full MIR falls from 177,367,725 to 152,861,272 bytes.
+In the inspected region 228 Store sequence, the per-chunk dirty test, working
+load, and stable/working select disappear.  The main emitted body ends at
+`0x001d1224` instead of `0x0022f6da`.  Trace code generation took 118.702 s.
+
+The final trace-free non-LTO run at
+`target/heliodor/results/20260720T064100Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 117.173 s and execution took
+107.836 s.  Relative to Step 36, compile time is 18.5% shorter while the single
+execution sample is only 0.4% shorter; no large runtime gain is claimed.
+
+The retained MIR now exposes the next direct cost: each clean chunk still
+loads, ORs, and stores the same dirty word and the same summary word.  Range
+proof removed the data-selection work, but metadata updates remain
+uncoalesced.  Dirty-word/summary-word state and safe update batching are the
+next lowering boundary; changing the scheduler is neither required nor
+allowed by this result.
+
+Status: **range-aware chunk state is Linux-correct and materially reduces MIR
+and compile time; runtime improvement remains small; repeated metadata-word
+updates remain open**.
 
 ## Execution record
 
@@ -4495,7 +4568,8 @@ open**.
 | 33 source-MemorySSA SLT lowering regions | this step | shared analyses 39/39; parser scheduler 16/16; observer/cascade/false-loop 163 passed | lib 920/920; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, docs, and diff gates pass | non-LTO and release/LTO both pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | non-LTO compile 163.267 s / execute 132.472 s; release compile 152.135 s / execute 133.980 s | bit-range Def/Use and SCC fences replace effect-only ready ordering; semantic checkpoint complete, no throughput gain claimed; allocator-selected use-cluster promotion remains open |
 | 34 exact aggregate projection and same-range forwarding | this step | range lowering 3/3; forwarding 5/5; shared analyses 39/39; parser scheduler 16/16 | lib 926/926; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, docs, and diff gates pass | optimized non-LTO and final release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | range-only non-LTO compile 160.558 s / execute 112.922 s; final non-LTO 156.443 s / 110.254 s; release 149.973 s / 110.762 s | static field Loads retain exact ranges and cached snapshots; two-state unsigned same-width Store values forward directly; final non-LTO execute sample is 16.8% below Step 33 |
 | 35 overlapping narrow-load coalescing | `103c9985` | covering-wide-load regression | retained Step 34 common gates | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 155.724 s; execute 108.799 s | a required complete-object load no longer disables sharing equal narrow word projections; scheduler unchanged |
-| 36 sparse object MemorySSA write state | this step | sparse CFG/SSA 5/5; executable ISel state/metadata 2/2 | lib 934/934; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 143.852 s; execute 108.252 s | first and dominating-active object states remove redundant lowering; gain is small and disjoint chunk first-write proof remains open |
+| 36 sparse object MemorySSA write state | `84fd5861` | sparse CFG/SSA 5/5; executable ISel state/metadata 2/2 | lib 934/934; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 143.852 s; execute 108.252 s | first and dominating-active object states remove redundant lowering; gain is small and disjoint chunk first-write proof remains open |
+| 37 range-aware sparse chunk MemorySSA | this step | sparse CFG/range SSA 8/8; executable chunk/data/metadata 1/1 | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 118.702 s; full compile 117.173 s; execute 107.836 s | full MIR -13.8% and compile -18.5% versus Step 36; execute -0.4%, so repeated dirty/summary word updates remain open |
 
 ## Related design records
 

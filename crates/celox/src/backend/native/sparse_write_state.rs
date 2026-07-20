@@ -1,0 +1,1222 @@
+//! CFG-exact write-state certificates for sparse next-state lowering.
+//!
+//! Sparse dirty metadata is clear at function entry when the function's full
+//! commit run executes on every path following a sparse Store.  A Store may
+//! therefore initialize its touched working chunk directly from stable state
+//! when the Store's per-object MemorySSA use reaches LiveOnEntry.
+//!
+//! Two pruned MemorySSA partitions are built.  The object partition proves
+//! whether active-list state already exists.  The chunk partition uses
+//! `(AbsoluteAddr, physical 64-bit chunk)` variables and proves whether a
+//! statically addressed chunk is clean or dirty.  Exact single-chunk objects
+//! use a linear partitioned-SSA fast path.  Mixed objects use an access-chain
+//! range walk: a dynamic Store becomes unknown only when it actually reaches
+//! the queried chunk, and no wildcard is expanded over the object's width.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use celox_analysis::ssa::{self, Event, Version};
+
+use crate::HashMap;
+use crate::backend::memory_layout::MemoryLayout;
+use crate::ir::cfg::SirCfg;
+use crate::ir::{
+    AbsoluteAddr, BlockId, ExecutionUnit, RegionedAbsoluteAddr, SIRInstruction, SIROffset,
+};
+
+type StorePoint = (usize, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SparseWriteState {
+    First,
+    Active,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SparseChunkState {
+    Clean,
+    Dirty,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MemoryDefinitionKind {
+    Store,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ChunkFootprint {
+    Exact { first: usize, last: usize },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MemoryDefinition {
+    point: StorePoint,
+    kind: MemoryDefinitionKind,
+    footprint: ChunkFootprint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SparseChunk {
+    object: AbsoluteAddr,
+    index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ChunkDefinition {
+    point: StorePoint,
+    kind: MemoryDefinitionKind,
+}
+
+#[derive(Debug)]
+struct ChunkPlan {
+    eligible: bool,
+    chunks: BTreeSet<usize>,
+    commit_count: usize,
+}
+
+impl Default for ChunkPlan {
+    fn default() -> Self {
+        Self {
+            eligible: true,
+            chunks: BTreeSet::new(),
+            commit_count: 0,
+        }
+    }
+}
+
+const CLEAN: u8 = 1;
+const DIRTY: u8 = 2;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ReachingState {
+    possible: u8,
+    depends_on_entry: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SparseWriteStates {
+    states: HashMap<(BlockId, usize), SparseWriteState>,
+    chunk_states: HashMap<(BlockId, usize), SparseChunkState>,
+}
+
+impl SparseWriteStates {
+    pub(super) fn analyze(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+        commit_block: BlockId,
+        commit_start: usize,
+    ) -> Option<Self> {
+        let cfg = SirCfg::analyze(eu).ok()?;
+        let commit_index = cfg.block_index(commit_block)?;
+        let mut events = vec![
+            Vec::<Event<AbsoluteAddr, MemoryDefinition, StorePoint>>::new();
+            cfg.block_ids.len()
+        ];
+        let mut stores = Vec::<(StorePoint, BlockId, AbsoluteAddr, Option<usize>)>::new();
+        let mut chunk_plans = BTreeMap::<AbsoluteAddr, ChunkPlan>::new();
+
+        for (block_index, &block_id) in cfg.block_ids.iter().enumerate() {
+            for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
+                let point = (block_index, instruction);
+                match inst {
+                    SIRInstruction::Store(address, offset, width, _, _, _)
+                        if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
+                    {
+                        let object = address.absolute_addr();
+                        let footprint = static_chunk_range(layout, object, offset, *width)
+                            .map_or(ChunkFootprint::Unknown, |(first, last)| {
+                                ChunkFootprint::Exact { first, last }
+                            });
+                        let chunk = match footprint {
+                            ChunkFootprint::Exact { first, last } if first == last => Some(first),
+                            ChunkFootprint::Exact { .. } | ChunkFootprint::Unknown => None,
+                        };
+                        let plan = chunk_plans.entry(object).or_default();
+                        if let Some(chunk) = chunk {
+                            plan.chunks.insert(chunk);
+                        } else {
+                            plan.eligible = false;
+                        }
+                        events[block_index].push(Event::Use {
+                            variable: object,
+                            usage: point,
+                        });
+                        events[block_index].push(Event::Definition {
+                            variable: object,
+                            definition: MemoryDefinition {
+                                point,
+                                kind: MemoryDefinitionKind::Store,
+                                footprint,
+                            },
+                        });
+                        stores.push((point, block_id, object, chunk));
+                    }
+                    SIRInstruction::Commit(source, destination, ..)
+                        if source.region == crate::ir::SPARSE_WORKING_REGION
+                            && destination.region == crate::ir::STABLE_REGION =>
+                    {
+                        let object = source.absolute_addr();
+                        chunk_plans.entry(object).or_default().commit_count += 1;
+                        events[block_index].push(Event::Use {
+                            variable: object,
+                            usage: point,
+                        });
+                        events[block_index].push(Event::Definition {
+                            variable: object,
+                            definition: MemoryDefinition {
+                                point,
+                                kind: MemoryDefinitionKind::Reset,
+                                footprint: ChunkFootprint::Unknown,
+                            },
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let memory_ssa = ssa::build(&cfg, &events).ok()?;
+        let object_phis =
+            resolve_phi_states(
+                &memory_ssa,
+                |definition: MemoryDefinition| match definition.kind {
+                    MemoryDefinitionKind::Store => DIRTY,
+                    MemoryDefinitionKind::Reset => CLEAN,
+                },
+            );
+
+        // Expanding a wildcard Store or repeated reset over every candidate
+        // chunk would make the event table quadratic.  Keep the linear
+        // partitioned-SSA path for exact objects; mixed objects are handled by
+        // the query-local range walker below without wildcard expansion.
+        let partitioned_objects = chunk_plans
+            .iter()
+            .filter_map(|(&object, plan)| {
+                (plan.eligible && !plan.chunks.is_empty() && plan.commit_count == 1)
+                    .then_some(object)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut chunk_events = vec![
+            Vec::<Event<SparseChunk, ChunkDefinition, StorePoint>>::new();
+            cfg.block_ids.len()
+        ];
+        for (block_index, &block_id) in cfg.block_ids.iter().enumerate() {
+            for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
+                let point = (block_index, instruction);
+                match inst {
+                    SIRInstruction::Store(address, offset, width, _, _, _)
+                        if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
+                    {
+                        let object = address.absolute_addr();
+                        if !partitioned_objects.contains(&object) {
+                            continue;
+                        }
+                        let Some(index) = static_single_chunk(layout, object, offset, *width)
+                        else {
+                            continue;
+                        };
+                        let variable = SparseChunk { object, index };
+                        chunk_events[block_index].push(Event::Use {
+                            variable,
+                            usage: point,
+                        });
+                        chunk_events[block_index].push(Event::Definition {
+                            variable,
+                            definition: ChunkDefinition {
+                                point,
+                                kind: MemoryDefinitionKind::Store,
+                            },
+                        });
+                    }
+                    SIRInstruction::Commit(source, destination, ..)
+                        if source.region == crate::ir::SPARSE_WORKING_REGION
+                            && destination.region == crate::ir::STABLE_REGION =>
+                    {
+                        let object = source.absolute_addr();
+                        if !partitioned_objects.contains(&object) {
+                            continue;
+                        }
+                        let plan = &chunk_plans[&object];
+                        for &index in &plan.chunks {
+                            chunk_events[block_index].push(Event::Definition {
+                                variable: SparseChunk { object, index },
+                                definition: ChunkDefinition {
+                                    point,
+                                    kind: MemoryDefinitionKind::Reset,
+                                },
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let chunk_ssa = ssa::build(&cfg, &chunk_events).ok()?;
+        let chunk_phis = resolve_phi_states(&chunk_ssa, |definition: ChunkDefinition| {
+            match definition.kind {
+                MemoryDefinitionKind::Store => DIRTY,
+                MemoryDefinitionKind::Reset => CLEAN,
+            }
+        });
+
+        let range_graph = RangeWriteGraph::build(&memory_ssa)?;
+        let mut range_solver = RangeWriteSolver::new(&range_graph);
+        let mut range_queries = BTreeMap::<SparseChunk, Vec<(StorePoint, BlockId)>>::new();
+        for &(point, block_id, object, chunk) in &stores {
+            if partitioned_objects.contains(&object) {
+                continue;
+            }
+            if let Some(index) = chunk {
+                range_queries
+                    .entry(SparseChunk { object, index })
+                    .or_default()
+                    .push((point, block_id));
+            }
+        }
+        let mut range_chunk_states = BTreeMap::<StorePoint, SparseChunkState>::new();
+        for (query, points) in range_queries {
+            range_solver.solve(query);
+            for (point, block_id) in points {
+                let Some(version) = memory_ssa.uses.get(&point).copied() else {
+                    continue;
+                };
+                let block_index = cfg.block_index(block_id)?;
+                let entry_is_clean = store_entry_is_clean(
+                    &cfg,
+                    block_id,
+                    block_index,
+                    point.1,
+                    commit_block,
+                    commit_index,
+                    commit_start,
+                );
+                let state = range_solver.state(version);
+                let possible = if state.possible == 0 || (state.depends_on_entry && !entry_is_clean)
+                {
+                    CLEAN | DIRTY
+                } else {
+                    state.possible
+                };
+                range_chunk_states.insert(point, classify_chunk_state(possible));
+            }
+        }
+
+        let mut states = HashMap::default();
+        let mut chunk_states = HashMap::default();
+        for (point, block_id, object, chunk) in stores {
+            let block_index = cfg.block_index(block_id)?;
+            let entry_is_clean = store_entry_is_clean(
+                &cfg,
+                block_id,
+                block_index,
+                point.1,
+                commit_block,
+                commit_index,
+                commit_start,
+            );
+            let object_state = memory_ssa
+                .uses
+                .get(&point)
+                .copied()
+                .map(|version| {
+                    classify_object_state(version_state(
+                        version,
+                        entry_is_clean,
+                        &object_phis,
+                        |definition: MemoryDefinition| match definition.kind {
+                            MemoryDefinitionKind::Store => DIRTY,
+                            MemoryDefinitionKind::Reset => CLEAN,
+                        },
+                    ))
+                })
+                .unwrap_or(SparseWriteState::Unknown);
+            let chunk_state = if partitioned_objects.contains(&object) {
+                chunk
+                    .and_then(|_| chunk_ssa.uses.get(&point).copied())
+                    .map(|version| {
+                        classify_chunk_state(version_state(
+                            version,
+                            entry_is_clean,
+                            &chunk_phis,
+                            |definition: ChunkDefinition| match definition.kind {
+                                MemoryDefinitionKind::Store => DIRTY,
+                                MemoryDefinitionKind::Reset => CLEAN,
+                            },
+                        ))
+                    })
+                    .unwrap_or(SparseChunkState::Unknown)
+            } else {
+                range_chunk_states
+                    .get(&point)
+                    .copied()
+                    .unwrap_or(SparseChunkState::Unknown)
+            };
+            states.insert((block_id, point.1), object_state);
+            chunk_states.insert((block_id, point.1), chunk_state);
+        }
+        Some(Self {
+            states,
+            chunk_states,
+        })
+    }
+
+    pub(super) fn state(&self, block: BlockId, instruction: usize) -> SparseWriteState {
+        self.states
+            .get(&(block, instruction))
+            .copied()
+            .unwrap_or(SparseWriteState::Unknown)
+    }
+
+    pub(super) fn chunk_state(&self, block: BlockId, instruction: usize) -> SparseChunkState {
+        self.chunk_states
+            .get(&(block, instruction))
+            .copied()
+            .unwrap_or(SparseChunkState::Unknown)
+    }
+}
+
+fn static_single_chunk(
+    layout: &MemoryLayout,
+    object: AbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> Option<usize> {
+    let (first, last) = static_chunk_range(layout, object, offset, width)?;
+    (first == last).then_some(first)
+}
+
+fn static_chunk_range(
+    layout: &MemoryLayout,
+    object: AbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> Option<(usize, usize)> {
+    let SIROffset::Static(bit_offset) = offset else {
+        return None;
+    };
+    if width == 0 {
+        return None;
+    }
+    if let Some(array) = layout.unpacked_arrays.get(&object) {
+        let within_element = bit_offset % array.element_width;
+        if width > array.element_width.checked_sub(within_element)? {
+            return None;
+        }
+    }
+    let (byte_offset, intra_byte) = layout.map_static_bit_offset(&object, *bit_offset);
+    let start = byte_offset.checked_mul(8)?.checked_add(intra_byte)?;
+    let end = start.checked_add(width - 1)?;
+    let first = start / 64;
+    let last = end / 64;
+    (last < layout.sparse_layouts.get(&object)?.chunk_count).then_some((first, last))
+}
+
+fn store_entry_is_clean(
+    cfg: &SirCfg,
+    block_id: BlockId,
+    block_index: usize,
+    instruction: usize,
+    commit_block: BlockId,
+    commit_index: usize,
+    commit_start: usize,
+) -> bool {
+    if block_id == commit_block {
+        instruction < commit_start
+    } else {
+        cfg.scc_for_block[block_index] != cfg.scc_for_block[commit_index]
+            && cfg.postdominates(commit_block, block_id)
+    }
+}
+
+#[derive(Debug)]
+enum RangeWriteNode {
+    Entry {
+        object: AbsoluteAddr,
+    },
+    Definition {
+        object: AbsoluteAddr,
+        definition: MemoryDefinition,
+        predecessor: usize,
+    },
+    Phi {
+        object: AbsoluteAddr,
+        inputs: Vec<usize>,
+    },
+}
+
+impl RangeWriteNode {
+    fn object(&self) -> AbsoluteAddr {
+        match self {
+            Self::Entry { object } | Self::Definition { object, .. } | Self::Phi { object, .. } => {
+                *object
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RangeWriteGraph {
+    versions: BTreeMap<Version<AbsoluteAddr, MemoryDefinition>, usize>,
+    nodes: Vec<RangeWriteNode>,
+    users: Vec<Vec<usize>>,
+    nodes_by_object: BTreeMap<AbsoluteAddr, Vec<usize>>,
+}
+
+impl RangeWriteGraph {
+    fn build(
+        sparse_ssa: &ssa::SparseSsa<AbsoluteAddr, MemoryDefinition, StorePoint>,
+    ) -> Option<Self> {
+        let phis = sparse_ssa
+            .phis
+            .iter()
+            .map(|phi| ((phi.variable, phi.block), phi))
+            .collect::<BTreeMap<_, _>>();
+        let mut versions = BTreeMap::new();
+        let mut ordered = Vec::new();
+        for &version in sparse_ssa.uses.values() {
+            intern_range_version(&mut versions, &mut ordered, version);
+        }
+        for phi in &sparse_ssa.phis {
+            intern_range_version(&mut versions, &mut ordered, phi.version);
+            for &(_, input) in &phi.inputs {
+                intern_range_version(&mut versions, &mut ordered, input);
+            }
+        }
+
+        let mut nodes = Vec::new();
+        let mut index = 0;
+        while index < ordered.len() {
+            let version = ordered[index];
+            let node = match version {
+                Version::Entry(object) => RangeWriteNode::Entry { object },
+                Version::Definition {
+                    variable: object,
+                    definition,
+                } => {
+                    let predecessor = sparse_ssa.uses.get(&definition.point).copied()?;
+                    let predecessor =
+                        intern_range_version(&mut versions, &mut ordered, predecessor);
+                    RangeWriteNode::Definition {
+                        object,
+                        definition,
+                        predecessor,
+                    }
+                }
+                Version::Phi {
+                    variable: object,
+                    block,
+                } => {
+                    let phi = phis.get(&(object, block))?;
+                    let inputs = phi
+                        .inputs
+                        .iter()
+                        .map(|&(_, input)| intern_range_version(&mut versions, &mut ordered, input))
+                        .collect();
+                    RangeWriteNode::Phi { object, inputs }
+                }
+            };
+            nodes.push(node);
+            index += 1;
+        }
+
+        let mut users = vec![Vec::new(); nodes.len()];
+        let mut nodes_by_object = BTreeMap::<AbsoluteAddr, Vec<usize>>::new();
+        for (node, value) in nodes.iter().enumerate() {
+            nodes_by_object
+                .entry(value.object())
+                .or_default()
+                .push(node);
+            match value {
+                RangeWriteNode::Entry { .. } => {}
+                RangeWriteNode::Definition { predecessor, .. } => {
+                    users[*predecessor].push(node);
+                }
+                RangeWriteNode::Phi { inputs, .. } => {
+                    for &input in inputs {
+                        users[input].push(node);
+                    }
+                }
+            }
+        }
+        Some(Self {
+            versions,
+            nodes,
+            users,
+            nodes_by_object,
+        })
+    }
+}
+
+fn intern_range_version(
+    versions: &mut BTreeMap<Version<AbsoluteAddr, MemoryDefinition>, usize>,
+    ordered: &mut Vec<Version<AbsoluteAddr, MemoryDefinition>>,
+    version: Version<AbsoluteAddr, MemoryDefinition>,
+) -> usize {
+    if let Some(&index) = versions.get(&version) {
+        return index;
+    }
+    let index = ordered.len();
+    ordered.push(version);
+    versions.insert(version, index);
+    index
+}
+
+struct RangeWriteSolver<'a> {
+    graph: &'a RangeWriteGraph,
+    states: Vec<ReachingState>,
+    work: VecDeque<usize>,
+}
+
+impl<'a> RangeWriteSolver<'a> {
+    fn new(graph: &'a RangeWriteGraph) -> Self {
+        Self {
+            graph,
+            states: vec![ReachingState::default(); graph.nodes.len()],
+            work: VecDeque::new(),
+        }
+    }
+
+    fn solve(&mut self, query: SparseChunk) {
+        self.work.clear();
+        let Some(nodes) = self.graph.nodes_by_object.get(&query.object) else {
+            return;
+        };
+        for &node in nodes {
+            self.states[node] = self.initial_state(node, query.index);
+            if self.states[node].possible != 0 || self.states[node].depends_on_entry {
+                self.work.push_back(node);
+            }
+        }
+
+        while let Some(node) = self.work.pop_front() {
+            let reaching = self.states[node];
+            for &user in &self.graph.users[node] {
+                if !self.forwards_predecessor(user, query.index) {
+                    continue;
+                }
+                let old = self.states[user];
+                self.states[user].possible |= reaching.possible;
+                self.states[user].depends_on_entry |= reaching.depends_on_entry;
+                if self.states[user].possible != old.possible
+                    || self.states[user].depends_on_entry != old.depends_on_entry
+                {
+                    self.work.push_back(user);
+                }
+            }
+        }
+    }
+
+    fn state(&self, version: Version<AbsoluteAddr, MemoryDefinition>) -> ReachingState {
+        self.graph
+            .versions
+            .get(&version)
+            .map(|&node| self.states[node])
+            .unwrap_or_default()
+    }
+
+    fn initial_state(&self, node: usize, chunk: usize) -> ReachingState {
+        match self.graph.nodes[node] {
+            RangeWriteNode::Entry { .. } => ReachingState {
+                possible: CLEAN,
+                depends_on_entry: true,
+            },
+            RangeWriteNode::Definition { definition, .. } => match definition.kind {
+                MemoryDefinitionKind::Reset => ReachingState {
+                    possible: CLEAN,
+                    depends_on_entry: false,
+                },
+                MemoryDefinitionKind::Store => match definition.footprint {
+                    ChunkFootprint::Exact { first, last } if (first..=last).contains(&chunk) => {
+                        ReachingState {
+                            possible: DIRTY,
+                            depends_on_entry: false,
+                        }
+                    }
+                    ChunkFootprint::Unknown => ReachingState {
+                        possible: CLEAN | DIRTY,
+                        depends_on_entry: false,
+                    },
+                    ChunkFootprint::Exact { .. } => ReachingState::default(),
+                },
+            },
+            RangeWriteNode::Phi { .. } => ReachingState::default(),
+        }
+    }
+
+    fn forwards_predecessor(&self, node: usize, chunk: usize) -> bool {
+        match self.graph.nodes[node] {
+            RangeWriteNode::Phi { .. } => true,
+            RangeWriteNode::Definition { definition, .. } => matches!(
+                definition,
+                MemoryDefinition {
+                    kind: MemoryDefinitionKind::Store,
+                    footprint: ChunkFootprint::Exact { first, last },
+                    ..
+                } if !(first..=last).contains(&chunk)
+            ),
+            RangeWriteNode::Entry { .. } => false,
+        }
+    }
+}
+
+fn resolve_phi_states<V, D, U>(
+    sparse_ssa: &ssa::SparseSsa<V, D, U>,
+    definition_state: impl Fn(D) -> u8,
+) -> BTreeMap<(V, usize), ReachingState>
+where
+    V: Copy + Ord,
+    D: Copy + Ord,
+{
+    let phi_indices = sparse_ssa
+        .phis
+        .iter()
+        .enumerate()
+        .map(|(index, phi)| ((phi.variable, phi.block), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut states = vec![ReachingState::default(); sparse_ssa.phis.len()];
+    let mut users = vec![Vec::<usize>::new(); sparse_ssa.phis.len()];
+
+    for (phi_index, phi) in sparse_ssa.phis.iter().enumerate() {
+        for &(_, input) in &phi.inputs {
+            match input {
+                Version::Entry(_) => {
+                    states[phi_index].possible |= CLEAN;
+                    states[phi_index].depends_on_entry = true;
+                }
+                Version::Definition { definition, .. } => {
+                    states[phi_index].possible |= definition_state(definition);
+                }
+                Version::Phi { variable, block } => {
+                    let input_index = phi_indices[&(variable, block)];
+                    users[input_index].push(phi_index);
+                }
+            }
+        }
+    }
+
+    let mut work = (0..states.len()).collect::<VecDeque<_>>();
+    while let Some(phi) = work.pop_front() {
+        let reaching = states[phi];
+        for &user in &users[phi] {
+            let old = states[user];
+            states[user].possible |= reaching.possible;
+            states[user].depends_on_entry |= reaching.depends_on_entry;
+            if states[user].possible != old.possible
+                || states[user].depends_on_entry != old.depends_on_entry
+            {
+                work.push_back(user);
+            }
+        }
+    }
+
+    phi_indices
+        .into_iter()
+        .map(|(identity, index)| (identity, states[index]))
+        .collect()
+}
+
+fn version_state<V, D>(
+    version: Version<V, D>,
+    entry_is_clean: bool,
+    phis: &BTreeMap<(V, usize), ReachingState>,
+    definition_state: impl Fn(D) -> u8,
+) -> u8
+where
+    V: Copy + Ord,
+    D: Copy + Ord,
+{
+    match version {
+        Version::Entry(_) => {
+            if entry_is_clean {
+                CLEAN
+            } else {
+                CLEAN | DIRTY
+            }
+        }
+        Version::Definition { definition, .. } => definition_state(definition),
+        Version::Phi { variable, block } => {
+            let state = phis.get(&(variable, block)).copied().unwrap_or_default();
+            if state.possible == 0 || (state.depends_on_entry && !entry_is_clean) {
+                CLEAN | DIRTY
+            } else {
+                state.possible
+            }
+        }
+    }
+}
+
+fn classify_object_state(possible: u8) -> SparseWriteState {
+    match possible {
+        CLEAN => SparseWriteState::First,
+        DIRTY => SparseWriteState::Active,
+        _ => SparseWriteState::Unknown,
+    }
+}
+
+fn classify_chunk_state(possible: u8) -> SparseChunkState {
+    match possible {
+        CLEAN => SparseChunkState::Clean,
+        DIRTY => SparseChunkState::Dirty,
+        _ => SparseChunkState::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HashMap;
+    use crate::backend::memory_layout::MemoryLayoutMode;
+    use crate::ir::{
+        BasicBlock, InstanceId, RegisterId, RegisterType, SIROffset, SIRTerminator, STABLE_REGION,
+    };
+    use veryl_analyzer::ir::VarId;
+
+    fn address(region: u32, variable: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region,
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(variable),
+        }
+    }
+
+    fn store(variable: u32, source: RegisterId) -> SIRInstruction<RegionedAbsoluteAddr> {
+        store_at(variable, 0, source)
+    }
+
+    fn store_at(
+        variable: u32,
+        bit_offset: usize,
+        source: RegisterId,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            SIROffset::Static(bit_offset),
+            1,
+            source,
+            vec![],
+            vec![],
+        )
+    }
+
+    fn commit(variable: u32) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Commit(
+            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            address(STABLE_REGION, variable),
+            SIROffset::Static(0),
+            1,
+            vec![],
+        )
+    }
+
+    fn eu(
+        blocks: impl IntoIterator<Item = (BlockId, BasicBlock<RegionedAbsoluteAddr>)>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().collect(),
+            register_map: [(
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        }
+    }
+
+    fn layout() -> MemoryLayout {
+        let sparse_layouts = (0..=1)
+            .map(|variable| {
+                (
+                    address(crate::ir::SPARSE_WORKING_REGION, variable).absolute_addr(),
+                    crate::backend::memory_layout::SparseWorkingLayout {
+                        active_index: variable as usize,
+                        chunk_count: 4,
+                        dirty_words_offset: 0,
+                        dirty_word_count: 1,
+                        summary_words_offset: 0,
+                        summary_word_count: 1,
+                    },
+                )
+            })
+            .collect();
+        MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: HashMap::default(),
+            widths: HashMap::default(),
+            is_4states: HashMap::default(),
+            total_size: 0,
+            working_offsets: HashMap::default(),
+            working_base_offset: 0,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 0,
+            sparse_layouts,
+            sparse_active_count_offset: 0,
+            sparse_active_flags_offset: 0,
+            sparse_active_list_offset: 0,
+            sparse_active_capacity: 0,
+            merged_total_size: 0,
+            triggered_bits_offset: 0,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 0,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        }
+    }
+
+    fn analyze(
+        unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        commit_block: BlockId,
+        commit_start: usize,
+    ) -> SparseWriteStates {
+        SparseWriteStates::analyze(unit, &layout(), commit_block, commit_start).unwrap()
+    }
+
+    #[test]
+    fn straight_line_marks_only_each_objects_first_store() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store(0, RegisterId(0)),
+                    store(0, RegisterId(0)),
+                    store_at(0, 64, RegisterId(0)),
+                    store(1, RegisterId(0)),
+                    commit(0),
+                    commit(1),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 4);
+
+        assert_eq!(facts.state(BlockId(0), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(0), 1), SparseWriteState::Active);
+        assert_eq!(facts.state(BlockId(0), 2), SparseWriteState::Active);
+        assert_eq!(facts.state(BlockId(0), 3), SparseWriteState::First);
+        assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Dirty);
+        assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(0), 3), SparseChunkState::Clean);
+    }
+
+    #[test]
+    fn mutually_exclusive_arm_stores_are_both_first_writes() {
+        let unit = eu([
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(2),
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(3),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0)), commit(0)],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]);
+        let facts = analyze(&unit, BlockId(3), 1);
+
+        assert_eq!(facts.state(BlockId(1), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(2), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(3), 0), SparseWriteState::Active);
+        assert_eq!(facts.chunk_state(BlockId(1), 0), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(3), 0), SparseChunkState::Dirty);
+    }
+
+    #[test]
+    fn join_after_a_maybe_store_is_not_a_first_write() {
+        let unit = eu([
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(2),
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(3),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(4), vec![]),
+                },
+            ),
+            (
+                BlockId(4),
+                BasicBlock {
+                    id: BlockId(4),
+                    params: vec![],
+                    instructions: vec![commit(0)],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]);
+        let facts = analyze(&unit, BlockId(4), 0);
+
+        assert_eq!(facts.state(BlockId(1), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(3), 0), SparseWriteState::Unknown);
+        assert_eq!(facts.chunk_state(BlockId(3), 0), SparseChunkState::Unknown);
+    }
+
+    #[test]
+    fn loop_backedge_prevents_a_first_write_certificate() {
+        let unit = eu([
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(2), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                },
+            ),
+            (
+                BlockId(2),
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![store(0, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                },
+            ),
+            (
+                BlockId(3),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![commit(0)],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]);
+        let facts = analyze(&unit, BlockId(3), 0);
+
+        assert_eq!(facts.state(BlockId(2), 0), SparseWriteState::Unknown);
+        assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Unknown);
+    }
+
+    #[test]
+    fn commit_reset_prevents_active_state_from_crossing_it() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store(0, RegisterId(0)),
+                    commit(0),
+                    store(0, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 3);
+
+        assert_eq!(facts.state(BlockId(0), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(0), 2), SparseWriteState::First);
+        assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
+    }
+
+    #[test]
+    fn dynamic_store_only_blocks_a_reaching_chunk_proof() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    store(0, RegisterId(0)),
+                    SIRInstruction::Store(
+                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        SIROffset::Dynamic(RegisterId(0)),
+                        1,
+                        RegisterId(0),
+                        vec![],
+                        vec![],
+                    ),
+                    store_at(0, 64, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 3);
+
+        assert_eq!(facts.state(BlockId(0), 0), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(0), 1), SparseWriteState::Active);
+        assert_eq!(facts.state(BlockId(0), 2), SparseWriteState::Active);
+        assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Unknown);
+        assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Unknown);
+    }
+
+    #[test]
+    fn dynamic_store_on_a_sibling_path_does_not_block_a_clean_chunk() {
+        let unit = eu([
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Store(
+                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        SIROffset::Dynamic(RegisterId(0)),
+                        1,
+                        RegisterId(0),
+                        vec![],
+                        vec![],
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(2),
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![store_at(0, 64, RegisterId(0))],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+            ),
+            (
+                BlockId(3),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![commit(0)],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]);
+        let facts = analyze(&unit, BlockId(3), 0);
+
+        assert_eq!(facts.state(BlockId(2), 0), SparseWriteState::First);
+        assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Clean);
+    }
+
+    #[test]
+    fn static_multi_chunk_store_clobbers_only_its_exact_range() {
+        let unit = eu([(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Store(
+                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        SIROffset::Static(0),
+                        128,
+                        RegisterId(0),
+                        vec![],
+                        vec![],
+                    ),
+                    store_at(0, 64, RegisterId(0)),
+                    store_at(0, 128, RegisterId(0)),
+                    commit(0),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]);
+        let facts = analyze(&unit, BlockId(0), 3);
+
+        assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Unknown);
+        assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Dirty);
+        assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
+    }
+}

@@ -10,7 +10,7 @@ use crate::ir::{
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 
 use super::mir::*;
-use super::sparse_first_write::{SparseFirstWrites, SparseWriteState};
+use super::sparse_write_state::{SparseChunkState, SparseWriteState, SparseWriteStates};
 use crate::backend::MemoryLayout;
 #[cfg(test)]
 use crate::backend::memory_layout::MemoryLayoutMode;
@@ -162,9 +162,9 @@ pub fn lower_execution_unit(
     let mut func = MFunction::new(vregs.clone(), spill_descs);
     let block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
-    let sparse_first_writes = sparse_worklist_run
+    let sparse_write_states = sparse_worklist_run
         .and_then(|(commit_block, commit_start, _)| {
-            SparseFirstWrites::analyze(eu, commit_block, commit_start)
+            SparseWriteStates::analyze(eu, layout, commit_block, commit_start)
         })
         .unwrap_or_default();
     let sparse_descriptor_table = sparse_worklist_run
@@ -430,7 +430,8 @@ pub fn lower_execution_unit(
                     inst,
                     sir_block,
                     &sir_defs,
-                    sparse_first_writes.state(sir_block_id, inst_idx),
+                    sparse_write_states.state(sir_block_id, inst_idx),
+                    sparse_write_states.chunk_state(sir_block_id, inst_idx),
                 );
             }
             if cfg!(debug_assertions) {
@@ -3479,7 +3480,7 @@ fn try_emit_single_chunk_sparse_store(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_sparse_first_single_chunk(
+fn prepare_sparse_clean_single_chunk(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     addr: &RegionedAbsoluteAddr,
@@ -3492,6 +3493,7 @@ fn prepare_sparse_first_single_chunk(
     summary_words_offset: i32,
     dirty_alias_range: Option<MemoryAliasRange>,
     summary_alias_range: Option<MemoryAliasRange>,
+    preserve_existing_metadata: bool,
 ) {
     let bit_offset = memory_offset_vreg(ctx, block, addr, offset);
     let chunk = ctx.alloc_vreg(SpillDesc::transient());
@@ -3555,11 +3557,31 @@ fn prepare_sparse_first_single_chunk(
         });
     }
 
+    let dirty_value = if preserve_existing_metadata {
+        let previous = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: previous,
+            base: BaseReg::SimState,
+            offset: dirty_words_offset,
+            index: dirty_index,
+            size: OpSize::S64,
+            alias_range: dirty_alias_range,
+        });
+        let merged = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: merged,
+            lhs: previous,
+            rhs: dirty_mask,
+        });
+        merged
+    } else {
+        dirty_mask
+    };
     block.push(MInst::StoreIndexed {
         base: BaseReg::SimState,
         offset: dirty_words_offset,
         index: dirty_index,
-        src: dirty_mask,
+        src: dirty_value,
         size: OpSize::S64,
         alias_range: dirty_alias_range,
     });
@@ -3584,11 +3606,31 @@ fn prepare_sparse_first_single_chunk(
         lhs: one,
         rhs: summary_bit,
     });
+    let summary_value = if preserve_existing_metadata {
+        let previous = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: previous,
+            base: BaseReg::SimState,
+            offset: summary_words_offset,
+            index: summary_index,
+            size: OpSize::S64,
+            alias_range: summary_alias_range,
+        });
+        let merged = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: merged,
+            lhs: previous,
+            rhs: summary_mask,
+        });
+        merged
+    } else {
+        summary_mask
+    };
     block.push(MInst::StoreIndexed {
         base: BaseReg::SimState,
         offset: summary_words_offset,
         index: summary_index,
-        src: summary_mask,
+        src: summary_value,
         size: OpSize::S64,
         alias_range: summary_alias_range,
     });
@@ -3601,6 +3643,7 @@ fn prepare_sparse_store(
     offset: &SIROffset,
     width: usize,
     write_state: SparseWriteState,
+    chunk_state: SparseChunkState,
 ) {
     let abs = addr.absolute_addr();
     let sparse = ctx.layout.sparse_layouts[&abs].clone();
@@ -3717,8 +3760,13 @@ fn prepare_sparse_store(
             (width + (64 - alignment)).div_ceil(64)
         }
     };
-    if write_state == SparseWriteState::First && max_chunks == 1 {
-        prepare_sparse_first_single_chunk(
+    if write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Dirty {
+        return;
+    }
+    let clean_single_chunk = write_state == SparseWriteState::First && max_chunks == 1
+        || write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Clean;
+    if clean_single_chunk {
+        prepare_sparse_clean_single_chunk(
             ctx,
             block,
             addr,
@@ -3731,6 +3779,7 @@ fn prepare_sparse_store(
             sparse.summary_words_offset as i32,
             dirty_alias_range,
             summary_alias_range,
+            write_state == SparseWriteState::Active,
         );
         return;
     }
@@ -4296,6 +4345,7 @@ fn lower_instruction(
     sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
     sparse_write_state: SparseWriteState,
+    sparse_chunk_state: SparseChunkState,
 ) {
     if let SIRInstruction::Commit(src, dst, _, _, _) = inst
         && src.region == crate::ir::SPARSE_WORKING_REGION
@@ -5018,7 +5068,15 @@ fn lower_instruction(
                 return;
             }
             if addr.region == crate::ir::SPARSE_WORKING_REGION && *width_bits != 0 {
-                prepare_sparse_store(ctx, block, addr, offset, *width_bits, sparse_write_state);
+                prepare_sparse_store(
+                    ctx,
+                    block,
+                    addr,
+                    offset,
+                    *width_bits,
+                    sparse_write_state,
+                    sparse_chunk_state,
+                );
             }
             // width=0: identity Store optimized away; only emit triggers.
             if *width_bits == 0 {
@@ -12212,6 +12270,155 @@ mod tests {
         state[SPARSE..SPARSE + 8].fill(0xff);
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(state[STABLE], 0xa6);
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
+        assert_eq!(state[ACTIVE_FLAGS], 0);
+    }
+
+    #[test]
+    fn chunk_memoryssa_preserves_disjoint_and_repeated_sparse_writes() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 24;
+        const DIRTY: usize = 48;
+        const SUMMARY: usize = 56;
+        const ACTIVE_COUNT: usize = 64;
+        const ACTIVE_FLAGS: usize = 72;
+        const ACTIVE_LIST: usize = 76;
+        const STATE_SIZE: usize = 80;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let one = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                        SIRInstruction::Store(sparse, SIROffset::Static(0), 1, one, vec![], vec![]),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(64),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(65),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 192, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                one,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 192);
+        layout.is_4states.insert(absolute, false);
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 3,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_count_offset = ACTIVE_COUNT;
+        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
+        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(instruction, MInst::SparseMarkActive { .. }))
+                .count(),
+            1,
+            "only the object's first Store may mark it active"
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|instruction| !matches!(instruction, MInst::Select { .. })),
+            "proved clean/dirty chunks must not select stable versus working storage"
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; STATE_SIZE];
+        state[STABLE..STABLE + 8].copy_from_slice(&0x10u64.to_le_bytes());
+        state[STABLE + 8..STABLE + 16].copy_from_slice(&0x20u64.to_le_bytes());
+        state[STABLE + 16..STABLE + 24].copy_from_slice(&0x30u64.to_le_bytes());
+        state[SPARSE..SPARSE + 24].fill(0xff);
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE..STABLE + 8].try_into().unwrap()),
+            0x11
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 8..STABLE + 16].try_into().unwrap()),
+            0x23
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()),
+            0x30
+        );
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
         assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
