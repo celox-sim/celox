@@ -4672,6 +4672,71 @@ large stable runtime gain is not claimed.
 Status: **whole-element native accesses are direct and Linux-correct; the
 scheduler is unchanged; larger structural execution-time gaps remain open**.
 
+### Step 43: Commit-independent sparse whole-zero fills
+
+Step 42 deliberately kept the 256-byte plane limit on SIR element-boundary
+preservation.  Removing that limit before adding a compact bulk operation made
+the 4,096-entry BTB arrays retain thousands of scalar Stores through every SIR
+pass and did not finish in a useful time.  With the limit retained, optimized
+SIR instead exposes the reset of the 51-bit `tag` array as one 208,896-bit
+`Concat` of an exact zero followed by one whole-object sparse Store.  Generic
+strided Store lowering expanded that value into hundreds of thousands of MIR
+instructions.
+
+The shared SIR representation now has demand-driven exact-zero proof.  It
+builds one definition index, starts only from candidate Store sources, and
+walks the reachable zero-preserving operand graph with an explicit stack.  It
+does not materialize the represented bit vector or build a reverse-use graph
+for unrelated SIR.  Work and memory are linear in the indexed definitions and
+visited operand edges; the 4,096 repeated `Concat` operands are traversed
+without recursion.
+
+Element-strided layout may now retain a padded array when an otherwise
+unsupported static Store is a complete, exact-zero overwrite of sparse
+working state with no trigger or capture side effect.  Native ISel replaces a
+complete covered zero run with one physical `MemFill`, marks the object active,
+and writes the complete dirty and summary bitsets.  Value and mask planes are
+both cleared in four-state mode.  Backend-owned padding is canonicalized to
+zero; no RTL bit is added to the observable state.
+
+This transformation does not preserve an artificial source order.  Stores to
+other objects and runtime events may lie between members of the zero run.  A
+read, non-zero or dynamic Store, or Commit of the same object closes the run,
+because those operations can observe or replace that object's working state.
+The new MIR operation publishes its exact write range to the shared dependence
+analysis, so the pressure scheduler may move it across disjoint work while
+retaining every overlapping RAW, WAR, and WAW edge.  Its x86 emitter preserves
+all scratch registers around `rep stosq` and handles the 4/2/1-byte tail.
+
+The first workload integration accidentally made this optimization conditional
+on finding one local sparse worklist Commit run.  `eval_only_ff` intentionally
+publishes from a separate apply function, so its wide reset missed the
+optimization: ISel produced 758,042 MIR instructions and 744,821 VRegs;
+`mir_opt` alone took 149.545 s and late state forwarding took 39.015 s.  The
+trace-free compile took 236.522 s.  Whole-zero planning is now independent of
+the commit strategy, which is the semantic boundary it actually requires.
+
+After the commit-strategy correction, the trace-free non-LTO compile-only run at
+`target/heliodor/results/20260720T105332Z_celox_test_soc_linux_boot.log` took
+64.899 s, versus 107.693 s in Step 42.  The final release/LTO compile-only run
+at `target/heliodor/results/20260720T105852Z_celox_test_soc_linux_boot.log`
+took 62.750 s.  Those two compile-only samples precede the final change which
+lets the pressure scheduler move `MemFill` by its exact memory dependencies.
+The final-source release/LTO full run at
+`target/heliodor/results/20260720T111304Z_celox_test_soc_linux_boot.log`
+reached `reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`; compilation
+took 62.047 s and execution took 111.351 s.  The compile-time reduction is
+direct, but this execution sample does not establish a runtime gain.
+
+Final library tests are 957/957 and the native-backend subset is 450/450,
+including the scheduler and executable lowering regressions.  All-target check
+and strict clippy also pass.
+
+Status: **the giant exact-zero value and Store no longer enter MIR, commit
+placement is not treated as an RTL rule, overlapping memory order is proved by
+exact effects, and Linux semantics and tick count are preserved; the larger
+execution-time gap remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4770,6 +4835,7 @@ scheduler is unchanged; larger structural execution-time gaps remain open**.
 | 40 straight-line dirty-word batching | this step | sparse batch close/run 3/3; executable multi-run bitmap regression | native backend 442/442 in the final combined source | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 108.349 s; execute 112.165 s | one proved same-word run emits one metadata mask; MIR 133,989,572 bytes; scheduler and data-Store order unchanged |
 | 41 bounded native element-layout preservation | this step | load/store coalescing boundary regressions | final combined lib 947/947; native backend 442/442 | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 105.731 s; execute 108.420 s | native layout intent prevents SIR coalescing from repacking small padded arrays; packed targets unchanged; MIR 133,726,550 bytes |
 | 42 direct whole-element indexed access | this step | executable 12-bit indexed load/store and padding canonicalization | lib 947/947; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | final non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace byte-identical after target scoping | trace 110.122 s; full compile 107.693 s; execute 105.529 s | direct indexed scalar access; MIR 133,426,760 bytes; historical timing variance prevents a large speed claim; scheduler unchanged |
+| 43 commit-independent sparse whole-zero fill | this step | demand-driven exact-zero, coverage/visibility, `MemFill` effects/emission, eval-only integration, scheduler overlap regressions | lib 957/957; native backend 450/450; all-target check; strict clippy; format and diff checks | final-source release/LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | intermediate non-LTO/release compile-only 64.899 / 62.750 s; final release compile 62.047 s / execute 111.351 s | Step 42 compile 107.693→about 62--65 s; 208,896-bit zero construction never enters MIR; no runtime-speed claim |
 
 ## Related design records
 

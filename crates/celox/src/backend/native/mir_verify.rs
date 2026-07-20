@@ -296,6 +296,12 @@ fn verify_instruction_constraints(
             index,
             "zero-length memcpy must be eliminated before MIR",
         )),
+        MInst::MemFill { byte_len: 0, .. } => Err(MirVerifyError::instruction(
+            "OPCODE.MEMFILL_NON_ZERO",
+            block,
+            index,
+            "zero-length memfill must be eliminated before MIR",
+        )),
         MInst::LoadConstantTableAddr { table, .. } if func.constant_table(*table).is_none() => {
             Err(MirVerifyError::instruction(
                 "OPCODE.CONSTANT_TABLE_EXISTS",

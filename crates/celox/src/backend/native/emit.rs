@@ -969,7 +969,7 @@ fn instruction_emits_no_code(inst: &MInst, assignment: &AssignmentMap) -> bool {
                     && dst == true_val
                     && dst == false_val
         ),
-        MInst::MemCopy { byte_len: 0, .. } => true,
+        MInst::MemCopy { byte_len: 0, .. } | MInst::MemFill { byte_len: 0, .. } => true,
         _ => false,
     }
 }
@@ -2037,6 +2037,47 @@ fn emit_inst(
             if rem != 0 {
                 asm.pop(rax)?;
             }
+        }
+
+        MInst::MemFill {
+            dst_offset,
+            byte_len,
+            value,
+        } => {
+            if *byte_len == 0 {
+                return Ok(false);
+            }
+            let qwords = byte_len / 8;
+            let rem = byte_len % 8;
+            let pattern = u64::from(*value) * 0x0101_0101_0101_0101;
+
+            asm.push(rax)?;
+            if qwords != 0 {
+                asm.push(rcx)?;
+            }
+            asm.push(rdi)?;
+            asm.lea(rdi, mem_operand(BaseReg::SimState, *dst_offset))?;
+            asm.mov(rax, pattern as i64)?;
+            if qwords != 0 {
+                asm.mov(rcx, qwords as i64)?;
+                asm.rep().stosq()?;
+            }
+            if rem >= 4 {
+                asm.mov(dword_ptr(rdi), eax)?;
+                asm.add(rdi, 4)?;
+            }
+            if rem % 4 >= 2 {
+                asm.mov(word_ptr(rdi), ax)?;
+                asm.add(rdi, 2)?;
+            }
+            if rem % 2 == 1 {
+                asm.mov(byte_ptr(rdi), al)?;
+            }
+            asm.pop(rdi)?;
+            if qwords != 0 {
+                asm.pop(rcx)?;
+            }
+            asm.pop(rax)?;
         }
 
         MInst::SparseCommit {
@@ -3867,6 +3908,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::StorePtrIndexed { .. }
                 | MInst::ReleaseStorePtrIndexed { .. } => indexed_store += 1,
                 MInst::MemCopy { .. }
+                | MInst::MemFill { .. }
                 | MInst::SparseCommit { .. }
                 | MInst::SparseMarkActive { .. }
                 | MInst::SparseCommitWorklist { .. } => memcopy += 1,
@@ -3957,7 +3999,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::OrStoreIndexed { .. }
                     | MInst::StorePtrIndexed { .. }
                     | MInst::ReleaseStorePtrIndexed { .. } => indexed_mem += 1,
-                    MInst::MemCopy { .. } => memcopy += 1,
+                    MInst::MemCopy { .. } | MInst::MemFill { .. } => memcopy += 1,
                     MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                     MInst::Add { .. }
                     | MInst::Add32 { .. }
@@ -4468,6 +4510,31 @@ mod shift_encoding_tests {
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[0..8].try_into().unwrap()), 40);
         assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn memfill_executes_qwords_and_every_tail_width_without_touching_neighbors() {
+        const START: usize = 5;
+        const LEN: usize = 23;
+
+        let mut func = MFunction::new(VRegAllocator::new(), vec![]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::MemFill {
+            dst_offset: START as i32,
+            byte_len: LEN,
+            value: 0x5a,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 40];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[..START], &[0xa5; START]);
+        assert_eq!(&state[START..START + LEN], &[0x5a; LEN]);
+        assert_eq!(&state[START + LEN..], &[0xa5; 40 - START - LEN]);
     }
 
     #[test]

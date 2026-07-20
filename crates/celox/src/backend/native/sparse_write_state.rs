@@ -21,7 +21,8 @@ use crate::HashMap;
 use crate::backend::memory_layout::MemoryLayout;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
-    AbsoluteAddr, BlockId, ExecutionUnit, RegionedAbsoluteAddr, SIRInstruction, SIROffset,
+    AbsoluteAddr, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
+    SIROffset, SIRTerminator, collect_exact_zero_registers,
 };
 
 type StorePoint = (usize, usize);
@@ -129,15 +130,325 @@ pub(super) struct SparseWriteStates {
     chunk_states: HashMap<(BlockId, usize), SparseChunkState>,
     dirty_word_states: HashMap<(BlockId, usize), SparseChunkState>,
     metadata_actions: HashMap<(BlockId, usize), SparseMetadataAction>,
+    zero_fills: SparseZeroFillPlans,
+}
+
+#[derive(Debug, Default)]
+struct SparseZeroFillPlans {
+    roots: HashMap<(BlockId, usize), RegionedAbsoluteAddr>,
+    members: crate::HashSet<(BlockId, usize)>,
+    dead_zero_definitions: crate::HashSet<(BlockId, usize)>,
+}
+
+impl SparseZeroFillPlans {
+    fn is_member(&self, block: BlockId, instruction: usize) -> bool {
+        self.members.contains(&(block, instruction))
+    }
+
+    fn root(&self, block: BlockId, instruction: usize) -> Option<RegionedAbsoluteAddr> {
+        self.roots.get(&(block, instruction)).copied()
+    }
+
+    fn is_dead_zero_definition(&self, block: BlockId, instruction: usize) -> bool {
+        self.dead_zero_definitions.contains(&(block, instruction))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZeroStoreCandidate {
+    instruction: usize,
+    start: usize,
+    end: usize,
+}
+
+fn finish_zero_fill_group(
+    block: BlockId,
+    address: RegionedAbsoluteAddr,
+    mut candidates: Vec<ZeroStoreCandidate>,
+    layout: &MemoryLayout,
+    plans: &mut SparseZeroFillPlans,
+) {
+    let object = address.absolute_addr();
+    let Some(&logical_width) = layout.widths.get(&object) else {
+        return;
+    };
+    let Some(sparse) = layout.sparse_layouts.get(&object) else {
+        return;
+    };
+    // A single native chunk already has a cheaper dedicated lowering.
+    if logical_width == 0 || sparse.chunk_count <= 1 || candidates.is_empty() {
+        return;
+    }
+
+    candidates.sort_unstable_by_key(|candidate| (candidate.start, candidate.end));
+    let mut covered_end = 0usize;
+    for candidate in &candidates {
+        if candidate.start > covered_end || candidate.end > logical_width {
+            return;
+        }
+        covered_end = covered_end.max(candidate.end);
+    }
+    if covered_end != logical_width {
+        return;
+    }
+
+    let anchor = candidates
+        .iter()
+        .map(|candidate| candidate.instruction)
+        .max()
+        .expect("non-empty zero-fill group must have an anchor");
+    for candidate in candidates {
+        plans.members.insert((block, candidate.instruction));
+    }
+    plans.roots.insert((block, anchor), address);
+}
+
+fn seal_zero_fill_group(
+    block: BlockId,
+    address: RegionedAbsoluteAddr,
+    open: &mut HashMap<RegionedAbsoluteAddr, Vec<ZeroStoreCandidate>>,
+    layout: &MemoryLayout,
+    plans: &mut SparseZeroFillPlans,
+) {
+    if let Some(candidates) = open.remove(&address) {
+        finish_zero_fill_group(block, address, candidates, layout, plans);
+    }
+}
+
+fn visit_instruction_uses<A>(instruction: &SIRInstruction<A>, mut visit: impl FnMut(RegisterId)) {
+    let mut visit_offset = |offset: &SIROffset| {
+        for register in offset.dynamic_registers().into_iter().flatten() {
+            visit(register);
+        }
+    };
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            visit(*lhs);
+            visit(*rhs);
+        }
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            visit(*source);
+        }
+        SIRInstruction::Load(_, _, offset, _) => visit_offset(offset),
+        SIRInstruction::Store(_, offset, width, source, _, _) => {
+            if *width != 0 {
+                visit_offset(offset);
+                visit(*source);
+            }
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => visit_offset(offset),
+        SIRInstruction::Concat(_, sources)
+        | SIRInstruction::RuntimeEvent { args: sources, .. }
+        | SIRInstruction::CombCaptureEvent { args: sources, .. } => {
+            for &source in sources {
+                visit(source);
+            }
+        }
+        SIRInstruction::Mux(_, condition, then_value, else_value) => {
+            visit(*condition);
+            visit(*then_value);
+            visit(*else_value);
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            visit(*old);
+            visit(*new);
+        }
+    }
+}
+
+fn visit_terminator_uses(terminator: &SIRTerminator, mut visit: impl FnMut(RegisterId)) {
+    match terminator {
+        SIRTerminator::Jump(_, arguments) => {
+            for &argument in arguments {
+                visit(argument);
+            }
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            visit(*cond);
+            for &argument in &true_block.1 {
+                visit(argument);
+            }
+            for &argument in &false_block.1 {
+                visit(argument);
+            }
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
+}
+
+fn decrement_use(
+    register: RegisterId,
+    use_counts: &mut HashMap<RegisterId, usize>,
+    work: &mut VecDeque<RegisterId>,
+) {
+    let Some(count) = use_counts.get_mut(&register) else {
+        return;
+    };
+    debug_assert_ne!(*count, 0);
+    *count -= 1;
+    if *count == 0 {
+        work.push_back(register);
+    }
+}
+
+/// Definitions used only to construct a removed bulk-zero Store must not be
+/// lowered either. This is ordinary backwards DCE over the already-proved
+/// exact-zero subgraph and is linear in the actual operand edges.
+fn find_dead_zero_definitions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    exact_zeros: &crate::HashSet<RegisterId>,
+    members: &crate::HashSet<(BlockId, usize)>,
+) -> crate::HashSet<(BlockId, usize)> {
+    let mut use_counts = HashMap::<RegisterId, usize>::default();
+    let mut definitions = HashMap::<RegisterId, (BlockId, usize)>::default();
+    for (&block_id, block) in &eu.blocks {
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            if let Some(dst) = instruction.defined_register()
+                && exact_zeros.contains(&dst)
+            {
+                definitions.insert(dst, (block_id, index));
+            }
+            visit_instruction_uses(instruction, |register| {
+                *use_counts.entry(register).or_default() += 1;
+            });
+        }
+        visit_terminator_uses(&block.terminator, |register| {
+            *use_counts.entry(register).or_default() += 1;
+        });
+    }
+
+    let mut work = VecDeque::new();
+    for &(block_id, index) in members {
+        let instruction = &eu.blocks[&block_id].instructions[index];
+        visit_instruction_uses(instruction, |register| {
+            decrement_use(register, &mut use_counts, &mut work);
+        });
+    }
+
+    let mut dead = crate::HashSet::default();
+    while let Some(register) = work.pop_front() {
+        let Some(&point) = definitions.get(&register) else {
+            continue;
+        };
+        if !dead.insert(point) {
+            continue;
+        }
+        let instruction = &eu.blocks[&point.0].instructions[point.1];
+        visit_instruction_uses(instruction, |dependency| {
+            decrement_use(dependency, &mut use_counts, &mut work);
+        });
+    }
+    dead
+}
+
+/// Find a whole-object zero overwrite before sparse lowering expands every
+/// logical Store into data initialization and bitmap updates. Stores to other
+/// objects and unrelated observable events may be interleaved: sparse working
+/// state is private until Commit, and an event which consumes an RTL value has
+/// an explicit register/data dependency on the Load producing that value.
+/// A same-object read, Commit, or non-zero/dynamic Store seals the group.
+fn find_sparse_zero_fills(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+) -> SparseZeroFillPlans {
+    let mut zero_roots = eu
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            SIRInstruction::Store(
+                address,
+                SIROffset::Static(_),
+                width,
+                source,
+                triggers,
+                capture_sites,
+            ) if address.region == crate::ir::SPARSE_WORKING_REGION
+                && *width != 0
+                && triggers.is_empty()
+                && capture_sites.is_empty() =>
+            {
+                Some(*source)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    zero_roots.sort_unstable();
+    zero_roots.dedup();
+    let zeros = collect_exact_zero_registers(eu, zero_roots);
+    let mut plans = SparseZeroFillPlans::default();
+    for (&block_id, block) in &eu.blocks {
+        let mut open = HashMap::<RegionedAbsoluteAddr, Vec<ZeroStoreCandidate>>::default();
+        for (instruction, inst) in block.instructions.iter().enumerate() {
+            match inst {
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(start),
+                    width,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) if address.region == crate::ir::SPARSE_WORKING_REGION
+                    && *width != 0
+                    && triggers.is_empty()
+                    && capture_sites.is_empty()
+                    && zeros.contains(source) =>
+                {
+                    let Some(end) = start.checked_add(*width) else {
+                        seal_zero_fill_group(block_id, *address, &mut open, layout, &mut plans);
+                        continue;
+                    };
+                    open.entry(*address).or_default().push(ZeroStoreCandidate {
+                        instruction,
+                        start: *start,
+                        end,
+                    });
+                }
+                SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..) => {
+                    seal_zero_fill_group(block_id, *address, &mut open, layout, &mut plans);
+                }
+                SIRInstruction::Commit(source, destination, ..) => {
+                    seal_zero_fill_group(block_id, *source, &mut open, layout, &mut plans);
+                    seal_zero_fill_group(block_id, *destination, &mut open, layout, &mut plans);
+                }
+                _ => {}
+            }
+        }
+        for (address, candidates) in open {
+            finish_zero_fill_group(block_id, address, candidates, layout, &mut plans);
+        }
+    }
+    plans.dead_zero_definitions = find_dead_zero_definitions(eu, &zeros, &plans.members);
+    plans
 }
 
 impl SparseWriteStates {
+    /// Whole-object zero overwrites are independent of the sparse commit
+    /// strategy.  In particular, eval-only FF functions may publish their
+    /// working state from a separate apply function and therefore have no
+    /// local worklist commit run at all.
+    pub(super) fn zero_fills_only(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        layout: &MemoryLayout,
+    ) -> Self {
+        Self {
+            zero_fills: find_sparse_zero_fills(eu, layout),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn analyze(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         layout: &MemoryLayout,
         commit_block: BlockId,
         commit_start: usize,
     ) -> Option<Self> {
+        let zero_fills = find_sparse_zero_fills(eu, layout);
         let cfg = SirCfg::analyze(eu).ok()?;
         let commit_index = cfg.block_index(commit_block)?;
         let mut events = vec![
@@ -150,6 +461,27 @@ impl SparseWriteStates {
         for (block_index, &block_id) in cfg.block_ids.iter().enumerate() {
             for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
                 let point = (block_index, instruction);
+                if zero_fills.is_member(block_id, instruction) {
+                    if let Some(address) = zero_fills.root(block_id, instruction) {
+                        let object = address.absolute_addr();
+                        let footprint = ChunkFootprint::Unknown;
+                        chunk_plans.entry(object).or_default().eligible = false;
+                        events[block_index].push(Event::Use {
+                            variable: object,
+                            usage: point,
+                        });
+                        events[block_index].push(Event::Definition {
+                            variable: object,
+                            definition: MemoryDefinition {
+                                point,
+                                kind: MemoryDefinitionKind::Store,
+                                footprint,
+                            },
+                        });
+                        stores.push((point, block_id, object, None));
+                    }
+                    continue;
+                }
                 match inst {
                     SIRInstruction::Store(address, offset, width, _, _, _)
                         if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
@@ -235,6 +567,9 @@ impl SparseWriteStates {
         for (block_index, &block_id) in cfg.block_ids.iter().enumerate() {
             for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
                 let point = (block_index, instruction);
+                if zero_fills.is_member(block_id, instruction) {
+                    continue;
+                }
                 match inst {
                     SIRInstruction::Store(address, offset, width, _, _, _)
                         if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
@@ -436,13 +771,20 @@ impl SparseWriteStates {
             states.insert((block_id, point.1), object_state);
             chunk_states.insert((block_id, point.1), chunk_state);
         }
-        let metadata_actions =
-            plan_metadata_batches(eu, layout, &states, &chunk_states, &dirty_word_states);
+        let metadata_actions = plan_metadata_batches(
+            eu,
+            layout,
+            &states,
+            &chunk_states,
+            &dirty_word_states,
+            &zero_fills,
+        );
         Some(Self {
             states,
             chunk_states,
             dirty_word_states,
             metadata_actions,
+            zero_fills,
         })
     }
 
@@ -476,6 +818,25 @@ impl SparseWriteStates {
             .get(&(block, instruction))
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Returns the address at a compact zero-fill anchor. Every other member
+    /// of the same fill group returns `None` and is identified by
+    /// [`Self::is_zero_fill_member`].
+    pub(super) fn zero_fill_root(
+        &self,
+        block: BlockId,
+        instruction: usize,
+    ) -> Option<RegionedAbsoluteAddr> {
+        self.zero_fills.root(block, instruction)
+    }
+
+    pub(super) fn is_zero_fill_member(&self, block: BlockId, instruction: usize) -> bool {
+        self.zero_fills.is_member(block, instruction)
+    }
+
+    pub(super) fn is_dead_zero_definition(&self, block: BlockId, instruction: usize) -> bool {
+        self.zero_fills.is_dead_zero_definition(block, instruction)
     }
 }
 
@@ -520,12 +881,17 @@ fn plan_metadata_batches(
     states: &HashMap<(BlockId, usize), SparseWriteState>,
     chunk_states: &HashMap<(BlockId, usize), SparseChunkState>,
     dirty_word_states: &HashMap<(BlockId, usize), SparseChunkState>,
+    zero_fills: &SparseZeroFillPlans,
 ) -> HashMap<(BlockId, usize), SparseMetadataAction> {
     let mut actions = HashMap::default();
     for (&block_id, block) in &eu.blocks {
         let mut pending = None::<PendingMetadataBatch>;
         for (instruction, inst) in block.instructions.iter().enumerate() {
             let point = (block_id, instruction);
+            if zero_fills.is_member(block_id, instruction) {
+                finish_metadata_batch(&mut pending, &mut actions);
+                continue;
+            }
             let candidate = match inst {
                 SIRInstruction::Store(address, offset, width, _, triggers, capture_sites)
                     if address.region == crate::ir::SPARSE_WORKING_REGION
@@ -1121,6 +1487,136 @@ mod tests {
         commit_start: usize,
     ) -> SparseWriteStates {
         SparseWriteStates::analyze(unit, &layout(), commit_block, commit_start).unwrap()
+    }
+
+    fn zero_fill_layout() -> MemoryLayout {
+        let mut layout = layout();
+        for variable in 0..=1 {
+            let object = address(crate::ir::SPARSE_WORKING_REGION, variable).absolute_addr();
+            layout.widths.insert(object, 128);
+            let sparse = layout.sparse_layouts.get_mut(&object).unwrap();
+            sparse.chunk_count = 2;
+            sparse.dirty_word_count = 1;
+            sparse.summary_word_count = 1;
+        }
+        layout
+    }
+
+    fn zero_fill_unit(
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [RegisterId(0), RegisterId(1)]
+                .map(|register| (register, RegisterType::Logic { width: 64 }))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn zero_store(variable: u32, bit_offset: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            SIROffset::Static(bit_offset),
+            64,
+            RegisterId(0),
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn zero_fill_crosses_only_unrelated_operations() {
+        let unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            zero_store(0, 0),
+            zero_store(1, 0),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![],
+            },
+            zero_store(0, 64),
+            zero_store(1, 64),
+        ]);
+
+        let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        for instruction in [1, 2, 4, 5] {
+            assert!(plans.is_member(BlockId(0), instruction));
+        }
+        assert!(plans.is_dead_zero_definition(BlockId(0), 0));
+        assert_eq!(
+            plans.root(BlockId(0), 4),
+            Some(address(crate::ir::SPARSE_WORKING_REGION, 0))
+        );
+        assert_eq!(
+            plans.root(BlockId(0), 5),
+            Some(address(crate::ir::SPARSE_WORKING_REGION, 1))
+        );
+    }
+
+    #[test]
+    fn same_object_read_prevents_zero_fill_reordering() {
+        let unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            zero_store(0, 0),
+            SIRInstruction::Load(
+                RegisterId(1),
+                address(crate::ir::SPARSE_WORKING_REGION, 0),
+                SIROffset::Static(0),
+                64,
+            ),
+            zero_store(0, 64),
+        ]);
+
+        let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        assert!(!plans.is_member(BlockId(0), 1));
+        assert!(!plans.is_member(BlockId(0), 3));
+    }
+
+    #[test]
+    fn partial_zero_overwrite_is_not_a_fill() {
+        let unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            zero_store(0, 0),
+        ]);
+
+        let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        assert!(!plans.is_member(BlockId(0), 1));
+        assert!(!plans.is_dead_zero_definition(BlockId(0), 0));
+    }
+
+    #[test]
+    fn zero_fill_elides_its_wide_concat_tree() {
+        let mut unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Concat(RegisterId(1), vec![RegisterId(0), RegisterId(0)]),
+            SIRInstruction::Store(
+                address(crate::ir::SPARSE_WORKING_REGION, 0),
+                SIROffset::Static(0),
+                128,
+                RegisterId(1),
+                vec![],
+                vec![],
+            ),
+        ]);
+        unit.register_map
+            .insert(RegisterId(1), RegisterType::Logic { width: 128 });
+
+        let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        assert!(plans.is_member(BlockId(0), 2));
+        assert!(plans.is_dead_zero_definition(BlockId(0), 1));
+        assert!(plans.is_dead_zero_definition(BlockId(0), 0));
     }
 
     #[test]

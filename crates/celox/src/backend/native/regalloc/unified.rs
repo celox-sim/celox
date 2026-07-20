@@ -426,6 +426,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         | MInst::StorePtrIndexed { .. }
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::MemCopy { .. }
+        | MInst::MemFill { .. }
         | MInst::SparseCommit { .. }
         | MInst::SparseMarkActive { .. }
         | MInst::SparseCommitWorklist { .. }

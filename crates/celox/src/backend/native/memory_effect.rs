@@ -254,6 +254,7 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
         } => checked_range(BaseReg::SimState, *src_offset, *byte_len)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::MemFill { .. } => MemoryEffects::NONE,
         MInst::SparseCommit { .. } => sparse_commit_read_ranges(inst)
             .map(|ranges| MemoryEffects::static_ranges(&ranges))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
@@ -278,6 +279,13 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
         MInst::MemCopy {
+            dst_offset,
+            byte_len,
+            ..
+        } => checked_range(BaseReg::SimState, *dst_offset, *byte_len)
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::MemFill {
             dst_offset,
             byte_len,
             ..
@@ -449,6 +457,26 @@ mod tests {
                 byte_len: 4096,
             }]
         );
+    }
+
+    #[test]
+    fn memfill_has_one_exact_write_and_no_read() {
+        let inst = MInst::MemFill {
+            dst_offset: 37,
+            byte_len: 23,
+            value: 0x5a,
+        };
+
+        assert!(!reads(&inst).has_effect());
+        assert_eq!(
+            writes(&inst).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 37,
+                byte_len: 23,
+            }]
+        );
+        assert_eq!(writes(&inst).unknown_memory(), None);
     }
 
     #[test]

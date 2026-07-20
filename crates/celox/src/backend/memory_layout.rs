@@ -1,5 +1,7 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, Program, SIRInstruction, SIROffset};
+use crate::ir::{
+    AbsoluteAddr, Program, RegisterId, SIRInstruction, SIROffset, collect_exact_zero_registers,
+};
 
 type LayoutVariable = (AbsoluteAddr, usize, bool, usize, usize);
 
@@ -401,45 +403,51 @@ fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Un
     layouts
 }
 
+fn supports_strided_access(
+    layout: UnpackedArrayLayout,
+    offset: &SIROffset,
+    width: usize,
+    whole_object_transfer: bool,
+) -> bool {
+    match offset {
+        SIROffset::Element {
+            element_width,
+            bit_offset,
+            ..
+        } => {
+            *element_width == layout.element_width
+                && bit_offset
+                    .checked_add(width)
+                    .is_some_and(|end| end <= layout.element_width)
+        }
+        SIROffset::Static(start) => {
+            let physically_contiguous = layout.element_stride * 8 == layout.element_width;
+            let whole = *start == 0 && width == layout.element_width * layout.element_count;
+            let single_element = start
+                .checked_add(width.saturating_sub(1))
+                .is_some_and(|end| *start / layout.element_width == end / layout.element_width);
+            physically_contiguous || single_element || (whole_object_transfer && whole)
+        }
+        SIROffset::Dynamic(_) => false,
+    }
+}
+
 pub(crate) fn collect_strided_array_layouts(
     program: &Program,
 ) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
-    let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>| {
+    let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>,
+                       exact_zeros: &crate::HashSet<RegisterId>| {
         let mut check = |addr: &crate::ir::RegionedAbsoluteAddr,
                          offset: &SIROffset,
                          width: usize,
-                         whole_commit: bool| {
+                         whole_object_transfer: bool| {
             let abs = addr.absolute_addr();
             let Some(layout) = candidates.get(&abs).copied() else {
                 return;
             };
-            let supported = match offset {
-                SIROffset::Element {
-                    element_width,
-                    bit_offset,
-                    ..
-                } => {
-                    *element_width == layout.element_width
-                        && bit_offset
-                            .checked_add(width)
-                            .is_some_and(|end| end <= layout.element_width)
-                }
-                SIROffset::Static(start) => {
-                    let physically_contiguous = layout.element_stride * 8 == layout.element_width;
-                    let whole = *start == 0 && width == layout.element_width * layout.element_count;
-                    let single_element =
-                        start
-                            .checked_add(width.saturating_sub(1))
-                            .is_some_and(|end| {
-                                *start / layout.element_width == end / layout.element_width
-                            });
-                    physically_contiguous || single_element || (whole_commit && whole)
-                }
-                SIROffset::Dynamic(_) => false,
-            };
-            if !supported {
+            if !supports_strided_access(layout, offset, width, whole_object_transfer) {
                 candidates.remove(&abs);
             }
         };
@@ -447,8 +455,12 @@ pub(crate) fn collect_strided_array_layouts(
             SIRInstruction::Load(_, addr, offset, width) => {
                 check(addr, offset, *width, false);
             }
-            SIRInstruction::Store(addr, offset, width, ..) => {
-                check(addr, offset, *width, false);
+            SIRInstruction::Store(addr, offset, width, source, triggers, capture_sites) => {
+                let sparse_bulk_zero = addr.region == crate::ir::SPARSE_WORKING_REGION
+                    && triggers.is_empty()
+                    && capture_sites.is_empty()
+                    && exact_zeros.contains(source);
+                check(addr, offset, *width, sparse_bulk_zero);
             }
             SIRInstruction::Commit(src, dst, offset, width, _) => {
                 check(src, offset, *width, true);
@@ -464,9 +476,25 @@ pub(crate) fn collect_strided_array_layouts(
         .chain(program.eval_only_ffs.values().flatten())
         .chain(program.apply_ffs.values().flatten())
     {
+        let mut zero_roots = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(address, SIROffset::Static(0), width, source, ..)
+                    if address.region == crate::ir::SPARSE_WORKING_REGION && *width > 64 =>
+                {
+                    Some(*source)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        zero_roots.sort_unstable();
+        zero_roots.dedup();
+        let exact_zeros = collect_exact_zero_registers(eu, zero_roots);
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                inspect(inst);
+                inspect(inst, &exact_zeros);
             }
         }
     }
@@ -579,5 +607,35 @@ mod tests {
 
         assert_eq!(forward, reverse);
         assert_eq!(forward, vec![low_address, high_address, less_aligned]);
+    }
+
+    #[test]
+    fn padded_array_accepts_only_semantic_whole_object_transfers() {
+        let layout = UnpackedArrayLayout {
+            element_width: 51,
+            element_count: 4096,
+            element_stride: 8,
+            plane_size: 4096 * 8,
+        };
+        let whole_width = 51 * 4096;
+
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(0),
+            whole_width,
+            false,
+        ));
+        assert!(supports_strided_access(
+            layout,
+            &SIROffset::Static(0),
+            whole_width,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(51),
+            whole_width - 51,
+            true,
+        ));
     }
 }

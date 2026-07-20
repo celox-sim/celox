@@ -591,6 +591,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::Load { .. }
         | MInst::LoadIndexed { .. }
         | MInst::Store { .. }
+        | MInst::MemFill { .. }
         | MInst::Add { .. }
         | MInst::Add32 { .. }
         | MInst::Sub { .. }
@@ -1008,6 +1009,44 @@ mod tests {
 
         let scheduled = schedule_region(&region, BTreeSet::from([before, after]));
         let positions = [0, 2, 3].map(|original| {
+            scheduled
+                .instructions
+                .iter()
+                .position(|candidate| candidate == &region[original])
+                .unwrap()
+        });
+
+        assert!(scheduled.dependency_verified);
+        assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+    }
+
+    #[test]
+    fn memfill_is_scheduled_by_its_exact_memory_dependencies() {
+        let before = VReg(0);
+        let after = VReg(1);
+        let region = vec![
+            MInst::Load {
+                dst: before,
+                base: BaseReg::SimState,
+                offset: 32,
+                size: OpSize::S64,
+            },
+            MInst::MemFill {
+                dst_offset: 36,
+                byte_len: 8,
+                value: 0,
+            },
+            MInst::Load {
+                dst: after,
+                base: BaseReg::SimState,
+                offset: 43,
+                size: OpSize::S8,
+            },
+        ];
+
+        assert!(is_pressure_schedulable_kind(&region[1]));
+        let scheduled = schedule_region(&region, BTreeSet::from([before, after]));
+        let positions = [0, 1, 2].map(|original| {
             scheduled
                 .instructions
                 .iter()

@@ -708,6 +708,15 @@ pub enum MInst {
         dst_offset: i32,
         byte_len: usize,
     },
+    /// Fill a contiguous simulator-state byte range with one byte value.
+    ///
+    /// This remains one MIR memory operation so reset/bulk initialization does
+    /// not create one register-allocation node per logical array element.
+    MemFill {
+        dst_offset: i32,
+        byte_len: usize,
+        value: u8,
+    },
     /// Commit dirty chunks from a sparse FF next-state region.  This is kept
     /// as one MIR memory barrier and expanded to a bitmap-scanning machine-code
     /// loop by the emitter.
@@ -1010,6 +1019,11 @@ impl fmt::Display for MInst {
                 f,
                 "memcopy [sim + {dst_offset}], [sim + {src_offset}], {byte_len}"
             ),
+            MInst::MemFill {
+                dst_offset,
+                byte_len,
+                value,
+            } => write!(f, "memfill [sim + {dst_offset}], {byte_len}, {value:#04x}"),
             MInst::SparseCommit {
                 src_offset,
                 dst_offset,
@@ -1262,6 +1276,7 @@ impl MInst {
             | MInst::StorePtrIndexed { .. }
             | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
@@ -1282,6 +1297,7 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseCommitWorklist { .. } => Uses::none(),
             MInst::SparseMarkActive { scratch, .. } => Uses::one(*scratch),
@@ -1593,6 +1609,7 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseCommitWorklist { .. }
             | MInst::Jump { .. }
@@ -1937,6 +1954,15 @@ mod tests {
                     src_offset: 0,
                     dst_offset: 8,
                     byte_len: 16,
+                },
+                expected: vec![],
+            },
+            UseCase {
+                name: "MemFill",
+                inst: MInst::MemFill {
+                    dst_offset: 0,
+                    byte_len: 16,
+                    value: 0x5a,
                 },
                 expected: vec![],
             },
@@ -2287,7 +2313,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            55,
+            56,
             "the MInst variant table must stay exhaustive"
         );
 

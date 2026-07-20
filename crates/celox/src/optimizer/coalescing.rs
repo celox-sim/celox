@@ -42,9 +42,10 @@ mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
 
-/// Preserve scalar element boundaries only for small register-like arrays.
-/// Larger memory-like arrays need compact bulk-store lowering before padding
-/// each element can be profitable without exploding compile-time IR.
+/// Keep explicit scalar stores only for small register-like arrays. Large
+/// arrays must remain free to coalesce reset/initialization runs before the
+/// ordinary SIR passes; their dynamic element accesses can still use a
+/// strided native layout when the resulting whole Store is a bulk zero fill.
 fn preserve_native_element_boundaries(
     array: &crate::backend::memory_layout::UnpackedArrayLayout,
 ) -> bool {

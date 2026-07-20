@@ -164,11 +164,13 @@ pub fn lower_execution_unit(
     let mut func = MFunction::new(vregs.clone(), spill_descs);
     let block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
-    let sparse_write_states = sparse_worklist_run
-        .and_then(|(commit_block, commit_start, _)| {
+    let sparse_write_states = match sparse_worklist_run {
+        Some((commit_block, commit_start, _)) => {
             SparseWriteStates::analyze(eu, layout, commit_block, commit_start)
-        })
-        .unwrap_or_default();
+                .unwrap_or_else(|| SparseWriteStates::zero_fills_only(eu, layout))
+        }
+        None => SparseWriteStates::zero_fills_only(eu, layout),
+    };
     let sparse_descriptor_table = sparse_worklist_run
         .is_some()
         .then(|| func.intern_constant_table(sparse_descriptor_table(layout)));
@@ -317,6 +319,15 @@ pub fn lower_execution_unit(
                         active_list_offset: layout.sparse_active_list_offset as i32,
                         active_capacity: layout.sparse_active_capacity,
                     });
+                }
+                continue;
+            }
+            if sparse_write_states.is_dead_zero_definition(sir_block_id, inst_idx) {
+                continue;
+            }
+            if sparse_write_states.is_zero_fill_member(sir_block_id, inst_idx) {
+                if let Some(address) = sparse_write_states.zero_fill_root(sir_block_id, inst_idx) {
+                    emit_sparse_zero_fill(&mut ctx, &mut mblock, address);
                 }
                 continue;
             }
@@ -2991,6 +3002,68 @@ fn emit_sparse_mark_active(
             active_capacity: ctx.layout.sparse_active_capacity,
         });
     }
+}
+
+fn emit_full_sparse_bitset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    offset: usize,
+    bit_count: usize,
+) {
+    let full_words = bit_count / 64;
+    if full_words != 0 {
+        block.push(MInst::MemFill {
+            dst_offset: offset as i32,
+            byte_len: full_words * 8,
+            value: u8::MAX,
+        });
+    }
+    let tail_bits = bit_count % 64;
+    if tail_bits != 0 {
+        let tail = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(tail_bits)));
+        block.push(MInst::LoadImm {
+            dst: tail,
+            value: mask_for_width(tail_bits),
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: (offset + full_words * 8) as i32,
+            src: tail,
+            size: OpSize::S64,
+        });
+    }
+}
+
+/// Lower a complete logical zero overwrite directly into sparse physical
+/// storage. Every byte in each physical element slot may be canonicalized to
+/// zero because padding is not part of RTL state. Marking every data chunk
+/// dirty makes the existing sparse worklist commit publish exactly that value.
+fn emit_sparse_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: RegionedAbsoluteAddr) {
+    let object = address.absolute_addr();
+    let sparse = ctx.layout.sparse_layouts[&object].clone();
+    let plane_size = ctx.layout.plane_size(&object);
+    let sparse_base = ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&object];
+
+    emit_sparse_mark_active(ctx, block, &sparse);
+    block.push(MInst::MemFill {
+        dst_offset: sparse_base as i32,
+        byte_len: plane_size,
+        value: 0,
+    });
+    if ctx.is_4state_var(&address) {
+        block.push(MInst::MemFill {
+            dst_offset: (sparse_base + plane_size) as i32,
+            byte_len: plane_size,
+            value: 0,
+        });
+    }
+    emit_full_sparse_bitset(ctx, block, sparse.dirty_words_offset, sparse.chunk_count);
+    emit_full_sparse_bitset(
+        ctx,
+        block,
+        sparse.summary_words_offset,
+        sparse.dirty_word_count,
+    );
 }
 
 fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROffset) -> VReg {
@@ -12500,6 +12573,174 @@ mod tests {
         assert_eq!(state[STABLE] & 1, 1);
         assert_eq!(state[STABLE + 8] & 1, 0);
         assert_eq!(state[STABLE + 24] & 1, 1);
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
+        assert_eq!(state[ACTIVE_FLAGS], 0);
+    }
+
+    #[test]
+    fn whole_sparse_zero_overwrite_uses_one_physical_fill() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 40;
+        const DIRTY: usize = 72;
+        const SUMMARY: usize = 80;
+        const ACTIVE_COUNT: usize = 88;
+        const ACTIVE_FLAGS: usize = 96;
+        const ACTIVE_LIST: usize = 100;
+        const STATE_SIZE: usize = 112;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let zero = RegisterId(0);
+        let wide_zero = RegisterId(1);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Concat(wide_zero, vec![zero; 4]),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(0),
+                            204,
+                            wide_zero,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 204, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (zero, RegisterType::Logic { width: 51 }),
+                (wide_zero, RegisterType::Logic { width: 204 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 204);
+        layout.is_4states.insert(absolute, false);
+        layout.unpacked_arrays.insert(
+            absolute,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 51,
+                element_count: 4,
+                element_stride: 8,
+                plane_size: 32,
+            },
+        );
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 4,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_count_offset = ACTIVE_COUNT;
+        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
+        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut eval_only_unit = unit.clone();
+        let removed = eval_only_unit
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions
+            .pop();
+        assert!(matches!(removed, Some(SIRInstruction::Commit(..))));
+        eval_only_unit.verify();
+        let eval_only_function = lower_execution_unit(&eval_only_unit, &layout, false);
+        eval_only_function.verify();
+        assert_eq!(
+            eval_only_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == SPARSE as i32
+                ))
+                .count(),
+            1,
+            "an eval-only function must not require a local sparse commit"
+        );
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == SPARSE as i32
+                ))
+                .count(),
+            1
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0xa5u8; STATE_SIZE];
+        state[DIRTY..DIRTY + 8].fill(0);
+        state[SUMMARY..SUMMARY + 8].fill(0);
+        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
+        state[ACTIVE_FLAGS] = 0;
+        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        let sentinel = state[STABLE + 32];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[STABLE..STABLE + 32], &[0; 32]);
+        assert_eq!(state[STABLE + 32], sentinel);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
         assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);

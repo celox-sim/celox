@@ -1,8 +1,9 @@
 use crate::{
-    HashMap,
+    HashMap, HashSet,
     logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
 };
 use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::{collections::BTreeSet, fmt::Display};
@@ -1751,6 +1752,23 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
     }
 }
 impl<A> SIRInstruction<A> {
+    pub(crate) fn defined_register(&self) -> Option<RegisterId> {
+        match self {
+            SIRInstruction::Imm(dst, _)
+            | SIRInstruction::Binary(dst, _, _, _)
+            | SIRInstruction::Unary(dst, _, _)
+            | SIRInstruction::Load(dst, _, _, _)
+            | SIRInstruction::Concat(dst, _)
+            | SIRInstruction::Slice(dst, _, _, _)
+            | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+            SIRInstruction::Store(..)
+            | SIRInstruction::Commit(..)
+            | SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+        }
+    }
+
     pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B> {
         match self {
             SIRInstruction::Imm(register_id, value) => SIRInstruction::Imm(register_id, value),
@@ -1848,6 +1866,137 @@ impl<A> SIRInstruction<A> {
         }
     }
 }
+
+fn visit_exact_zero_dependencies<A>(
+    instruction: &SIRInstruction<A>,
+    mut visit: impl FnMut(RegisterId),
+) -> Option<usize> {
+    let mut count = 0usize;
+    let mut dependency = |register| {
+        count += 1;
+        visit(register);
+    };
+    match instruction {
+        SIRInstruction::Binary(
+            _,
+            lhs,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Sar,
+            rhs,
+        ) => {
+            dependency(*lhs);
+            dependency(*rhs);
+        }
+        SIRInstruction::Unary(
+            _,
+            UnaryOp::Ident
+            | UnaryOp::ToTwoState
+            | UnaryOp::Minus
+            | UnaryOp::Or
+            | UnaryOp::Xor
+            | UnaryOp::PopCount,
+            source,
+        ) => {
+            dependency(*source);
+        }
+        SIRInstruction::Concat(_, sources) => {
+            for &source in sources {
+                dependency(source);
+            }
+        }
+        SIRInstruction::Slice(_, source, _, _) => dependency(*source),
+        // Equal exact-zero arms make an unknown four-state condition
+        // irrelevant too, so the condition is not a dependency.
+        SIRInstruction::Mux(_, _, then_value, else_value) => {
+            dependency(*then_value);
+            dependency(*else_value);
+        }
+        _ => return None,
+    }
+    Some(count)
+}
+
+/// Prove exact all-zero values reachable from selected roots without
+/// materializing their potentially enormous bit representation or building a
+/// reverse-use graph for unrelated SIR. The explicit stack also avoids host
+/// recursion on deep expression chains.
+pub(crate) fn collect_exact_zero_registers<A>(
+    eu: &ExecutionUnit<A>,
+    roots: impl IntoIterator<Item = RegisterId>,
+) -> HashSet<RegisterId> {
+    let mut definitions = HashMap::<RegisterId, Option<&SIRInstruction<A>>>::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            if let Some(dst) = instruction.defined_register() {
+                if let Some(definition) = definitions.get_mut(&dst) {
+                    *definition = None;
+                } else {
+                    definitions.insert(dst, Some(instruction));
+                }
+            }
+        }
+    }
+
+    let mut result = HashMap::<RegisterId, bool>::default();
+    let mut visiting = HashSet::default();
+    for root in roots {
+        let mut work = vec![(root, false)];
+        while let Some((register, expanded)) = work.pop() {
+            if result.contains_key(&register) {
+                visiting.remove(&register);
+                continue;
+            }
+            let Some(instruction) = definitions.get(&register).copied().flatten() else {
+                result.insert(register, false);
+                visiting.remove(&register);
+                continue;
+            };
+            if expanded {
+                let mut all_zero = true;
+                let count = visit_exact_zero_dependencies(instruction, |dependency| {
+                    all_zero &= result.get(&dependency) == Some(&true);
+                });
+                result.insert(register, count.is_some_and(|count| count != 0) && all_zero);
+                visiting.remove(&register);
+                continue;
+            }
+            if let SIRInstruction::Imm(_, value) = instruction {
+                result.insert(register, value.payload.is_zero() && value.mask.is_zero());
+                continue;
+            }
+            if !visiting.insert(register) {
+                result.insert(register, false);
+                continue;
+            }
+            let mut count = 0usize;
+            work.push((register, true));
+            if visit_exact_zero_dependencies(instruction, |dependency| {
+                count += 1;
+                if !result.contains_key(&dependency) {
+                    work.push((dependency, false));
+                }
+            })
+            .is_none()
+                || count == 0
+            {
+                work.pop();
+                result.insert(register, false);
+                visiting.remove(&register);
+            }
+        }
+    }
+    result
+        .into_iter()
+        .filter_map(|(register, zero)| zero.then_some(register))
+        .collect()
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum GlueAddrBase<V> {
     Parent(V),
@@ -1877,6 +2026,43 @@ impl<V: fmt::Display> fmt::Display for GlueAddrBase<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_zero_analysis_collapses_repeated_concat_dependencies() {
+        let zero = RegisterId(0);
+        let wide_zero = RegisterId(1);
+        let sliced_zero = RegisterId(2);
+        let nonzero = RegisterId(3);
+        let mixed = RegisterId(4);
+        let eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Concat(wide_zero, vec![zero; 4096]),
+                        SIRInstruction::Slice(sliced_zero, wide_zero, 0, 64),
+                        SIRInstruction::Imm(nonzero, SIRValue::new(1u8)),
+                        SIRInstruction::Concat(mixed, vec![zero, nonzero]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+
+        let zeros = collect_exact_zero_registers(&eu, [sliced_zero, mixed]);
+        assert!(zeros.contains(&zero));
+        assert!(zeros.contains(&wide_zero));
+        assert!(zeros.contains(&sliced_zero));
+        assert!(!zeros.contains(&nonzero));
+        assert!(!zeros.contains(&mixed));
+    }
 
     #[test]
     fn test_sirvalue_display() {
