@@ -4737,6 +4737,76 @@ placement is not treated as an RTL rule, overlapping memory order is proved by
 exact effects, and Linux semantics and tick count are preserved; the larger
 execution-time gap remains open**.
 
+### Step 44: Machine-width known-bits mask elimination
+
+The complete generated MIR exposed a systematic ordinary-compiler defect in
+the hot FPU and vector bodies.  `lower_to_imm_forms` recognized constant
+operands of 64-bit `And`, but not `And32`; the following redundant-mask pass
+understood only 64-bit `AndImm` and represented facts as one contiguous source
+width.  Explicit 32-bit ALU zero-extension and register-form masks therefore
+escaped the pass.  One repeated hot sequence in Step 42 was effectively:
+
+```text
+v77599 = sub.w32 v16510, v44036
+v16515 = and.w32 v77599, 0xffffffff
+v16516 = and.w32 v16515, v44135  # v44135 is 0xffffffff
+v16517 = select v16512, v16516, v16510
+v16518 = and.w32 v16517, 0x3fffffff
+v16519 = and.w32 v16518, v2251   # v2251 is 0x3fffffff
+```
+
+The retained MIR pass lowers a constant `And32` operand to `AndImm32` and uses
+a conservative possible-one-bits lattice over the two actual MIR machine
+widths.  It handles immediate and register forms, folds mask chains, and
+recognizes idempotent repeated operands.  If a low-word mask is redundant but
+the source may have upper bits, it emits `Mov32`, not `Mov`, preserving the
+observable 32-bit zero-extension.  An unchecked `Bsr` remains completely
+unknown because its zero-input result is unspecified.  Facts and
+definition-chain rewrites are block-local; the definition table stores only
+compact mask facts, and only immutable constant values are looked up
+function-wide.  No instruction, memory operation, or scheduler edge is
+reordered.
+
+The corresponding final hot sequence is:
+
+```text
+v77599 = sub.w32 v16510, v44036
+v16517 = select v16512, v77599, v16510
+v16518 = and.w32 v16517, 0x3fffffff
+```
+
+This relies only on MIR value semantics.  It does not preserve source order,
+padding contents, or any other non-semantic rule; disjoint RTL work remains
+free for later scheduling and allocation.
+
+Before this retained change, a source-MemorySSA direct Store-to-Load forwarding
+trial was measured and fully reverted.  It kept the packed Store home while
+also carrying the forwarded SSA value across a long use range.  The exact
+Linux workload still passed but execution regressed from the immediately
+preceding 111.069 s baseline to 116.634 s.  That double-residency design is not
+part of this step.
+
+The exact final-source non-LTO run completed through `reboot: Power down` with
+`cy=9ae070 x3=aa pass=1`; compilation took 68.337 s and execution took 107.693
+s, 3.0% below the preceding non-LTO execution sample.  Two final-source
+release/LTO runs produced the same marker.  They compiled in 61.215 and 62.130
+s and executed in 109.005 and 107.524 s.  Against Step 43's release/LTO
+111.351 s execution sample, those are 2.1% and 3.4% reductions.  Earlier
+byte-identical-MIR candidates executed in 100--102 s, but that host-time
+variation is not used as the final speed claim.
+
+The complete final trace is at
+`target/heliodor/analysis/step44-known-bits-mask-final-compact`:
+pre-optimized SIR, post-optimized SIR, native-optimized SIR, and full native
+MIR are all present.  Focused MIR optimization tests pass 61/61, the
+optimized library passes 962/962, native testbench passes 60 with one upstream
+ignore, and counter passes 9 with three Veryl ignores.  Package check,
+all-target strict clippy, format, and diff checks pass.
+
+Status: **redundant machine-width normalization is removed without constraining
+RTL scheduling freedom; Linux semantics and tick count are preserved and the
+two final-source release execution samples improve by 2.1--3.4%**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4836,6 +4906,7 @@ execution-time gap remains open**.
 | 41 bounded native element-layout preservation | this step | load/store coalescing boundary regressions | final combined lib 947/947; native backend 442/442 | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 105.731 s; execute 108.420 s | native layout intent prevents SIR coalescing from repacking small padded arrays; packed targets unchanged; MIR 133,726,550 bytes |
 | 42 direct whole-element indexed access | this step | executable 12-bit indexed load/store and padding canonicalization | lib 947/947; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | final non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace byte-identical after target scoping | trace 110.122 s; full compile 107.693 s; execute 105.529 s | direct indexed scalar access; MIR 133,426,760 bytes; historical timing variance prevents a large speed claim; scheduler unchanged |
 | 43 commit-independent sparse whole-zero fill | this step | demand-driven exact-zero, coverage/visibility, `MemFill` effects/emission, eval-only integration, scheduler overlap regressions | lib 957/957; native backend 450/450; all-target check; strict clippy; format and diff checks | final-source release/LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | intermediate non-LTO/release compile-only 64.899 / 62.750 s; final release compile 62.047 s / execute 111.351 s | Step 42 compile 107.693→about 62--65 s; 208,896-bit zero construction never enters MIR; no runtime-speed claim |
+| 44 machine-width known-bits mask elimination | this step | MIR mask/constant/32-bit zero-extension 61/61 | lib 962/962; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks | final non-LTO and two release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | final non-LTO compile 68.337 s / execute 107.693 s; final release compile 61.215 / 62.130 s, execute 109.005 / 107.524 s | redundant register/immediate 32/64-bit mask chains removed without scheduler changes; final release execute -2.1% / -3.4% versus Step 43 |
 
 ## Related design records
 

@@ -514,6 +514,16 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
                 imm: value,
             })
         }
+        MInst::And32 { dst, lhs, rhs } if *rhs == imm_vreg => Some(MInst::AndImm32 {
+            dst: *dst,
+            src: *lhs,
+            imm: value as u32,
+        }),
+        MInst::And32 { dst, lhs, rhs } if *lhs == imm_vreg => Some(MInst::AndImm32 {
+            dst: *dst,
+            src: *rhs,
+            imm: value as u32,
+        }),
         MInst::Or { dst, lhs, rhs } if *rhs == imm_vreg => {
             sign_extended_i32(value).map(|imm| MInst::OrImm {
                 dst: *dst,
@@ -885,104 +895,79 @@ fn fold_bin(
 // Phase 1B: Redundant mask elimination
 // ────────────────────────────────────────────────────────────────
 
-/// Helper: compute the width of a mask that is `(1 << w) - 1`.
-fn mask_width(imm: u64) -> Option<usize> {
-    if imm == 0 {
+/// Return `w` when `mask` is the contiguous low-bit mask `(1 << w) - 1`.
+/// Other MIR peepholes also use this shape test when recognizing bit fields.
+fn mask_width(mask: u64) -> Option<usize> {
+    if mask == 0 {
         return Some(0);
     }
-    if imm == u64::MAX {
+    if mask == u64::MAX {
         return Some(64);
     }
-    // Check if imm is of the form (1 << w) - 1: all lower bits set
-    let w = imm.trailing_ones() as usize;
-    if imm == (1u64 << w) - 1 {
-        Some(w)
-    } else {
-        None
-    }
+    let width = mask.trailing_ones() as usize;
+    (mask == (1u64 << width) - 1).then_some(width)
 }
 
-/// Redundant mask elimination: track known bit widths and remove unnecessary
-/// AND masks when the source is already narrow enough.
+/// Redundant mask elimination over the two machine widths represented by MIR.
+///
+/// A scalar "known width" misses non-contiguous masks and, more importantly,
+/// used to forget the zero-extension semantics of the explicit 32-bit MIR
+/// operations.  Track a conservative set of bits which may be one instead.
+/// This is the ordinary known-bits lattice restricted to the fact needed by
+/// this pass: `x & mask == x` exactly when every possible one-bit of `x` is in
+/// `mask`.  Value facts and chain rewrites are local to a block, so the pass
+/// neither reaches through the CFG to lengthen a live range nor invents an
+/// ordering constraint.
 fn redundant_mask_eliminate(func: &mut MFunction) {
-    // Build def-map for AND chain folding
-    let mut def_map: HashMap<VReg, MInst> = HashMap::new();
+    let mut constants: HashMap<VReg, u64> = HashMap::new();
     for block in &func.blocks {
         for inst in &block.insts {
-            if let Some(d) = inst.def() {
-                def_map.insert(d, inst.clone());
+            if let MInst::LoadImm { dst, value } = inst {
+                constants.insert(*dst, *value);
             }
         }
     }
 
     for block in &mut func.blocks {
-        let mut known: HashMap<VReg, usize> = HashMap::new();
+        let mut possible_ones: HashMap<VReg, u64> = HashMap::new();
+        let mut definitions: HashMap<VReg, MaskDefinition> = HashMap::new();
 
         for inst in &mut block.insts {
-            let known_width = compute_known_width(inst, &known);
-
-            let should_replace = if let MInst::AndImm { dst, src, imm } = inst {
-                // Check 1: redundant mask (source already narrow enough)
-                if let Some(mw) = mask_width(*imm) {
-                    if let Some(&src_w) = known.get(src) {
-                        if src_w <= mw {
-                            Some(MaskElimAction::Mov(*dst, *src))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                // Check 2: AND chain folding — AndImm(AndImm(x, m1), m2) → AndImm(x, m1 & m2)
-                } else {
-                    None
-                }
-                .or_else(|| {
-                    // AND chain: if src was defined by AndImm(inner, m1), fold to AndImm(inner, m1 & imm)
-                    if let Some(MInst::AndImm {
-                        src: inner,
-                        imm: m1,
-                        ..
-                    }) = def_map.get(src)
-                    {
-                        let folded = *m1 & *imm;
-                        Some(MaskElimAction::FoldAnd(*dst, *inner, folded))
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
+            let result_possible_ones = compute_possible_one_bits(inst, &possible_ones, &constants);
+            let should_replace =
+                redundant_mask_action(inst, &possible_ones, &constants, &definitions);
 
             if let Some(action) = should_replace {
                 match action {
                     MaskElimAction::Mov(dst, src) => {
                         *inst = MInst::Mov { dst, src };
-                        if let Some(&src_w) = known.get(&src) {
-                            known.insert(dst, src_w);
-                        }
                     }
+                    MaskElimAction::Mov32(dst, src) => *inst = MInst::Mov32 { dst, src },
                     MaskElimAction::FoldAnd(dst, inner, folded_mask) => {
                         *inst = MInst::AndImm {
                             dst,
                             src: inner,
                             imm: folded_mask,
                         };
-                        let w = if folded_mask == 0 {
-                            0
-                        } else {
-                            64 - folded_mask.leading_zeros() as usize
+                    }
+                    MaskElimAction::FoldAnd32(dst, inner, folded_mask) => {
+                        *inst = MInst::AndImm32 {
+                            dst,
+                            src: inner,
+                            imm: folded_mask,
                         };
-                        known.insert(dst, w);
                     }
                 }
-                continue;
             }
 
-            if let Some(w) = known_width {
-                if let Some(d) = inst.def() {
-                    known.insert(d, w);
+            if let Some(dst) = inst.def() {
+                if result_possible_ones == u64::MAX {
+                    possible_ones.remove(&dst);
+                } else {
+                    possible_ones.insert(dst, result_possible_ones);
+                }
+                if let Some(definition) = MaskDefinition::from_inst(inst) {
+                    definitions.insert(dst, definition);
                 }
             }
         }
@@ -991,72 +976,226 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
 
 enum MaskElimAction {
     Mov(VReg, VReg),
+    Mov32(VReg, VReg),
     FoldAnd(VReg, VReg, u64),
+    FoldAnd32(VReg, VReg, u32),
 }
 
-/// Compute the known bit width of an instruction's result.
-fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usize> {
-    match inst {
-        MInst::LoadImm { value, .. } => {
-            if *value == 0 {
-                Some(0)
-            } else {
-                Some(64 - value.leading_zeros() as usize)
-            }
-        }
-        MInst::LoadConstantTableAddr { .. } => Some(64),
-        MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => {
-            Some(size.bytes() as usize * 8)
-        }
-        MInst::Cmp { .. } | MInst::CmpImm { .. } => Some(1),
-        MInst::Popcnt { .. } => Some(7), // max popcnt(u64) = 64, fits in 7 bits
-        MInst::Bsr { .. } => Some(6),    // max bsr(u64) = 63
-        MInst::BsrOr { .. } => Some(6),  // max bsr(u64) = 63
-        MInst::Mov { src, .. } => known.get(src).copied(),
-        MInst::AndImm { src, imm, .. } => {
-            let imm_w = if *imm == 0 {
-                0
-            } else {
-                64 - imm.leading_zeros() as usize
-            };
-            let src_w = known.get(src).copied().unwrap_or(64);
-            Some(src_w.min(imm_w))
-        }
-        MInst::OrImm { src, imm, .. } => {
-            let imm_w = if *imm == 0 {
-                0
-            } else {
-                64 - imm.leading_zeros() as usize
-            };
-            let src_w = known.get(src).copied().unwrap_or(64);
-            Some(src_w.max(imm_w))
-        }
-        MInst::ShrImm { src, imm, .. } => known.get(src).map(|&w| w.saturating_sub(*imm as usize)),
-        MInst::ShlImm { src, imm, .. } => known.get(src).map(|&w| (w + *imm as usize).min(64)),
-        MInst::And { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
-            (Some(&l), Some(&r)) => Some(l.min(r)),
-            (Some(&l), None) => Some(l),
-            (None, Some(&r)) => Some(r),
+#[derive(Clone, Copy)]
+enum MaskDefinition {
+    Register { lhs: VReg, rhs: VReg, word32: bool },
+    Immediate { src: VReg, mask: u64, word32: bool },
+}
+
+impl MaskDefinition {
+    fn from_inst(inst: &MInst) -> Option<Self> {
+        match inst {
+            MInst::And { lhs, rhs, .. } => Some(Self::Register {
+                lhs: *lhs,
+                rhs: *rhs,
+                word32: false,
+            }),
+            MInst::And32 { lhs, rhs, .. } => Some(Self::Register {
+                lhs: *lhs,
+                rhs: *rhs,
+                word32: true,
+            }),
+            MInst::AndImm { src, imm, .. } => Some(Self::Immediate {
+                src: *src,
+                mask: *imm,
+                word32: false,
+            }),
+            MInst::AndImm32 { src, imm, .. } => Some(Self::Immediate {
+                src: *src,
+                mask: u64::from(*imm),
+                word32: true,
+            }),
             _ => None,
-        },
-        MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => {
-            match (known.get(lhs), known.get(rhs)) {
-                (Some(&l), Some(&r)) => Some(l.max(r)),
+        }
+    }
+}
+
+fn possible_bits(
+    value: VReg,
+    possible_ones: &HashMap<VReg, u64>,
+    constants: &HashMap<VReg, u64>,
+) -> u64 {
+    possible_ones
+        .get(&value)
+        .or_else(|| constants.get(&value))
+        .copied()
+        .unwrap_or(u64::MAX)
+}
+
+fn redundant_32_bit_mask_action(
+    dst: VReg,
+    src: VReg,
+    mask: u32,
+    possible_ones: &HashMap<VReg, u64>,
+    constants: &HashMap<VReg, u64>,
+) -> Option<MaskElimAction> {
+    let source_bits = possible_bits(src, possible_ones, constants);
+    let low_mask = u64::from(mask);
+    if source_bits & u64::from(u32::MAX) & !low_mask != 0 {
+        return None;
+    }
+    if source_bits & !u64::from(u32::MAX) == 0 {
+        Some(MaskElimAction::Mov(dst, src))
+    } else {
+        // The mask is redundant in the low word, but the operation's required
+        // zero-extension is not.  Preserve that machine-width semantic.
+        Some(MaskElimAction::Mov32(dst, src))
+    }
+}
+
+fn and_repeats_operand(definition: Option<&MaskDefinition>, operand: VReg, word32: bool) -> bool {
+    match definition {
+        Some(MaskDefinition::Register {
+            lhs,
+            rhs,
+            word32: definition_word32,
+        }) if *definition_word32 == word32 => *lhs == operand || *rhs == operand,
+        _ => false,
+    }
+}
+
+fn redundant_mask_action(
+    inst: &MInst,
+    possible_ones: &HashMap<VReg, u64>,
+    constants: &HashMap<VReg, u64>,
+    definitions: &HashMap<VReg, MaskDefinition>,
+) -> Option<MaskElimAction> {
+    match inst {
+        MInst::AndImm { dst, src, imm } => {
+            if possible_bits(*src, possible_ones, constants) & !*imm == 0 {
+                return Some(MaskElimAction::Mov(*dst, *src));
+            }
+            match definitions.get(src) {
+                Some(MaskDefinition::Immediate {
+                    src: inner,
+                    mask: first,
+                    word32: false,
+                }) => Some(MaskElimAction::FoldAnd(*dst, *inner, *first & *imm)),
+                Some(MaskDefinition::Immediate {
+                    src: inner,
+                    mask: first,
+                    word32: true,
+                }) => Some(MaskElimAction::FoldAnd32(
+                    *dst,
+                    *inner,
+                    *first as u32 & *imm as u32,
+                )),
                 _ => None,
             }
         }
-        MInst::Add { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
-            (Some(&l), Some(&r)) => Some((l.max(r) + 1).min(64)),
-            _ => None,
-        },
-        // Bit widths alone do not bound a subtraction result: `0 - 1`
-        // produces all one bits.  In particular, do not use an unsigned
-        // input-width estimate to remove a following mask.
-        MInst::Sub { .. } => None,
-        MInst::Mul { lhs, rhs, .. } => match (known.get(lhs), known.get(rhs)) {
-            (Some(&l), Some(&r)) => Some((l + r).min(64)),
-            _ => None,
-        },
+        MInst::AndImm32 { dst, src, imm } => {
+            redundant_32_bit_mask_action(*dst, *src, *imm, possible_ones, constants).or_else(|| {
+                match definitions.get(src) {
+                    Some(MaskDefinition::Immediate {
+                        src: inner,
+                        mask: first,
+                        ..
+                    }) => Some(MaskElimAction::FoldAnd32(
+                        *dst,
+                        *inner,
+                        *first as u32 & *imm,
+                    )),
+                    _ => None,
+                }
+            })
+        }
+        MInst::And { dst, lhs, rhs } => {
+            if let Some(&mask) = constants.get(rhs)
+                && possible_bits(*lhs, possible_ones, constants) & !mask == 0
+            {
+                return Some(MaskElimAction::Mov(*dst, *lhs));
+            }
+            if let Some(&mask) = constants.get(lhs)
+                && possible_bits(*rhs, possible_ones, constants) & !mask == 0
+            {
+                return Some(MaskElimAction::Mov(*dst, *rhs));
+            }
+            if and_repeats_operand(definitions.get(lhs), *rhs, false) {
+                Some(MaskElimAction::Mov(*dst, *lhs))
+            } else if and_repeats_operand(definitions.get(rhs), *lhs, false) {
+                Some(MaskElimAction::Mov(*dst, *rhs))
+            } else {
+                None
+            }
+        }
+        MInst::And32 { dst, lhs, rhs } => {
+            if let Some(&mask) = constants.get(rhs) {
+                return redundant_32_bit_mask_action(
+                    *dst,
+                    *lhs,
+                    mask as u32,
+                    possible_ones,
+                    constants,
+                );
+            }
+            if let Some(&mask) = constants.get(lhs) {
+                return redundant_32_bit_mask_action(
+                    *dst,
+                    *rhs,
+                    mask as u32,
+                    possible_ones,
+                    constants,
+                );
+            }
+            if and_repeats_operand(definitions.get(lhs), *rhs, true) {
+                Some(MaskElimAction::Mov(*dst, *lhs))
+            } else if and_repeats_operand(definitions.get(rhs), *lhs, true) {
+                Some(MaskElimAction::Mov(*dst, *rhs))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn machine_width_mask(size: OpSize) -> u64 {
+    match size {
+        OpSize::S8 => u64::from(u8::MAX),
+        OpSize::S16 => u64::from(u16::MAX),
+        OpSize::S32 => u64::from(u32::MAX),
+        OpSize::S64 => u64::MAX,
+    }
+}
+
+fn compute_possible_one_bits(
+    inst: &MInst,
+    possible_ones: &HashMap<VReg, u64>,
+    constants: &HashMap<VReg, u64>,
+) -> u64 {
+    let bits = |value| possible_bits(value, possible_ones, constants);
+    let low32 = u64::from(u32::MAX);
+    match inst {
+        MInst::LoadImm { value, .. } => *value,
+        MInst::Load { size, .. }
+        | MInst::LoadIndexed { size, .. }
+        | MInst::LoadPtr { size, .. }
+        | MInst::LoadPtrIndexed { size, .. } => machine_width_mask(*size),
+        MInst::Mov { src, .. } => bits(*src),
+        MInst::Mov32 { src, .. } => bits(*src) & low32,
+        MInst::And { lhs, rhs, .. } => bits(*lhs) & bits(*rhs),
+        MInst::And32 { lhs, rhs, .. } => bits(*lhs) & bits(*rhs) & low32,
+        MInst::AndImm { src, imm, .. } => bits(*src) & *imm,
+        MInst::AndImm32 { src, imm, .. } => bits(*src) & u64::from(*imm),
+        MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => bits(*lhs) | bits(*rhs),
+        MInst::Or32 { lhs, rhs, .. } | MInst::Xor32 { lhs, rhs, .. } => {
+            (bits(*lhs) | bits(*rhs)) & low32
+        }
+        MInst::OrImm { src, imm, .. } => bits(*src) | *imm,
+        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => low32,
+        MInst::ShrImm { src, imm, .. } => bits(*src).checked_shr(u32::from(*imm)).unwrap_or(0),
+        MInst::ShlImm { src, imm, .. } => bits(*src).checked_shl(u32::from(*imm)).unwrap_or(0),
+        MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
+        MInst::Popcnt { .. } => 0x7f,
+        // Bsr's destination is unspecified for a zero input.  This pass has
+        // no path-sensitive nonzero fact, so every output bit remains possible.
+        MInst::Bsr { .. } => u64::MAX,
+        MInst::BsrOr { zero_value, .. } => 0x3f | u64::from(*zero_value),
         MInst::Select {
             true_val,
             false_val,
@@ -1076,13 +1215,8 @@ fn compute_known_width(inst: &MInst, known: &HashMap<VReg, usize>) -> Option<usi
             true_val,
             false_val,
             ..
-        } => match (known.get(true_val), known.get(false_val)) {
-            (Some(&t), Some(&f)) => Some(t.max(f)),
-            _ => None,
-        },
-        MInst::Pext { .. } => Some(64), // conservative
-        MInst::Pdep { .. } => Some(64), // conservative
-        _ => None,
+        } => bits(*true_val) | bits(*false_val),
+        _ => u64::MAX,
     }
 }
 
@@ -3936,6 +4070,178 @@ mod tests {
     }
 
     #[test]
+    fn redundant_mask_elimination_keeps_mask_after_unchecked_bsr() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Bsr {
+                    dst: VReg(1),
+                    src: VReg(0),
+                },
+                MInst::AndImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0x3f,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::AndImm {
+                dst: VReg(2),
+                src: VReg(1),
+                imm: 0x3f,
+            }
+        ));
+    }
+
+    #[test]
+    fn redundant_word32_register_mask_is_eliminated() {
+        let mask = 0x3fff_ffff;
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: mask,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: u64::from(mask),
+                },
+                MInst::And32 {
+                    dst: VReg(3),
+                    lhs: VReg(1),
+                    rhs: VReg(2),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn redundant_word32_mask_preserves_required_zero_extension() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::ShlImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 40,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0xff,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Mov32 {
+                dst: VReg(2),
+                src: VReg(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn repeated_large_register_mask_is_eliminated() {
+        let mask = 0x00ff_00ff_00ff_00ff;
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: mask,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::And {
+                    dst: VReg(3),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[3],
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            }
+        ));
+    }
+
+    #[test]
     fn dominators_do_not_depend_on_block_storage_order() {
         // Storage order is entry, join, left, right; reverse postorder is
         // entry, right, left, join.
@@ -4655,6 +4961,36 @@ mod tests {
                 dst: VReg(3),
                 src: VReg(4),
                 imm: 7,
+            }
+        ));
+    }
+
+    #[test]
+    fn lower_to_imm_forms_folds_word32_and_constant_low_word() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0xfeed_face_3fff_ffff,
+                },
+                MInst::And32 {
+                    dst: VReg(1),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        lower_to_imm_forms(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::AndImm32 {
+                dst: VReg(1),
+                src: VReg(2),
+                imm: 0x3fff_ffff,
             }
         ));
     }
