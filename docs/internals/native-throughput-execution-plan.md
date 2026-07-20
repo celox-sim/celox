@@ -4883,6 +4883,62 @@ without adding a non-semantic RTL order; Linux semantics and tick count are
 preserved, but measured execution throughput is unchanged and the allocator
 pressure problem remains open**.
 
+### Step 46: Control-dependent masked array search
+
+The complete optimized SIR exposed an eager predicate in `pending_xlate` of
+the following form:
+
+```text
+any(outer & (flags | (gate &
+    (concat(array[lane] == 0x100, ...)
+     | concat(array[lane] == 0x300, ...)
+     | concat(array[lane] == 0x180, ...)))))
+```
+
+The packed form unconditionally emitted 32 static `sh_csr_addr` element loads
+and 96 equality operations. In two-state logic it is instead a search over the
+set bits of `outer & gate`, preceded by the independent `outer & flags` test.
+The new `masked_array_any` SIR pass recovers that control dependence: it exits
+on an active flag, computes the candidate mask, selects one set lane with CTZ,
+performs one dynamic element load, short-circuits the key comparisons, and
+clears the lane with `remaining &= remaining - 1` only after all keys miss.
+
+This does not add a source-, layer-, block-, or arm-order rule. Those orders
+are optimization freedom. The legality proof uses only the actual RTL
+semantics: all recognized definitions dominate the reduction in one block;
+the unpacked-array shape and exact lane-to-offset mapping agree with program
+metadata; the eager load/compare DAG has no outside users; and no overlapping
+Store or Commit changes the searched bit range between the original loads and
+the reduction. A dynamic write is conservatively treated as overlapping. The
+four-state case is left unchanged. The scheduler and its dependency graph are
+not modified.
+
+The complete final trace is at
+`target/heliodor/analysis/step46-masked-array-any-final`. Its
+post-optimized SIR and full MIR contain the recovered branch/loop, one dynamic
+element-load site, and one comparison site per key; the old 32-load/96-compare
+body is dead. It is byte-identical to the dump used for the fixed-CPU A/B
+measurement. Six focused tests cover semantic equivalence, actual load counts,
+four-state rejection, declared array shape, lane order, and overlapping versus
+subsequent writes; a seventh test fixes the CLI name and optimization-level
+defaults. The optimized library passes 972/972, native testbench passes 60
+with one upstream ignore, and counter passes 9 with three Veryl ignores.
+
+Every full run reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`. A fixed-CPU non-LTO parent/candidate/parent/candidate
+comparison separated code generation from execution. Step 45 executed in
+106.589 and 102.699 s; this step executed in 100.532 and 98.778 s. Their means
+are 104.644 and 99.655 s, a 4.989 s or 4.8% reduction. The paired reductions
+are 6.057 and 3.921 s. Compile times were recorded separately: 94.476 and
+91.564 s for Step 45, and 91.762 and 90.653 s for this step; no compile-speed
+claim is made. After the final source checks, a further non-LTO run compiled in
+90.686 s and executed in 99.781 s with the same completion marker.
+
+Status: **eager masked array comparisons are represented as a
+control-dependent search without constraining RTL scheduling freedom;
+Linux semantics and tick count are preserved and fixed-CPU execution improves
+by 4.8%**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4984,6 +5040,7 @@ pressure problem remains open**.
 | 43 commit-independent sparse whole-zero fill | this step | demand-driven exact-zero, coverage/visibility, `MemFill` effects/emission, eval-only integration, scheduler overlap regressions | lib 957/957; native backend 450/450; all-target check; strict clippy; format and diff checks | final-source release/LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | intermediate non-LTO/release compile-only 64.899 / 62.750 s; final release compile 62.047 s / execute 111.351 s | Step 42 compile 107.693→about 62--65 s; 208,896-bit zero construction never enters MIR; no runtime-speed claim |
 | 44 machine-width known-bits mask elimination | this step | MIR mask/constant/32-bit zero-extension 61/61 | lib 962/962; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks | final non-LTO and two release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | final non-LTO compile 68.337 s / execute 107.693 s; final release compile 61.215 / 62.130 s, execute 109.005 / 107.524 s | redundant register/immediate 32/64-bit mask chains removed without scheduler changes; final release execute -2.1% / -3.4% versus Step 43 |
 | 45 allocator-visible same-block value sharing | this step | MIR GVN/rematerialization/MemorySSA 64/64 | lib 965/965; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | all candidate and fixed-CPU A/B/A/B runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | fixed-CPU Step 44 execute 101.001 / 101.731 s; candidate 98.888 / 104.028 s | hot repeated byte/bit indices share one value; final code -22,895 bytes; execute mean unchanged, so no speed claim |
+| 46 control-dependent masked array search | this step | masked-array search and CLI 7/7 | lib 972/972; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final-source run all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | Step 45 execute 106.589 / 102.699 s; candidate 100.532 / 98.778 s; final source 99.781 s | 32 eager element loads and 96 comparisons become a set-bit search; scheduler unchanged; execute mean -4.8% |
 
 ## Related design records
 

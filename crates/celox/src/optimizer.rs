@@ -172,6 +172,7 @@ pub enum SirPass {
     ConcatFolding,
     XorChainFolding,
     VectorizeConcat,
+    MaskedArrayAny,
     BranchifyMux,
     SplitCoalescedStores,
     PartialForward,
@@ -197,6 +198,7 @@ impl SirPass {
         SirPass::ConcatFolding,
         SirPass::XorChainFolding,
         SirPass::VectorizeConcat,
+        SirPass::MaskedArrayAny,
         SirPass::BranchifyMux,
         SirPass::SplitCoalescedStores,
         SirPass::PartialForward,
@@ -222,6 +224,7 @@ impl SirPass {
             SirPass::ConcatFolding => "concat_folding",
             SirPass::XorChainFolding => "xor_chain_folding",
             SirPass::VectorizeConcat => "vectorize_concat",
+            SirPass::MaskedArrayAny => "masked_array_any",
             SirPass::BranchifyMux => "branchify_mux",
             SirPass::SplitCoalescedStores => "split_coalesced_stores",
             SirPass::PartialForward => "partial_forward",
@@ -248,6 +251,7 @@ impl SirPass {
             "concat_folding" => Some(SirPass::ConcatFolding),
             "xor_chain_folding" => Some(SirPass::XorChainFolding),
             "vectorize_concat" => Some(SirPass::VectorizeConcat),
+            "masked_array_any" => Some(SirPass::MaskedArrayAny),
             "branchify_mux" => Some(SirPass::BranchifyMux),
             "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
             "partial_forward" => Some(SirPass::PartialForward),
@@ -447,5 +451,17 @@ mod tests {
         assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::ControlFlowSimplify));
         assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::ControlFlowSimplify));
         assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::ControlFlowSimplify));
+    }
+
+    #[test]
+    fn masked_array_any_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("masked_array_any"),
+            Some(SirPass::MaskedArrayAny)
+        );
+        assert_eq!(SirPass::MaskedArrayAny.as_str(), "masked_array_any");
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::MaskedArrayAny));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::MaskedArrayAny));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::MaskedArrayAny));
     }
 }

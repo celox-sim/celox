@@ -25,6 +25,7 @@ mod pass_identity_store_bypass;
 mod pass_inline_commit_forwarding;
 mod pass_loop_idiom;
 mod pass_manager;
+mod pass_masked_array_any;
 mod pass_optimize_blocks;
 mod pass_packed_scatter_store;
 mod pass_partial_forward;
@@ -155,6 +156,7 @@ use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::{ExecutionUnitPass, ExecutionUnitPassManager};
+use pass_masked_array_any::MaskedArrayAnyPass;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_packed_scatter_store::PackedScatterStorePass;
 use pass_partial_forward::PartialForwardPass;
@@ -701,6 +703,9 @@ fn optimize_with_options(
         // Vectorization exposes the wide source of predicate concats.  A
         // second idiom/DCE sweep removes the scalar predicates it replaced.
         comb_passes.add_pass(LoopIdiomPass);
+    }
+    if on(SirPass::MaskedArrayAny) {
+        comb_passes.add_pass(MaskedArrayAnyPass::for_program(program));
     }
     if on(SirPass::Gvn) {
         comb_passes.add_pass(GvnPass); // DCE for dead bit-extract chains after vectorization
