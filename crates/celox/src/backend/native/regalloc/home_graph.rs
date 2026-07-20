@@ -72,8 +72,8 @@ pub(super) enum RecipeNode {
     },
 }
 
-/// Memory-version-independent identity of a materialization home.  Exact
-/// MemorySSA versions stay in `RecipeNode` and are selected independently for
+/// Memory-snapshot-independent identity of a materialization home. Exact
+/// MemorySSA snapshots stay in `RecipeNode` and are selected independently for
 /// every use.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum RecipeShapeNode {
@@ -103,7 +103,7 @@ pub(super) enum HomeKind {
     /// A pure constant/unary target DAG.
     Rematerialize(RecipeShapeId),
     /// One or more physical state loads, independent of their use-local
-    /// MemorySSA versions.
+    /// MemorySSA snapshots.
     State(RecipeShapeId),
     /// One allocator-created packed-state word. The identity is the SSA
     /// version stored there, not merely its physical address.
@@ -113,7 +113,7 @@ pub(super) enum HomeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct UseMaterialization {
     pub use_id: BundleUseId,
-    /// Exact, versioned recipe proved at this use.
+    /// Exact, MemorySSA-snapshot-proved recipe at this use.
     pub recipe: RecipeId,
     pub cost: u32,
 }
@@ -1300,7 +1300,7 @@ mod tests {
         );
         assert_ne!(
             states[0].1.recipe, states[1].1.recipe,
-            "MemorySSA versions must remain use-local even when the physical home is shared"
+            "MemorySSA snapshots must remain use-local even when the physical home is shared"
         );
         let HomeKind::State(shape) = states[0].1.kind else {
             unreachable!();

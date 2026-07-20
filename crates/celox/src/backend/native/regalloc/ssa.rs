@@ -192,7 +192,7 @@ pub(super) fn allocate(
                 .map(|block| block.insts.len())
                 .sum::<usize>(),
             reconstruction.frame_size,
-            reconstruction.shared_reload_blocks,
+            reconstruction.shared_reload_blocks.len(),
             start.elapsed()
         );
     }
@@ -204,7 +204,7 @@ pub(super) fn allocate(
     // allocation graph was frozen. Rebuild the normalized graph once, then
     // use it for every independent post-reconstruction proof and coloring
     // phase. No spill planning or allocation retry is performed.
-    let reconstructed_cfg = if reconstruction.shared_reload_blocks != 0 {
+    let reconstructed_cfg = if !reconstruction.shared_reload_blocks.is_empty() {
         let rebuilt = super::cfg::normalize(func)
             .map_err(|error| super::cfg_error("shared reload CFG normalization", error))?;
         rebuilt.verify(func).map_err(|error| {
@@ -246,6 +246,7 @@ pub(super) fn allocate(
         cfg,
         &reconstruction.recipe_reloads,
         &inserted_state_writes,
+        &reconstruction.shared_reload_blocks,
     )
     .map_err(|error| {
         super::reload_recipe_error("spill-planner reload-recipe verification", error)

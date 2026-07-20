@@ -1,16 +1,21 @@
 //! Reload recipes whose validity is proved against physical MIR memory effects.
 //!
 //! A simulation-state recipe is deliberately expressed as the exact MIR load
-//! that produced the value.  It never reconstructs an address or an operand
-//! width from SIR metadata.  The accompanying memory version consists of one
-//! unknown-alias epoch and one sparse MemorySSA version for every byte read by
-//! that load.  A recipe is usable only where all of those versions still
-//! match.
+//! that produced the value. It never reconstructs an address or an operand
+//! width from SIR metadata. Its `MemorySnapshot` is a query-specific view of
+//! the shared access-based MemorySSA graph. A recipe is usable only where the
+//! same clobber graph reaches that exact physical load.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
-use crate::backend::native::memory_effect;
+use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
+use celox_analysis::memory_ssa::{
+    self, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryAccessGraph, MemoryAccessId,
+    MemoryClobber, MemoryPointMap,
+};
+
+use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
 use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, OpSize, VReg};
 
 use super::cfg::NormalizedCfg;
@@ -30,42 +35,51 @@ impl StateLoad {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum MemoryVariable {
-    UnknownAlias,
-    Byte(i64),
-}
-
-/// Structural MemorySSA identity, independent of unrelated tracked ranges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum MemoryVersion {
-    Entry(MemoryVariable),
-    Write {
-        block: BlockId,
-        ordinal: usize,
-        variable: MemoryVariable,
-    },
-    Phi {
-        block: BlockId,
-        variable: MemoryVariable,
-    },
+enum SnapshotAccess {
+    LiveOnEntry,
+    Write { block: BlockId, ordinal: usize },
+    Phi(BlockId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct StateVersion {
-    unknown_alias: MemoryVersion,
-    bytes: Box<[MemoryVersion]>,
+struct SnapshotPhi {
+    block: BlockId,
+    inputs: Box<[(BlockId, SnapshotAccess)]>,
+}
+
+/// Stable, query-specific clobber graph for one physical state load.
+///
+/// The root alone is sufficient for comparisons inside one immutable graph.
+/// Phi equations are retained so final-MIR verification also detects changed
+/// incoming definitions at a join with the same block identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct MemorySnapshot {
+    root: SnapshotAccess,
+    phis: Box<[SnapshotPhi]>,
+}
+
+/// Provenance for one CFG factoring introduced after reload planning.
+///
+/// The final verifier may inline the corresponding query-specific MemoryPhi
+/// only after checking that the final block still has exactly these incoming
+/// edges, exactly this successor, and no write which aliases SimState.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MemoryPhiFactoring {
+    pub block: BlockId,
+    pub successor: BlockId,
+    pub predecessors: Box<[BlockId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct StateRecipe {
     pub load: StateLoad,
-    version: StateVersion,
+    snapshot: MemorySnapshot,
     observed_bits: StateBitRange,
 }
 
 impl StateRecipe {
     /// Version-independent physical identity used to group one state home
-    /// across uses.  Exact MemorySSA versions remain in the use-specific
+    /// across uses. Exact MemorySSA snapshots remain in the use-specific
     /// recipe and are never discarded for validation.
     pub(super) fn home_shape_key(&self) -> (StateLoad, i64, i64) {
         (self.load, self.observed_bits.start, self.observed_bits.end)
@@ -1137,21 +1151,222 @@ enum RecipeBase {
     State(VReg),
 }
 
-#[derive(Debug)]
-struct MemoryPhi {
-    block: usize,
-    variable: MemoryVariable,
-    version: MemoryVersion,
-    inputs: Vec<(usize, MemoryVersion)>,
+type MemoryProgramPoint = (usize, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MemoryDefinition {
+    point: MemoryProgramPoint,
+    block: BlockId,
+    ordinal: usize,
 }
 
+/// Reload-specific adapter around the shared access graph. MIR effects and
+/// stable write identities stay here; neither is part of `celox-analysis`.
 #[derive(Debug)]
-struct MemorySsa {
-    tracked_bytes: BTreeSet<i64>,
-    entry_versions: BTreeMap<MemoryVariable, MemoryVersion>,
-    write_versions: HashMap<(usize, usize, MemoryVariable), MemoryVersion>,
-    phis: Vec<MemoryPhi>,
-    phis_by_block: Vec<Vec<(MemoryVariable, usize)>>,
+struct ReloadMemorySsa {
+    graph: MemoryAccessGraph<MemoryDefinition>,
+    points: MemoryPointMap<MemoryProgramPoint>,
+    writes: BTreeMap<MemoryDefinition, Vec<MemoryEffect<MemoryObject>>>,
+    block_ids: Vec<BlockId>,
+    walker: ClobberWalker,
+}
+
+impl ReloadMemorySsa {
+    fn snapshot_at_block_entry(
+        &mut self,
+        block: usize,
+        load: StateLoad,
+    ) -> Result<MemorySnapshot, ReloadRecipeError> {
+        let access = self.points.block_entry(block).ok_or_else(|| {
+            ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_BLOCK_ENTRY",
+                self.block_ids.get(block).copied(),
+                None,
+                None,
+                "MemorySSA has no block-entry coordinate",
+            )
+        })?;
+        self.snapshot_at(access, load)
+    }
+
+    fn snapshot_at(
+        &mut self,
+        start: MemoryAccessId,
+        load: StateLoad,
+    ) -> Result<MemorySnapshot, ReloadRecipeError> {
+        let bytes = load.bytes().ok_or_else(|| {
+            ReloadRecipeError::new(
+                "RELOAD_RECIPE.STATE_RANGE",
+                None,
+                None,
+                None,
+                "state load byte range overflows i64",
+            )
+        })?;
+        let byte_len = usize::try_from(bytes.end - bytes.start).map_err(|_| {
+            ReloadRecipeError::new(
+                "RELOAD_RECIPE.STATE_RANGE",
+                None,
+                None,
+                None,
+                "state load byte range is not representable as usize",
+            )
+        })?;
+        let query = MemoryEffect::Exact(MemoryLocation {
+            object: MemoryObject::SimState,
+            offset: bytes.start,
+            byte_len,
+        });
+        let graph = &self.graph;
+        let writes = &self.writes;
+        let block_ids = &self.block_ids;
+        let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
+            writes.get(definition).is_some_and(|effects| {
+                effects
+                    .iter()
+                    .copied()
+                    .any(|write| effects_may_alias(write, *query))
+            })
+        };
+        let mut clobber_query = self.walker.query(graph, &query, &oracle);
+        let mut clobber_access = |start| match clobber_query.clobber(start) {
+            Some(MemoryClobber::Access(access)) => Ok(access),
+            Some(MemoryClobber::Indeterminate) => Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.CLOBBER_CYCLE",
+                None,
+                None,
+                None,
+                "query-specific clobber graph is an unresolved closed cycle",
+            )),
+            None => Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.CLOBBER_ACCESS",
+                None,
+                None,
+                None,
+                "clobber query starts outside the MemorySSA graph",
+            )),
+        };
+        let root_access = clobber_access(start)?;
+        let root = Self::stable_access(graph, block_ids, root_access)?;
+
+        // Capture the query-specific phi equations reachable from the root.
+        // This is the stable certificate used after MIR reconstruction.
+        let mut pending = BTreeMap::<BlockId, MemoryAccessId>::new();
+        if let SnapshotAccess::Phi(block) = root {
+            pending.insert(block, root_access);
+        }
+        let mut phis = BTreeMap::<BlockId, SnapshotPhi>::new();
+        while let Some((block, access)) = pending.pop_first() {
+            if phis.contains_key(&block) {
+                continue;
+            }
+            let MemoryAccess::Phi {
+                block: dense_block,
+                inputs,
+            } = graph.access(access).ok_or_else(|| {
+                ReloadRecipeError::new(
+                    "RELOAD_RECIPE.SNAPSHOT_ACCESS",
+                    Some(block),
+                    None,
+                    None,
+                    "snapshot phi references an invalid MemorySSA access",
+                )
+            })?
+            else {
+                return Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.SNAPSHOT_PHI",
+                    Some(block),
+                    None,
+                    None,
+                    "snapshot phi identity does not name a MemoryPhi",
+                ));
+            };
+            let inputs = inputs.to_vec();
+            let actual_block = block_ids.get(dense_block).copied().ok_or_else(|| {
+                ReloadRecipeError::new(
+                    "RELOAD_RECIPE.SNAPSHOT_BLOCK",
+                    Some(block),
+                    None,
+                    None,
+                    "MemoryPhi block is outside the MIR block table",
+                )
+            })?;
+            if actual_block != block {
+                return Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.SNAPSHOT_PHI_IDENTITY",
+                    Some(block),
+                    None,
+                    None,
+                    "stable and dense MemoryPhi identities disagree",
+                ));
+            }
+            let mut stable_inputs = Vec::with_capacity(inputs.len());
+            for (predecessor, input) in inputs {
+                let predecessor = block_ids.get(predecessor).copied().ok_or_else(|| {
+                    ReloadRecipeError::new(
+                        "RELOAD_RECIPE.SNAPSHOT_PREDECESSOR",
+                        Some(block),
+                        None,
+                        None,
+                        "MemoryPhi predecessor is outside the MIR block table",
+                    )
+                })?;
+                let input_access = clobber_access(input)?;
+                let input = Self::stable_access(graph, block_ids, input_access)?;
+                if let SnapshotAccess::Phi(input_block) = input {
+                    pending.entry(input_block).or_insert(input_access);
+                }
+                stable_inputs.push((predecessor, input));
+            }
+            stable_inputs.sort_unstable_by_key(|&(predecessor, input)| (predecessor, input));
+            phis.insert(
+                block,
+                SnapshotPhi {
+                    block,
+                    inputs: stable_inputs.into_boxed_slice(),
+                },
+            );
+        }
+
+        Ok(MemorySnapshot {
+            root,
+            phis: phis.into_values().collect::<Vec<_>>().into_boxed_slice(),
+        })
+    }
+
+    fn stable_access(
+        graph: &MemoryAccessGraph<MemoryDefinition>,
+        block_ids: &[BlockId],
+        access: MemoryAccessId,
+    ) -> Result<SnapshotAccess, ReloadRecipeError> {
+        match graph.access(access) {
+            Some(MemoryAccess::LiveOnEntry) => Ok(SnapshotAccess::LiveOnEntry),
+            Some(MemoryAccess::Definition { definition, .. }) => Ok(SnapshotAccess::Write {
+                block: definition.block,
+                ordinal: definition.ordinal,
+            }),
+            Some(MemoryAccess::Phi { block, .. }) => block_ids
+                .get(block)
+                .copied()
+                .map(SnapshotAccess::Phi)
+                .ok_or_else(|| {
+                    ReloadRecipeError::new(
+                        "RELOAD_RECIPE.SNAPSHOT_BLOCK",
+                        None,
+                        None,
+                        None,
+                        "MemoryPhi block is outside the MIR block table",
+                    )
+                }),
+            None => Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.SNAPSHOT_ACCESS",
+                None,
+                None,
+                None,
+                "clobber identity is outside the MemorySSA graph",
+            )),
+        }
+    }
 }
 
 fn analyze_unverified_with_queries(
@@ -1268,36 +1483,7 @@ fn analyze_unverified_with_queries(
             }
         }
     }
-    let mut tracked_bytes = BTreeSet::<i64>::new();
-    for &value in &relevant_values {
-        if let Some(load) = state_loads.get(value.0 as usize).copied().flatten() {
-            tracked_bytes.extend(load.bytes().expect("state-load range was validated"));
-        }
-    }
-    for homes in store_homes.values() {
-        for home in homes {
-            let Some(bytes) = home.load.bytes() else {
-                return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.STATE_RANGE",
-                    None,
-                    None,
-                    Some(home.value),
-                    "store-home byte range overflows i64",
-                ));
-            };
-            tracked_bytes.extend(bytes);
-        }
-    }
-    for fragment in fragment_homes.values() {
-        tracked_bytes.extend(
-            fragment
-                .load
-                .bytes()
-                .expect("validated state fragment has a finite byte range"),
-        );
-    }
-
-    let mut memory_ssa = build_memory_ssa(func, cfg, &tracked_bytes)?;
+    let mut memory_ssa = build_reload_memory_ssa(func, cfg)?;
     let mut point_recipes = BTreeMap::new();
     let mut edge_recipes = BTreeMap::new();
     let mut point_fragment_recipes = BTreeMap::new();
@@ -1326,20 +1512,6 @@ fn analyze_unverified_with_queries(
         &mut valid_point_uses,
         &mut valid_edge_uses,
     )?;
-    verify_memory_phis(func, cfg, &memory_ssa)?;
-    let phi_aliases = trivial_memory_phi_aliases(&memory_ssa);
-    canonicalize_reload_recipes(
-        &mut recipes,
-        &mut point_recipes,
-        &mut edge_recipes,
-        &phi_aliases,
-    );
-    canonicalize_fragment_recipes(
-        &mut point_fragment_recipes,
-        &mut edge_fragment_recipes,
-        &phi_aliases,
-    );
-
     Ok(ReloadRecipeAnalysis {
         recipes,
         pure_recipes,
@@ -1901,31 +2073,39 @@ fn pure_expression(inst: &MInst) -> Option<PureRecipe> {
     }
 }
 
-fn build_memory_ssa(
+fn build_reload_memory_ssa(
     func: &MFunction,
     cfg: &NormalizedCfg,
-    tracked_bytes: &BTreeSet<i64>,
-) -> Result<MemorySsa, ReloadRecipeError> {
-    let variables = std::iter::once(MemoryVariable::UnknownAlias)
-        .chain(tracked_bytes.iter().copied().map(MemoryVariable::Byte))
-        .collect::<Vec<_>>();
-    let mut entry_versions = BTreeMap::new();
-    for variable in variables {
-        entry_versions.insert(variable, MemoryVersion::Entry(variable));
-    }
+) -> Result<ReloadMemorySsa, ReloadRecipeError> {
+    let mut events = vec![
+        Vec::<MemoryAccessEvent<MemoryDefinition, MemoryProgramPoint>>::new();
+        func.blocks.len()
+    ];
+    let mut writes = BTreeMap::<MemoryDefinition, Vec<MemoryEffect<MemoryObject>>>::new();
+    let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
 
-    let mut definition_blocks = BTreeMap::<MemoryVariable, BTreeSet<usize>>::new();
-    let mut write_versions = HashMap::new();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let effect = memory_effect::writes(inst);
-            let affects_sim_state =
-                matches!(
-                    effect.unknown_memory(),
-                    Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
-                ) || effect.ranges().any(|range| range.base == BaseReg::SimState);
-            let ordinal = if affects_sim_state {
+            let effects = analysis_effects(&memory_effect::writes(inst))
+                .filter(|effect| effects_may_alias(*effect, sim_state))
+                .collect::<Vec<_>>();
+            for effect in &effects {
+                if let MemoryEffect::Exact(location) = effect
+                    && (location.byte_len == 0 || location.end().is_none())
+                {
+                    return Err(ReloadRecipeError::new(
+                        "RELOAD_RECIPE.MEMORY_RANGE",
+                        Some(mir_block.id),
+                        Some(instruction),
+                        None,
+                        "MIR SimState write has an empty or overflowing range",
+                    ));
+                }
+            }
+            let definition = if effects.is_empty() {
+                None
+            } else {
                 let ordinal = write_ordinal;
                 write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
                     ReloadRecipeError::new(
@@ -1936,105 +2116,47 @@ fn build_memory_ssa(
                         "per-block MemorySSA write ordinal exceeds addressable MIR size",
                     )
                 })?;
-                Some(ordinal)
-            } else {
-                None
+                let definition = MemoryDefinition {
+                    point: (block, instruction),
+                    block: mir_block.id,
+                    ordinal,
+                };
+                if writes.insert(definition, effects).is_some() {
+                    return Err(ReloadRecipeError::new(
+                        "RELOAD_RECIPE.WRITE_IDENTITY",
+                        Some(mir_block.id),
+                        Some(instruction),
+                        None,
+                        "one MIR write produced multiple MemoryDef identities",
+                    ));
+                }
+                Some(definition)
             };
-            let affected = affected_variables(inst, tracked_bytes)?;
-            if affected.is_empty() {
-                continue;
-            }
-            let ordinal = ordinal.ok_or_else(|| {
-                ReloadRecipeError::new(
-                    "RELOAD_RECIPE.WRITE_ORDINAL_MISSING",
-                    Some(mir_block.id),
-                    Some(instruction),
-                    None,
-                    "MemorySSA found affected SimState variables for an instruction without a SimState write ordinal",
-                )
-            })?;
-            for variable in affected {
-                definition_blocks.entry(variable).or_default().insert(block);
-                write_versions.insert(
-                    (block, instruction, variable),
-                    MemoryVersion::Write {
-                        block: mir_block.id,
-                        ordinal,
-                        variable,
-                    },
-                );
-            }
+            events[block].push(MemoryAccessEvent {
+                point: (block, instruction),
+                definition,
+            });
         }
     }
 
-    let mut phis = Vec::<MemoryPhi>::new();
-    let mut phis_by_block = vec![Vec::new(); func.blocks.len()];
-    for (variable, original_definitions) in definition_blocks {
-        let mut definitions = original_definitions;
-        let mut queue = definitions.iter().copied().collect::<VecDeque<_>>();
-        let mut placed = BTreeSet::<usize>::new();
-        while let Some(definition) = queue.pop_front() {
-            for &frontier in &cfg.dominance_frontier[definition] {
-                if frontier == 0 || !placed.insert(frontier) {
-                    continue;
-                }
-                let id = phis.len();
-                phis.push(MemoryPhi {
-                    block: frontier,
-                    variable,
-                    version: MemoryVersion::Phi {
-                        block: func.blocks[frontier].id,
-                        variable,
-                    },
-                    inputs: Vec::with_capacity(cfg.predecessors[frontier].len()),
-                });
-                phis_by_block[frontier].push((variable, id));
-                if definitions.insert(frontier) {
-                    queue.push_back(frontier);
-                }
-            }
-        }
-    }
-    for entries in &mut phis_by_block {
-        entries.sort_unstable_by_key(|(variable, _)| *variable);
-    }
-
-    Ok(MemorySsa {
-        tracked_bytes: tracked_bytes.clone(),
-        entry_versions,
-        write_versions,
-        phis,
-        phis_by_block,
+    let (graph, points) = memory_ssa::build(cfg, &events).map_err(|error| {
+        ReloadRecipeError::new(
+            error.rule,
+            error
+                .block
+                .and_then(|block| func.blocks.get(block).map(|block| block.id)),
+            None,
+            None,
+            error.message,
+        )
+    })?;
+    Ok(ReloadMemorySsa {
+        graph,
+        points,
+        writes,
+        block_ids: func.blocks.iter().map(|block| block.id).collect(),
+        walker: ClobberWalker::new(),
     })
-}
-
-fn affected_variables(
-    inst: &MInst,
-    tracked_bytes: &BTreeSet<i64>,
-) -> Result<Vec<MemoryVariable>, ReloadRecipeError> {
-    let effect = memory_effect::writes(inst);
-    if matches!(
-        effect.unknown_memory(),
-        Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
-    ) {
-        return Ok(vec![MemoryVariable::UnknownAlias]);
-    }
-    let mut affected = BTreeSet::new();
-    for range in effect
-        .ranges()
-        .filter(|range| range.base == BaseReg::SimState)
-    {
-        let Some(end) = range.end() else {
-            return Ok(vec![MemoryVariable::UnknownAlias]);
-        };
-        affected.extend(
-            tracked_bytes
-                .range(range.offset..end)
-                .copied()
-                .map(MemoryVariable::Byte),
-        );
-    }
-    Ok(affected.into_iter().collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2044,7 +2166,7 @@ fn rename_memory_ssa(
     state_loads: &[Option<StateLoad>],
     pure_recipes: &[PureRecipe],
     recipes: &mut [ReloadRecipe],
-    memory_ssa: &mut MemorySsa,
+    memory_ssa: &mut ReloadMemorySsa,
     store_homes: &HashMap<(usize, usize), Vec<StoreHomeSpec>>,
     fragment_homes: &HashMap<(usize, usize), ValidatedStateFragment>,
     preserving_writes: &HashMap<(usize, usize), ValidatedStateFragment>,
@@ -2077,13 +2199,11 @@ fn rename_memory_ssa(
     enum Action {
         Enter(usize),
         Exit {
-            memory_changes: Vec<(MemoryVariable, Option<MemoryVersion>)>,
             home_pushes: Vec<VReg>,
             fragment_pushes: Vec<VReg>,
         },
     }
 
-    let mut current = BTreeMap::<MemoryVariable, MemoryVersion>::new();
     let mut current_homes = BTreeMap::<VReg, Vec<StoreHome>>::new();
     let mut current_home_index = StoreHomeIndex::new();
     let mut current_fragments = BTreeMap::<VReg, Vec<StateFragmentHome>>::new();
@@ -2102,7 +2222,6 @@ fn rename_memory_ssa(
     while let Some(action) = actions.pop() {
         let block = match action {
             Action::Exit {
-                memory_changes,
                 home_pushes,
                 fragment_pushes,
             } => {
@@ -2142,28 +2261,12 @@ fn rename_memory_ssa(
                         current_homes.remove(&value);
                     }
                 }
-                for (variable, previous) in memory_changes.into_iter().rev() {
-                    if let Some(previous) = previous {
-                        current.insert(variable, previous);
-                    } else {
-                        current.remove(&variable);
-                    }
-                }
                 continue;
             }
             Action::Enter(block) => block,
         };
-        let mut memory_changes = Vec::new();
         let mut home_pushes = Vec::new();
         let mut fragment_pushes = Vec::new();
-        for &(variable, phi) in &memory_ssa.phis_by_block[block] {
-            set_current(
-                &mut current,
-                &mut memory_changes,
-                variable,
-                memory_ssa.phis[phi].version,
-            );
-        }
 
         let block_id = func.blocks[block].id;
         // A register phi that merges values already committed to the same
@@ -2238,7 +2341,7 @@ fn rename_memory_ssa(
                 let home = StoreHome {
                     state: StateRecipe {
                         load,
-                        version: current_state_version(load, &current, memory_ssa)?,
+                        snapshot: memory_ssa.snapshot_at_block_entry(block, load)?,
                         observed_bits,
                     },
                     steps: common_steps.unwrap_or_default(),
@@ -2250,6 +2353,18 @@ fn rename_memory_ssa(
         }
 
         for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            let memory_point = memory_ssa
+                .points
+                .event((block, instruction))
+                .ok_or_else(|| {
+                    ReloadRecipeError::new(
+                        "RELOAD_RECIPE.MEMORY_POINT",
+                        Some(block_id),
+                        Some(instruction),
+                        None,
+                        "MemorySSA does not cover this MIR instruction",
+                    )
+                })?;
             if collect_all_uses {
                 for value in inst.uses().into_iter().collect::<BTreeSet<_>>() {
                     let point = PointUse {
@@ -2262,7 +2377,7 @@ fn rename_memory_ssa(
                         recipes,
                         pure_recipes,
                         &current_homes,
-                        &current,
+                        memory_point.before,
                         memory_ssa,
                     )? {
                         point_recipes.insert(point, recipe);
@@ -2273,7 +2388,7 @@ fn rename_memory_ssa(
                             value,
                             canonical_bits,
                             &current_fragments,
-                            &current,
+                            memory_point.before,
                             memory_ssa,
                         )?
                     {
@@ -2293,7 +2408,7 @@ fn rename_memory_ssa(
                         recipes,
                         pure_recipes,
                         &current_homes,
-                        &current,
+                        memory_point.before,
                         memory_ssa,
                     )? {
                         point_recipes.insert(point, recipe);
@@ -2303,7 +2418,7 @@ fn rename_memory_ssa(
                             value,
                             canonical_bits,
                             &current_fragments,
-                            &current,
+                            memory_point.before,
                             memory_ssa,
                         )?
                     {
@@ -2318,7 +2433,7 @@ fn rename_memory_ssa(
             {
                 recipes[definition.0 as usize] = ReloadRecipe::StateVersion(StateRecipe {
                     load,
-                    version: current_state_version(load, &current, memory_ssa)?,
+                    snapshot: memory_ssa.snapshot_at(memory_point.before, load)?,
                     observed_bits: StateBitRange::from_load(load).ok_or_else(|| {
                         ReloadRecipeError::new(
                             "RELOAD_RECIPE.STATE_RANGE",
@@ -2348,8 +2463,8 @@ fn rename_memory_ssa(
                 for value in candidates {
                     for home in &current_homes[&value] {
                         if !home.state.observed_bits.overlaps(written_bits)
-                            && current_state_version(home.state.load, &current, memory_ssa)?
-                                == home.state.version
+                            && memory_ssa.snapshot_at(memory_point.before, home.state.load)?
+                                == home.state.snapshot
                         {
                             preserved_homes.push((value, home.clone()));
                         }
@@ -2368,8 +2483,8 @@ fn rename_memory_ssa(
                 for value in fragment_candidates {
                     for fragment in &current_fragments[&value] {
                         if !fragment.state.observed_bits.overlaps(written_bits)
-                            && current_state_version(fragment.state.load, &current, memory_ssa)?
-                                == fragment.state.version
+                            && memory_ssa.snapshot_at(memory_point.before, fragment.state.load)?
+                                == fragment.state.snapshot
                         {
                             preserved_fragments.push((value, fragment.clone()));
                         }
@@ -2377,39 +2492,23 @@ fn rename_memory_ssa(
                 }
             }
 
-            for variable in affected_variables(inst, &memory_ssa.tracked_bytes)? {
-                let Some(&version) = memory_ssa
-                    .write_versions
-                    .get(&(block, instruction, variable))
-                else {
-                    return Err(ReloadRecipeError::new(
-                        "RELOAD_RECIPE.WRITE_VERSION",
-                        Some(block_id),
-                        Some(instruction),
-                        None,
-                        "memory write has no MemorySSA definition",
-                    ));
-                };
-                set_current(&mut current, &mut memory_changes, variable, version);
-            }
-
             for (value, mut home) in preserved_homes {
-                let version = current_state_version(home.state.load, &current, memory_ssa)?;
-                if version == home.state.version {
+                let snapshot = memory_ssa.snapshot_at(memory_point.after, home.state.load)?;
+                if snapshot == home.state.snapshot {
                     continue;
                 }
-                home.state.version = version;
+                home.state.snapshot = snapshot;
                 index_store_home(&mut current_home_index, value, &home);
                 current_homes.entry(value).or_default().push(home);
                 home_pushes.push(value);
             }
 
             for (value, mut fragment) in preserved_fragments {
-                let version = current_state_version(fragment.state.load, &current, memory_ssa)?;
-                if version == fragment.state.version {
+                let snapshot = memory_ssa.snapshot_at(memory_point.after, fragment.state.load)?;
+                if snapshot == fragment.state.snapshot {
                     continue;
                 }
-                fragment.state.version = version;
+                fragment.state.snapshot = snapshot;
                 index_fragment_home(&mut current_fragment_index, value, &fragment);
                 current_fragments.entry(value).or_default().push(fragment);
                 fragment_pushes.push(value);
@@ -2420,7 +2519,7 @@ fn rename_memory_ssa(
                     let stored = StoreHome {
                         state: StateRecipe {
                             load: home.load,
-                            version: current_state_version(home.load, &current, memory_ssa)?,
+                            snapshot: memory_ssa.snapshot_at(memory_point.after, home.load)?,
                             observed_bits: home.observed_bits,
                         },
                         steps: home.steps.clone(),
@@ -2434,7 +2533,7 @@ fn rename_memory_ssa(
                 let stored = StateFragmentHome {
                     state: StateRecipe {
                         load: fragment.load,
-                        version: current_state_version(fragment.load, &current, memory_ssa)?,
+                        snapshot: memory_ssa.snapshot_at(memory_point.after, fragment.load)?,
                         observed_bits: fragment.observed_bits,
                     },
                     value_bit_offset: fragment.value_bit_offset,
@@ -2450,6 +2549,15 @@ fn rename_memory_ssa(
             }
         }
 
+        let block_exit = memory_ssa.points.block_exit(block).ok_or_else(|| {
+            ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_BLOCK_EXIT",
+                Some(block_id),
+                None,
+                None,
+                "MemorySSA has no block-exit coordinate",
+            )
+        })?;
         for &successor in &cfg.successors[block] {
             let successor_id = func.blocks[successor].id;
             for phi in &func.blocks[successor].phis {
@@ -2473,7 +2581,7 @@ fn rename_memory_ssa(
                     recipes,
                     pure_recipes,
                     &current_homes,
-                    &current,
+                    block_exit,
                     memory_ssa,
                 )? {
                     edge_recipes.insert(edge, recipe);
@@ -2484,22 +2592,16 @@ fn rename_memory_ssa(
                         *value,
                         canonical_bits,
                         &current_fragments,
-                        &current,
+                        block_exit,
                         memory_ssa,
                     )?
                 {
                     edge_fragment_recipes.insert(edge, recipe);
                 }
             }
-            for &(_, phi) in &memory_ssa.phis_by_block[successor] {
-                let variable = memory_ssa.phis[phi].variable;
-                let version = current_version(variable, &current, memory_ssa)?;
-                memory_ssa.phis[phi].inputs.push((block, version));
-            }
         }
 
         actions.push(Action::Exit {
-            memory_changes,
             home_pushes,
             fragment_pushes,
         });
@@ -2527,13 +2629,13 @@ pub(super) fn verify_expected_materialized_reloads(
     cfg: &NormalizedCfg,
     reloads: &[ExpectedMaterializedReload],
 ) -> Result<(), ReloadRecipeError> {
-    verify_expected_materialized_reloads_after_state_spills(func, cfg, reloads, &[])
+    verify_expected_materialized_reloads_after_state_spills(func, cfg, reloads, &[], &[])
 }
 
 /// Verify recipes after SSA reconstruction has inserted allocator-owned
 /// SimState stores.
 ///
-/// Pre-reconstruction `MemoryVersion::Write` ordinals name only the original
+/// Pre-reconstruction `SnapshotAccess::Write` ordinals name only the original
 /// MIR writes.  Final MIR ordinals also contain the supplied allocator-owned
 /// stores.  Treating those inserted stores as part of the original ordinal
 /// space would renumber every later, disjoint write and reject an unchanged
@@ -2546,8 +2648,10 @@ pub(super) fn verify_expected_materialized_reloads_after_state_spills(
     cfg: &NormalizedCfg,
     reloads: &[ExpectedMaterializedReload],
     inserted_state_writes: &[(BlockId, usize)],
+    memory_phi_factorings: &[MemoryPhiFactoring],
 ) -> Result<(), ReloadRecipeError> {
     let inserted_state_writes = validate_inserted_state_writes(func, inserted_state_writes)?;
+    let memory_phi_factorings = validate_memory_phi_factorings(func, cfg, memory_phi_factorings)?;
     let mut destinations = BTreeSet::new();
     for materialization in reloads {
         if !destinations.insert(materialization.reload) {
@@ -2617,6 +2721,7 @@ pub(super) fn verify_expected_materialized_reloads_after_state_spills(
             &materialization.expected,
             &actual,
             &inserted_state_writes,
+            &memory_phi_factorings,
         )?;
     }
     Ok(())
@@ -2678,6 +2783,94 @@ fn validate_inserted_state_writes(
     Ok(grouped)
 }
 
+fn validate_memory_phi_factorings<'a>(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    factorings: &'a [MemoryPhiFactoring],
+) -> Result<BTreeMap<BlockId, &'a MemoryPhiFactoring>, ReloadRecipeError> {
+    let mut validated = BTreeMap::new();
+    let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
+    for factoring in factorings {
+        if factoring.predecessors.is_empty()
+            || factoring
+                .predecessors
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_PREDECESSORS",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi predecessors must be nonempty, unique, and sorted",
+            ));
+        }
+        if validated.insert(factoring.block, factoring).is_some() {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_UNIQUE",
+                Some(factoring.block),
+                None,
+                None,
+                "more than one CFG factoring names the same block",
+            ));
+        }
+        let Some(&block) = cfg.block_index.get(&factoring.block) else {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_BLOCK",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi block is absent from final CFG",
+            ));
+        };
+        let Some(&successor) = cfg.block_index.get(&factoring.successor) else {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_SUCCESSOR",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi successor is absent from final CFG",
+            ));
+        };
+        if cfg.successors[block].as_slice() != [successor] {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_SUCCESSOR",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi block no longer has its recorded unique successor",
+            ));
+        }
+        let mut actual_predecessors = cfg.predecessors[block]
+            .iter()
+            .map(|&predecessor| func.blocks[predecessor].id)
+            .collect::<Vec<_>>();
+        actual_predecessors.sort_unstable();
+        if actual_predecessors.as_slice() != factoring.predecessors.as_ref() {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_PREDECESSORS",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi incoming edges changed after reconstruction",
+            ));
+        }
+        if func.blocks[block].insts.iter().any(|inst| {
+            analysis_effects(&memory_effect::writes(inst))
+                .any(|effect| effects_may_alias(effect, sim_state))
+        }) {
+            return Err(ReloadRecipeError::new(
+                "RELOAD_RECIPE.MEMORY_PHI_FACTORING_WRITE",
+                Some(factoring.block),
+                None,
+                None,
+                "factored MemoryPhi block contains a write which may alias SimState",
+            ));
+        }
+    }
+    Ok(validated)
+}
+
 fn verify_resolved_recipe_match(
     func: &MFunction,
     reload: VReg,
@@ -2686,6 +2879,7 @@ fn verify_resolved_recipe_match(
     original: &ResolvedRecipe,
     materialized: &ResolvedRecipe,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+    memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
 ) -> Result<(), ReloadRecipeError> {
     match (&original.base, &materialized.base) {
         (ResolvedBase::Constant(left), ResolvedBase::Constant(right)) if left == right => {}
@@ -2709,44 +2903,35 @@ fn verify_resolved_recipe_match(
                     ),
                 ));
             }
-            if !stable_state_version_matches(&left.version, &right.version, inserted_state_writes) {
-                let first_difference =
-                    std::iter::once((left.version.unknown_alias, right.version.unknown_alias))
-                        .chain(
-                            left.version
-                                .bytes
-                                .iter()
-                                .copied()
-                                .zip(right.version.bytes.iter().copied()),
-                        )
-                        .find(|(expected, actual)| {
-                            !stable_memory_version_matches(
-                                *expected,
-                                *actual,
-                                inserted_state_writes,
-                            )
-                        })
-                        .map(|(expected, actual)| {
-                            format!(
-                                "; expected_write={} actual_write={}",
-                                describe_expected_memory_version_write(
-                                    func,
-                                    expected,
-                                    inserted_state_writes,
-                                ),
-                                describe_memory_version_write(func, actual)
-                            )
-                        })
-                        .unwrap_or_default();
+            if !stable_memory_snapshot_matches(
+                &left.snapshot,
+                &right.snapshot,
+                inserted_state_writes,
+                memory_phi_factorings,
+            ) {
+                let first_difference = first_snapshot_difference(
+                    &left.snapshot,
+                    &right.snapshot,
+                    inserted_state_writes,
+                    memory_phi_factorings,
+                )
+                .map(|(expected, actual)| {
+                    format!(
+                        "; expected_write={} actual_write={}",
+                        describe_expected_snapshot_write(func, expected, inserted_state_writes),
+                        describe_snapshot_write(func, actual)
+                    )
+                })
+                .unwrap_or_default();
                 return Err(ReloadRecipeError::new(
-                    "RELOAD_RECIPE.STATE_VERSION_CURRENT",
+                    "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT",
                     None,
                     None,
                     Some(reload),
                     format!(
-                        "an overlapping or unknown state write changed the selected version {:?} to {:?}{}; planned_use={planned_use:?} final_load={}/i{}",
-                        left.version,
-                        right.version,
+                        "an overlapping or unknown state write changed the selected snapshot {:?} to {:?}{}; planned_use={planned_use:?} final_load={}/i{}",
+                        left.snapshot,
+                        right.snapshot,
                         first_difference,
                         final_location.block,
                         final_location.instruction
@@ -2782,82 +2967,190 @@ fn verify_resolved_recipe_match(
     Ok(())
 }
 
-fn stable_state_version_matches(
-    expected: &StateVersion,
-    actual: &StateVersion,
+fn stable_memory_snapshot_matches(
+    expected: &MemorySnapshot,
+    actual: &MemorySnapshot,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+    memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
 ) -> bool {
-    stable_memory_version_matches(
-        expected.unknown_alias,
-        actual.unknown_alias,
+    first_snapshot_difference(
+        expected,
+        actual,
         inserted_state_writes,
-    ) && expected.bytes.len() == actual.bytes.len()
-        && expected
-            .bytes
-            .iter()
-            .copied()
-            .zip(actual.bytes.iter().copied())
-            .all(|(expected, actual)| {
-                stable_memory_version_matches(expected, actual, inserted_state_writes)
-            })
+        memory_phi_factorings,
+    )
+    .is_none()
 }
 
-fn stable_memory_version_matches(
-    expected: MemoryVersion,
-    actual: MemoryVersion,
+fn first_snapshot_difference(
+    expected: &MemorySnapshot,
+    actual: &MemorySnapshot,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
-) -> bool {
-    match (expected, actual) {
-        (MemoryVersion::Entry(expected), MemoryVersion::Entry(actual)) => expected == actual,
-        (
-            MemoryVersion::Phi {
-                block: expected_block,
-                variable: expected_variable,
-            },
-            MemoryVersion::Phi {
-                block: actual_block,
-                variable: actual_variable,
-            },
-        ) => expected_block == actual_block && expected_variable == actual_variable,
-        (
-            MemoryVersion::Write {
-                block: expected_block,
-                ordinal: expected_ordinal,
-                variable: expected_variable,
-            },
-            MemoryVersion::Write {
-                block: actual_block,
-                ordinal: actual_ordinal,
-                variable: actual_variable,
-            },
-        ) if expected_block == actual_block && expected_variable == actual_variable => {
-            let inserted = inserted_state_writes
-                .get(&actual_block)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            match inserted.binary_search(&actual_ordinal) {
-                Ok(_) => false,
-                Err(insertions_before) => actual_ordinal
-                    .checked_sub(insertions_before)
-                    .is_some_and(|stable_ordinal| stable_ordinal == expected_ordinal),
+    memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
+) -> Option<(SnapshotAccess, SnapshotAccess)> {
+    let expected_phis = expected
+        .phis
+        .iter()
+        .map(|phi| (phi.block, phi))
+        .collect::<BTreeMap<_, _>>();
+    let actual_phis = actual
+        .phis
+        .iter()
+        .map(|phi| (phi.block, phi))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = vec![(expected.root, actual.root)];
+    let mut visited = BTreeSet::new();
+    while let Some((expected_access, actual_access)) = pending.pop() {
+        if !visited.insert((expected_access, actual_access)) {
+            continue;
+        }
+        match (expected_access, actual_access) {
+            (SnapshotAccess::LiveOnEntry, SnapshotAccess::LiveOnEntry) => {}
+            (
+                SnapshotAccess::Write {
+                    block: expected_block,
+                    ordinal: expected_ordinal,
+                },
+                SnapshotAccess::Write {
+                    block: actual_block,
+                    ordinal: actual_ordinal,
+                },
+            ) if expected_block == actual_block => {
+                let inserted = inserted_state_writes
+                    .get(&actual_block)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let matches = match inserted.binary_search(&actual_ordinal) {
+                    Ok(_) => false,
+                    Err(insertions_before) => actual_ordinal
+                        .checked_sub(insertions_before)
+                        .is_some_and(|stable_ordinal| stable_ordinal == expected_ordinal),
+                };
+                if !matches {
+                    return Some((expected_access, actual_access));
+                }
+            }
+            (SnapshotAccess::Phi(expected_block), SnapshotAccess::Phi(actual_block))
+                if expected_block == actual_block =>
+            {
+                let (Some(expected_phi), Some(actual_phi)) = (
+                    expected_phis.get(&expected_block),
+                    actual_phis.get(&actual_block),
+                ) else {
+                    return Some((expected_access, actual_access));
+                };
+                let Some(actual_inputs) = expand_factored_snapshot_inputs(
+                    actual_phi,
+                    &actual_phis,
+                    memory_phi_factorings,
+                ) else {
+                    return Some((expected_access, actual_access));
+                };
+                if expected_phi.inputs.len() != actual_inputs.len() {
+                    return Some((expected_access, actual_access));
+                }
+                for (
+                    &(expected_predecessor, expected_input),
+                    &(actual_predecessor, actual_input),
+                ) in expected_phi.inputs.iter().zip(actual_inputs.iter())
+                {
+                    if expected_predecessor != actual_predecessor {
+                        return Some((expected_access, actual_access));
+                    }
+                    pending.push((expected_input, actual_input));
+                }
+            }
+            _ => return Some((expected_access, actual_access)),
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SnapshotInputFrame {
+    Enter {
+        parent: BlockId,
+        predecessor: BlockId,
+        access: SnapshotAccess,
+    },
+    Exit(BlockId),
+}
+
+/// Inline only MemoryPhis backed by a validated reconstruction factoring.
+/// Ordinary MemoryPhis remain structural proof nodes, so changing an original
+/// incoming write or swapping two original paths is still rejected.
+fn expand_factored_snapshot_inputs(
+    root: &SnapshotPhi,
+    actual_phis: &BTreeMap<BlockId, &SnapshotPhi>,
+    factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
+) -> Option<Vec<(BlockId, SnapshotAccess)>> {
+    let mut frames = root
+        .inputs
+        .iter()
+        .rev()
+        .map(|&(predecessor, access)| SnapshotInputFrame::Enter {
+            parent: root.block,
+            predecessor,
+            access,
+        })
+        .collect::<Vec<_>>();
+    let mut active = BTreeSet::new();
+    let mut expanded = Vec::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            SnapshotInputFrame::Enter {
+                parent,
+                predecessor,
+                access,
+            } => {
+                let SnapshotAccess::Phi(phi_block) = access else {
+                    expanded.push((predecessor, access));
+                    continue;
+                };
+                let Some(factoring) = factorings.get(&phi_block) else {
+                    expanded.push((predecessor, access));
+                    continue;
+                };
+                if phi_block != predecessor || factoring.successor != parent {
+                    return None;
+                }
+                let phi = actual_phis.get(&phi_block)?;
+                if phi
+                    .inputs
+                    .iter()
+                    .map(|&(input_predecessor, _)| input_predecessor)
+                    .ne(factoring.predecessors.iter().copied())
+                    || !active.insert(phi_block)
+                {
+                    return None;
+                }
+                frames.push(SnapshotInputFrame::Exit(phi_block));
+                frames.extend(phi.inputs.iter().rev().map(|&(predecessor, access)| {
+                    SnapshotInputFrame::Enter {
+                        parent: phi_block,
+                        predecessor,
+                        access,
+                    }
+                }));
+            }
+            SnapshotInputFrame::Exit(block) => {
+                if !active.remove(&block) {
+                    return None;
+                }
             }
         }
-        _ => false,
     }
+    expanded.sort_unstable_by_key(|&(predecessor, access)| (predecessor, access));
+    Some(expanded)
 }
 
-fn describe_expected_memory_version_write(
+fn describe_expected_snapshot_write(
     func: &MFunction,
-    version: MemoryVersion,
+    access: SnapshotAccess,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
 ) -> String {
-    let MemoryVersion::Write {
-        block,
-        ordinal,
-        variable,
-    } = version
-    else {
-        return format!("{version:?}");
+    let SnapshotAccess::Write { block, ordinal } = access else {
+        return format!("{access:?}");
     };
     let mut final_ordinal = ordinal;
     for &inserted in inserted_state_writes
@@ -2869,26 +3162,25 @@ fn describe_expected_memory_version_write(
             break;
         }
         let Some(next) = final_ordinal.checked_add(1) else {
-            return format!("{version:?} (final ordinal overflow)");
+            return format!("{access:?} (final ordinal overflow)");
         };
         final_ordinal = next;
     }
-    describe_memory_version_write(
+    describe_snapshot_write(
         func,
-        MemoryVersion::Write {
+        SnapshotAccess::Write {
             block,
             ordinal: final_ordinal,
-            variable,
         },
     )
 }
 
-fn describe_memory_version_write(func: &MFunction, version: MemoryVersion) -> String {
-    let MemoryVersion::Write { block, ordinal, .. } = version else {
-        return format!("{version:?}");
+fn describe_snapshot_write(func: &MFunction, access: SnapshotAccess) -> String {
+    let SnapshotAccess::Write { block, ordinal } = access else {
+        return format!("{access:?}");
     };
     let Some(owner) = func.blocks.iter().find(|owner| owner.id == block) else {
-        return format!("{version:?} (block absent from final MIR)");
+        return format!("{access:?} (block absent from final MIR)");
     };
     let located = owner
         .insts
@@ -2903,63 +3195,9 @@ fn describe_memory_version_write(func: &MFunction, version: MemoryVersion) -> St
         })
         .nth(ordinal);
     located.map_or_else(
-        || format!("{version:?} (ordinal absent from final MIR)"),
+        || format!("{access:?} (ordinal absent from final MIR)"),
         |(instruction, inst)| format!("{block}/i{instruction} {inst:?}"),
     )
-}
-
-fn set_current(
-    current: &mut BTreeMap<MemoryVariable, MemoryVersion>,
-    changes: &mut Vec<(MemoryVariable, Option<MemoryVersion>)>,
-    variable: MemoryVariable,
-    version: MemoryVersion,
-) {
-    let previous = current.insert(variable, version);
-    changes.push((variable, previous));
-}
-
-fn current_version(
-    variable: MemoryVariable,
-    current: &BTreeMap<MemoryVariable, MemoryVersion>,
-    memory_ssa: &MemorySsa,
-) -> Result<MemoryVersion, ReloadRecipeError> {
-    current
-        .get(&variable)
-        .copied()
-        .or_else(|| memory_ssa.entry_versions.get(&variable).copied())
-        .ok_or_else(|| {
-            ReloadRecipeError::new(
-                "RELOAD_RECIPE.ENTRY_VERSION",
-                None,
-                None,
-                None,
-                format!("MemorySSA variable {variable:?} has no entry definition"),
-            )
-        })
-}
-
-fn current_state_version(
-    load: StateLoad,
-    current: &BTreeMap<MemoryVariable, MemoryVersion>,
-    memory_ssa: &MemorySsa,
-) -> Result<StateVersion, ReloadRecipeError> {
-    let unknown_alias = current_version(MemoryVariable::UnknownAlias, current, memory_ssa)?;
-    let Some(bytes) = load.bytes() else {
-        return Err(ReloadRecipeError::new(
-            "RELOAD_RECIPE.STATE_RANGE",
-            None,
-            None,
-            None,
-            "state load byte range overflows i64",
-        ));
-    };
-    let bytes = bytes
-        .map(|byte| current_version(MemoryVariable::Byte(byte), current, memory_ssa))
-        .collect::<Result<Box<[_]>, _>>()?;
-    Ok(StateVersion {
-        unknown_alias,
-        bytes,
-    })
 }
 
 fn available_recipe(
@@ -2967,8 +3205,8 @@ fn available_recipe(
     recipes: &[ReloadRecipe],
     pure_recipes: &[PureRecipe],
     current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
-    current: &BTreeMap<MemoryVariable, MemoryVersion>,
-    memory_ssa: &MemorySsa,
+    at: MemoryAccessId,
+    memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
     let mut current_value = value;
     let mut reverse_steps = Vec::<PureStep>::new();
@@ -2989,13 +3227,9 @@ fn available_recipe(
         // stored to SimState after it is computed.  Walking through the pure
         // expression first would lose that stronger, one-load home and try to
         // reconstruct the expression from its source instead.
-        if let Some(recipe) = available_store_home(
-            current_value,
-            &reverse_steps,
-            current_homes,
-            current,
-            memory_ssa,
-        )? {
+        if let Some(recipe) =
+            available_store_home(current_value, &reverse_steps, current_homes, at, memory_ssa)?
+        {
             return Ok(Some(recipe));
         }
 
@@ -3008,12 +3242,12 @@ fn available_recipe(
                 }));
             }
             Some(ReloadRecipe::StateVersion(recipe)) => {
-                if current_state_version(recipe.load, current, memory_ssa)? != recipe.version {
+                if memory_ssa.snapshot_at(at, recipe.load)? != recipe.snapshot {
                     return available_store_home(
                         current_value,
                         &reverse_steps,
                         current_homes,
-                        current,
+                        at,
                         memory_ssa,
                     );
                 }
@@ -3041,7 +3275,7 @@ fn available_recipe(
                     current_value,
                     &reverse_steps,
                     current_homes,
-                    current,
+                    at,
                     memory_ssa,
                 );
             }
@@ -3062,14 +3296,14 @@ fn available_store_home(
     value: VReg,
     reverse_steps: &[PureStep],
     current_homes: &BTreeMap<VReg, Vec<StoreHome>>,
-    current: &BTreeMap<MemoryVariable, MemoryVersion>,
-    memory_ssa: &MemorySsa,
+    at: MemoryAccessId,
+    memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<ResolvedRecipe>, ReloadRecipeError> {
     let Some(homes) = current_homes.get(&value) else {
         return Ok(None);
     };
     for home in homes.iter().rev() {
-        if current_state_version(home.state.load, current, memory_ssa)? == home.state.version {
+        if memory_ssa.snapshot_at(at, home.state.load)? == home.state.snapshot {
             let mut steps = home.steps.clone();
             let mut suffix = reverse_steps.to_vec();
             suffix.reverse();
@@ -3105,8 +3339,8 @@ fn available_fragment_recipe(
     value: VReg,
     canonical_bits: &[u8],
     current_fragments: &BTreeMap<VReg, Vec<StateFragmentHome>>,
-    current: &BTreeMap<MemoryVariable, MemoryVersion>,
-    memory_ssa: &MemorySsa,
+    at: MemoryAccessId,
+    memory_ssa: &mut ReloadMemorySsa,
 ) -> Result<Option<CompositeStateRecipe>, ReloadRecipeError> {
     let Some(&required_bits) = canonical_bits.get(value.0 as usize) else {
         return Err(ReloadRecipeError::new(
@@ -3132,7 +3366,7 @@ fn available_fragment_recipe(
         if home.value_bit_offset >= required_bits || end <= home.value_bit_offset {
             continue;
         }
-        if current_state_version(home.state.load, current, memory_ssa)? == home.state.version {
+        if memory_ssa.snapshot_at(at, home.state.load)? == home.state.snapshot {
             available.push(home);
         }
     }
@@ -3205,247 +3439,6 @@ fn available_fragment_recipe(
     Ok(Some(CompositeStateRecipe { fragments }))
 }
 
-/// Collapse MemorySSA phis whose complete SCC has one external version.
-///
-/// Iterated dominance-frontier placement is intentionally structural and can
-/// create a wrapper phi after CFG tail merging even when every incoming edge
-/// carries the same version.  Treating that wrapper as a new state value would
-/// reject a valid reload moved from those edges into their shared block.  SCC
-/// condensation handles loop phis without recursion: a component is trivial
-/// only when all of its external operands canonicalize to one version.
-fn trivial_memory_phi_aliases(memory_ssa: &MemorySsa) -> HashMap<MemoryVersion, MemoryVersion> {
-    let count = memory_ssa.phis.len();
-    if count == 0 {
-        return HashMap::new();
-    }
-    let phi_index = memory_ssa
-        .phis
-        .iter()
-        .enumerate()
-        .map(|(index, phi)| (phi.version, index))
-        .collect::<HashMap<_, _>>();
-    let mut dependencies = vec![Vec::<usize>::new(); count];
-    let mut users = vec![Vec::<usize>::new(); count];
-    for (phi, node) in memory_ssa.phis.iter().enumerate() {
-        let inputs = node
-            .inputs
-            .iter()
-            .filter_map(|(_, version)| phi_index.get(version).copied())
-            .collect::<BTreeSet<_>>();
-        dependencies[phi].extend(inputs.iter().copied());
-        for input in inputs {
-            users[input].push(phi);
-        }
-    }
-
-    let mut visited = vec![false; count];
-    let mut postorder = Vec::with_capacity(count);
-    for root in 0..count {
-        if visited[root] {
-            continue;
-        }
-        let mut stack = vec![(root, false)];
-        while let Some((phi, expanded)) = stack.pop() {
-            if expanded {
-                postorder.push(phi);
-                continue;
-            }
-            if std::mem::replace(&mut visited[phi], true) {
-                continue;
-            }
-            stack.push((phi, true));
-            stack.extend(
-                dependencies[phi]
-                    .iter()
-                    .rev()
-                    .copied()
-                    .map(|dependency| (dependency, false)),
-            );
-        }
-    }
-
-    let mut component_of = vec![usize::MAX; count];
-    let mut components = Vec::<Vec<usize>>::new();
-    for root in postorder.into_iter().rev() {
-        if component_of[root] != usize::MAX {
-            continue;
-        }
-        let component = components.len();
-        let mut members = Vec::new();
-        let mut stack = vec![root];
-        component_of[root] = component;
-        while let Some(phi) = stack.pop() {
-            members.push(phi);
-            for &user in &users[phi] {
-                if component_of[user] == usize::MAX {
-                    component_of[user] = component;
-                    stack.push(user);
-                }
-            }
-        }
-        members.sort_unstable();
-        components.push(members);
-    }
-
-    let mut component_dependencies = vec![BTreeSet::<usize>::new(); components.len()];
-    let mut component_users = vec![BTreeSet::<usize>::new(); components.len()];
-    for phi in 0..count {
-        let component = component_of[phi];
-        for &dependency in &dependencies[phi] {
-            let dependency = component_of[dependency];
-            if dependency != component && component_dependencies[component].insert(dependency) {
-                component_users[dependency].insert(component);
-            }
-        }
-    }
-    let mut pending = component_dependencies
-        .iter()
-        .map(BTreeSet::len)
-        .collect::<Vec<_>>();
-    let mut ready = pending
-        .iter()
-        .enumerate()
-        .filter_map(|(component, pending)| (*pending == 0).then_some(component))
-        .collect::<BTreeSet<_>>();
-    let mut aliases = HashMap::<MemoryVersion, MemoryVersion>::new();
-    while let Some(component) = ready.pop_first() {
-        let mut external = BTreeSet::<MemoryVersion>::new();
-        for &phi in &components[component] {
-            for &(_, version) in &memory_ssa.phis[phi].inputs {
-                if phi_index
-                    .get(&version)
-                    .is_some_and(|input| component_of[*input] == component)
-                {
-                    continue;
-                }
-                external.insert(canonical_memory_version(version, &aliases));
-            }
-        }
-        let representative = if external.len() == 1 {
-            external.first().copied()
-        } else if external.is_empty() {
-            components[component]
-                .iter()
-                .map(|phi| memory_ssa.phis[*phi].version)
-                .min()
-        } else {
-            None
-        };
-        if let Some(representative) = representative {
-            for &phi in &components[component] {
-                let version = memory_ssa.phis[phi].version;
-                if version != representative {
-                    aliases.insert(version, representative);
-                }
-            }
-        }
-        for &user in &component_users[component] {
-            pending[user] -= 1;
-            if pending[user] == 0 {
-                ready.insert(user);
-            }
-        }
-    }
-    aliases
-}
-
-fn canonical_memory_version(
-    mut version: MemoryVersion,
-    aliases: &HashMap<MemoryVersion, MemoryVersion>,
-) -> MemoryVersion {
-    while let Some(&canonical) = aliases.get(&version) {
-        version = canonical;
-    }
-    version
-}
-
-fn canonicalize_state_recipe(
-    recipe: &mut StateRecipe,
-    aliases: &HashMap<MemoryVersion, MemoryVersion>,
-) {
-    recipe.version.unknown_alias = canonical_memory_version(recipe.version.unknown_alias, aliases);
-    for version in &mut recipe.version.bytes {
-        *version = canonical_memory_version(*version, aliases);
-    }
-}
-
-fn canonicalize_resolved_recipe(
-    recipe: &mut ResolvedRecipe,
-    aliases: &HashMap<MemoryVersion, MemoryVersion>,
-) {
-    if let ResolvedBase::State(state) = &mut recipe.base {
-        canonicalize_state_recipe(state, aliases);
-    }
-}
-
-fn canonicalize_reload_recipes(
-    recipes: &mut [ReloadRecipe],
-    point_recipes: &mut BTreeMap<PointUse, ResolvedRecipe>,
-    edge_recipes: &mut BTreeMap<EdgeUse, ResolvedRecipe>,
-    aliases: &HashMap<MemoryVersion, MemoryVersion>,
-) {
-    if aliases.is_empty() {
-        return;
-    }
-    for recipe in recipes {
-        if let ReloadRecipe::StateVersion(state) = recipe {
-            canonicalize_state_recipe(state, aliases);
-        }
-    }
-    for recipe in point_recipes.values_mut() {
-        canonicalize_resolved_recipe(recipe, aliases);
-    }
-    for recipe in edge_recipes.values_mut() {
-        canonicalize_resolved_recipe(recipe, aliases);
-    }
-}
-
-fn canonicalize_fragment_recipes(
-    point_recipes: &mut BTreeMap<PointUse, CompositeStateRecipe>,
-    edge_recipes: &mut BTreeMap<EdgeUse, CompositeStateRecipe>,
-    aliases: &HashMap<MemoryVersion, MemoryVersion>,
-) {
-    if aliases.is_empty() {
-        return;
-    }
-    for recipe in point_recipes.values_mut().chain(edge_recipes.values_mut()) {
-        for fragment in &mut recipe.fragments {
-            canonicalize_state_recipe(&mut fragment.state, aliases);
-        }
-    }
-}
-
-fn verify_memory_phis(
-    func: &MFunction,
-    cfg: &NormalizedCfg,
-    memory_ssa: &MemorySsa,
-) -> Result<(), ReloadRecipeError> {
-    for phi in &memory_ssa.phis {
-        let expected = cfg.predecessors[phi.block]
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let actual = phi
-            .inputs
-            .iter()
-            .map(|(predecessor, _)| *predecessor)
-            .collect::<BTreeSet<_>>();
-        if expected != actual || phi.inputs.len() != expected.len() {
-            return Err(ReloadRecipeError::new(
-                "RELOAD_RECIPE.PHI_INPUTS",
-                Some(func.blocks[phi.block].id),
-                None,
-                None,
-                format!(
-                    "MemorySSA phi for {:?} has predecessor inputs {actual:?}, expected {expected:?}",
-                    phi.variable
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3462,72 +3455,6 @@ mod tests {
             MFunction::new(vregs, vec![SpillDesc::transient(); count]),
             values,
         )
-    }
-
-    #[test]
-    fn trivial_memory_phi_aliases_cover_wrappers_and_cycles() {
-        let variable = MemoryVariable::Byte(80);
-        let entry = MemoryVersion::Entry(variable);
-        let write = MemoryVersion::Write {
-            block: BlockId(0),
-            ordinal: 0,
-            variable,
-        };
-        let nontrivial = MemoryVersion::Phi {
-            block: BlockId(1),
-            variable,
-        };
-        let wrapper = MemoryVersion::Phi {
-            block: BlockId(2),
-            variable,
-        };
-        let cycle_left = MemoryVersion::Phi {
-            block: BlockId(3),
-            variable,
-        };
-        let cycle_right = MemoryVersion::Phi {
-            block: BlockId(4),
-            variable,
-        };
-        let memory_ssa = MemorySsa {
-            tracked_bytes: BTreeSet::new(),
-            entry_versions: BTreeMap::new(),
-            write_versions: HashMap::new(),
-            phis: vec![
-                MemoryPhi {
-                    block: 1,
-                    variable,
-                    version: nontrivial,
-                    inputs: vec![(0, entry), (1, write)],
-                },
-                MemoryPhi {
-                    block: 2,
-                    variable,
-                    version: wrapper,
-                    inputs: vec![(0, nontrivial), (1, nontrivial)],
-                },
-                MemoryPhi {
-                    block: 3,
-                    variable,
-                    version: cycle_left,
-                    inputs: vec![(0, entry), (1, cycle_right)],
-                },
-                MemoryPhi {
-                    block: 4,
-                    variable,
-                    version: cycle_right,
-                    inputs: vec![(0, cycle_left)],
-                },
-            ],
-            phis_by_block: Vec::new(),
-        };
-
-        let aliases = trivial_memory_phi_aliases(&memory_ssa);
-
-        assert!(!aliases.contains_key(&nontrivial));
-        assert_eq!(aliases.get(&wrapper), Some(&nontrivial));
-        assert_eq!(aliases.get(&cycle_left), Some(&entry));
-        assert_eq!(aliases.get(&cycle_right), Some(&entry));
     }
 
     fn analyze_function(mut func: MFunction) -> (MFunction, NormalizedCfg, ReloadRecipeAnalysis) {
@@ -5121,6 +5048,7 @@ mod tests {
                 planned_use: None,
             }],
             &inserted_writes,
+            &[],
         )
         .unwrap();
     }
@@ -5177,9 +5105,176 @@ mod tests {
                 planned_use: None,
             }],
             &[(BlockId(0), 1)],
+            &[],
         )
         .unwrap_err();
-        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_VERSION_CURRENT");
+        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT");
+    }
+
+    #[test]
+    fn snapshot_comparison_accepts_only_proven_write_free_phi_factoring() {
+        let write = |block| SnapshotAccess::Write {
+            block: BlockId(block),
+            ordinal: 0,
+        };
+        let expected = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![SnapshotPhi {
+                block: BlockId(10),
+                inputs: vec![
+                    (BlockId(1), write(1)),
+                    (BlockId(2), write(2)),
+                    (BlockId(3), write(3)),
+                ]
+                .into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+        };
+        let actual = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![
+                SnapshotPhi {
+                    block: BlockId(10),
+                    inputs: vec![
+                        (BlockId(3), write(3)),
+                        (BlockId(20), SnapshotAccess::Phi(BlockId(20))),
+                    ]
+                    .into_boxed_slice(),
+                },
+                SnapshotPhi {
+                    block: BlockId(20),
+                    inputs: vec![(BlockId(1), write(1)), (BlockId(2), write(2))].into_boxed_slice(),
+                },
+            ]
+            .into_boxed_slice(),
+        };
+        let inserted_writes = BTreeMap::new();
+        assert!(!stable_memory_snapshot_matches(
+            &expected,
+            &actual,
+            &inserted_writes,
+            &BTreeMap::new(),
+        ));
+
+        let factoring = MemoryPhiFactoring {
+            block: BlockId(20),
+            successor: BlockId(10),
+            predecessors: vec![BlockId(1), BlockId(2)].into_boxed_slice(),
+        };
+        let factorings = BTreeMap::from([(factoring.block, &factoring)]);
+        assert!(stable_memory_snapshot_matches(
+            &expected,
+            &actual,
+            &inserted_writes,
+            &factorings,
+        ));
+
+        let mut changed = actual.clone();
+        changed.phis[1].inputs[1].1 = write(4);
+        assert!(!stable_memory_snapshot_matches(
+            &expected,
+            &changed,
+            &inserted_writes,
+            &factorings,
+        ));
+    }
+
+    #[test]
+    fn independent_verifier_rejects_changed_input_of_same_memory_phi() {
+        let (mut func, values) = function_with_values(5);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: values[1],
+            value: 11,
+        });
+        entry.push(MInst::LoadImm {
+            dst: values[2],
+            value: 22,
+        });
+        entry.push(MInst::Branch {
+            cond: values[0],
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[1],
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: values[2],
+            size: OpSize::S64,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+
+        let mut join = MBlock::new(BlockId(3));
+        join.push(MInst::Load {
+            dst: values[3],
+            base: BaseReg::SimState,
+            offset: 40,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Mov {
+            dst: values[4],
+            src: values[3],
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+
+        let (func, cfg, analysis) = analyze_function(func);
+        let expected = analysis.resolved_recipe(values[3]).unwrap().unwrap();
+        assert!(matches!(
+            &expected.base,
+            ResolvedBase::State(StateRecipe {
+                snapshot: MemorySnapshot {
+                    root: SnapshotAccess::Phi(BlockId(3)),
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let mut final_func = func.clone();
+        let left = final_func
+            .blocks
+            .iter()
+            .position(|block| block.id == BlockId(1))
+            .unwrap();
+        final_func.blocks[left].insts.insert(
+            1,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 40,
+                src: values[1],
+                size: OpSize::S64,
+            },
+        );
+        let error = verify_expected_materialized_reloads_after_state_spills(
+            &final_func,
+            &cfg,
+            &[ExpectedMaterializedReload {
+                reload: values[3],
+                expected,
+                planned_use: None,
+            }],
+            &[(BlockId(1), 1)],
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT");
     }
 
     #[test]
@@ -5223,7 +5318,7 @@ mod tests {
             }],
         )
         .unwrap_err();
-        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_VERSION_CURRENT");
+        assert_eq!(error.rule, "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT");
     }
 
     #[test]

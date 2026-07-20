@@ -1,21 +1,49 @@
 //! Sparse late forwarding for direct SimState round trips.
 //!
-//! Overlapping 8/16/32/64-bit accesses are partitioned into non-overlapping
-//! machine cells only to prove exact reaching definitions. Executable MIR is
-//! not converted to whole-cell SSA. After pressure scheduling, exact
-//! same-shaped loads reached by one store become copy uses of one canonical
-//! store value. Register allocation can then keep that concrete use cluster
-//! resident or split it back to MemorySSA-proved state reloads at the original
-//! load points. Narrow-store normalization is paid once per store version,
-//! never once per forwarded load.
+//! Physical byte ranges and reaching memory definitions are provided by the
+//! IR-independent celox-analysis MemorySSA. This adapter only maps MIR effects
+//! and selects exact same-shaped Store-to-Load clusters.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::backend::native::memory_effect::{self, UnknownMemory};
+use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
+use celox_analysis::memory_ssa::{
+    self, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryClobber,
+};
+
+use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
 use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, OpSize, SpillDesc, VReg};
 
 use super::cfg::NormalizedCfg;
+
+type ProgramPoint = (usize, usize);
+
+#[derive(Debug)]
+struct ForwardMemoryAnalysis {
+    memory: ForwardMemoryState,
+}
+
+#[derive(Debug)]
+struct ForwardMemoryState {
+    reads: Vec<ForwardMemoryRead>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForwardMemoryRead {
+    instruction: ProgramPoint,
+    read_index: usize,
+    effect: MemoryEffect<MemoryObject>,
+    clobber: ForwardClobber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardClobber {
+    LiveOnEntry,
+    Definition(ProgramPoint),
+    Phi(usize),
+    Indeterminate,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StatePromotionError {
@@ -56,626 +84,19 @@ impl fmt::Display for StatePromotionError {
 
 impl std::error::Error for StatePromotionError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct CellId(usize);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct VersionId(usize);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cell {
-    id: CellId,
-    offset: i32,
-    size: OpSize,
-}
-
-impl Cell {
-    fn start(self) -> i64 {
-        i64::from(self.offset)
-    }
-
-    fn end(self) -> i64 {
-        self.start() + i64::from(self.size.bytes())
+fn exact_location(base: BaseReg, offset: i32, size: OpSize) -> MemoryLocation<MemoryObject> {
+    MemoryLocation {
+        object: MemoryObject::direct(base),
+        offset: i64::from(offset),
+        byte_len: size.bytes() as usize,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RawAccessKind {
-    Load { destination: VReg },
-    Store { source: VReg },
-    Kill,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RawAccess {
-    block: usize,
-    instruction: usize,
-    start: i64,
-    end: i64,
-    kind: RawAccessKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Component {
-    start: i64,
-    end: i64,
-    has_store: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AccessPart {
-    cell: CellId,
-    cell_byte_offset: usize,
-    access_byte_offset: usize,
-    byte_width: usize,
-    reaching: VersionId,
-    definition: Option<VersionId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Access {
-    block: usize,
-    instruction: usize,
-    kind: RawAccessKind,
-    parts: Vec<AccessPart>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VersionKind {
-    LiveOnEntry,
-    Store {
-        block: usize,
-        instruction: usize,
-    },
-    Kill {
-        block: usize,
-        instruction: usize,
-    },
-    Phi {
-        block: usize,
-        incoming: Vec<(usize, VersionId)>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Version {
-    id: VersionId,
-    cell: CellId,
-    kind: VersionKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromotionPlan {
-    cells: Vec<Cell>,
-    versions: Vec<Version>,
-    accesses: Vec<Access>,
-    phis_by_block: Vec<Vec<(CellId, VersionId)>>,
-    barriers: BarrierSsa,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct BarrierVersionId(usize);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BarrierVersionKind {
-    LiveOnEntry,
-    Kill {
-        block: usize,
-        instruction: usize,
-    },
-    Phi {
-        block: usize,
-        incoming: Vec<(usize, BarrierVersionId)>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BarrierVersion {
-    id: BarrierVersionId,
-    kind: BarrierVersionKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct BarrierSsa {
-    versions: Vec<BarrierVersion>,
-    observed: BTreeMap<(usize, usize), BarrierVersionId>,
-    phis_by_block: Vec<Vec<BarrierVersionId>>,
-}
-
-fn direct_state_access(inst: &MInst) -> Option<(i64, i64, RawAccessKind)> {
-    let (offset, size, kind) = match inst {
-        MInst::Load {
-            dst,
-            base: BaseReg::SimState,
-            offset,
-            size,
-        } => (*offset, *size, RawAccessKind::Load { destination: *dst }),
-        MInst::Store {
-            base: BaseReg::SimState,
-            offset,
-            src,
-            size,
-        } => (*offset, *size, RawAccessKind::Store { source: *src }),
-        _ => return None,
-    };
-    let start = i64::from(offset);
-    let end = start.checked_add(i64::from(size.bytes()))?;
-    Some((start, end, kind))
-}
-
-fn op_size(bytes: usize) -> Option<OpSize> {
-    match bytes {
-        1 => Some(OpSize::S8),
-        2 => Some(OpSize::S16),
-        4 => Some(OpSize::S32),
-        8 => Some(OpSize::S64),
-        _ => None,
-    }
-}
-
-fn component_for_range(components: &[Component], start: i64, end: i64) -> Option<usize> {
-    let index = components.partition_point(|component| component.end <= start);
-    components
-        .get(index)
-        .filter(|component| component.start <= start && end <= component.end)
-        .map(|_| index)
-}
-
-fn discover_components(
-    func: &MFunction,
-) -> Result<(Vec<Component>, Vec<RawAccess>, Vec<(usize, usize)>), StatePromotionError> {
-    let mut raw = Vec::new();
-    let mut intervals = Vec::<(i64, i64, bool)>::new();
-    for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let Some((start, end, kind)) = direct_state_access(inst) else {
-                continue;
-            };
-            if start < 0 || start >= end {
-                return Err(StatePromotionError::new(
-                    "STATE_PROMOTE.DIRECT_RANGE",
-                    Some(mir_block.id),
-                    Some(instruction),
-                    "direct SimState access has an invalid physical range",
-                ));
-            }
-            let store = matches!(kind, RawAccessKind::Store { .. });
-            intervals.push((start, end, store));
-            raw.push(RawAccess {
-                block,
-                instruction,
-                start,
-                end,
-                kind,
-            });
-        }
-    }
-    intervals.sort_unstable_by_key(|&(start, end, store)| (start, end, store));
-    let mut components = Vec::<Component>::new();
-    for (start, end, store) in intervals {
-        if let Some(last) = components.last_mut()
-            && start < last.end
-        {
-            last.end = last.end.max(end);
-            last.has_store |= store;
-        } else {
-            components.push(Component {
-                start,
-                end,
-                has_store: store,
-            });
-        }
-    }
-
-    // Non-direct writes are MemorySSA definitions at their real program
-    // points.  They do not blacklist an address range for the whole function:
-    // a preceding or non-reaching indexed write cannot invalidate an exact
-    // store-to-load chain elsewhere in the CFG.
-    let mut unknown_kills = Vec::<(usize, usize)>::new();
-    for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            if direct_state_access(inst).is_some() {
-                continue;
-            }
-            let effects = memory_effect::writes(inst);
-            if matches!(
-                effects.unknown_memory(),
-                Some(UnknownMemory::Direct(BaseReg::SimState))
-            ) {
-                unknown_kills.push((block, instruction));
-            }
-            for range in effects
-                .ranges()
-                .filter(|range| range.base == BaseReg::SimState)
-            {
-                let Some(end) = range.end() else {
-                    return Err(StatePromotionError::new(
-                        "STATE_PROMOTE.KILL_RANGE",
-                        Some(mir_block.id),
-                        Some(instruction),
-                        "known SimState write range exceeds the address domain",
-                    ));
-                };
-                let mut component =
-                    components.partition_point(|component| component.end <= range.offset);
-                while let Some(overlap) = components.get(component) {
-                    if overlap.start >= end {
-                        break;
-                    }
-                    if overlap.has_store {
-                        raw.push(RawAccess {
-                            block,
-                            instruction,
-                            start: overlap.start.max(range.offset),
-                            end: overlap.end.min(end),
-                            kind: RawAccessKind::Kill,
-                        });
-                    }
-                    component += 1;
-                }
-            }
-        }
-    }
-    Ok((components, raw, unknown_kills))
-}
-
-fn build_cells(
-    components: &[Component],
-) -> Result<(Vec<Cell>, Vec<Vec<CellId>>), StatePromotionError> {
-    let mut cells = Vec::new();
-    let mut by_component = vec![Vec::new(); components.len()];
-    for (component_index, component) in components.iter().enumerate() {
-        if !component.has_store {
-            continue;
-        }
-        let mut cursor = component.start;
-        while cursor < component.end {
-            let remaining = usize::try_from(component.end - cursor).map_err(|_| {
-                StatePromotionError::new(
-                    "STATE_PROMOTE.COMPONENT_RANGE",
-                    None,
-                    None,
-                    "physical component length does not fit usize",
-                )
-            })?;
-            let bytes = if remaining >= 8 {
-                8
-            } else if remaining >= 4 {
-                4
-            } else if remaining >= 2 {
-                2
-            } else {
-                1
-            };
-            let offset = i32::try_from(cursor).map_err(|_| {
-                StatePromotionError::new(
-                    "STATE_PROMOTE.CELL_OFFSET",
-                    None,
-                    None,
-                    "promoted physical offset does not fit MIR i32",
-                )
-            })?;
-            let id = CellId(cells.len());
-            cells.push(Cell {
-                id,
-                offset,
-                size: op_size(bytes).expect("cell partition uses native powers of two"),
-            });
-            by_component[component_index].push(id);
-            cursor += i64::try_from(bytes).expect("native cell size fits i64");
-        }
-    }
-    Ok((cells, by_component))
-}
-
-fn map_accesses(
-    components: &[Component],
-    raw: &[RawAccess],
-    cells: &[Cell],
-    cells_by_component: &[Vec<CellId>],
-) -> Result<Vec<Access>, StatePromotionError> {
-    let mut accesses = Vec::new();
-    for access in raw {
-        let Some(component) = component_for_range(components, access.start, access.end) else {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.ACCESS_COMPONENT",
-                None,
-                None,
-                "direct state access is not covered by its overlap component",
-            ));
-        };
-        if !components[component].has_store {
-            continue;
-        }
-        let mut parts = Vec::new();
-        let mut cursor = access.start;
-        for &cell_id in &cells_by_component[component] {
-            let cell = cells[cell_id.0];
-            let start = cursor.max(cell.start());
-            let end = access.end.min(cell.end());
-            if start >= end {
-                continue;
-            }
-            if start != cursor {
-                return Err(StatePromotionError::new(
-                    "STATE_PROMOTE.ACCESS_COVERAGE",
-                    None,
-                    None,
-                    "promoted cells leave a hole in a direct access",
-                ));
-            }
-            parts.push(AccessPart {
-                cell: cell_id,
-                cell_byte_offset: usize::try_from(start - cell.start()).map_err(|_| {
-                    StatePromotionError::new(
-                        "STATE_PROMOTE.ACCESS_RANGE",
-                        None,
-                        None,
-                        "cell-relative byte offset does not fit usize",
-                    )
-                })?,
-                access_byte_offset: usize::try_from(start - access.start).map_err(|_| {
-                    StatePromotionError::new(
-                        "STATE_PROMOTE.ACCESS_RANGE",
-                        None,
-                        None,
-                        "access-relative byte offset does not fit usize",
-                    )
-                })?,
-                byte_width: usize::try_from(end - start).map_err(|_| {
-                    StatePromotionError::new(
-                        "STATE_PROMOTE.ACCESS_RANGE",
-                        None,
-                        None,
-                        "access fragment width does not fit usize",
-                    )
-                })?,
-                reaching: VersionId(cell_id.0),
-                definition: None,
-            });
-            cursor = end;
-        }
-        if cursor != access.end || parts.is_empty() {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.ACCESS_COVERAGE",
-                None,
-                None,
-                "promoted cells do not exactly cover a direct access",
-            ));
-        }
-        accesses.push(Access {
-            block: access.block,
-            instruction: access.instruction,
-            kind: access.kind,
-            parts,
-        });
-    }
-    Ok(accesses)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BarrierEventKind {
-    Query,
-    Kill { definition: BarrierVersionId },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BarrierEvent {
-    instruction: usize,
-    kind: BarrierEventKind,
-}
-
-/// Build one sparse MemorySSA generation for writes whose concrete SimState
-/// range is unknown.
-///
-/// Expanding such a write into one definition per tracked physical cell would
-/// cost `unknown_writes * cells`.  A direct store and load can instead compare
-/// the single unknown-memory generation observed at their exact points.  If a
-/// write reaches only one arm or a later loop iteration, ordinary phi
-/// placement gives the load a different generation and forwarding is rejected.
-fn analyze_unknown_barriers(
+fn analyze(
     func: &MFunction,
     cfg: &NormalizedCfg,
-    raw: &[RawAccess],
-    unknown_kills: &[(usize, usize)],
-) -> Result<BarrierSsa, StatePromotionError> {
-    let queries = raw
-        .iter()
-        .filter(|access| {
-            matches!(
-                access.kind,
-                RawAccessKind::Load { .. } | RawAccessKind::Store { .. }
-            )
-        })
-        .map(|access| (access.block, access.instruction))
-        .collect::<BTreeSet<_>>();
-    if queries.is_empty() {
-        return Ok(BarrierSsa {
-            phis_by_block: vec![Vec::new(); func.blocks.len()],
-            ..BarrierSsa::default()
-        });
-    }
-
-    let mut events = vec![Vec::<BarrierEvent>::new(); func.blocks.len()];
-    for &(block, instruction) in &queries {
-        events[block].push(BarrierEvent {
-            instruction,
-            kind: BarrierEventKind::Query,
-        });
-    }
-    let mut versions = vec![BarrierVersion {
-        id: BarrierVersionId(0),
-        kind: BarrierVersionKind::LiveOnEntry,
-    }];
-    let mut definitions = HashSet::<usize>::new();
-    for &(block, instruction) in unknown_kills {
-        let definition = BarrierVersionId(versions.len());
-        versions.push(BarrierVersion {
-            id: definition,
-            kind: BarrierVersionKind::Kill { block, instruction },
-        });
-        definitions.insert(block);
-        events[block].push(BarrierEvent {
-            instruction,
-            kind: BarrierEventKind::Kill { definition },
-        });
-    }
-    for block_events in &mut events {
-        block_events.sort_unstable_by_key(|event| event.instruction);
-    }
-
-    let mut upward_uses = HashSet::<usize>::new();
-    for (block, block_events) in events.iter().enumerate() {
-        let mut defined = false;
-        for event in block_events {
-            match event.kind {
-                BarrierEventKind::Query if !defined => {
-                    upward_uses.insert(block);
-                }
-                BarrierEventKind::Kill { .. } => defined = true,
-                BarrierEventKind::Query => {}
-            }
-        }
-    }
-    let mut live_in = upward_uses.clone();
-    let mut live_work = upward_uses.into_iter().collect::<VecDeque<_>>();
-    while let Some(block) = live_work.pop_front() {
-        for &predecessor in &cfg.predecessors[block] {
-            if !definitions.contains(&predecessor) && live_in.insert(predecessor) {
-                live_work.push_back(predecessor);
-            }
-        }
-    }
-
-    let mut phi_blocks = HashSet::<usize>::new();
-    let mut queued = definitions.clone();
-    let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
-    while let Some(block) = phi_work.pop() {
-        for &frontier in &cfg.dominance_frontier[block] {
-            if frontier == 0 || !live_in.contains(&frontier) || !phi_blocks.insert(frontier) {
-                continue;
-            }
-            if queued.insert(frontier) {
-                phi_work.push(frontier);
-            }
-        }
-    }
-    let mut phis_by_block = vec![Vec::<BarrierVersionId>::new(); func.blocks.len()];
-    let mut ordered_phis = phi_blocks.into_iter().collect::<Vec<_>>();
-    ordered_phis.sort_unstable();
-    for block in ordered_phis {
-        let id = BarrierVersionId(versions.len());
-        versions.push(BarrierVersion {
-            id,
-            kind: BarrierVersionKind::Phi {
-                block,
-                incoming: Vec::with_capacity(cfg.predecessors[block].len()),
-            },
-        });
-        phis_by_block[block].push(id);
-    }
-
-    let mut children = vec![Vec::<usize>::new(); func.blocks.len()];
-    for block in 1..func.blocks.len() {
-        let parent = cfg.idom[block].ok_or_else(|| {
-            StatePromotionError::new(
-                "STATE_PROMOTE.BARRIER_DOMINATOR_TREE",
-                Some(func.blocks[block].id),
-                None,
-                "reachable unknown-memory block has no immediate dominator",
-            )
-        })?;
-        children[parent].push(block);
-    }
-    enum Action {
-        Enter(usize),
-        Exit(BarrierVersionId),
-    }
-    let mut current = BarrierVersionId(0);
-    let mut observed = BTreeMap::<(usize, usize), BarrierVersionId>::new();
-    let mut actions = vec![Action::Enter(0)];
-    while let Some(action) = actions.pop() {
-        let block = match action {
-            Action::Exit(previous) => {
-                current = previous;
-                continue;
-            }
-            Action::Enter(block) => block,
-        };
-        let previous = current;
-        if let Some(&phi) = phis_by_block[block].first() {
-            current = phi;
-        }
-        for event in &events[block] {
-            match event.kind {
-                BarrierEventKind::Query => {
-                    if observed
-                        .insert((block, event.instruction), current)
-                        .is_some()
-                    {
-                        return Err(StatePromotionError::new(
-                            "STATE_PROMOTE.BARRIER_QUERY_IDENTITY",
-                            Some(func.blocks[block].id),
-                            Some(event.instruction),
-                            "one direct state instruction has multiple barrier queries",
-                        ));
-                    }
-                }
-                BarrierEventKind::Kill { definition } => current = definition,
-            }
-        }
-        for &successor in &cfg.successors[block] {
-            for &phi in &phis_by_block[successor] {
-                let BarrierVersionKind::Phi { incoming, .. } = &mut versions[phi.0].kind else {
-                    unreachable!("barrier phi table references a non-phi version");
-                };
-                incoming.push((block, current));
-            }
-        }
-        actions.push(Action::Exit(previous));
-        actions.extend(children[block].iter().rev().copied().map(Action::Enter));
-    }
-
-    for version in &mut versions {
-        if let BarrierVersionKind::Phi { block, incoming } = &mut version.kind {
-            incoming.sort_unstable_by_key(|(predecessor, _)| *predecessor);
-            if incoming.len() != cfg.predecessors[*block].len()
-                || incoming
-                    .iter()
-                    .zip(&cfg.predecessors[*block])
-                    .any(|((actual, _), expected)| actual != expected)
-            {
-                return Err(StatePromotionError::new(
-                    "STATE_PROMOTE.BARRIER_PHI_INPUTS",
-                    Some(func.blocks[*block].id),
-                    None,
-                    "unknown-memory phi does not cover every predecessor exactly once",
-                ));
-            }
-        }
-    }
-    if observed.len() != queries.len() {
-        return Err(StatePromotionError::new(
-            "STATE_PROMOTE.BARRIER_QUERY_COVERAGE",
-            None,
-            None,
-            "unknown-memory SSA did not visit every direct state access",
-        ));
-    }
-    Ok(BarrierSsa {
-        versions,
-        observed,
-        phis_by_block,
-    })
-}
-
-fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, StatePromotionError> {
-    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
-    if func.blocks.len() != cfg.predecessors.len()
-        || func.blocks.len() != cfg.successors.len()
-        || func.blocks.len() != cfg.idom.len()
-    {
+) -> Result<ForwardMemoryAnalysis, StatePromotionError> {
+    if func.blocks.len() != cfg.successors.len() {
         return Err(StatePromotionError::new(
             "STATE_PROMOTE.CFG_SHAPE",
             None,
@@ -683,256 +104,140 @@ fn analyze(func: &MFunction, cfg: &NormalizedCfg) -> Result<PromotionPlan, State
             "normalized CFG does not cover every MIR block",
         ));
     }
-    let phase_start = timing.then(std::time::Instant::now);
-    let (components, raw, unknown_kills) = discover_components(func)?;
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] discover elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    let phase_start = timing.then(std::time::Instant::now);
-    let barriers = analyze_unknown_barriers(func, cfg, &raw, &unknown_kills)?;
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] barrier_ssa elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    let phase_start = timing.then(std::time::Instant::now);
-    let (cells, cells_by_component) = build_cells(&components)?;
-    let mut accesses = map_accesses(&components, &raw, &cells, &cells_by_component)?;
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] partition elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    if cells.is_empty() {
-        return Ok(PromotionPlan {
-            cells,
-            versions: Vec::new(),
-            accesses,
-            phis_by_block: vec![Vec::new(); func.blocks.len()],
-            barriers,
-        });
-    }
+    let mut events =
+        vec![Vec::<MemoryAccessEvent<ProgramPoint, ProgramPoint>>::new(); func.blocks.len()];
+    let mut writes_by_definition = BTreeMap::<ProgramPoint, Vec<MemoryEffect<MemoryObject>>>::new();
+    let mut pending_reads = Vec::<(ProgramPoint, usize, MemoryEffect<MemoryObject>)>::new();
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+            let point = (block, instruction);
+            let write_effects = memory_effect::writes(inst);
+            let mut reads = Vec::new();
+            let writes = analysis_effects(&write_effects).collect::<Vec<_>>();
 
-    let phase_start = timing.then(std::time::Instant::now);
-    let mut accesses_by_block = vec![Vec::<usize>::new(); func.blocks.len()];
-    let mut definitions = HashSet::<(CellId, usize)>::new();
-    for (index, access) in accesses.iter().enumerate() {
-        accesses_by_block[access.block].push(index);
-    }
-    for block_accesses in &mut accesses_by_block {
-        block_accesses.sort_unstable_by_key(|&access| accesses[access].instruction);
-    }
-    for (block, block_accesses) in accesses_by_block.iter().enumerate() {
-        for &access_index in block_accesses {
-            let access = &accesses[access_index];
-            match access.kind {
-                RawAccessKind::Store { .. } | RawAccessKind::Kill => {
-                    for part in &access.parts {
-                        definitions.insert((part.cell, block));
-                    }
+            if let MInst::Load {
+                base: BaseReg::SimState,
+                offset,
+                size,
+                ..
+            } = inst
+            {
+                let location = exact_location(BaseReg::SimState, *offset, *size);
+                reads.push(MemoryEffect::Exact(location));
+            }
+            if !reads.is_empty() || !writes.is_empty() {
+                for &effect in reads.iter().chain(&writes) {
+                    validate_memory_effect(func, block, instruction, effect)?;
                 }
-                RawAccessKind::Load { .. } => {}
-            }
-        }
-    }
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] local_def_use elapsed={:?}",
-            start.elapsed()
-        );
-    }
-
-    // Build minimal SSA directly from definition blocks.  Computing pruned
-    // SSA here requires one backwards liveness problem per physical state
-    // cell; on a large RTL CFG that is O(cells * CFG).  Cytron IDF placement
-    // is independent of uses and remains sparse for the common case where a
-    // state location has one dominating store.
-    let phase_start = timing.then(std::time::Instant::now);
-    let mut phi_pairs = HashSet::<(CellId, usize)>::new();
-    let mut queued = definitions.clone();
-    let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
-    while let Some((cell, block)) = phi_work.pop() {
-        for &frontier in &cfg.dominance_frontier[block] {
-            let pair = (cell, frontier);
-            if frontier == 0 || !phi_pairs.insert(pair) {
-                continue;
-            }
-            if queued.insert(pair) {
-                phi_work.push(pair);
-            }
-        }
-    }
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] phi_placement elapsed={:?}",
-            start.elapsed()
-        );
-    }
-
-    let phase_start = timing.then(std::time::Instant::now);
-    let mut versions = cells
-        .iter()
-        .map(|cell| Version {
-            id: VersionId(cell.id.0),
-            cell: cell.id,
-            kind: VersionKind::LiveOnEntry,
-        })
-        .collect::<Vec<_>>();
-    let mut phis_by_block = vec![Vec::<(CellId, VersionId)>::new(); func.blocks.len()];
-    let mut ordered_phis = phi_pairs.into_iter().collect::<Vec<_>>();
-    ordered_phis.sort_unstable_by_key(|(cell, block)| (*block, *cell));
-    for (cell, block) in ordered_phis {
-        let id = VersionId(versions.len());
-        versions.push(Version {
-            id,
-            cell,
-            kind: VersionKind::Phi {
-                block,
-                incoming: Vec::new(),
-            },
-        });
-        phis_by_block[block].push((cell, id));
-    }
-    for access in &mut accesses {
-        let version_kind = match access.kind {
-            RawAccessKind::Store { .. } => Some(false),
-            RawAccessKind::Kill => Some(true),
-            RawAccessKind::Load { .. } => None,
-        };
-        let Some(kill) = version_kind else { continue };
-        for part in &mut access.parts {
-            let id = VersionId(versions.len());
-            versions.push(Version {
-                id,
-                cell: part.cell,
-                kind: if kill {
-                    VersionKind::Kill {
-                        block: access.block,
-                        instruction: access.instruction,
-                    }
+                for (read_index, &effect) in reads.iter().enumerate() {
+                    pending_reads.push((point, read_index, effect));
+                }
+                let definition = if writes.is_empty() {
+                    None
                 } else {
-                    VersionKind::Store {
-                        block: access.block,
-                        instruction: access.instruction,
+                    if writes_by_definition.insert(point, writes).is_some() {
+                        return Err(StatePromotionError::new(
+                            "STATE_PROMOTE.DEFINITION_IDENTITY",
+                            Some(mir_block.id),
+                            Some(instruction),
+                            "one MIR instruction produced multiple MemoryDef records",
+                        ));
                     }
-                },
-            });
-            part.definition = Some(id);
-        }
-    }
-
-    let mut children = vec![Vec::<usize>::new(); func.blocks.len()];
-    for block in 1..func.blocks.len() {
-        let parent = cfg.idom[block].ok_or_else(|| {
-            StatePromotionError::new(
-                "STATE_PROMOTE.DOMINATOR_TREE",
-                Some(func.blocks[block].id),
-                None,
-                "reachable non-entry block has no immediate dominator",
-            )
-        })?;
-        children[parent].push(block);
-    }
-    enum Action {
-        Enter(usize),
-        Exit(Vec<(CellId, VersionId)>),
-    }
-    let mut current = cells
-        .iter()
-        .map(|cell| VersionId(cell.id.0))
-        .collect::<Vec<_>>();
-    let mut actions = vec![Action::Enter(0)];
-    while let Some(action) = actions.pop() {
-        let block = match action {
-            Action::Exit(changes) => {
-                for (cell, previous) in changes.into_iter().rev() {
-                    current[cell.0] = previous;
-                }
-                continue;
-            }
-            Action::Enter(block) => block,
-        };
-        let mut changes = Vec::new();
-        for &(cell, version) in &phis_by_block[block] {
-            changes.push((cell, current[cell.0]));
-            current[cell.0] = version;
-        }
-        for &access_index in &accesses_by_block[block] {
-            let access = &mut accesses[access_index];
-            for part in &mut access.parts {
-                part.reaching = current[part.cell.0];
-                if let Some(definition) = part.definition {
-                    changes.push((part.cell, current[part.cell.0]));
-                    current[part.cell.0] = definition;
-                }
-            }
-        }
-        for &successor in &cfg.successors[block] {
-            for &(_, version) in &phis_by_block[successor] {
-                let cell = versions[version.0].cell;
-                let incoming = current[cell.0];
-                let VersionKind::Phi { incoming: row, .. } = &mut versions[version.0].kind else {
-                    unreachable!("phi table references a phi version");
+                    Some(point)
                 };
-                row.push((block, incoming));
+                events[block].push(MemoryAccessEvent { point, definition });
             }
         }
-        actions.push(Action::Exit(changes));
-        actions.extend(children[block].iter().rev().copied().map(Action::Enter));
     }
 
-    let version_cells = versions
-        .iter()
-        .map(|version| version.cell)
-        .collect::<Vec<_>>();
-    for version in &mut versions {
-        if let VersionKind::Phi { block, incoming } = &mut version.kind {
-            incoming.sort_unstable_by_key(|(predecessor, _)| *predecessor);
-            let expected = &cfg.predecessors[*block];
-            if incoming.len() != expected.len()
-                || incoming
-                    .iter()
-                    .zip(expected)
-                    .any(|((actual, _), expected)| actual != expected)
-            {
-                return Err(StatePromotionError::new(
-                    "STATE_PROMOTE.PHI_INPUTS",
-                    Some(func.blocks[*block].id),
-                    None,
-                    "physical state phi does not cover every predecessor exactly once",
-                ));
-            }
-            if incoming
+    let (graph, points) = memory_ssa::build(cfg, &events).map_err(|error| {
+        StatePromotionError::new(
+            error.rule,
+            error
+                .block
+                .and_then(|block| func.blocks.get(block).map(|mir_block| mir_block.id)),
+            None,
+            error.message,
+        )
+    })?;
+    let oracle = |definition: &ProgramPoint, query: &MemoryEffect<MemoryObject>| {
+        writes_by_definition.get(definition).is_some_and(|writes| {
+            writes
                 .iter()
-                .any(|(_, source)| version_cells[source.0] != version.cell)
-            {
-                return Err(StatePromotionError::new(
-                    "STATE_PROMOTE.PHI_CELL",
-                    Some(func.blocks[*block].id),
-                    None,
-                    "physical state phi mixes different machine cells",
-                ));
-            }
-        }
+                .copied()
+                .any(|write| effects_may_alias(write, *query))
+        })
+    };
+    let mut walker = ClobberWalker::new();
+    let mut reads = Vec::with_capacity(pending_reads.len());
+    for (instruction, read_index, effect) in pending_reads {
+        let start = points
+            .event(instruction)
+            .map(|point| point.before)
+            .ok_or_else(|| {
+                StatePromotionError::new(
+                    "STATE_PROMOTE.READ_POINT",
+                    func.blocks.get(instruction.0).map(|block| block.id),
+                    Some(instruction.1),
+                    "MemorySSA has no coordinate for an analyzed load",
+                )
+            })?;
+        let clobber = walker
+            .clobber(&graph, start, &effect, &oracle)
+            .ok_or_else(|| {
+                StatePromotionError::new(
+                    "STATE_PROMOTE.READ_ACCESS",
+                    func.blocks.get(instruction.0).map(|block| block.id),
+                    Some(instruction.1),
+                    "MemorySSA read starts at an invalid access",
+                )
+            })?;
+        let clobber = match clobber {
+            MemoryClobber::Indeterminate => ForwardClobber::Indeterminate,
+            MemoryClobber::Access(access) => match graph.access(access).ok_or_else(|| {
+                StatePromotionError::new(
+                    "STATE_PROMOTE.CLOBBER_ACCESS",
+                    func.blocks.get(instruction.0).map(|block| block.id),
+                    Some(instruction.1),
+                    "clobber walker returned an invalid graph access",
+                )
+            })? {
+                MemoryAccess::LiveOnEntry => ForwardClobber::LiveOnEntry,
+                MemoryAccess::Definition { definition, .. } => {
+                    ForwardClobber::Definition(*definition)
+                }
+                MemoryAccess::Phi { block, .. } => ForwardClobber::Phi(block),
+            },
+        };
+        reads.push(ForwardMemoryRead {
+            instruction,
+            read_index,
+            effect,
+            clobber,
+        });
     }
-    if let Some(start) = phase_start {
-        eprintln!(
-            "[state-forward-timing] rename_verify elapsed={:?}",
-            start.elapsed()
-        );
+    let memory = ForwardMemoryState { reads };
+    Ok(ForwardMemoryAnalysis { memory })
+}
+
+fn validate_memory_effect(
+    func: &MFunction,
+    block: usize,
+    instruction: usize,
+    effect: MemoryEffect<MemoryObject>,
+) -> Result<(), StatePromotionError> {
+    let MemoryEffect::Exact(location) = effect else {
+        return Ok(());
+    };
+    if location.byte_len == 0 || location.end().is_none() {
+        return Err(StatePromotionError::new(
+            "STATE_PROMOTE.MEMORY_RANGE",
+            func.blocks.get(block).map(|block| block.id),
+            Some(instruction),
+            "MIR memory effect has an empty or overflowing physical range",
+        ));
     }
-    Ok(PromotionPlan {
-        cells,
-        versions,
-        accesses,
-        phis_by_block,
-        barriers,
-    })
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -957,100 +262,49 @@ struct ForwardCluster {
 
 fn exact_forward_candidates(
     func: &MFunction,
-    plan: &PromotionPlan,
+    analysis: &ForwardMemoryAnalysis,
 ) -> Result<Vec<ForwardCandidate>, StatePromotionError> {
-    let accesses = plan
-        .accesses
-        .iter()
-        .filter(|access| matches!(access.kind, RawAccessKind::Store { .. }))
-        .map(|access| ((access.block, access.instruction), access))
-        .collect::<HashMap<_, _>>();
     let mut candidates = Vec::new();
-    for load in &plan.accesses {
-        let RawAccessKind::Load { destination } = load.kind else {
-            continue;
-        };
-        let mut reaching_store = None::<(usize, usize)>;
-        for part in &load.parts {
-            let VersionKind::Store { block, instruction } = plan.versions[part.reaching.0].kind
-            else {
-                reaching_store = None;
-                break;
-            };
-            let location = (block, instruction);
-            match reaching_store {
-                Some(previous) if previous != location => {
-                    reaching_store = None;
-                    break;
-                }
-                Some(_) => {}
-                None => reaching_store = Some(location),
-            }
-        }
-        let Some(store_location) = reaching_store else {
-            continue;
-        };
-        let Some(store) = accesses.get(&store_location) else {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.STORE_ACCESS",
-                func.blocks.get(load.block).map(|block| block.id),
-                Some(load.instruction),
-                "reaching state version has no matching store access",
-            ));
-        };
-        let RawAccessKind::Store { source } = store.kind else {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.STORE_ACCESS",
-                func.blocks.get(load.block).map(|block| block.id),
-                Some(load.instruction),
-                "reaching store version points at a non-store access",
-            ));
-        };
-        let load_barrier = plan
-            .barriers
-            .observed
-            .get(&(load.block, load.instruction))
-            .copied()
-            .ok_or_else(|| {
-                StatePromotionError::new(
-                    "STATE_PROMOTE.BARRIER_LOAD",
-                    func.blocks.get(load.block).map(|block| block.id),
-                    Some(load.instruction),
-                    "direct load has no unknown-memory generation",
-                )
-            })?;
-        let store_barrier = plan
-            .barriers
-            .observed
-            .get(&store_location)
-            .copied()
-            .ok_or_else(|| {
-                StatePromotionError::new(
-                    "STATE_PROMOTE.BARRIER_STORE",
-                    func.blocks.get(store_location.0).map(|block| block.id),
-                    Some(store_location.1),
-                    "reaching direct store has no unknown-memory generation",
-                )
-            })?;
-        if load_barrier != store_barrier {
-            continue;
-        }
+    for read in &analysis.memory.reads {
+        let load_location = read.instruction;
+        let (load_block, load_instruction) = load_location;
         let Some(MInst::Load {
+            dst: destination,
             base: BaseReg::SimState,
             offset: load_offset,
             size: load_size,
-            ..
         }) = func
             .blocks
-            .get(load.block)
-            .and_then(|block| block.insts.get(load.instruction))
+            .get(load_block)
+            .and_then(|block| block.insts.get(load_instruction))
         else {
             return Err(StatePromotionError::new(
                 "STATE_PROMOTE.LOAD_ACCESS",
-                func.blocks.get(load.block).map(|block| block.id),
-                Some(load.instruction),
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
                 "analyzed load no longer matches MIR",
             ));
+        };
+        if read.read_index != 0 {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.LOAD_QUERY",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "direct MIR load has an unexpected MemorySSA query index",
+            ));
+        }
+        let expected_location = exact_location(BaseReg::SimState, *load_offset, *load_size);
+        if read.effect != MemoryEffect::Exact(expected_location) {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.LOAD_LOCATION",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "MemorySSA query location differs from the direct MIR load",
+            ));
+        }
+
+        let ForwardClobber::Definition(store_location) = read.clobber else {
+            continue;
         };
         let Some(MInst::Store {
             base: BaseReg::SimState,
@@ -1062,31 +316,20 @@ fn exact_forward_candidates(
             .get(store_location.0)
             .and_then(|block| block.insts.get(store_location.1))
         else {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.STORE_ACCESS",
-                func.blocks.get(store_location.0).map(|block| block.id),
-                Some(store_location.1),
-                "analyzed store no longer matches MIR",
-            ));
+            // A bounded indexed write or another exact MIR write can be the
+            // reaching byte definition, but it is not a forwardable store.
+            continue;
         };
-        if source != *store_source {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.STORE_SOURCE",
-                func.blocks.get(store_location.0).map(|block| block.id),
-                Some(store_location.1),
-                "state-version source differs from the reaching MIR store",
-            ));
-        }
-        if load_offset != store_offset || load_size != store_size || source == destination {
+        if load_offset != store_offset || load_size != store_size || store_source == destination {
             continue;
         }
         candidates.push(ForwardCandidate {
             store_block: store_location.0,
             store_instruction: store_location.1,
-            block: load.block,
-            instruction: load.instruction,
-            destination,
-            source,
+            block: load_block,
+            instruction: load_instruction,
+            destination: *destination,
+            source: *store_source,
             size: *load_size,
         });
     }
@@ -1189,8 +432,8 @@ pub(super) fn forward_exact_round_trips(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<usize, StatePromotionError> {
-    let plan = analyze(func, cfg)?;
-    let candidates = exact_forward_candidates(func, &plan)?;
+    let analysis = analyze(func, cfg)?;
+    let candidates = exact_forward_candidates(func, &analysis)?;
     if candidates.is_empty() {
         return Ok(0);
     }
@@ -1571,9 +814,51 @@ mod tests {
         ];
         let mut function = function(3, vec![block]);
         let cfg = normalize(&mut function);
-        let plan = analyze(&function, &cfg).unwrap();
-        assert!(plan.cells.iter().any(|cell| cell.offset == 8));
-        assert!(plan.cells.iter().any(|cell| cell.offset == 64));
+        let analysis = analyze(&function, &cfg).unwrap();
+        assert!(analysis.memory.reads.is_empty());
+    }
+
+    #[test]
+    fn sparse_commit_reads_are_not_memory_ssa_queries() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::SparseCommit {
+                src_offset: 1_000_000,
+                dst_offset: 2_000_000,
+                byte_size: 16 * 1024 * 1024,
+                dirty_words_offset: 3_000_000,
+                dirty_word_count: 1,
+                summary_words_offset: 4_000_000,
+                summary_word_count: 1,
+                four_state: false,
+            },
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(2, vec![block]);
+        let cfg = normalize(&mut function);
+        let analysis = analyze(&function, &cfg).unwrap();
+
+        assert_eq!(analysis.memory.reads.len(), 1);
+        assert_eq!(
+            analysis.memory.reads[0].clobber,
+            ForwardClobber::Definition((0, 1))
+        );
     }
 
     #[test]
@@ -1774,11 +1059,12 @@ mod tests {
             }],
         );
         let cfg = normalize(&mut function);
-        let plan = analyze(&function, &cfg).unwrap();
+        let analysis = analyze(&function, &cfg).unwrap();
 
-        assert_eq!(plan.cells.len(), CELLS);
-        assert_eq!(plan.versions.len(), CELLS * 2);
-        assert_eq!(plan.barriers.versions.len(), KILLS + 1);
-        assert_eq!(plan.barriers.observed.len(), CELLS * 2);
+        assert_eq!(analysis.memory.reads.len(), CELLS);
+        let last_kill = (0, 2 + CELLS + KILLS - 1);
+        for read in &analysis.memory.reads {
+            assert_eq!(read.clobber, ForwardClobber::Definition(last_kill));
+        }
     }
 }

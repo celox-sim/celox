@@ -4,6 +4,8 @@
 //! Sparse operations carry the concrete metadata ranges they mutate; keeping
 //! those ranges here lets every MemorySSA consumer use the same alias model.
 
+use celox_analysis::memory::{MemoryEffect, MemoryLocation};
+
 use super::mir::{BaseReg, MInst};
 
 const MAX_STATIC_RANGES: usize = 3;
@@ -33,6 +35,23 @@ pub(crate) enum UnknownMemory {
     Direct(BaseReg),
     /// Runtime-owned pointer memory, disjoint from SimState and StackFrame.
     Indirect,
+}
+
+/// IR-independent object identity used by shared memory analyses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum MemoryObject {
+    SimState,
+    StackFrame,
+    Indirect,
+}
+
+impl MemoryObject {
+    pub(crate) fn direct(base: BaseReg) -> Self {
+        match base {
+            BaseReg::SimState => Self::SimState,
+            BaseReg::StackFrame => Self::StackFrame,
+        }
+    }
 }
 
 /// Static effects contain at most the three ranges required by a sparse
@@ -79,6 +98,29 @@ impl MemoryEffects {
     pub(crate) fn has_effect(self) -> bool {
         self.unknown.is_some() || self.range_count != 0
     }
+}
+
+/// Translate the compact MIR effect record without coupling celox-analysis to
+/// MIR types. The iterator contains at most three exact ranges and one unknown
+/// object and performs no allocation.
+pub(crate) fn analysis_effects(
+    effects: &MemoryEffects,
+) -> impl Iterator<Item = MemoryEffect<MemoryObject>> + '_ {
+    effects
+        .ranges()
+        .map(|range| {
+            MemoryEffect::Exact(MemoryLocation {
+                object: MemoryObject::direct(range.base),
+                offset: range.offset,
+                byte_len: range.byte_len,
+            })
+        })
+        .chain(effects.unknown_memory().map(|unknown| {
+            MemoryEffect::UnknownObject(match unknown {
+                UnknownMemory::Direct(base) => MemoryObject::direct(base),
+                UnknownMemory::Indirect => MemoryObject::Indirect,
+            })
+        }))
 }
 
 fn checked_range(base: BaseReg, offset: i32, byte_len: usize) -> Option<MemoryRange> {

@@ -13,8 +13,8 @@ use super::next_use::NextUseAnalysis;
 #[cfg(test)]
 use super::reload::PureStep;
 use super::reload::{
-    ExpectedMaterializedReload, PointUse, ReloadRecipeAnalysis, ResolvedBase, ResolvedRecipe,
-    materialize_pure_step,
+    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
+    ResolvedRecipe, materialize_pure_step,
 };
 use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillPlan};
 
@@ -23,7 +23,7 @@ pub(super) struct ReconstructionResult {
     pub recipe_reloads: Vec<ExpectedMaterializedReload>,
     pub state_stores: Vec<MaterializedStateStore>,
     pub state_reloads: Vec<MaterializedStateReload>,
-    pub shared_reload_blocks: usize,
+    pub shared_reload_blocks: Vec<MemoryPhiFactoring>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1041,7 +1041,7 @@ fn share_identical_edge_reload_bundles(
     bundles: &[EdgeReloadBundle],
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
     state_reloads: &mut Vec<MaterializedStateReload>,
-) -> Result<usize, ReconstructError> {
+) -> Result<Vec<MemoryPhiFactoring>, ReconstructError> {
     let mut grouped = HashMap::<EdgeReloadGroupKey, Vec<usize>>::new();
     for (bundle, edge) in bundles.iter().enumerate() {
         grouped
@@ -1076,9 +1076,8 @@ fn share_identical_edge_reload_bundles(
         });
     }
     if plans.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
-    let shared_count = plans.len();
 
     let maximum_id = func
         .blocks
@@ -1106,6 +1105,7 @@ fn share_identical_edge_reload_bundles(
     })?;
 
     let mut removed_recipe_reloads = BTreeSet::<VReg>::new();
+    let mut memory_phi_factorings = Vec::with_capacity(plans.len());
     for (shared_offset, plan) in plans.into_iter().enumerate() {
         let canonical_index = plan.bundles[0];
         let canonical = &bundles[canonical_index];
@@ -1212,11 +1212,20 @@ fn share_identical_edge_reload_bundles(
             target: successor_id,
         });
         func.blocks.push(shared);
+        memory_phi_factorings.push(MemoryPhiFactoring {
+            block: shared_id,
+            successor: successor_id,
+            predecessors: predecessor_ids
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        });
     }
 
     recipe_reloads.retain(|reload| !removed_recipe_reloads.contains(&reload.reload));
     state_reloads.retain(|reload| !removed_recipe_reloads.contains(&reload.reload));
-    Ok(shared_count)
+    Ok(memory_phi_factorings)
 }
 
 fn shared_reload_phi_replacements(
@@ -1771,7 +1780,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(shared, 1);
+        assert_eq!(shared.len(), 1);
         assert_eq!(func.blocks.len(), 7);
         assert_eq!(
             func.blocks[4].phis[0].sources,
@@ -2110,13 +2119,15 @@ mod tests {
         plan.verify_recipe_homes(&func, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
-        let rebuilt_cfg = (result.shared_reload_blocks != 0)
+        let rebuilt_cfg = (!result.shared_reload_blocks.is_empty())
             .then(|| super::super::cfg::normalize(&mut func).unwrap());
         let cfg = rebuilt_cfg.as_ref().unwrap_or(&cfg);
-        super::super::reload::verify_expected_materialized_reloads(
+        super::super::reload::verify_expected_materialized_reloads_after_state_spills(
             &func,
             cfg,
             &result.recipe_reloads,
+            &[],
+            &result.shared_reload_blocks,
         )
         .unwrap();
         (func, result)
@@ -2594,7 +2605,7 @@ mod tests {
 
         let (func, result) = reconstruct_with_registers(func, 2);
 
-        assert_eq!(result.shared_reload_blocks, 1);
+        assert_eq!(result.shared_reload_blocks.len(), 1);
         assert_eq!(result.frame_size, 0);
         assert_eq!(
             func.blocks

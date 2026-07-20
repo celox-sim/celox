@@ -4057,8 +4057,105 @@ whole-CFG register use.  Stack, existing-state, deferred-state, rematerialized,
 and register alternatives are then priced and allocated together before the
 atomic MIR rewrite.
 
+Step 32e extracts the structure-independent compiler analyses into the new
+`celox-analysis` crate.  The shared crate now owns checked iterative CFG
+construction, stable RPO, Lengauer--Tarjan dominators, postdominators,
+frontiers, control dependence, SCC/loop facts, generic pruned SSA, sparse
+MemorySSA, and interval-based memory-dependence tracking.  The SIR and MIR
+callers are adapters over that substrate rather than owners of private graph
+algorithms.
+
+The first state-forwarding migration initially passed every ordinary focused
+test but had an unacceptable memory design.  First, `state_promote` fed all
+MIR read effects into MemorySSA queries, so a large `SparseCommit` source range
+became one SSA use per byte.  Restricting queries did not fix the design: the
+first shared MemorySSA still represented every tracked byte as an independent
+SSA variable, expanded every broad exact write over all overlapping tracked
+bytes, and ran pruned liveness over `(byte, CFG block)` pairs.  Its worst-case
+storage was therefore proportional to `tracked bytes * CFG blocks`, and a
+wide write could add `tracked bytes` definitions.  Running that implementation
+on the Linux workload exhausted WSL memory.  This was an implementation error,
+not a build-tool or rust-analyzer problem.
+
+The retained replacement is access-based MemorySSA in the conventional
+MemoryDef/MemoryPhi form, but its abstraction boundary is narrower than the
+first replacement. `MemoryAccessGraph<D>` owns only live-on-entry,
+MemoryDef/MemoryPhi nodes, and defining edges. `MemoryPointMap<P>` separately
+maps caller-selected instruction and block boundaries into that graph.
+`AliasOracle<D, Q>` and `ClobberWalker` consume caller-owned definition effects
+and query objects; byte ranges are one implementation in the independent
+`memory` module rather than fields required by MemorySSA. Read-result tables,
+MIR coordinates, value numbers, reload fragments, and query scratch are not
+stored in the shared graph.
+
+For `B/E` CFG blocks/edges, `C` captured program points, `D` writing
+definitions, and `F` MemoryPhi inputs, graph plus point-map storage is
+`O(B + E + C + D + F)` and is independent of every effect's byte length. One
+`ClobberQuery` owns reusable `O(D + F)` scratch. All starting points for the
+same alias query share its resolved accesses, so capturing a root and its
+reachable Phi inputs visits each access at most once rather than restarting a
+whole-graph walk per Phi edge. Across `Q` distinct alias queries the
+conservative worst case remains `O(Q * (D + F))`, excluding the caller's alias
+test. Regressions cover a 16 MiB range represented by one MemoryDef and a
+custom non-byte alias domain using the same graph and walker.
+
+The MIR adapter also stopped cloning and fully reanalyzing its CFG. SSA now
+accepts a minimal CFG view, and `NormalizedCfg` supplies its existing
+predecessors, successors, dominator children, and frontier directly.  MIR CFG
+normalization uses a forward-only shared analysis, so it no longer constructs
+and immediately discards postdominators, control-dependence tables, and SCC
+membership.
+
+State promotion is now a client adapter: it owns MIR write effects and converts
+clobber accesses into its private reaching-definition result. Reload planning
+and lowering use a different adapter. One SimState-writing MIR instruction is
+one shared MemoryDef; exact instruction-before/after and block-entry/exit
+accesses produce the point-specific snapshot used by a selected recipe. A
+`MemorySnapshot` records its stable root clobber and every reachable,
+query-specific Phi equation. Final reconstruction therefore compares the
+actual clobber graph, including Phi inputs, while translating allocator-owned
+store ordinals back to the stable original-write domain. Merely retaining the
+same `Phi(block)` no longer hides a changed incoming write. The old reload
+`MemoryVariable::Byte`, private phi placement, affected-byte expansion,
+dominator rename state, and phi-SCC canonicalizer have all been removed;
+store-home and bit-fragment preservation remain deliberately client-local.
+
+The first current-revision Linux gate exposed one missing abstraction at this
+boundary. Shared edge-reload reconstruction may factor several predecessor
+edges through a new write-free block. Access-based MemorySSA then represents
+the same reaching writes with one additional MemoryPhi, while the original
+snapshot names the predecessor writes directly. Comparing the two graph
+shapes literally rejected this semantics-preserving CFG factoring before JIT
+execution. Reconstruction now emits a `MemoryPhiFactoring` proof record for
+each block it creates. The final verifier checks that record against the final
+CFG's exact predecessor set and unique successor and independently rejects any
+instruction in the block which may write SimState. Only a factoring which
+passes those checks is inlined during snapshot comparison; an unrecorded Phi
+or any changed incoming write remains a mismatch.
+
+Current bounded validation is: `celox-analysis` 32/32, access-based state
+promotion 9/9, snapshot-based reload planning and final verification 35/35,
+optimized non-LTO library 917/917, native testbench 60 passed with one upstream
+ignore, and counter 9 passed with three Veryl ignores. Package check, format,
+and diff checks pass. A focused final-verifier regression changes one input of
+an otherwise identically named MemoryPhi and confirms that the structural
+snapshot rejects it. A second regression accepts the same writes factored only
+through recorded write-free CFG structure, rejects that structure without its
+proof record, and rejects a changed write beneath the recorded factoring.
+
+After fetching Heliodor revision `7ad830fc0f8506c934b61a853ce2eadfa5926b82`,
+the current revision completed the full optimized, non-LTO Linux workload in
+`20260720T020745Z_celox_test_soc_linux_boot.log`. Code generation took
+164.189 s, execution took 126.644 s, and the 48-line log ended with
+`reboot: Power down`, `cy=9ae070 x3=aa pass=1`, and an explicit pass result.
+The cycle count is unchanged from the preceding accepted run; the increased
+code-generation time and remaining native-execution gap are performance work,
+not an unverified correctness claim.
+
 Status: **32a--32d correctness boundary complete; eager whole-version
-promotion rejected; use-cluster allocation is in progress**.
+promotion rejected; shared analysis extraction and both reaching-def/snapshot
+adapters complete; current Linux acceptance complete; use-cluster allocation
+and throughput work are in progress**.
 
 ## Execution record
 
