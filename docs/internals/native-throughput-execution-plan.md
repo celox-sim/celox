@@ -4477,6 +4477,65 @@ Status: **range-aware chunk state is Linux-correct and materially reduces MIR
 and compile time; runtime improvement remains small; repeated metadata-word
 updates remain open**.
 
+### Step 38: Hierarchical sparse metadata state
+
+Step 37 removed the stable/working data selection but retained two metadata
+read-modify-write sequences per clean chunk: one for the chunk's dirty word and
+one for the dirty word's bit in the summary word.  Once any chunk in a dirty
+word has been written, that summary bit is already set.  Repeating the summary
+load, OR, and store for every later chunk cannot affect commit behavior.
+
+The range MemorySSA solver now also queries the 64-chunk interval represented
+by each dirty word.  This is the same CFG and alias proof used for data chunks,
+not a block-local counter.  Its state immediately before a Store has three
+uses:
+
+- `Clean`: the dirty word is zero, so its first bit can be stored without
+  loading the old dirty word;
+- `Dirty`: at least one bit is already set, so the dirty word is preserved but
+  the summary update is omitted completely; and
+- `Unknown`: both metadata words retain their previous read-modify-write path.
+
+An object-level first write still initializes both words directly.  A repeated
+write to an already-dirty chunk still performs no metadata preparation.  Thus
+the hierarchy is object active state, dirty-word state, and exact chunk state;
+none is inferred from another at a weaker granularity.  The change emits fewer
+internal metadata instructions at the same SIR Store point.  It does not move a
+Store, defer metadata across an instruction, or alter CFG/scheduling.
+
+The existing eight CFG/range regressions now assert dirty-word states at
+straight-line, diamond, loop, reset, sibling-dynamic, and exact multi-chunk
+points.  The executable JIT regression additionally requires exactly one
+summary update for two disjoint chunks in the same dirty word, executes a third
+repeated write, and verifies final stable and cleared metadata state.  Library
+938/938, native testbench 60 passed with one ignore, counter 9 passed with three
+Veryl ignores, all-target check, and strict clippy pass.
+
+The complete trace at
+`target/heliodor/analysis/step38-sparse-metadata-state` took 113.106 s.  Full
+MIR falls from 152,861,272 to 143,093,464 bytes.  In the inspected region 228
+sequence, summary offset `68373480` is stored once after the first chunk rather
+than loaded and stored for every chunk.  The main emitted body ends at
+`0x001abb58` instead of `0x001d1224`.
+
+Two trace-free non-LTO runs completed through `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`:
+
+- `target/heliodor/results/20260720T065710Z_celox_test_soc_linux_boot.log`:
+  compile 111.882 s, execute 109.449 s;
+- `target/heliodor/results/20260720T070120Z_celox_test_soc_linux_boot.log`:
+  compile 111.514 s, execute 105.793 s.
+
+The execution samples straddle the Step 37 result of 107.836 s, so the runtime
+effect is not claimed as a stable large gain.  The generated-code and compile
+improvements are direct.  Complete MIR now leaves one dirty-word load/OR/store
+per clean chunk; coalescing those exact static masks without extending value
+live ranges or changing scheduler order is the next boundary.
+
+Status: **hierarchical summary updates are eliminated where proved redundant;
+Linux semantics and tick count are preserved; dirty-word update coalescing
+remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4569,7 +4628,8 @@ updates remain open**.
 | 34 exact aggregate projection and same-range forwarding | this step | range lowering 3/3; forwarding 5/5; shared analyses 39/39; parser scheduler 16/16 | lib 926/926; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, docs, and diff gates pass | optimized non-LTO and final release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | range-only non-LTO compile 160.558 s / execute 112.922 s; final non-LTO 156.443 s / 110.254 s; release 149.973 s / 110.762 s | static field Loads retain exact ranges and cached snapshots; two-state unsigned same-width Store values forward directly; final non-LTO execute sample is 16.8% below Step 33 |
 | 35 overlapping narrow-load coalescing | `103c9985` | covering-wide-load regression | retained Step 34 common gates | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 155.724 s; execute 108.799 s | a required complete-object load no longer disables sharing equal narrow word projections; scheduler unchanged |
 | 36 sparse object MemorySSA write state | `84fd5861` | sparse CFG/SSA 5/5; executable ISel state/metadata 2/2 | lib 934/934; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 143.852 s; execute 108.252 s | first and dominating-active object states remove redundant lowering; gain is small and disjoint chunk first-write proof remains open |
-| 37 range-aware sparse chunk MemorySSA | this step | sparse CFG/range SSA 8/8; executable chunk/data/metadata 1/1 | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 118.702 s; full compile 117.173 s; execute 107.836 s | full MIR -13.8% and compile -18.5% versus Step 36; execute -0.4%, so repeated dirty/summary word updates remain open |
+| 37 range-aware sparse chunk MemorySSA | `85952b9d` | sparse CFG/range SSA 8/8; executable chunk/data/metadata 1/1 | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 118.702 s; full compile 117.173 s; execute 107.836 s | full MIR -13.8% and compile -18.5% versus Step 36; execute -0.4%, so repeated dirty/summary word updates remain open |
+| 38 hierarchical sparse metadata state | this step | dirty-word assertions in range SSA 8/8; executable one-summary-update regression | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 113.106 s; compile 111.882 / 111.514 s; execute 109.449 / 105.793 s | summary updates collapse to one per proved dirty word; MIR -6.4%; runtime effect varies and dirty-word update coalescing remains open |
 
 ## Related design records
 

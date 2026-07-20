@@ -66,6 +66,13 @@ struct SparseChunk {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ChunkRangeQuery {
+    object: AbsoluteAddr,
+    first: usize,
+    last: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ChunkDefinition {
     point: StorePoint,
     kind: MemoryDefinitionKind,
@@ -101,6 +108,7 @@ struct ReachingState {
 pub(super) struct SparseWriteStates {
     states: HashMap<(BlockId, usize), SparseWriteState>,
     chunk_states: HashMap<(BlockId, usize), SparseChunkState>,
+    dirty_word_states: HashMap<(BlockId, usize), SparseChunkState>,
 }
 
 impl SparseWriteStates {
@@ -265,14 +273,18 @@ impl SparseWriteStates {
 
         let range_graph = RangeWriteGraph::build(&memory_ssa)?;
         let mut range_solver = RangeWriteSolver::new(&range_graph);
-        let mut range_queries = BTreeMap::<SparseChunk, Vec<(StorePoint, BlockId)>>::new();
+        let mut range_queries = BTreeMap::<ChunkRangeQuery, Vec<(StorePoint, BlockId)>>::new();
         for &(point, block_id, object, chunk) in &stores {
             if partitioned_objects.contains(&object) {
                 continue;
             }
             if let Some(index) = chunk {
                 range_queries
-                    .entry(SparseChunk { object, index })
+                    .entry(ChunkRangeQuery {
+                        object,
+                        first: index,
+                        last: index,
+                    })
                     .or_default()
                     .push((point, block_id));
             }
@@ -302,6 +314,52 @@ impl SparseWriteStates {
                     state.possible
                 };
                 range_chunk_states.insert(point, classify_chunk_state(possible));
+            }
+        }
+
+        let mut dirty_word_queries = BTreeMap::<ChunkRangeQuery, Vec<(StorePoint, BlockId)>>::new();
+        for &(point, block_id, object, chunk) in &stores {
+            let Some(chunk) = chunk else {
+                continue;
+            };
+            let first = (chunk / 64) * 64;
+            let last = first
+                .saturating_add(63)
+                .min(layout.sparse_layouts[&object].chunk_count.saturating_sub(1));
+            dirty_word_queries
+                .entry(ChunkRangeQuery {
+                    object,
+                    first,
+                    last,
+                })
+                .or_default()
+                .push((point, block_id));
+        }
+        let mut dirty_word_states = HashMap::default();
+        for (query, points) in dirty_word_queries {
+            range_solver.solve(query);
+            for (point, block_id) in points {
+                let Some(version) = memory_ssa.uses.get(&point).copied() else {
+                    continue;
+                };
+                let block_index = cfg.block_index(block_id)?;
+                let entry_is_clean = store_entry_is_clean(
+                    &cfg,
+                    block_id,
+                    block_index,
+                    point.1,
+                    commit_block,
+                    commit_index,
+                    commit_start,
+                );
+                let state = range_solver.state(version);
+                let possible = if state.possible == 0 || (state.depends_on_entry && !entry_is_clean)
+                {
+                    CLEAN | DIRTY
+                } else {
+                    state.possible
+                };
+                dirty_word_states.insert((block_id, point.1), classify_chunk_state(possible));
             }
         }
 
@@ -361,6 +419,7 @@ impl SparseWriteStates {
         Some(Self {
             states,
             chunk_states,
+            dirty_word_states,
         })
     }
 
@@ -373,6 +432,13 @@ impl SparseWriteStates {
 
     pub(super) fn chunk_state(&self, block: BlockId, instruction: usize) -> SparseChunkState {
         self.chunk_states
+            .get(&(block, instruction))
+            .copied()
+            .unwrap_or(SparseChunkState::Unknown)
+    }
+
+    pub(super) fn dirty_word_state(&self, block: BlockId, instruction: usize) -> SparseChunkState {
+        self.dirty_word_states
             .get(&(block, instruction))
             .copied()
             .unwrap_or(SparseChunkState::Unknown)
@@ -580,13 +646,13 @@ impl<'a> RangeWriteSolver<'a> {
         }
     }
 
-    fn solve(&mut self, query: SparseChunk) {
+    fn solve(&mut self, query: ChunkRangeQuery) {
         self.work.clear();
         let Some(nodes) = self.graph.nodes_by_object.get(&query.object) else {
             return;
         };
         for &node in nodes {
-            self.states[node] = self.initial_state(node, query.index);
+            self.states[node] = self.initial_state(node, query);
             if self.states[node].possible != 0 || self.states[node].depends_on_entry {
                 self.work.push_back(node);
             }
@@ -595,7 +661,7 @@ impl<'a> RangeWriteSolver<'a> {
         while let Some(node) = self.work.pop_front() {
             let reaching = self.states[node];
             for &user in &self.graph.users[node] {
-                if !self.forwards_predecessor(user, query.index) {
+                if !self.forwards_predecessor(user, query) {
                     continue;
                 }
                 let old = self.states[user];
@@ -618,7 +684,7 @@ impl<'a> RangeWriteSolver<'a> {
             .unwrap_or_default()
     }
 
-    fn initial_state(&self, node: usize, chunk: usize) -> ReachingState {
+    fn initial_state(&self, node: usize, query: ChunkRangeQuery) -> ReachingState {
         match self.graph.nodes[node] {
             RangeWriteNode::Entry { .. } => ReachingState {
                 possible: CLEAN,
@@ -630,7 +696,9 @@ impl<'a> RangeWriteSolver<'a> {
                     depends_on_entry: false,
                 },
                 MemoryDefinitionKind::Store => match definition.footprint {
-                    ChunkFootprint::Exact { first, last } if (first..=last).contains(&chunk) => {
+                    ChunkFootprint::Exact { first, last }
+                        if chunk_ranges_overlap(first, last, query.first, query.last) =>
+                    {
                         ReachingState {
                             possible: DIRTY,
                             depends_on_entry: false,
@@ -647,7 +715,7 @@ impl<'a> RangeWriteSolver<'a> {
         }
     }
 
-    fn forwards_predecessor(&self, node: usize, chunk: usize) -> bool {
+    fn forwards_predecessor(&self, node: usize, query: ChunkRangeQuery) -> bool {
         match self.graph.nodes[node] {
             RangeWriteNode::Phi { .. } => true,
             RangeWriteNode::Definition { definition, .. } => matches!(
@@ -656,11 +724,15 @@ impl<'a> RangeWriteSolver<'a> {
                     kind: MemoryDefinitionKind::Store,
                     footprint: ChunkFootprint::Exact { first, last },
                     ..
-                } if !(first..=last).contains(&chunk)
+                } if !chunk_ranges_overlap(first, last, query.first, query.last)
             ),
             RangeWriteNode::Entry { .. } => false,
         }
     }
+}
+
+fn chunk_ranges_overlap(first: usize, last: usize, other_first: usize, other_last: usize) -> bool {
+    first <= other_last && other_first <= last
 }
 
 fn resolve_phi_states<V, D, U>(
@@ -837,7 +909,7 @@ mod tests {
                     address(crate::ir::SPARSE_WORKING_REGION, variable).absolute_addr(),
                     crate::backend::memory_layout::SparseWorkingLayout {
                         active_index: variable as usize,
-                        chunk_count: 4,
+                        chunk_count: 128,
                         dirty_words_offset: 0,
                         dirty_word_count: 1,
                         summary_words_offset: 0,
@@ -894,6 +966,7 @@ mod tests {
                     store(0, RegisterId(0)),
                     store(0, RegisterId(0)),
                     store_at(0, 64, RegisterId(0)),
+                    store_at(0, 4096, RegisterId(0)),
                     store(1, RegisterId(0)),
                     commit(0),
                     commit(1),
@@ -901,16 +974,38 @@ mod tests {
                 terminator: SIRTerminator::Return,
             },
         )]);
-        let facts = analyze(&unit, BlockId(0), 4);
+        let facts = analyze(&unit, BlockId(0), 5);
 
         assert_eq!(facts.state(BlockId(0), 0), SparseWriteState::First);
         assert_eq!(facts.state(BlockId(0), 1), SparseWriteState::Active);
         assert_eq!(facts.state(BlockId(0), 2), SparseWriteState::Active);
-        assert_eq!(facts.state(BlockId(0), 3), SparseWriteState::First);
+        assert_eq!(facts.state(BlockId(0), 3), SparseWriteState::Active);
+        assert_eq!(facts.state(BlockId(0), 4), SparseWriteState::First);
         assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Clean);
         assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Dirty);
         assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
         assert_eq!(facts.chunk_state(BlockId(0), 3), SparseChunkState::Clean);
+        assert_eq!(facts.chunk_state(BlockId(0), 4), SparseChunkState::Clean);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 0),
+            SparseChunkState::Clean
+        );
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 1),
+            SparseChunkState::Dirty
+        );
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 2),
+            SparseChunkState::Dirty
+        );
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 3),
+            SparseChunkState::Clean
+        );
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 4),
+            SparseChunkState::Clean
+        );
     }
 
     #[test]
@@ -965,6 +1060,10 @@ mod tests {
         assert_eq!(facts.chunk_state(BlockId(1), 0), SparseChunkState::Clean);
         assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Clean);
         assert_eq!(facts.chunk_state(BlockId(3), 0), SparseChunkState::Dirty);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(3), 0),
+            SparseChunkState::Dirty
+        );
     }
 
     #[test]
@@ -1025,6 +1124,10 @@ mod tests {
         assert_eq!(facts.state(BlockId(1), 0), SparseWriteState::First);
         assert_eq!(facts.state(BlockId(3), 0), SparseWriteState::Unknown);
         assert_eq!(facts.chunk_state(BlockId(3), 0), SparseChunkState::Unknown);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(3), 0),
+            SparseChunkState::Unknown
+        );
     }
 
     #[test]
@@ -1075,6 +1178,10 @@ mod tests {
 
         assert_eq!(facts.state(BlockId(2), 0), SparseWriteState::Unknown);
         assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Unknown);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(2), 0),
+            SparseChunkState::Unknown
+        );
     }
 
     #[test]
@@ -1098,6 +1205,10 @@ mod tests {
         assert_eq!(facts.state(BlockId(0), 0), SparseWriteState::First);
         assert_eq!(facts.state(BlockId(0), 2), SparseWriteState::First);
         assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 2),
+            SparseChunkState::Clean
+        );
     }
 
     #[test]
@@ -1188,6 +1299,10 @@ mod tests {
 
         assert_eq!(facts.state(BlockId(2), 0), SparseWriteState::First);
         assert_eq!(facts.chunk_state(BlockId(2), 0), SparseChunkState::Clean);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(2), 0),
+            SparseChunkState::Clean
+        );
     }
 
     #[test]
@@ -1218,5 +1333,13 @@ mod tests {
         assert_eq!(facts.chunk_state(BlockId(0), 0), SparseChunkState::Unknown);
         assert_eq!(facts.chunk_state(BlockId(0), 1), SparseChunkState::Dirty);
         assert_eq!(facts.chunk_state(BlockId(0), 2), SparseChunkState::Clean);
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 1),
+            SparseChunkState::Dirty
+        );
+        assert_eq!(
+            facts.dirty_word_state(BlockId(0), 2),
+            SparseChunkState::Dirty
+        );
     }
 }
