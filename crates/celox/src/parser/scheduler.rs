@@ -10,6 +10,8 @@ use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
+use celox_analysis::dag_schedule::schedule_min_live_values;
+use celox_analysis::interval::{DisjointIntervalError, DisjointIntervalMap, ExactInterval};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -458,6 +460,109 @@ fn strong_connect(u: usize, adj: &Vec<Vec<usize>>, ctx: &mut TarjanContext) {
         }
         ctx.sccs.push(scc);
     }
+}
+
+/// Memory definitions and uses induced by one set of LogicPaths.
+///
+/// A variable target is one bit-range MemoryDef. A current-value source is a
+/// MemoryUse of every overlapping definition; a previous-value source is a
+/// live-on-entry use plus an anti-dependence which keeps that use before an
+/// overlapping definition. `successors` contains all semantic edges while
+/// `value_users` contains only Def-to-Use edges which can become a forwarded
+/// value during later lowering. Both tables are indexed by the predecessor.
+struct LogicPathMemorySsa {
+    successors: Vec<Vec<usize>>,
+    value_users: Vec<Vec<usize>>,
+}
+
+fn bit_interval(access: BitAccess) -> Option<(usize, usize)> {
+    Some((
+        access.lsb,
+        access.msb.checked_sub(access.lsb)?.checked_add(1)?,
+    ))
+}
+
+fn build_logic_path_memory_ssa<Addr>(
+    input: &[LogicPath<Addr>],
+) -> Result<LogicPathMemorySsa, SchedulerError<Addr>>
+where
+    Addr: Copy + Ord + Hash + Eq + Display + Debug,
+{
+    let mut definition_intervals = Vec::new();
+    for (path, logic_path) in input.iter().enumerate() {
+        let Some(target) = logic_path.target.var() else {
+            continue;
+        };
+        let Some((start, length)) = bit_interval(target.access) else {
+            return Err(SchedulerError::InvalidDependencyGraph);
+        };
+        definition_intervals.push(ExactInterval {
+            object: target.id,
+            start,
+            length,
+            value: path,
+        });
+    }
+    let definitions = match DisjointIntervalMap::try_new(definition_intervals) {
+        Ok(definitions) => definitions,
+        Err(DisjointIntervalError::Overlap { first, second }) => {
+            return Err(SchedulerError::MultipleDriver {
+                blocks: vec![input[first].clone(), input[second].clone()],
+            });
+        }
+        Err(DisjointIntervalError::Empty { .. } | DisjointIntervalError::Overflow { .. }) => {
+            return Err(SchedulerError::InvalidDependencyGraph);
+        }
+    };
+
+    let mut successors = vec![Vec::new(); input.len()];
+    let mut value_users = vec![Vec::new(); input.len()];
+    for (user, path) in input.iter().enumerate() {
+        for source in &path.sources {
+            let Some((start, length)) = bit_interval(source.access) else {
+                return Err(SchedulerError::InvalidDependencyGraph);
+            };
+            let reaching = definitions
+                .overlapping(&source.id, start, length)
+                .map_err(|_| SchedulerError::InvalidDependencyGraph)?;
+            for definition in reaching {
+                successors[definition].push(user);
+                value_users[definition].push(user);
+            }
+        }
+
+        // A previous-value source reads the live-on-entry version. Preserve
+        // that read before every overlapping definition. A self read/write is
+        // already one atomic LogicPath and needs no self anti-dependence.
+        for source in &path.previous_sources {
+            let Some((start, length)) = bit_interval(source.access) else {
+                return Err(SchedulerError::InvalidDependencyGraph);
+            };
+            let reaching = definitions
+                .overlapping(&source.id, start, length)
+                .map_err(|_| SchedulerError::InvalidDependencyGraph)?;
+            for definition in reaching.filter(|definition| *definition != user) {
+                successors[user].push(definition);
+            }
+        }
+        for target in &path.order_before {
+            if target.0 < input.len() && target.0 != user {
+                successors[user].push(target.0);
+            }
+        }
+    }
+    for edges in &mut successors {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+    for edges in &mut value_users {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+    Ok(LogicPathMemorySsa {
+        successors,
+        value_users,
+    })
 }
 
 fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
@@ -2053,6 +2158,109 @@ fn stable_topological_sccs(
     (ordered.len() == component_count).then_some((ordered, component_by_path))
 }
 
+fn logic_path_is_scheduling_barrier<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> bool {
+    matches!(path.target, LogicPathTarget::CombCaptureEvent { .. })
+        || !path.comb_capture_enable_sites.is_empty()
+}
+
+fn schedule_acyclic_path_region(
+    paths: &[usize],
+    dependencies: &[Vec<usize>],
+    value_dependencies: &[Vec<usize>],
+    local_by_path: &mut [usize],
+) -> Option<Vec<Vec<usize>>> {
+    for (local, &path) in paths.iter().enumerate() {
+        if path >= local_by_path.len() || local_by_path[path] != usize::MAX {
+            for &mapped in &paths[..local] {
+                local_by_path[mapped] = usize::MAX;
+            }
+            return None;
+        }
+        local_by_path[path] = local;
+    }
+
+    let result = (|| {
+        let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
+        let mut local_values = vec![Vec::<usize>::new(); paths.len()];
+        for (definition, &path) in paths.iter().enumerate() {
+            for &user_path in dependencies.get(path)? {
+                let user = *local_by_path.get(user_path)?;
+                if user != usize::MAX && definition != user {
+                    local_dependencies[user].push(definition);
+                }
+            }
+            for &user_path in value_dependencies.get(path)? {
+                let user = *local_by_path.get(user_path)?;
+                if user != usize::MAX && definition != user {
+                    local_values[user].push(definition);
+                }
+            }
+        }
+        for row in &mut local_dependencies {
+            row.sort_unstable();
+            row.dedup();
+        }
+        for row in &mut local_values {
+            row.sort_unstable();
+            row.dedup();
+        }
+        let order = schedule_min_live_values(&local_dependencies, &local_values).ok()?;
+        Some(order.into_iter().map(|local| vec![paths[local]]).collect())
+    })();
+
+    for &path in paths {
+        local_by_path[path] = usize::MAX;
+    }
+    result
+}
+
+/// Schedule maximal acyclic runs by MemoryDef/MemoryUse liveness. Loop SCCs
+/// and observable events are synchronization boundaries, so no path is moved
+/// across an iteration or externally visible effect.
+fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
+    topological_sccs: Vec<Vec<usize>>,
+    dependencies: &[Vec<usize>],
+    value_dependencies: &[Vec<usize>],
+    input: &[LogicPath<Addr>],
+) -> Option<Vec<Vec<usize>>> {
+    if dependencies.len() != input.len() || value_dependencies.len() != input.len() {
+        return None;
+    }
+    let mut local_by_path = vec![usize::MAX; input.len()];
+    let mut result = Vec::with_capacity(topological_sccs.len());
+    let mut pending = Vec::new();
+    let flush = |pending: &mut Vec<usize>,
+                 result: &mut Vec<Vec<usize>>,
+                 local_by_path: &mut [usize]|
+     -> Option<()> {
+        if pending.is_empty() {
+            return Some(());
+        }
+        result.extend(schedule_acyclic_path_region(
+            pending,
+            dependencies,
+            value_dependencies,
+            local_by_path,
+        )?);
+        pending.clear();
+        Some(())
+    };
+
+    for scc in topological_sccs {
+        if let [path] = scc.as_slice()
+            && !dependencies[*path].contains(path)
+            && !logic_path_is_scheduling_barrier(&input[*path])
+        {
+            pending.push(*path);
+        } else {
+            flush(&mut pending, &mut result, &mut local_by_path)?;
+            result.push(scc);
+        }
+    }
+    flush(&mut pending, &mut result, &mut local_by_path)?;
+    Some(result)
+}
+
 /// Schedules and transforms LogicPaths into Simulation Intermediate Representation (SIR).
 ///
 /// This process performs:
@@ -2071,50 +2279,17 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     _var_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
-    // 1. Build Atom Map & Multiple Driver Check
-    let mut atoms_map: HashMap<Addr, Vec<(BitAccess, usize)>> = HashMap::default();
-    for (i, path) in input.iter().enumerate() {
-        if let Some(target) = path.target.var() {
-            atoms_map
-                .entry(target.id)
-                .or_default()
-                .push((target.access, i));
-        }
-    }
-    for entries in atoms_map.values_mut() {
-        entries.sort_by_key(|(access, _)| access.lsb);
-        for window in entries.windows(2) {
-            if window[0].0.msb >= window[1].0.lsb {
-                let blocks = vec![input[window[0].1].clone(), input[window[1].1].clone()];
-                return Err(SchedulerError::MultipleDriver { blocks });
-            }
-        }
-    }
-
-    // 2. Build Dependency Graph
+    // 1. Build bit-range MemoryDefs/MemoryUses and their semantic graph.
+    // This is the source dataflow adapter; interval indexing and DAG
+    // scheduling remain IR-independent in celox-analysis.
     let n = input.len();
-    let mut adj = vec![Vec::new(); n];
-    for (u, path) in input.iter().enumerate() {
-        for source in &path.sources {
-            if let Some(candidates) = atoms_map.get(&source.id) {
-                for (target_access, v) in candidates {
-                    if source.access.overlaps(target_access) {
-                        adj[*v].push(u); // Dependency: v must be evaluated for u
-                    }
-                }
-            }
-        }
-        for target in &path.order_before {
-            if target.0 < n {
-                adj[u].push(target.0);
-            }
-        }
-    }
-    for edges in &mut adj {
-        edges.sort_unstable();
-        edges.dedup();
-    }
-    // 3. SCC Extraction (Tarjan)
+    let LogicPathMemorySsa {
+        successors: adj,
+        value_users,
+    } = build_logic_path_memory_ssa(&input)?;
+
+    // 2. SCC extraction identifies the synchronization boundaries at which
+    // the dataflow equations must be iterated rather than freely reordered.
     let mut ctx = TarjanContext {
         index: 0,
         stack: Vec::new(),
@@ -2133,11 +2308,12 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let (topological_sccs, component_by_path) =
         stable_topological_sccs(ctx.sccs, &adj, &path_domains)
             .ok_or(SchedulerError::InvalidDependencyGraph)?;
-    // LogicPath target widths do not describe the temporary VRegs created
-    // while lowering their SLT expression.  Keep source lowering in a stable
-    // topological stream and leave pressure decisions to the MIR scheduler,
-    // where the complete machine DAG is visible.
-    let sccs = topological_sccs;
+    // 3. Acyclic runs are scheduled from MemoryUse exits toward MemoryDefs.
+    // Hard ordering edges constrain the result without inventing liveness;
+    // only Def-to-Use edges influence adjacency. No source-width estimate is
+    // used as a proxy for eventual machine-register pressure.
+    let sccs = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input)
+        .ok_or(SchedulerError::InvalidDependencyGraph)?;
 
     let mut builder = SIRBuilder::new();
     let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
@@ -2176,7 +2352,8 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut pending_fold_indices: Vec<usize> = Vec::new();
     let mut pending_fold_roots = HashSet::default();
 
-    // 4. Scheduling: Process each SCC by selecting either Static Unrolling (A) or Dynamic Convergence (B).
+    // 4. Lower each scheduled component, selecting static unrolling or
+    // dynamic convergence for cyclic SCCs.
     for scc in sccs {
         let component = component_by_path[scc[0]];
         let mut user_safety_limit = None;
@@ -2533,8 +2710,8 @@ mod tests {
 
     use super::{
         ExactFoldGroup, ExactIndexedLoadKey, FoldGroupReadFacts, NormalizedIndexExpr,
-        best_weighted_fold_family, build_fold_group_schedule_index, collect_node_input_deps,
-        prepare_atomic_fold_group_results, sort, stable_topological_sccs,
+        best_weighted_fold_family, build_fold_group_schedule_index, build_logic_path_memory_ssa,
+        collect_node_input_deps, prepare_atomic_fold_group_results, sort, stable_topological_sccs,
     };
     use crate::ir::{BinaryOp, BitAccess, SIRBuilder, SIRInstruction, SIRTerminator, VarAtomBase};
     use crate::logic_tree::{
@@ -2578,6 +2755,132 @@ mod tests {
             stable_topological_sccs(unordered, &adj, &[Some(0), Some(0), Some(1)]).unwrap();
 
         assert_eq!(ordered, vec![vec![0], vec![2], vec![1]]);
+    }
+
+    fn simple_path(
+        arena: &mut SLTNodeArena<u32>,
+        target: u32,
+        source: Option<u32>,
+    ) -> LogicPath<u32> {
+        let expr = if let Some(source) = source {
+            arena
+                .alloc(SLTNode::Input {
+                    variable: source,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 7),
+                })
+                .unwrap()
+        } else {
+            arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(target),
+                    BigUint::from(0u8),
+                    8,
+                    false,
+                ))
+                .unwrap()
+        };
+        LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
+            sources: source
+                .map(|source| [VarAtomBase::new(source, 0, 7)].into_iter().collect())
+                .unwrap_or_default(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr,
+        }
+    }
+
+    #[test]
+    fn memory_ssa_scheduler_lowers_independent_single_use_chains_contiguously() {
+        let mut arena = SLTNodeArena::new();
+        let paths = vec![
+            simple_path(&mut arena, 10, None),
+            simple_path(&mut arena, 20, None),
+            simple_path(&mut arena, 11, Some(10)),
+            simple_path(&mut arena, 21, Some(20)),
+            simple_path(&mut arena, 12, Some(11)),
+            simple_path(&mut arena, 22, Some(21)),
+        ];
+        let result = sort(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &crate::HashMap::default(),
+            1,
+        )
+        .unwrap();
+        let unit = &result.execution_units[0];
+        let stores = unit.blocks[&unit.entry_block_id]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(address, ..) => Some(*address),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(stores, vec![10, 11, 12, 20, 21, 22]);
+    }
+
+    #[test]
+    fn previous_value_use_is_an_order_edge_not_a_forwarded_value() {
+        let mut arena = SLTNodeArena::new();
+        let mut previous_user = simple_path(&mut arena, 20, Some(10));
+        previous_user.sources.clear();
+        previous_user.previous_sources = [VarAtomBase::new(10, 0, 7)].into_iter().collect();
+        let writer = simple_path(&mut arena, 10, None);
+        let paths = vec![previous_user, writer];
+
+        let memory_ssa = build_logic_path_memory_ssa(&paths).unwrap();
+        assert_eq!(memory_ssa.successors, vec![vec![1], vec![]]);
+        assert_eq!(
+            memory_ssa.value_users,
+            vec![Vec::<usize>::new(), Vec::new()]
+        );
+
+        let result = sort(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &crate::HashMap::default(),
+            1,
+        )
+        .unwrap();
+        let unit = &result.execution_units[0];
+        let stores = unit.blocks[&unit.entry_block_id]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(address, ..) => Some(*address),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![20, 10]);
+    }
+
+    #[test]
+    fn memory_use_depends_on_each_overlapping_bit_range_definition() {
+        let mut arena = SLTNodeArena::new();
+        let mut low = simple_path(&mut arena, 10, None);
+        low.target = LogicPathTarget::Var(VarAtomBase::new(10, 0, 3));
+        let mut high = simple_path(&mut arena, 10, None);
+        high.target = LogicPathTarget::Var(VarAtomBase::new(10, 4, 7));
+        let mut user = simple_path(&mut arena, 20, Some(10));
+        user.sources = [VarAtomBase::new(10, 2, 5)].into_iter().collect();
+
+        let memory_ssa = build_logic_path_memory_ssa(&[low, high, user]).unwrap();
+        assert_eq!(memory_ssa.successors, vec![vec![2], vec![2], vec![]]);
+        assert_eq!(memory_ssa.value_users, vec![vec![2], vec![2], vec![]]);
     }
 
     fn fixed_group_path(

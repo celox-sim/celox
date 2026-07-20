@@ -4157,6 +4157,161 @@ promotion rejected; shared analysis extraction and both reaching-def/snapshot
 adapters complete; current Linux acceptance complete; use-cluster allocation
 and throughput work are in progress**.
 
+### Step 33: Lower SLT from source MemorySSA regions
+
+Step 31 removed `layer` as the production lowering batch, but its retained
+effect-domain stream still chose among ready paths without representing which
+memory definition supplies each input. That is insufficient: it can satisfy
+topological order while separating a single-use producer from its consumer,
+and the later SIR pass then sees unnecessarily long Store-to-Load ranges.
+
+SLT does not yet have a control-flow graph on which to construct ordinary
+MemoryPhi nodes. Its acyclic portion does, however, already have the
+single-definition form of MemorySSA. Every variable LogicPath target is one
+`MemoryDef` of an exact `(object, bit interval)`. A normal source is a
+`MemoryUse` of every overlapping definition, while uncovered bits are
+live-on-entry. A previous-value source reads only live-on-entry and therefore
+adds a Use-before-overlapping-Def anti-dependence without pretending that the
+new definition produces its value. Explicit `order_before` edges likewise
+constrain order without creating a live value. Overlapping target definitions
+remain a multiple-driver error.
+
+The bit interval is an alias-domain choice made by the SLT adapter, not a field
+of the shared analysis. `celox-analysis::interval` now supplies an exact,
+unit-independent disjoint interval index, so the same representation can be
+used for bits here and bytes in a machine-memory adapter. Construction is
+`O(N log N)` and one overlap query is `O(log N + K)` for `K` returned
+definitions; neither time nor storage depends on the numerical width of an
+RTL object.
+
+A cyclic LogicPath SCC is the point where a static definition is executed more
+than once. It is therefore lowered as the existing explicit unrolled or
+runtime-convergence region and acts as a synchronization fence. Observable
+capture events are fences as well. The maximal acyclic runs between those
+boundaries are lowering regions. Within one such region, hard dependencies
+and the Def-to-Use value subset are passed to the shared bottom-up DAG list
+scheduler. Scheduling a use backward makes its unscheduled definitions live;
+scheduling a definition kills its value. The smallest live-value delta wins,
+with critical-path and stable-index tie breakers. Reversing that order for
+forward lowering keeps independent single-use chains contiguous without
+attaching arbitrary HDL widths to machine VRegs.
+
+For `N` region nodes, `E` hard edges, and `V` value edges, the list scheduler
+uses `O((N + E + V) log N)` time and `O(N + E + V)` storage. It constructs no
+layer, all-pairs reachability table, path cone, or interval proportional to an
+address width. A 4,096-node independent-region regression exercises this
+bound, and a 16 MiB interval regression confirms width-independent storage.
+
+This ordering is not itself mem2reg. Lowering still emits the semantic Store
+for a LogicPath target and Load for an input. Once their order and the SCC
+boundaries are explicit, the normal SIR Store-to-Load forwarding and CFG
+MemorySSA passes may replace a legal pair. Directly replacing every SLT input
+with a producer register here is deliberately excluded: fanout and terminal
+visibility can otherwise create the eager whole-version live ranges rejected
+in Step 32. Selecting larger promoted use clusters remains an allocator-owned
+decision.
+
+Current bounded validation is: shared interval/DAG/CFG/SSA/MemorySSA analyses
+39/39, parser scheduler 16/16, observer/cascade/false-loop regressions 163
+passed with the known upstream ignores, optimized non-LTO library 920/920,
+native testbench 60 passed with one upstream ignore, and counter 9 passed with
+three Veryl ignores. Package/all-target check and strict clippy, format, diff,
+and VitePress documentation gates pass.
+
+The full trace-free non-LTO run at
+`target/heliodor/results/20260720T025452Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` and exactly one
+`cy=9ae070 x3=aa pass=1`. Code generation took 163.267 s and execution took
+132.472 s. The one deliberate release/LTO run at
+`target/heliodor/results/20260720T030643Z_celox_test_soc_linux_boot.log` also
+completed with the exact marker; code generation took 152.135 s and execution
+took 133.980 s. The Heliodor checkout remained clean at pinned revision
+`7ad830fc0f8506c934b61a853ce2eadfa5926b82`.
+
+This establishes semantic acceptance, but not a throughput improvement. The
+immediately preceding current-revision non-LTO sample took 164.189 s to compile
+and 126.644 s to execute. A single timing pair cannot establish a regression,
+but the new 132.472 s execution sample does not support a speedup claim. The
+source MemorySSA order is therefore retained as the correct lowering
+foundation; actual Store-to-Load use-cluster promotion and allocator-owned
+range splitting remain the next performance boundary.
+
+Status: **complete as a source-MemorySSA lowering and semantic checkpoint; no
+throughput gain is claimed; use-cluster promotion remains open**.
+
+### Step 34: Exact aggregate projections and type-safe store forwarding
+
+The Step 33 ordering exposed a separate lowering defect. A static field
+projection represented as `Slice(Input)` first lowered the entire input and
+only then shifted and masked the requested field. For an 839-bit ROB entry,
+copying one field therefore produced an 839-bit Load and a wide reconstruction
+chain even though the memory address and exact bit interval were already
+known. This was not a scheduling problem: the requested operation was one
+exact range Load, but lowering discarded that information.
+
+`lower_slice_inner` now composes the Slice range with the static Input range
+before emitting SIR. A scheduler-materialized Input remains a strict boundary:
+the cached snapshot is sliced first, so the optimization never replaces that
+snapshot with a later Load across an intervening Store. Dynamic indexes retain
+their existing override path, and static loop/input overrides are queried at
+the composed range before falling back to memory.
+
+Exact range lowering exposed adjacent same-range Store-to-Load pairs. They had
+not been forwarded because SLT memory Loads conservatively have `Logic` type,
+while the stored two-state value is often an unsigned `Bit`. The payload and
+width are identical in a two-state simulation. Store-to-load forwarding now
+accepts only the exact-width `unsigned Bit -> Logic` case when `four_state` is
+false. Exact type matches remain unchanged; signed Bit values and every
+four-state kind mismatch still retain the memory round trip.
+
+The resulting ROB transfer changes from a full-entry Load followed by field
+extraction and a second Store to direct use of the exact stored field value:
+
+```text
+before: Store rob_alloc_entry[133] = r557
+        r = Load rob_alloc_entry[0:838]
+        Store u_rob.i_alloc_entry[133] = Slice(r, 133)
+
+after:  Store rob_alloc_entry[133] = r557
+        Store u_rob.i_alloc_entry[133] = r557
+```
+
+The complete pre/post/native SIR and MIR are retained under
+`target/heliodor/analysis/step34-range-lowering` and
+`target/heliodor/analysis/step34-range-forwarding`. The final optimized SIR
+contains the direct field transfers and no intermediate same-range Loads for
+the inspected ROB copy paths.
+
+Validation covers three range-lowering cases (direct static range, cached
+snapshot, and static override), five forwarding cases including two-state,
+four-state, signedness, and width boundaries, all 39 shared-analysis tests,
+all 16 parser scheduler tests, all 926 library tests, native testbench 60
+passed with one upstream ignore, and counter 9 passed with three Veryl
+ignores. Package check, all-target strict clippy, format, and diff checks pass.
+
+The final trace-free optimized non-LTO run completed through
+`reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`. Code generation
+took 156.443 s and execution took 110.254 s. The adjacent Step 33 run took
+163.267 s to compile and 132.472 s to execute; the final execution sample is
+16.8% shorter. The range-only intermediate measured 160.558 s compile and
+112.922 s execute, so both the exact-range lowering and the subsequent direct
+forwarding were measured on generated code that retained the acceptance
+marker.
+
+The one final release/LTO run also completed through `reboot: Power down` with
+the exact marker. Its code generation took 149.973 s and execution took
+110.762 s. LTO was used only for this final gate, not for iterative builds.
+
+This does not eliminate every aggregate-memory cost. Inside the ROB itself,
+some consumers genuinely request both a complete entry and individual fields;
+those currently remain distinct memory values. Sharing that value identity is
+a later aggregate-promotion/use-cluster decision and must not be approximated
+by moving scheduler materialization points.
+
+Status: **complete for exact static aggregate projection and its safe
+same-range forwarding; scheduler order and Linux cycle count are preserved;
+aggregate value sharing remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4245,6 +4400,8 @@ and throughput work are in progress**.
 | 32a--32b sparse terminal StateSSA and lazy residency graph | this step | range StateSSA 8/8; residency/writeback 6/6 | lib 905/905; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/strict clippy/format/diff gates pass | production remains disconnected; no Linux semantic or timing claim | n/a | terminal visibility now creates exact phis; phi SCC inheritance and allocator-selected branch/shared writeback clusters are represented without eagerly changing SIR |
 | 32c allocation-owned packed-state operations and sparse physical MemorySSA | this step | state homes 8/8; allocation IR 21/21 | lib 913/913; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; package all-target strict clippy and non-LTO check/format/diff gates pass | production range lowering remains disconnected; no Linux semantic or timing claim | n/a | full machine-word stores/reloads enter exact allocation liveness; independent sparse MemorySSA rejects every wrong-path or overlapping reload before atomic MIR publication |
 | 32d production state-home proof and eager-promotion rejection | this step | regalloc 278/278; final-write identity accepts 40 disjoint inserted writes and rejects a reaching overlap | lib 924/924; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/format gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | trace 89.995 s; full compile 86.870 s; execute 128.011 s | final MIR proof is sound; eager whole-version promotion raises the main frames and regresses Step 30f execution, so use-cluster allocation replaces it next |
+| 33 source-MemorySSA SLT lowering regions | this step | shared analyses 39/39; parser scheduler 16/16; observer/cascade/false-loop 163 passed | lib 920/920; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, docs, and diff gates pass | non-LTO and release/LTO both pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | non-LTO compile 163.267 s / execute 132.472 s; release compile 152.135 s / execute 133.980 s | bit-range Def/Use and SCC fences replace effect-only ready ordering; semantic checkpoint complete, no throughput gain claimed; allocator-selected use-cluster promotion remains open |
+| 34 exact aggregate projection and same-range forwarding | this step | range lowering 3/3; forwarding 5/5; shared analyses 39/39; parser scheduler 16/16 | lib 926/926; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, docs, and diff gates pass | optimized non-LTO and final release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | range-only non-LTO compile 160.558 s / execute 112.922 s; final non-LTO 156.443 s / 110.254 s; release 149.973 s / 110.762 s | static field Loads retain exact ranges and cached snapshots; two-state unsigned same-width Store values forward directly; final non-LTO execute sample is 16.8% below Step 33 |
 
 ## Related design records
 

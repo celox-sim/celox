@@ -13,10 +13,10 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
         "store_load_forwarding"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let register_map = &eu.register_map;
         for block in eu.blocks.values_mut() {
-            forward_and_simplify(&mut block.instructions, register_map);
+            forward_and_simplify(&mut block.instructions, register_map, options.four_state);
         }
 
         // Apply aliases across the whole EU
@@ -31,6 +31,7 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
 fn forward_and_simplify(
     instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>],
     register_map: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
 ) {
     // Track latest stored register for each (addr, bit_offset, width)
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,7 +91,12 @@ fn forward_and_simplify(
                 };
                 if let Some(entry) = known_stores.get(&key) {
                     if entry.width == *width
-                        && register_map.get(dst) == register_map.get(&entry.src)
+                        && forwarding_types_are_compatible(
+                            register_map.get(dst),
+                            register_map.get(&entry.src),
+                            *width,
+                            four_state,
+                        )
                     {
                         // Forward: alias dst to the stored register
                         aliases.insert(*dst, entry.src);
@@ -173,6 +179,36 @@ fn forward_and_simplify(
     for inst in instructions.iter_mut() {
         apply_aliases_to_inst(inst, &resolved);
     }
+}
+
+/// Whether replacing a memory round trip with the stored SSA value preserves
+/// the value interpretation expected by every user of the Load.
+///
+/// SLT lowering conservatively gives memory Loads a `Logic` result even in a
+/// two-state simulation. A known two-state, unsigned `Bit` value stored at the
+/// exact same width has the same payload as that Load, so retaining the memory
+/// round trip solely for the register-kind difference is unnecessary. Signed
+/// `Bit` values are excluded because replacing an unsigned `Logic` operand
+/// with one could affect a later width extension. In four-state mode the
+/// register kind also carries mask semantics and must match exactly.
+fn forwarding_types_are_compatible(
+    load: Option<&RegisterType>,
+    stored: Option<&RegisterType>,
+    width: usize,
+    four_state: bool,
+) -> bool {
+    let (Some(load), Some(stored)) = (load, stored) else {
+        return false;
+    };
+    if load.width() != width || stored.width() != width {
+        return false;
+    }
+    if load == stored {
+        return true;
+    }
+    !four_state
+        && matches!(load, RegisterType::Logic { .. })
+        && matches!(stored, RegisterType::Bit { signed: false, .. })
 }
 
 fn apply_aliases_to_inst(
@@ -322,7 +358,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        forward_and_simplify(&mut instructions, &register_map);
+        forward_and_simplify(&mut instructions, &register_map, false);
 
         assert!(matches!(
             instructions[2],
@@ -354,11 +390,113 @@ mod tests {
         .into_iter()
         .collect();
 
-        forward_and_simplify(&mut instructions, &register_map);
+        forward_and_simplify(&mut instructions, &register_map, false);
 
         assert!(matches!(
             instructions[2],
             SIRInstruction::Binary(_, RegisterId(0), BinaryOp::Eq, RegisterId(2))
+        ));
+    }
+
+    #[test]
+    fn forwards_unsigned_bit_to_logic_in_two_state_mode() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(32)),
+            (RegisterId(1), RegisterType::Logic { width: 32 }),
+            (RegisterId(2), RegisterType::Logic { width: 32 }),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert!(matches!(
+            instructions[2],
+            SIRInstruction::Binary(_, RegisterId(0), BinaryOp::Eq, RegisterId(2))
+        ));
+    }
+
+    #[test]
+    fn preserves_bit_to_logic_round_trip_in_four_state_mode() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(32)),
+            (RegisterId(1), RegisterType::Logic { width: 32 }),
+            (RegisterId(2), RegisterType::Logic { width: 32 }),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, true);
+
+        assert!(matches!(
+            instructions[2],
+            SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
+        ));
+    }
+
+    #[test]
+    fn does_not_forward_a_signed_bit_as_an_unsigned_logic_value() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 32),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 32,
+                    signed: true,
+                },
+            ),
+            (RegisterId(1), RegisterType::Logic { width: 32 }),
+            (RegisterId(2), RegisterType::Logic { width: 32 }),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert!(matches!(
+            instructions[2],
+            SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
         ));
     }
 }

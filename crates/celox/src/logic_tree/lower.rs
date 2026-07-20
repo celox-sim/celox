@@ -3034,23 +3034,30 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
+        // A cached value is a snapshot at the point where the scheduler first
+        // lowered this node.  Preserve that snapshot instead of introducing a
+        // later memory read which could cross an intervening Store.
+        if allow_cache && let Some(&inner_reg) = cache.get(&expr) {
+            return self.slice_reg(builder, inner_reg, access);
+        }
+
         if let SLTNode::Input {
             variable,
             index,
             access: input_access,
             ..
         } = arena.get(expr)
-            && !index.is_empty()
             && access.msb <= input_access.msb - input_access.lsb
         {
             let composed =
                 BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
-            if let Some(env) = env {
-                return self
-                    .lookup_override(builder, arena, cache, env, variable, index, &composed)
-                    .expect("dynamic input lookup always produces a memory fallback");
+            if let Some(env) = env
+                && let Some(reg) =
+                    self.lookup_override(builder, arena, cache, env, variable, index, &composed)
+            {
+                return reg;
             }
-            return self.lower_input(builder, variable, index, &composed, arena, cache, None);
+            return self.lower_input(builder, variable, index, &composed, arena, cache, env);
         }
 
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
@@ -5877,6 +5884,113 @@ mod tests {
         eu.verify_result()
             .unwrap_or_else(|error| panic!("{error}\n{eu}"));
         eu
+    }
+
+    #[test]
+    fn static_input_slice_lowers_to_an_exact_range_load() {
+        let mut arena = SLTNodeArena::new();
+        let packed = arena
+            .alloc(SLTNode::Input {
+                variable: 10,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(100, 938),
+            })
+            .unwrap();
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(33, 37),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            field,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert!(matches!(
+            instructions.as_slice(),
+            [SIRInstruction::Load(_, 10, SIROffset::Static(133), 5)]
+        ));
+    }
+
+    #[test]
+    fn static_input_slice_preserves_a_cached_snapshot() {
+        let mut arena = SLTNodeArena::new();
+        let packed = input(&mut arena, 10, 839);
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(133, 133),
+            })
+            .unwrap();
+
+        let lowerer = SLTToSIRLowerer::new(false);
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let snapshot = lowerer.lower(&mut builder, packed, &arena, &mut cache);
+        lowerer.lower(&mut builder, field, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            1
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, 10, SIROffset::Static(0), 839)
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
+        )));
+    }
+
+    #[test]
+    fn static_input_slice_uses_an_exact_override_range() {
+        let mut arena = SLTNodeArena::new();
+        let packed = input(&mut arena, 10, 16);
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(4, 7),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let materialized = builder.alloc_logic(16);
+        builder.emit(SIRInstruction::Imm(materialized, SIRValue::new(0xabcdu16)));
+        let mut inputs = crate::HashMap::default();
+        inputs.insert(VarAtomBase::new(10, 0, 15), materialized);
+        SLTToSIRLowerer::new(false).lower_with_inputs(
+            &mut builder,
+            field,
+            &arena,
+            &mut crate::HashMap::default(),
+            inputs,
+        );
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Load(..)))
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == materialized
+        )));
     }
 
     fn instruction_count(
