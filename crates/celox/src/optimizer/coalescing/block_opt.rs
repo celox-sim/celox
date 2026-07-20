@@ -285,6 +285,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    element_widths: &HashMap<A, usize>,
 ) -> bool {
     let next_id = reg_counter;
     let mut replaced_indices = std::collections::HashSet::new();
@@ -390,7 +391,16 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                 details[segment_start].offset + details[segment_start].width;
 
             for (k, detail) in details.iter().enumerate().skip(segment_start + 1) {
-                if detail.offset == expected_next_offset {
+                let stays_in_element = element_widths.get(&addr).is_none_or(|element_width| {
+                    *element_width != 0
+                        && details[segment_start].offset / element_width
+                            == detail
+                                .offset
+                                .checked_add(detail.width.saturating_sub(1))
+                                .map(|end| end / element_width)
+                                .unwrap_or(usize::MAX)
+                });
+                if detail.offset == expected_next_offset && stays_in_element {
                     segment_end = k;
                     expected_next_offset += detail.width;
                 } else {
@@ -707,12 +717,23 @@ pub(super) fn optimize_block<
     unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
     reg_counter: &mut usize,
     skip_final_schedule: bool,
+    element_widths: &HashMap<A, usize>,
 ) {
     const MAX_INFLIGHT_LOADS: usize = 8;
-    coalesce_static_loads(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_loads(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        element_widths,
+    );
 
     // First pass: coalesce stores that are safe even with intermediate loads present
-    coalesce_static_stores(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_stores(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        element_widths,
+    );
 
     // Reuse already-loaded wide static regions before exact-load forwarding.
     // Turning contained loads into pure Slices can also make more store groups
@@ -728,7 +749,12 @@ pub(super) fn optimize_block<
 
     // Second pass: after eliminate_redundant_loads removed store-forwarded loads,
     // previously-unsafe store groups may now be safe to coalesce
-    coalesce_static_stores(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_stores(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        element_widths,
+    );
 
     for (from, to) in local_replacement_map {
         unit_replacement_map.insert(from, to);
@@ -745,6 +771,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    element_widths: &HashMap<A, usize>,
 ) {
     #[derive(Clone)]
     struct LoadInfo {
@@ -814,23 +841,37 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             continue;
         }
 
-        let mut by_word: HashMap<usize, Vec<LoadInfo>> = HashMap::default();
+        let element_width = element_widths.get(&seg.addr).copied();
+        let mut by_word: HashMap<(usize, usize), Vec<LoadInfo>> = HashMap::default();
         for ld in seg.loads {
             if ld.width == 0 || ld.width > 64 {
                 continue;
             }
-            let word_base = (ld.offset / 64) * 64;
+            let (word_base, word_width) = if let Some(element_width) = element_width {
+                if element_width == 0 {
+                    continue;
+                }
+                let element_base = (ld.offset / element_width) * element_width;
+                let within_element = ld.offset - element_base;
+                let chunk_base = (within_element / 64) * 64;
+                (
+                    element_base + chunk_base,
+                    (element_width - chunk_base).min(64),
+                )
+            } else {
+                ((ld.offset / 64) * 64, 64)
+            };
             if ld
                 .offset
                 .checked_add(ld.width)
-                .zip(word_base.checked_add(64))
+                .zip(word_base.checked_add(word_width))
                 .is_some_and(|(load_end, word_end)| load_end <= word_end)
             {
-                by_word.entry(word_base).or_default().push(ld);
+                by_word.entry((word_base, word_width)).or_default().push(ld);
             }
         }
 
-        for (word_base, mut loads) in by_word {
+        for ((word_base, word_width), mut loads) in by_word {
             if loads.len() < 2 {
                 continue;
             }
@@ -846,7 +887,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             let insert_idx = loads[0].index;
 
             let wide_reg = next_reg_id(register_map, reg_counter);
-            register_map.insert(wide_reg, RegisterType::Logic { width: 64 });
+            register_map.insert(wide_reg, RegisterType::Logic { width: word_width });
             insertions
                 .entry(insert_idx)
                 .or_default()
@@ -854,11 +895,18 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
                     wide_reg,
                     seg.addr.clone(),
                     SIROffset::Static(word_base),
-                    64,
+                    word_width,
                 ));
 
             for ld in loads {
                 let rel_off = ld.offset - word_base;
+                if element_width.is_some() {
+                    replacements.insert(
+                        ld.index,
+                        vec![SIRInstruction::Slice(ld.dst, wide_reg, rel_off, ld.width)],
+                    );
+                    continue;
+                }
                 let mut ops: Vec<SIRInstruction<A>> = Vec::new();
                 let mut source_reg = wide_reg;
 
@@ -1134,7 +1182,8 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 #[cfg(test)]
 mod tests {
     use super::{
-        coalesce_static_loads as coalesce_static_loads_with_types, optimize_block,
+        coalesce_static_loads as coalesce_static_loads_with_types,
+        coalesce_static_stores as coalesce_static_stores_with_types, optimize_block,
         subsume_static_loads as subsume_static_loads_with_types,
     };
     use crate::HashMap;
@@ -1233,7 +1282,12 @@ mod tests {
         .collect();
         let mut reg_counter = 2;
 
-        coalesce_static_loads_with_types(&mut instructions, &mut register_map, &mut reg_counter);
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &HashMap::default(),
+        );
 
         assert_eq!(
             instructions
@@ -1250,6 +1304,72 @@ mod tests {
             instruction,
             SIRInstruction::Load(RegisterId(1) | RegisterId(2), _, _, _)
         )));
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn unpacked_array_elements_are_not_repacked_by_block_coalescing() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 12),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(12), 12),
+        ];
+        let mut register_map = [(RegisterId(0), logic(12)), (RegisterId(1), logic(12))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &[(7u32, 12usize)].into_iter().collect(),
+        );
+
+        assert_eq!(
+            instructions,
+            vec![
+                SIRInstruction::Load(RegisterId(0), 7, SIROffset::Static(0), 12),
+                SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(12), 12),
+            ]
+        );
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn store_coalescing_stops_at_unpacked_element_boundaries() {
+        let mut instructions = (0..4)
+            .map(|index| SIRInstruction::Imm(RegisterId(index), SIRValue::new(index as u8)))
+            .chain((0..4).map(|index| {
+                SIRInstruction::Store(
+                    7u32,
+                    SIROffset::Static(index * 6),
+                    6,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            }))
+            .collect::<Vec<_>>();
+        let mut register_map = (0..4).map(|index| (RegisterId(index), logic(6))).collect();
+        let mut reg_counter = 3;
+
+        assert!(coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &[(7u32, 12usize)].into_iter().collect(),
+        ));
+
+        let stores = instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, SIROffset::Static(offset), width, ..) => {
+                    Some((*offset, *width))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![(0, 12), (12, 12)]);
         verify(instructions, register_map);
     }
 
@@ -1468,6 +1588,7 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            &HashMap::default(),
         );
 
         assert!(replacements.is_empty());
@@ -1510,6 +1631,7 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            &HashMap::default(),
         );
 
         assert!(replacements.is_empty());
@@ -1547,6 +1669,7 @@ mod tests {
                 &mut replacements,
                 &mut reg_counter,
                 true,
+                &HashMap::default(),
             );
             verify(block.instructions.clone(), register_map);
             block.instructions

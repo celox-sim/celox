@@ -30,6 +30,7 @@ fn analyze(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
+    preserve_element_storage_layout: bool,
 ) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
@@ -100,6 +101,7 @@ fn analyze(
         trace_opts,
         trace_out,
         optimize_options,
+        preserve_element_storage_layout,
     );
     (sir, errors)
 }
@@ -129,6 +131,45 @@ pub fn compile_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+    compile_to_sir_with_layout_mode(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+    )
+}
+
+fn compile_to_sir_with_layout_mode(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
         top,
@@ -142,6 +183,7 @@ pub fn compile_to_sir(
         reset_type,
         param_overrides,
         optimize_options,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
     let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
     if !real_errors.is_empty() {
@@ -514,7 +556,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     > {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let compile_start = phase_timing.then(crate::timing::now);
-        let (mut program, warnings) = compile_to_sir(
+        let (mut program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -527,6 +569,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         )?;
         if let Some(start) = compile_start {
             eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
@@ -701,7 +744,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// while capturing compilation trace data as configured by TraceOptions.
     pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
         let mut trace = crate::debug::CompilationTrace::default();
-        let program_res = compile_to_sir(
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        let program_res = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -714,16 +761,13 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         );
 
         let sim_res = program_res.and_then(|(mut program, warnings)| {
             // Register testbench runtime-event sites before layout fixes the ring geometry.
             crate::testbench::register_runtime_event_sites(&mut program);
 
-            #[cfg(target_arch = "x86_64")]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(target_arch = "x86_64"))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             program.build_layout_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
@@ -822,7 +866,11 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     /// Compiles the Veryl source and constructs the timed simulation wrapper.
     pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
         self.options.emit_triggers = true;
-        let (mut program, warnings) = compile_to_sir(
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        let (mut program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -835,11 +883,8 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         )?;
-        #[cfg(target_arch = "x86_64")]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-        #[cfg(not(target_arch = "x86_64"))]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
         program.build_layout_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {

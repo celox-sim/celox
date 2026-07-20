@@ -1,6 +1,7 @@
 use crate::ir::*;
 use crate::optimizer::{PassOptions, ProgramPass, SirPass};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 mod block_opt;
 pub(crate) mod commit_ops;
@@ -41,6 +42,17 @@ mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
 
+/// Preserve scalar element boundaries only for small register-like arrays.
+/// Larger memory-like arrays need compact bulk-store lowering before padding
+/// each element can be profitable without exploding compile-time IR.
+fn preserve_native_element_boundaries(
+    array: &crate::backend::memory_layout::UnpackedArrayLayout,
+) -> bool {
+    (9..=64).contains(&array.element_width)
+        && array.element_stride * 8 != array.element_width
+        && array.plane_size <= 256
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
@@ -65,6 +77,7 @@ pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsolut
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &crate::backend::MemoryLayout,
 ) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
     let mut changed = false;
     if crate::ir::inline_single_predecessor_jumps(eu)
@@ -76,6 +89,21 @@ pub(crate) fn optimize_native_merged_chain(
         .map_err(|error| ("after native jump inlining", error))?;
     OptimizeBlocksPass {
         skip_final_schedule: false,
+        element_widths: Arc::new(
+            layout
+                .unpacked_arrays
+                .iter()
+                .filter(|(_, array)| preserve_native_element_boundaries(array))
+                .flat_map(|(&address, array)| {
+                    [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
+                        (
+                            RegionedAbsoluteAddr::from_absolute_addr(region, address),
+                            array.element_width,
+                        )
+                    })
+                })
+                .collect::<crate::HashMap<_, _>>(),
+        ),
     }
     .run(eu, &PassOptions::default());
     eu.verify_result()
@@ -150,6 +178,7 @@ impl ProgramPass for CoalescingPass {
             options.max_inflight_loads,
             options.four_state,
             &options.optimize_options,
+            options.preserve_element_storage_layout,
         );
     }
 }
@@ -410,6 +439,7 @@ fn optimize_with_options(
     max_inflight_loads: usize,
     four_state: bool,
     opt: &crate::optimizer::OptimizeOptions,
+    preserve_element_storage_layout: bool,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
@@ -419,6 +449,30 @@ fn optimize_with_options(
         max_inflight_loads,
         four_state,
         optimize_options: opt.clone(),
+        preserve_element_storage_layout,
+    };
+    // Decide element-strided eligibility from the source-shaped SIR. Later
+    // block optimization may combine accesses, but must not manufacture a
+    // cross-element access which retroactively invalidates that decision.
+    let element_widths = if preserve_element_storage_layout {
+        let strided_candidates =
+            crate::backend::memory_layout::collect_strided_array_layouts(program);
+        Arc::new(
+            strided_candidates
+                .iter()
+                .filter(|(_, array)| preserve_native_element_boundaries(array))
+                .flat_map(|(&address, array)| {
+                    [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
+                        (
+                            RegionedAbsoluteAddr::from_absolute_addr(region, address),
+                            array.element_width,
+                        )
+                    })
+                })
+                .collect::<crate::HashMap<_, _>>(),
+        )
+    } else {
+        Arc::new(crate::HashMap::default())
     };
 
     // Helper closure to check pass enablement.
@@ -462,10 +516,13 @@ fn optimize_with_options(
     if on(SirPass::OptimizeBlocks) {
         ff_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: on(SirPass::Reschedule),
+            element_widths: Arc::clone(&element_widths),
         });
     }
     if on(SirPass::CoalesceStores) {
-        ff_passes.add_pass(CoalesceStoresPass);
+        ff_passes.add_pass(CoalesceStoresPass {
+            element_widths: Arc::clone(&element_widths),
+        });
     }
     if on(SirPass::SplitWideCommits) {
         ff_passes.add_pass(SplitWideCommitsPass);
@@ -525,10 +582,13 @@ fn optimize_with_options(
     if on(SirPass::OptimizeBlocks) {
         eval_only_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: on(SirPass::Reschedule),
+            element_widths: Arc::clone(&element_widths),
         });
     }
     if on(SirPass::CoalesceStores) {
-        eval_only_passes.add_pass(CoalesceStoresPass);
+        eval_only_passes.add_pass(CoalesceStoresPass {
+            element_widths: Arc::clone(&element_widths),
+        });
     }
     if on(SirPass::Reschedule) {
         eval_only_passes.add_pass(ReschedulePass);
@@ -558,10 +618,13 @@ fn optimize_with_options(
     if on(SirPass::OptimizeBlocks) {
         apply_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: on(SirPass::Reschedule),
+            element_widths: Arc::clone(&element_widths),
         });
     } // Still useful for loading from working memory
     if on(SirPass::CoalesceStores) {
-        apply_passes.add_pass(CoalesceStoresPass);
+        apply_passes.add_pass(CoalesceStoresPass {
+            element_widths: Arc::clone(&element_widths),
+        });
     }
     if on(SirPass::SplitWideCommits) {
         apply_passes.add_pass(SplitWideCommitsPass);
@@ -622,10 +685,13 @@ fn optimize_with_options(
     if on(SirPass::OptimizeBlocks) {
         comb_passes.add_pass(OptimizeBlocksPass {
             skip_final_schedule: false, // eval_comb has no reschedule pass
+            element_widths: Arc::clone(&element_widths),
         });
     }
     if on(SirPass::CoalesceStores) {
-        comb_passes.add_pass(CoalesceStoresPass);
+        comb_passes.add_pass(CoalesceStoresPass {
+            element_widths: Arc::clone(&element_widths),
+        });
     }
     if on(SirPass::VectorizeConcat) {
         comb_passes.add_pass(VectorizeConcatPass);

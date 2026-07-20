@@ -3,6 +3,7 @@ use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use std::sync::Arc;
 
 use super::pass_manager::ExecutionUnitPass;
 
@@ -10,6 +11,10 @@ pub(super) struct OptimizeBlocksPass {
     /// When true, skip the final `schedule_instructions` inside `optimize_block`
     /// because a `ReschedulePass` will run afterward in the same pipeline.
     pub skip_final_schedule: bool,
+    /// Element widths for arrays whose element boundaries must survive until
+    /// backend layout selection. Coalescing within one element remains legal;
+    /// only cross-element packed accesses are forbidden.
+    pub element_widths: Arc<HashMap<RegionedAbsoluteAddr, usize>>,
 }
 
 impl ExecutionUnitPass for OptimizeBlocksPass {
@@ -34,6 +39,7 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
                 &mut replacement_map,
                 &mut reg_counter,
                 skip_final_schedule,
+                &self.element_widths,
             );
         }
 

@@ -2,10 +2,14 @@ use crate::HashMap;
 use crate::HashSet;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use std::sync::Arc;
 
 use super::pass_manager::ExecutionUnitPass;
 
-pub(super) struct CoalesceStoresPass;
+#[derive(Default)]
+pub(super) struct CoalesceStoresPass {
+    pub element_widths: Arc<HashMap<RegionedAbsoluteAddr, usize>>,
+}
 
 const MAX_COALESCED_STORE_WIDTH: usize = 64;
 
@@ -18,13 +22,19 @@ impl ExecutionUnitPass for CoalesceStoresPass {
         let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
         for block in eu.blocks.values_mut() {
-            coalesce_block(block, &mut eu.register_map, &mut reg_counter);
+            coalesce_block(
+                block,
+                &mut eu.register_map,
+                &mut reg_counter,
+                &self.element_widths,
+            );
         }
     }
 }
 
 /// A candidate Store instruction within a block.
 struct StoreCandidate {
+    addr: RegionedAbsoluteAddr,
     inst_index: usize,
     offset: usize,
     width: usize,
@@ -36,6 +46,7 @@ fn coalesce_block(
     block: &mut BasicBlock<RegionedAbsoluteAddr>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    element_widths: &HashMap<RegionedAbsoluteAddr, usize>,
 ) {
     // Step 1: Collect Store groups, sealing on reads.
     //
@@ -50,6 +61,7 @@ fn coalesce_block(
                 if triggers.is_empty() && sites.is_empty() =>
             {
                 groups.entry(*addr).or_default().push(StoreCandidate {
+                    addr: *addr,
                     inst_index: i,
                     offset: *off,
                     width: *width,
@@ -105,9 +117,24 @@ fn coalesce_block(
         let mut run_start = 0;
         while run_start < group.len() {
             let mut run_end = run_start;
-            while run_end + 1 < group.len()
-                && group[run_end + 1].offset == group[run_end].offset + group[run_end].width
-            {
+            while run_end + 1 < group.len() {
+                let next = &group[run_end + 1];
+                let contiguous = next.offset == group[run_end].offset + group[run_end].width;
+                let stays_in_element =
+                    element_widths
+                        .get(&group[run_start].addr)
+                        .is_none_or(|element_width| {
+                            *element_width != 0
+                                && group[run_start].offset / element_width
+                                    == next
+                                        .offset
+                                        .checked_add(next.width.saturating_sub(1))
+                                        .map(|end| end / element_width)
+                                        .unwrap_or(usize::MAX)
+                        });
+                if !contiguous || !stays_in_element {
+                    break;
+                }
                 run_end += 1;
             }
 
@@ -315,7 +342,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         // Should be 2 instructions: Concat + wide Store
@@ -394,7 +421,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         // 4 instructions: Concat+Store for addr0, Concat+Store for addr1
@@ -438,7 +465,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         // No coalescing should happen — 3 original instructions remain
@@ -481,7 +508,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         assert_eq!(block.instructions.len(), 2);
@@ -527,7 +554,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         // Triggered stores should not be coalesced
@@ -586,10 +613,56 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let options = PassOptions::default();
-        CoalesceStoresPass.run(&mut eu, &options);
+        CoalesceStoresPass::default().run(&mut eu, &options);
 
         let block = eu.blocks.get(&BlockId(0)).unwrap();
         // 3 instructions: Concat + wide Store (for bits 0-2) + original Store(bit 5)
         assert_eq!(block.instructions.len(), 3);
+    }
+
+    #[test]
+    fn test_unpacked_element_boundary_splits_contiguous_run() {
+        let addr = make_addr(0);
+        let register_map = (0..4)
+            .map(|index| {
+                (
+                    RegisterId(index),
+                    RegisterType::Bit {
+                        width: 6,
+                        signed: false,
+                    },
+                )
+            })
+            .collect();
+        let instructions = (0..4)
+            .map(|index| {
+                SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(index * 6),
+                    6,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            })
+            .collect();
+        let mut eu = make_eu(instructions, register_map);
+        let pass = CoalesceStoresPass {
+            element_widths: Arc::new([(addr, 12usize)].into_iter().collect()),
+        };
+
+        pass.run(&mut eu, &PassOptions::default());
+
+        let stores = eu.blocks[&BlockId(0)]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, SIROffset::Static(offset), width, ..) => {
+                    Some((*offset, *width))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![(0, 12), (12, 12)]);
     }
 }

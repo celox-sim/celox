@@ -354,6 +354,9 @@ pub struct PassOptions {
     pub max_inflight_loads: usize,
     pub four_state: bool,
     pub optimize_options: OptimizeOptions,
+    /// Preserve source array element boundaries for a backend layout that
+    /// stores each element in its own naturally sized scalar slot.
+    pub preserve_element_storage_layout: bool,
 }
 
 impl Default for PassOptions {
@@ -362,6 +365,7 @@ impl Default for PassOptions {
             max_inflight_loads: 8,
             four_state: false,
             optimize_options: OptimizeOptions::default(),
+            preserve_element_storage_layout: false,
         }
     }
 }
@@ -397,6 +401,23 @@ impl PassManager {
 }
 
 pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &OptimizeOptions) {
+    optimize_impl(program, four_state, optimize_options, false);
+}
+
+pub(crate) fn optimize_preserving_element_storage(
+    program: &mut Program,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+) {
+    optimize_impl(program, four_state, optimize_options, true);
+}
+
+fn optimize_impl(
+    program: &mut Program,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+    preserve_element_storage_layout: bool,
+) {
     let mut manager = PassManager::new();
     manager.add_pass(coalescing::CoalescingPass);
     manager.run(
@@ -404,6 +425,7 @@ pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &Opti
         &PassOptions {
             four_state,
             optimize_options: optimize_options.clone(),
+            preserve_element_storage_layout,
             ..PassOptions::default()
         },
     );

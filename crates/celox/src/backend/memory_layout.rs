@@ -401,7 +401,9 @@ fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Un
     layouts
 }
 
-fn collect_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
+pub(crate) fn collect_strided_array_layouts(
+    program: &Program,
+) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
     let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>| {

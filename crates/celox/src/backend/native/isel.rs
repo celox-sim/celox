@@ -924,6 +924,12 @@ impl<'a> ISelContext<'a> {
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
+        if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr())
+            && width_bits == array.element_width
+            && bit_offset.is_multiple_of(array.element_width)
+        {
+            return Self::exact_storage_access_size(width_bits);
+        }
         if bit_offset != 0 {
             return None;
         }
@@ -949,6 +955,32 @@ impl<'a> ISelContext<'a> {
         width_bits: usize,
     ) -> Option<OpSize> {
         self.full_static_access_size(addr, bit_offset, width_bits)
+    }
+
+    /// A whole dynamically indexed array element occupies one independently
+    /// padded native scalar slot. Accessing that slot directly is legal when
+    /// the offset contains no additional bit displacement.
+    fn full_element_access_size(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        offset: &SIROffset,
+        width_bits: usize,
+    ) -> Option<OpSize> {
+        let array = self.layout.unpacked_arrays.get(&addr.absolute_addr())?;
+        if width_bits != array.element_width {
+            return None;
+        }
+        match offset {
+            SIROffset::Element {
+                element_width,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+                ..
+            } if *element_width == array.element_width => {
+                Self::exact_storage_access_size(width_bits)
+            }
+            _ => None,
+        }
     }
 
     fn mask_for_store_width(&mut self, block: &mut MBlock, src: VReg, width_bits: usize) -> VReg {
@@ -4925,6 +4957,7 @@ fn lower_instruction(
                     }
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                    let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
                     let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                     let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
                     let base_off = ctx.byte_offset(addr, 0);
@@ -4991,8 +5024,13 @@ fn lower_instruction(
                         return;
                     }
                     if offset_low_zero_bits >= 3 {
-                        let load_size = ISelContext::op_size_for_width(*width_bits);
-                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        let load_size = full_element_size
+                            .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
+                        let raw = if full_element_size.is_some() {
+                            vreg
+                        } else {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        };
                         block.push(MInst::LoadIndexed {
                             dst: raw,
                             base: BaseReg::SimState,
@@ -5001,7 +5039,9 @@ fn lower_instruction(
                             size: load_size,
                             alias_range: value_alias_range,
                         });
-                        if *width_bits < 64 {
+                        if full_element_size.is_some() {
+                            ctx.known_bits.insert(vreg, *width_bits);
+                        } else if *width_bits < 64 {
                             ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
                         } else {
                             ctx.emit_mov(block, vreg, raw);
@@ -5115,6 +5155,8 @@ fn lower_instruction(
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                         // Dynamic: load mask similarly with indexed addressing
+                        let full_element_size =
+                            ctx.full_element_access_size(addr, offset, *width_bits);
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let mask_base_off = ctx.mask_byte_offset(addr, 0);
                         let mask_alias_range = MemoryAliasRange::new(
@@ -5128,8 +5170,14 @@ fn lower_instruction(
                             imm: 3,
                         });
                         if memory_offset_low_zero_bits(ctx, addr, offset) >= 3 {
-                            let load_size = ISelContext::op_size_for_width(*width_bits);
-                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            let load_size = full_element_size
+                                .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            let raw = if full_element_size.is_some() {
+                                mvreg
+                            } else {
+                                ctx.alloc_vreg(SpillDesc::transient())
+                            };
                             block.push(MInst::LoadIndexed {
                                 dst: raw,
                                 base: BaseReg::SimState,
@@ -5138,8 +5186,9 @@ fn lower_instruction(
                                 size: load_size,
                                 alias_range: mask_alias_range,
                             });
-                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            if *width_bits < 64 {
+                            if full_element_size.is_some() {
+                                ctx.known_bits.insert(mvreg, *width_bits);
+                            } else if *width_bits < 64 {
                                 ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
                             } else {
                                 ctx.emit_mov(block, mvreg, raw);
@@ -5552,6 +5601,8 @@ fn lower_instruction(
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                         // Dynamic offset store: RMW with register-indexed addressing.
+                        let full_element_size =
+                            ctx.full_element_access_size(addr, offset, *width_bits);
                         let src_vreg = ctx.reg_map.get(*src_reg);
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
@@ -5601,7 +5652,8 @@ fn lower_instruction(
                                 );
                             }
                         } else if offset_low_zero_bits >= 3
-                            && let Some(store_size) = OpSize::from_bits(*width_bits)
+                            && let Some(store_size) =
+                                full_element_size.or_else(|| OpSize::from_bits(*width_bits))
                         {
                             let store_src = if *width_bits < 64 {
                                 let masked = ctx.alloc_vreg(SpillDesc::transient());
@@ -5840,6 +5892,8 @@ fn lower_instruction(
                         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                             // Dynamic mask store: same RMW pattern as value store,
                             // but targeting the mask memory region.
+                            let full_element_size =
+                                ctx.full_element_access_size(addr, offset, *width_bits);
                             let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                             let offset_low_zero_bits =
                                 memory_offset_low_zero_bits(ctx, addr, offset);
@@ -5906,7 +5960,8 @@ fn lower_instruction(
                                     );
                                 }
                             } else if offset_low_zero_bits >= 3
-                                && let Some(store_size) = OpSize::from_bits(*width_bits)
+                                && let Some(store_size) =
+                                    full_element_size.or_else(|| OpSize::from_bits(*width_bits))
                             {
                                 let store_src = if *width_bits < 64 {
                                     let masked = ctx.alloc_vreg(SpillDesc::transient());
@@ -12129,6 +12184,167 @@ mod tests {
     }
 
     #[test]
+    fn full_dynamic_padded_element_uses_native_indexed_load_and_store() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut output_var = VarId::default();
+        output_var.inc();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let index = RegisterId(0);
+        let value = RegisterId(1);
+        let loaded = RegisterId(2);
+        let element_offset = SIROffset::Element {
+            index,
+            element_width: 12,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                        SIRInstruction::Imm(value, SIRValue::new(0xabcu16)),
+                        SIRInstruction::Store(
+                            array,
+                            element_offset.clone(),
+                            12,
+                            value,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Load(loaded, array, element_offset, 12),
+                        SIRInstruction::Store(
+                            output,
+                            SIROffset::Static(0),
+                            12,
+                            loaded,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (value, RegisterType::Logic { width: 12 }),
+                (loaded, RegisterType::Logic { width: 12 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(array_abs, 0), (output_abs, 8)].into_iter().collect();
+        layout.widths = [(array_abs, 24), (output_abs, 12)].into_iter().collect();
+        layout.is_4states = [(array_abs, false), (output_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 12,
+                element_count: 2,
+                element_stride: 2,
+                plane_size: 4,
+            },
+        );
+        layout.total_size = 16;
+        layout.working_base_offset = 16;
+        layout.sparse_base_offset = 16;
+        layout.merged_total_size = 16;
+        layout.triggered_bits_offset = 16;
+        layout.scratch_base_offset = 16;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::LoadIndexed {
+                        size: OpSize::S16,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::StoreIndexed {
+                        size: OpSize::S16,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|inst| !matches!(
+                    inst,
+                    MInst::LoadIndexed {
+                        size: OpSize::S32,
+                        ..
+                    }
+                ))
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; 16];
+        state[2..4].copy_from_slice(&0xf123u16.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(u16::from_le_bytes(state[2..4].try_into().unwrap()), 0x0abc);
+        assert_eq!(u16::from_le_bytes(state[8..10].try_into().unwrap()), 0x0abc);
+    }
+
+    #[test]
     fn first_sparse_element_write_uses_entry_memoryssa_and_commits_exactly() {
         const STABLE: usize = 0;
         const SPARSE: usize = 32;
@@ -12270,13 +12486,20 @@ mod tests {
 
         let old = 0xa6b5_c4d3_e2f1_8070u64;
         let mut state = vec![0u8; STATE_SIZE];
+        state[STABLE] = 1;
+        state[STABLE + 24] = 1;
         state[STABLE + 16..STABLE + 24].copy_from_slice(&old.to_le_bytes());
         state[SPARSE + 16..SPARSE + 24].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        // Only bit 0 of each padded slot belongs to the RTL value. Padding is
+        // backend-owned and may be canonicalized by a whole-element store.
         assert_eq!(
-            u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()),
-            old | 1
+            u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()) & 1,
+            1
         );
+        assert_eq!(state[STABLE] & 1, 1);
+        assert_eq!(state[STABLE + 8] & 1, 0);
+        assert_eq!(state[STABLE + 24] & 1, 1);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
         assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);

@@ -2223,6 +2223,7 @@ pub fn parse(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
+    preserve_element_storage_layout: bool,
 ) -> Result<Program, ParserError> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
@@ -2281,10 +2282,17 @@ pub fn parse(
 
     // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
     // may be enabled and need to execute.
-    timed_phase!(
-        "optimize",
-        crate::optimizer::optimize(&mut program, four_state, optimize_options)
-    );
+    timed_phase!("optimize", {
+        if preserve_element_storage_layout {
+            crate::optimizer::optimize_preserving_element_storage(
+                &mut program,
+                four_state,
+                optimize_options,
+            )
+        } else {
+            crate::optimizer::optimize(&mut program, four_state, optimize_options)
+        }
+    });
     timed_phase!(
         "verify_sir_after_optimize",
         verify_program_sir(&program, "after optimization")

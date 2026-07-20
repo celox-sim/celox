@@ -4590,6 +4590,88 @@ gain is claimed.
 Status: **proved straight-line metadata batches are complete; RTL Store order,
 the MIR scheduler, and the Linux tick count are unchanged**.
 
+### Step 41: Preserve profitable native array element layout
+
+The post-optimization SIR exposed a circular layout decision.  The native
+backend requests element-strided storage for unpacked arrays, but the SIR load
+and store coalescers first combined adjacent logical elements into packed
+64-bit accesses.  Layout discovery then saw those manufactured cross-element
+accesses and rejected element-strided storage.  For Heliodor's 32-entry
+12-bit `sh_csr_addr`, this produced six packed word loads followed by shift and
+mask extraction instead of independent scalar element loads.
+
+Layout intent is now an explicit input to SIR optimization.  Public
+`compile_to_sir`, Cranelift, NAPI, and Wasm retain the ordinary packed path.
+Only a native `ElementStrided` build asks coalescing to preserve eligible
+element boundaries.  Loads and Stores may still coalesce within one element;
+they may not manufacture an access across two elements whose scalar layout is
+being retained.  The native post-merge cleanup receives the already selected
+layout and applies the same rule.  No scheduler order or CFG is changed.
+
+Unconditionally padding every memory-like array caused unacceptable IR and
+memory growth on 4,096-entry tag arrays.  That trial was rejected.  Until a
+compact bulk-store MIR operation exists, the retained profitability boundary
+is a padded 9--64-bit element in a register-like array whose plane is at most
+256 bytes.  This bounds the extra scalar SIR by the existing small array size;
+large memories keep packed bulk lowering.
+
+The complete trace at
+`target/heliodor/analysis/step41-preserve-small-element-layout` has
+19,628,017 bytes of post-optimized SIR, 19,655,322 bytes of native SIR, and
+133,726,550 bytes of MIR.  The inspected `sh_csr_addr` sequence contains 32
+direct element Loads instead of six covering Loads plus roughly 52 extraction
+operations.  The non-LTO run at
+`target/heliodor/results/20260720T090921Z_celox_test_soc_linux_boot.log`
+completed through kernel power-down with exactly `cy=9ae070 x3=aa pass=1`;
+compilation took 105.731 s and execution took 108.420 s.
+
+Status: **the native layout/optimization contract is explicit and bounded;
+packed backends and scheduler ordering are unchanged**.
+
+### Step 42: Direct whole-element indexed accesses
+
+After Step 41, a dynamic 12-bit element Load used the correct 16-bit physical
+slot but still emitted an AND, while a dynamic Store retained a load/bitfield
+insert/store sequence.  A zero-displacement `SIROffset::Element` whose width is
+the complete logical element can use the slot directly.  ISel now emits one
+naturally sized indexed Load or Store for that case in both value and mask
+planes.  Stores mask the logical source and may canonicalize backend-owned
+padding; padding preservation is not part of RTL semantics.  Partial-element
+accesses retain the existing RMW path.
+
+An executable JIT regression uses a two-element 12-bit array, poisons the
+padding, performs a dynamic Store and Load, and verifies the two logical
+values and canonicalized physical slot.  The older sparse one-bit regression
+was corrected to assert only RTL bits and adjacent logical elements rather
+than imposing a non-semantic padding-preservation rule.
+
+The final complete trace at
+`target/heliodor/analysis/step42-final-target-scoped-elements` is byte-identical
+to the original Step 42 trace for all four outputs.  Its sizes and SHA-256
+hashes are:
+
+- pre-optimized SIR: 58,711,247 bytes,
+  `867e5df4cb8fda6c1cbc564bd5ff7d9ef34dc7b7a126960301d89e536f5bc52e`;
+- post-optimized SIR: 19,628,017 bytes,
+  `079510d983473a2ba1b878d6d04e17b14f92959e2bdc4c7ca99847eb3b634dab`;
+- native optimized SIR: 19,655,322 bytes,
+  `f1cc8a47869bc68027717811fd15ea6ddd0b0f2111ae3d76725202eaef1f24c4`;
+- MIR: 133,426,760 bytes,
+  `f9fb5b9f44b1f1ff285325fbbf259a642eff51a5cc0ceef446a7e369aeb3a3cd`.
+
+Final combined validation is native backend 442/442, optimized non-LTO library
+947/947, native testbench 60 passed with one upstream ignore, counter 9 passed
+with three Veryl ignores, all-target check, strict clippy, format, and diff
+checks.  The exact final-source non-LTO Linux run at
+`target/heliodor/results/20260720T093721Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` and `cy=9ae070 x3=aa pass=1`.
+Compilation took 107.693 s and execution took 105.529 s.  Two post-layout runs
+are close to 108.4 and 105.5 s, but the Step 38 range was 105.8--109.4 s, so a
+large stable runtime gain is not claimed.
+
+Status: **whole-element native accesses are direct and Linux-correct; the
+scheduler is unchanged; larger structural execution-time gaps remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4686,6 +4768,8 @@ the MIR scheduler, and the Linux tick count are unchanged**.
 | 38 hierarchical sparse metadata state | this step | dirty-word assertions in range SSA 8/8; executable one-summary-update regression | lib 938/938; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | trace 113.106 s; compile 111.882 / 111.514 s; execute 109.449 / 105.793 s | summary updates collapse to one per proved dirty word; MIR -6.4%; runtime effect varies and dirty-word update coalescing remains open |
 | 39 explicit indexed metadata RMW | this step | MIR operands/emission; exact read+write effects; scheduler barrier | native backend 442/442 in the final combined source | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 110.487 s; execute 110.961 s | x86 memory-destination OR removes the loaded metadata VReg; MIR 141,698,513 bytes; no stable runtime claim |
 | 40 straight-line dirty-word batching | this step | sparse batch close/run 3/3; executable multi-run bitmap regression | native backend 442/442 in the final combined source | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 108.349 s; execute 112.165 s | one proved same-word run emits one metadata mask; MIR 133,989,572 bytes; scheduler and data-Store order unchanged |
+| 41 bounded native element-layout preservation | this step | load/store coalescing boundary regressions | final combined lib 947/947; native backend 442/442 | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 105.731 s; execute 108.420 s | native layout intent prevents SIR coalescing from repacking small padded arrays; packed targets unchanged; MIR 133,726,550 bytes |
+| 42 direct whole-element indexed access | this step | executable 12-bit indexed load/store and padding canonicalization | lib 947/947; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check and strict clippy pass | final non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace byte-identical after target scoping | trace 110.122 s; full compile 107.693 s; execute 105.529 s | direct indexed scalar access; MIR 133,426,760 bytes; historical timing variance prevents a large speed claim; scheduler unchanged |
 
 ## Related design records
 

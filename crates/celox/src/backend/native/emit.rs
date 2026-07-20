@@ -3622,7 +3622,7 @@ fn emit_chained_eu_groups(
             verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
         }
     }
-    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu)
+    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     if let Some(trace) = trace.as_deref_mut() {
