@@ -13,6 +13,7 @@ pub(crate) mod mir_legalize;
 pub(crate) mod mir_opt;
 pub mod mir_verify;
 pub mod regalloc;
+mod sparse_first_write;
 pub(crate) mod ssa_destroy;
 
 pub use backend::{NativeBackend, SharedNativeCode};

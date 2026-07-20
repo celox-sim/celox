@@ -199,6 +199,34 @@ impl SirCfg {
     }
 }
 
+impl celox_analysis::ssa::SsaCfg for SirCfg {
+    type FrontierIter<'a> = std::iter::Copied<std::slice::Iter<'a, usize>>;
+
+    fn root(&self) -> usize {
+        0
+    }
+
+    fn predecessors(&self) -> &[Vec<usize>] {
+        &self.predecessors
+    }
+
+    fn successors(&self) -> &[Vec<usize>] {
+        &self.successors
+    }
+
+    fn dominator_children(&self) -> &[Vec<usize>] {
+        &self.dom_children
+    }
+
+    fn dominance_frontier_len(&self) -> usize {
+        self.dominance_frontier.len()
+    }
+
+    fn dominance_frontier(&self, block: usize) -> Self::FrontierIter<'_> {
+        self.dominance_frontier[block].iter().copied()
+    }
+}
+
 fn map_analysis_error(error: celox_analysis::cfg::CfgError) -> SirCfgError {
     match error {
         celox_analysis::cfg::CfgError::InvalidGraph(message) => SirCfgError::InvalidGraph(message),

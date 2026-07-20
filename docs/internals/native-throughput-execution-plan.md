@@ -4312,6 +4312,98 @@ Status: **complete for exact static aggregate projection and its safe
 same-range forwarding; scheduler order and Linux cycle count are preserved;
 aggregate value sharing remains open**.
 
+### Step 35: Coalesce narrow projections independently of covering loads
+
+The aggregate projection fix in Step 34 deliberately retained consumers that
+really load both a complete object and some of its fields.  The static-load
+coalescer then treated the covering load as a reason to leave every overlapping
+narrow load independent.  That discarded a legal local choice: narrow loads
+with the same machine-word projection can share one word load even when another
+consumer also requires the complete object.
+
+`coalesce_static_loads` now groups equal narrow word projections without making
+their eligibility depend on a covering wide load.  It does not replace, move,
+or reorder the covering load, and it changes neither SIR scheduling nor the RTL
+Store order.  A focused regression keeps the wide load and verifies that the
+overlapping narrow loads still coalesce.
+
+The complete trace is retained at
+`target/heliodor/analysis/step35-word-load-coalescing`.  The non-LTO Linux run
+completed through `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`; code generation took 155.724 s and execution took
+108.799 s.  This is a small continuation of Step 34 rather than a new lowering
+architecture.
+
+Status: **complete and committed as `103c9985`; scheduler and observable RTL
+semantics are unchanged**.
+
+### Step 36: CFG-exact sparse object write state
+
+Complete MIR inspection exposed repeated sparse-state setup before consecutive
+Stores to the same RTL object.  Every Store re-tested the object's dirty state,
+re-marked it active, and conditionally selected stable versus working storage,
+even when a dominating Store made the object state unambiguous.  This is an
+ISel state-proof problem, not a reason to reorder scheduled SIR.
+
+`SirCfg` now implements the structure-independent `celox-analysis` SSA CFG
+interface.  A pruned MemorySSA instance uses each sparse `AbsoluteAddr` as an
+alias-disjoint variable and classifies a Store as:
+
+- `First` when its use reaches entry and the complete sparse commit run is
+  guaranteed to follow;
+- `Active` when its use reaches a dominating Store to that object without an
+  intervening commit reset; or
+- `Unknown` at phis, loops, resets, and every unproved point.
+
+The analysis reuses the existing CFG, dominators, dominance frontiers,
+postdominators, and SCCs.  Its time and storage are linear in CFG edges, sparse
+Store definitions, and generated phi inputs.  It creates no layer graph,
+all-pairs reachability table, or representation proportional to an RTL width.
+A commit is an explicit reset definition.  A Store whose following commit is
+not proved, or whose block shares a cyclic SCC with that commit, keeps the old
+lowering.
+
+ISel consumes only these certificates.  A first write initializes the touched
+working chunk from stable storage without reading dirty state.  A proved active
+single-chunk object reads working storage directly and omits repeated active,
+dirty, and summary setup.  `Unknown` executes the previous instruction sequence
+unchanged.  The scheduler, CFG, SIR Store order, and commit order are not
+modified.
+
+Five CFG regressions cover straight-line definitions, mutually exclusive
+diamond arms, a maybe-store join, a loop backedge, and a commit reset.  Two JIT
+regressions execute the generated machine code and verify exact stable data and
+cleared dirty/summary/active metadata after commit.  The current common gates
+are library 934/934, native testbench 60 passed with one ignore, and counter 9
+passed with three Veryl ignores.
+
+The first-write-only intermediate passed the exact Linux marker but executed in
+114.168 s and was not accepted as a speed result.  Adding the dominating active
+state proof produced the complete trace at
+`target/heliodor/analysis/step36-sparse-write-memoryssa`: optimized SIR is
+19,602,427 bytes and complete MIR is 177,367,725 bytes.  In the inspected
+`eval_comb_apply_ff[0]` body, repeated `SparseMarkActive` sequences disappear
+and the emitted end address shrinks from `0x002bb110` to `0x0022f6da`, while the
+spill frame remains 6,768 bytes.
+
+The final trace-free non-LTO run at
+`target/heliodor/results/20260720T055058Z_celox_test_soc_linux_boot.log`
+completed through `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 143.852 s and execution took
+108.252 s.  The execution sample is only 0.5% below Step 35, so no large speedup
+is claimed.
+
+The remaining complete-MIR defect is more specific.  Consecutive static Stores
+to different chunks of one already-active object still load and test the dirty
+word and load both stable and working data for every chunk.  Object MemorySSA
+cannot prove that each disjoint chunk is itself a first write.  The next step is
+therefore range-aware sparse MemorySSA with conservative dynamic-range kills,
+not a scheduler change.
+
+Status: **object-level first/active state is structurally complete and Linux
+correct; the measured gain is small; chunk-range first-write proof remains
+open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -4402,6 +4494,8 @@ aggregate value sharing remains open**.
 | 32d production state-home proof and eager-promotion rejection | this step | regalloc 278/278; final-write identity accepts 40 disjoint inserted writes and rejects a reaching overlap | lib 924/924; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; non-LTO check/format gates pass | pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | trace 89.995 s; full compile 86.870 s; execute 128.011 s | final MIR proof is sound; eager whole-version promotion raises the main frames and regresses Step 30f execution, so use-cluster allocation replaces it next |
 | 33 source-MemorySSA SLT lowering regions | this step | shared analyses 39/39; parser scheduler 16/16; observer/cascade/false-loop 163 passed | lib 920/920; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, docs, and diff gates pass | non-LTO and release/LTO both pass through `reboot: Power down` with exactly one `cy=9ae070 x3=aa pass=1` | non-LTO compile 163.267 s / execute 132.472 s; release compile 152.135 s / execute 133.980 s | bit-range Def/Use and SCC fences replace effect-only ready ordering; semantic checkpoint complete, no throughput gain claimed; allocator-selected use-cluster promotion remains open |
 | 34 exact aggregate projection and same-range forwarding | this step | range lowering 3/3; forwarding 5/5; shared analyses 39/39; parser scheduler 16/16 | lib 926/926; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, docs, and diff gates pass | optimized non-LTO and final release/LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | range-only non-LTO compile 160.558 s / execute 112.922 s; final non-LTO 156.443 s / 110.254 s; release 149.973 s / 110.762 s | static field Loads retain exact ranges and cached snapshots; two-state unsigned same-width Store values forward directly; final non-LTO execute sample is 16.8% below Step 33 |
+| 35 overlapping narrow-load coalescing | `103c9985` | covering-wide-load regression | retained Step 34 common gates | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 155.724 s; execute 108.799 s | a required complete-object load no longer disables sharing equal narrow word projections; scheduler unchanged |
+| 36 sparse object MemorySSA write state | this step | sparse CFG/SSA 5/5; executable ISel state/metadata 2/2 | lib 934/934; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 143.852 s; execute 108.252 s | first and dominating-active object states remove redundant lowering; gain is small and disjoint chunk first-write proof remains open |
 
 ## Related design records
 
