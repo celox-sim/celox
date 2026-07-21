@@ -2221,7 +2221,10 @@ fn emit_inst(
             active_capacity,
         } => {
             let scratch = preg_to_reg64(resolve(assignment, *scratch));
-            let mut done = asm.create_label();
+            let mut local_done = asm.create_label();
+            let done = continuation_label
+                .as_ref()
+                .map_or(local_done, |label| **label);
             let flag = mem_operand(
                 BaseReg::SimState,
                 *active_flags_offset + *active_index as i32,
@@ -2246,7 +2249,12 @@ fn emit_inst(
                 qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
                 scratch,
             )?;
-            asm.set_label(&mut done)?;
+            if let Some(done) = continuation_label {
+                asm.set_label(done)?;
+                bound_continuation = true;
+            } else {
+                asm.set_label(&mut local_done)?;
+            }
         }
 
         MInst::SparseCommitWorklist {
@@ -4649,6 +4657,51 @@ mod shift_encoding_tests {
                     .unwrap()
             ),
             0
+        );
+    }
+
+    #[test]
+    fn sparse_mark_active_shares_a_fallthrough_block_label() {
+        const ACTIVE_COUNT: usize = 0;
+        const ACTIVE_FLAGS: usize = 8;
+        const ACTIVE_LIST: usize = 16;
+        const ACTIVE_INDEX: u32 = 3;
+
+        let mut vregs = VRegAllocator::new();
+        let scratch = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Scratch { dst: scratch });
+        entry.push(MInst::SparseMarkActive {
+            scratch,
+            active_index: ACTIVE_INDEX,
+            active_count_offset: ACTIVE_COUNT as i32,
+            active_flags_offset: ACTIVE_FLAGS as i32,
+            active_list_offset: ACTIVE_LIST as i32,
+            active_capacity: 4,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.push(MInst::Return);
+        func.push_block(entry);
+        func.push_block(exit);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 64];
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
+            1
+        );
+        assert_eq!(state[ACTIVE_FLAGS + ACTIVE_INDEX as usize], 1);
+        assert_eq!(
+            u32::from_le_bytes(state[ACTIVE_LIST..ACTIVE_LIST + 4].try_into().unwrap()),
+            ACTIVE_INDEX
         );
     }
 

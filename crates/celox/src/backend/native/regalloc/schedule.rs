@@ -591,7 +591,10 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::Load { .. }
         | MInst::LoadIndexed { .. }
         | MInst::Store { .. }
+        | MInst::StoreIndexed { .. }
+        | MInst::OrStoreIndexed { .. }
         | MInst::MemFill { .. }
+        | MInst::SparseMarkActive { .. }
         | MInst::Add { .. }
         | MInst::Add32 { .. }
         | MInst::Sub { .. }
@@ -632,14 +635,11 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         MInst::LoadPtr { .. }
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
-        | MInst::StoreIndexed { .. }
-        | MInst::OrStoreIndexed { .. }
         | MInst::LoadPtrIndexed { .. }
         | MInst::StorePtrIndexed { .. }
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::MemCopy { .. }
         | MInst::SparseCommit { .. }
-        | MInst::SparseMarkActive { .. }
         | MInst::SparseCommitWorklist { .. }
         | MInst::UMulHi { .. }
         | MInst::UDiv { .. }
@@ -754,6 +754,19 @@ mod tests {
                 assert!(dependencies.contains(&(index - 1)));
             }
         }
+
+        let mark = MInst::SparseMarkActive {
+            scratch: VReg(MARKS as u32),
+            active_index: MARKS as u32,
+            active_count_offset: 0,
+            active_flags_offset: 1024,
+            active_list_offset: 1_000_000,
+            active_capacity: ACTIVE_CAPACITY,
+        };
+        assert!(
+            is_pressure_schedulable_kind(&mark),
+            "exact sparse metadata effects must be represented by DAG edges, not a region barrier"
+        );
     }
 
     #[test]
@@ -1207,8 +1220,8 @@ mod tests {
         ];
 
         assert!(
-            !is_pressure_schedulable_kind(&region[3]),
-            "indexed memory RMW must remain a scheduling-region barrier"
+            is_pressure_schedulable_kind(&region[3]),
+            "indexed memory RMW must use its conservative alias range inside the scheduling DAG"
         );
         let scheduled = schedule_region(&region, BTreeSet::from([before, after]));
         let positions = [0, 3, 4].map(|original| {
@@ -1267,6 +1280,10 @@ mod tests {
 
         let scheduled = schedule_region(&region, BTreeSet::from([combined[2]]));
 
+        assert!(
+            region.iter().all(is_pressure_schedulable_kind),
+            "indexed reads and their pure consumers must form one production scheduling region"
+        );
         assert!(scheduled.dependency_verified);
         assert!(
             max_pressure(&scheduled.instructions, &BTreeSet::from([combined[2]]))
@@ -1328,6 +1345,65 @@ mod tests {
 
         assert!(scheduled.dependency_verified);
         assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+    }
+
+    #[test]
+    fn indexed_stores_do_not_split_independent_value_chains() {
+        let index = VReg(0);
+        let first = VReg(1);
+        let second = VReg(2);
+        let first_result = VReg(3);
+        let second_result = VReg(4);
+        let region = vec![
+            MInst::Load {
+                dst: first,
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            },
+            MInst::Load {
+                dst: second,
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S64,
+            },
+            MInst::AddImm {
+                dst: first_result,
+                src: first,
+                imm: 1,
+            },
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 32,
+                index,
+                src: first_result,
+                size: OpSize::S64,
+                alias_range: MemoryAliasRange::new(32, 8),
+            },
+            MInst::AddImm {
+                dst: second_result,
+                src: second,
+                imm: 1,
+            },
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 48,
+                index,
+                src: second_result,
+                size: OpSize::S64,
+                alias_range: MemoryAliasRange::new(48, 8),
+            },
+        ];
+
+        assert!(region.iter().all(is_pressure_schedulable_kind));
+        let scheduled = schedule_region(&region, BTreeSet::new());
+
+        assert!(scheduled.dependency_verified);
+        assert!(
+            max_pressure(&scheduled.instructions, &BTreeSet::new())
+                < max_pressure(&region, &BTreeSet::new()),
+            "disjoint indexed stores must allow each producer chain to close before the next one"
+        );
     }
 
     #[test]

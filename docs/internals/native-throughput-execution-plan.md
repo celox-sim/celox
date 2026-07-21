@@ -4992,6 +4992,53 @@ its packed dataflow meaning without adding a non-semantic order; Linux meaning
 and tick count are preserved, while the measured runtime effect remains
 unconfirmed because paired samples disagree**.
 
+### Step 48: Schedule indexed writes and sparse marks by their effects
+
+The production pressure scheduler still split a basic block at every
+`StoreIndexed`, `OrStoreIndexed`, and `SparseMarkActive`, even though all three
+already publish their memory effects to the shared byte-range dependence
+analysis. In the generated `eval_comb_apply_ff` MIR these barriers occurred
+inside nearly every dynamic next-state update. They prevented independent
+producer chains from being placed next to their indexed stores and imposed an
+order which is not part of RTL semantics.
+
+These operations now remain in the block-local scheduling DAG. Bounded indexed
+accesses use their conservative alias envelope; unbounded accesses cover their
+complete direct-memory object. `SparseMarkActive` uses its exact active-count,
+flag, and list ranges. The existing dependence tracker therefore preserves
+overlapping RAW, WAR, and WAW order, including the read-modify-write nature of
+an indexed OR and the order of sparse worklist insertions, while disjoint
+operations and read/read pairs remain free to move. Def-use edges keep the
+allocated sparse scratch value attached to its mark.
+
+Moving a sparse mark to the end of a machine fallthrough block exposed an
+emitter defect: the pseudo's internal done label and the elided jump's target
+label denoted the same machine-code position, but the assembler permits only
+one label per instruction. The mark now reuses the fallthrough continuation
+label. An executable two-block regression covers this exact placement and
+checks the active count, flag, and list contents.
+
+The scheduler regressions pass 19/19, optimized library tests pass 987/987,
+native execution tests pass 16/16, native testbench passes 60 with one upstream
+ignore, and counter passes 9 with three Veryl ignores. The complete final trace
+is at `target/heliodor/analysis/step68-effect-dag`. Its SIR is unchanged. The
+full MIR trace falls from 60,336,354 to 60,304,632 bytes, and the standalone
+`apply_ff` spill frame falls from 232 to 216 bytes; the main fused frame remains
+5,368 bytes. Inspection of the scheduled MIR shows dynamic producer/load/store
+chains closing before the following sparse mark instead of being pinned to
+their source order.
+
+The non-LTO Linux gate compiled in 66.524 s and executed in 103.476 s. It
+reached `reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`. This matches
+the 103.471 s best adjacent baseline sample, so no execution-speed claim is
+made. The retained result removes non-semantic scheduling barriers, but the
+unchanged fused spill frame and runtime show that working-state round trips,
+not these barriers alone, are the next larger target.
+
+Status: **indexed writes and sparse metadata marks use exact dependence edges
+instead of artificial region boundaries; Linux semantics are preserved and
+generated MIR is smaller, but measured execution is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5095,6 +5142,7 @@ unconfirmed because paired samples disagree**.
 | 45 allocator-visible same-block value sharing | this step | MIR GVN/rematerialization/MemorySSA 64/64 | lib 965/965; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | all candidate and fixed-CPU A/B/A/B runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | fixed-CPU Step 44 execute 101.001 / 101.731 s; candidate 98.888 / 104.028 s | hot repeated byte/bit indices share one value; final code -22,895 bytes; execute mean unchanged, so no speed claim |
 | 46 control-dependent masked array search | this step | masked-array search and CLI 7/7 | lib 972/972; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final-source run all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | Step 45 execute 106.589 / 102.699 s; candidate 100.532 / 98.778 s; final source 99.781 s | 32 eager element loads and 96 comparisons become a set-bit search; scheduler unchanged; execute mean -4.8% |
 | 47 CFG circular-priority recovery | this step | circular-priority and CLI 10/10 | lib 982/982; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final release/LTO all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | parent execute 98.925 / 106.973 s; candidate 102.461 / 101.181 s; final release 101.637 s | 32 scalar priority iterations become packed rotate and CTZ; scheduler unchanged; mean -1.1% but paired directions disagree, so runtime effect is unconfirmed |
+| 48 effect-DAG indexed writes and sparse marks | this step | scheduler 19/19; sparse fallthrough emission regression | lib 987/987; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | compile 66.524 s; execute 103.476 s | artificial barriers removed; standalone `apply_ff` frame 232→216 bytes; fused frame and execution unchanged, so no speed claim |
 
 ## Related design records
 
