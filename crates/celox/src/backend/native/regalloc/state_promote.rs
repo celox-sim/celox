@@ -912,6 +912,100 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_exposes_dead_store_across_disjoint_indexed_read() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S8,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0,
+            },
+            MInst::LoadIndexed {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 64,
+                index: VReg(1),
+                size: OpSize::S8,
+                alias_range: MemoryAliasRange::new(64, 8),
+            },
+            MInst::Load {
+                dst: VReg(3),
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S8,
+            },
+            MInst::LoadImm {
+                dst: VReg(4),
+                value: 1 << 4,
+            },
+            MInst::Or {
+                dst: VReg(5),
+                lhs: VReg(3),
+                rhs: VReg(4),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(5),
+                size: OpSize::S8,
+            },
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 0,
+                src: VReg(2),
+                size: OpSize::S8,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(6, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
+        crate::backend::native::mir_opt::eliminate_redundant_local_stores(&mut function);
+
+        assert!(function.blocks[0].insts.iter().all(|inst| !matches!(
+            inst,
+            MInst::Load {
+                base: BaseReg::SimState,
+                offset: 16,
+                ..
+            }
+        )));
+        assert!(
+            function.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::Mov { dst: VReg(3), .. }))
+        );
+        let state_stores = function.blocks[0]
+            .insts
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        size: OpSize::S8,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(state_stores.len(), 1, "{:#?}", function.blocks[0].insts);
+        assert!(matches!(state_stores[0], MInst::Store { src: VReg(5), .. }));
+    }
+
+    #[test]
     fn already_canonical_narrow_store_reuses_its_source_value() {
         let mut block = MBlock::new(BlockId(0));
         block.insts = vec![

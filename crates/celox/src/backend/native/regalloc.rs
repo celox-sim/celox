@@ -473,6 +473,11 @@ fn run_regalloc_in_place(
                 error.message,
             )
         })?;
+    // Pressure scheduling runs after the ordinary MIR pipeline, and late
+    // MemorySSA forwarding can turn a state read into a register copy.  Close
+    // the resulting store chain before CSSA so overwritten packed-state
+    // updates do not survive into allocation and machine code.
+    super::mir_opt::eliminate_redundant_local_stores(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("late state-forwarding verification", error))?;
     if let Some(start) = state_forward_start {

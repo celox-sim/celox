@@ -3,7 +3,7 @@
 //! - Copy propagation: `v2 = mov v1` → replace all uses of v2 with v1
 //! - Dead code elimination: remove instructions whose defs are unused
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::memory_effect;
 use super::mir::*;
@@ -3818,91 +3818,172 @@ fn alloc_transient_vreg(vregs: &mut VRegAllocator, spill_descs: &mut Vec<SpillDe
     vreg
 }
 
-fn eliminate_redundant_local_stores(func: &mut MFunction) {
+#[derive(Default)]
+struct LaterDirectStores {
+    sim_state: BTreeMap<i32, u8>,
+    stack_frame: BTreeMap<i32, u8>,
+}
+
+impl LaterDirectStores {
+    const SIZES: [(OpSize, u8); 4] = [
+        (OpSize::S8, 1 << 0),
+        (OpSize::S16, 1 << 1),
+        (OpSize::S32, 1 << 2),
+        (OpSize::S64, 1 << 3),
+    ];
+
+    fn slots(&self, base: BaseReg) -> &BTreeMap<i32, u8> {
+        match base {
+            BaseReg::SimState => &self.sim_state,
+            BaseReg::StackFrame => &self.stack_frame,
+        }
+    }
+
+    fn slots_mut(&mut self, base: BaseReg) -> &mut BTreeMap<i32, u8> {
+        match base {
+            BaseReg::SimState => &mut self.sim_state,
+            BaseReg::StackFrame => &mut self.stack_frame,
+        }
+    }
+
+    fn size_bit(size: OpSize) -> u8 {
+        match size {
+            OpSize::S8 => 1 << 0,
+            OpSize::S16 => 1 << 1,
+            OpSize::S32 => 1 << 2,
+            OpSize::S64 => 1 << 3,
+        }
+    }
+
+    fn contains(&self, slot: MemorySlot) -> bool {
+        self.slots(slot.base)
+            .get(&slot.offset)
+            .is_some_and(|sizes| sizes & Self::size_bit(slot.size) != 0)
+    }
+
+    fn insert(&mut self, slot: MemorySlot) {
+        *self.slots_mut(slot.base).entry(slot.offset).or_default() |= Self::size_bit(slot.size);
+    }
+
+    fn clear(&mut self, base: BaseReg) {
+        self.slots_mut(base).clear();
+    }
+
+    /// Forget later stores whose values can be observed by `range`.
+    ///
+    /// Direct stores are at most eight bytes wide, so an overlapping store
+    /// starts no earlier than seven bytes before the read.  Indexing by start
+    /// offset finds narrow-read candidates in O(log n + overlap) instead of
+    /// retaining over every store in the block; removing those candidates is
+    /// O(overlap * log n).  A wide bounded indexed read visits only the
+    /// tracked starts in its alias envelope.
+    fn invalidate_range(
+        &mut self,
+        range: memory_effect::MemoryRange,
+        scratch: &mut Vec<(i32, u8)>,
+    ) {
+        let Some(read_end) = range.end() else {
+            self.clear(range.base);
+            return;
+        };
+        let read_start = range.offset;
+        if read_end <= read_start {
+            return;
+        }
+
+        const MAX_STORE_BYTES: i64 = 8;
+        let first_candidate = read_start.saturating_sub(MAX_STORE_BYTES - 1);
+        let last_candidate = read_end - 1;
+        if last_candidate < i64::from(i32::MIN) || first_candidate > i64::from(i32::MAX) {
+            return;
+        }
+        let first_candidate =
+            first_candidate.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let last_candidate = last_candidate.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        if first_candidate > last_candidate {
+            return;
+        }
+
+        scratch.clear();
+        scratch.extend(
+            self.slots(range.base)
+                .range(first_candidate..=last_candidate)
+                .filter_map(|(&offset, &sizes)| {
+                    let mut retained = 0u8;
+                    for (size, bit) in Self::SIZES {
+                        if sizes & bit == 0 {
+                            continue;
+                        }
+                        let slot_start = i64::from(offset);
+                        let slot_end = slot_start + i64::from(size.bytes());
+                        if slot_end <= read_start || read_end <= slot_start {
+                            retained |= bit;
+                        }
+                    }
+                    (retained != sizes).then_some((offset, retained))
+                }),
+        );
+        let slots = self.slots_mut(range.base);
+        for &(offset, retained) in scratch.iter() {
+            if retained == 0 {
+                slots.remove(&offset);
+            } else {
+                slots.insert(offset, retained);
+            }
+        }
+    }
+}
+
+fn invalidate_stores_observed_by(
+    later_stores: &mut LaterDirectStores,
+    inst: &MInst,
+    scratch: &mut Vec<(i32, u8)>,
+) {
+    let reads = memory_effect::reads(inst);
+    if let Some(memory) = reads.unknown_memory() {
+        match memory {
+            memory_effect::UnknownMemory::Direct(base) => later_stores.clear(base),
+            // Runtime-owned pointer memory is explicitly disjoint from both
+            // direct-addressed bases tracked by this local DSE.
+            memory_effect::UnknownMemory::Indirect => {}
+        }
+    }
+    for range in reads.ranges() {
+        later_stores.invalidate_range(range, scratch);
+    }
+}
+
+pub(super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
     for block in &mut func.blocks {
-        let mut later_stores: HashMap<MemorySlot, ()> = HashMap::new();
+        let mut later_stores = LaterDirectStores::default();
+        let mut invalidation_scratch = Vec::new();
         let mut reversed = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..).rev() {
-            match inst {
-                MInst::Store {
-                    base,
-                    offset,
-                    src,
-                    size,
-                } => {
-                    let key = MemorySlot { base, offset, size };
-                    if later_stores.contains_key(&key) {
-                        continue;
-                    }
-                    invalidate_overlapping_slots(&mut later_stores, base, offset, size);
-                    later_stores.insert(key, ());
-                    reversed.push(MInst::Store {
-                        base,
-                        offset,
-                        src,
-                        size,
-                    });
+            invalidate_stores_observed_by(&mut later_stores, &inst, &mut invalidation_scratch);
+            if let MInst::Store {
+                base, offset, size, ..
+            } = &inst
+            {
+                let slot = MemorySlot {
+                    base: *base,
+                    offset: *offset,
+                    size: *size,
+                };
+                if later_stores.contains(slot) {
+                    continue;
                 }
-                MInst::MemCopy {
-                    src_offset,
-                    dst_offset,
-                    byte_len,
-                } => {
-                    // In reverse order, both ranges are barriers: the source
-                    // is observed by the copy and the destination is changed
-                    // by it. Preserve tracking for unrelated addresses.
-                    invalidate_overlapping_byte_range(
-                        &mut later_stores,
-                        BaseReg::SimState,
-                        src_offset,
-                        byte_len,
-                    );
-                    invalidate_overlapping_byte_range(
-                        &mut later_stores,
-                        BaseReg::SimState,
-                        dst_offset,
-                        byte_len,
-                    );
-                    reversed.push(MInst::MemCopy {
-                        src_offset,
-                        dst_offset,
-                        byte_len,
-                    });
-                }
-                MInst::LoadIndexed { .. }
-                | MInst::LoadPtrIndexed { .. }
-                | MInst::StoreIndexed { .. }
-                | MInst::OrStoreIndexed { .. }
-                | MInst::StorePtrIndexed { .. }
-                | MInst::ReleaseStorePtrIndexed { .. }
-                | MInst::LoadPtr { .. }
-                | MInst::StorePtr { .. }
-                | MInst::ReleaseStorePtr { .. } => {
-                    later_stores.clear();
-                    reversed.push(inst);
-                }
-                MInst::Load {
-                    dst,
-                    base,
-                    offset,
-                    size,
-                } => {
-                    invalidate_overlapping_slots(&mut later_stores, base, offset, size);
-                    reversed.push(MInst::Load {
-                        dst,
-                        base,
-                        offset,
-                        size,
-                    });
-                }
-                other => reversed.push(other),
+                // Writes do not observe an earlier value. Keep every exact
+                // later overwrite candidate, including overlapping widths;
+                // intervening reads invalidate precisely the candidates they
+                // can observe.
+                later_stores.insert(slot);
             }
+            reversed.push(inst);
         }
 
         reversed.reverse();
-        let rewritten = reversed;
-        block.insts = rewritten;
+        block.insts = reversed;
     }
 }
 
@@ -6134,6 +6215,193 @@ mod tests {
         optimize(&mut func);
 
         assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S8,
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(3),
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn bounded_disjoint_indexed_read_does_not_block_dead_store_elimination() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::LoadIndexed {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 64,
+                    index: VReg(1),
+                    size: OpSize::S8,
+                    alias_range: MemoryAliasRange::new(64, 8),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        eliminate_redundant_local_stores(&mut func);
+
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S8,
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(3),
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn bounded_overlapping_indexed_read_keeps_preceding_store() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::LoadIndexed {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    index: VReg(1),
+                    size: OpSize::S8,
+                    alias_range: MemoryAliasRange::new(16, 8),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        eliminate_redundant_local_stores(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(0),
+                size: OpSize::S8,
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(3),
+                size: OpSize::S8,
+            }
+        )));
+    }
+
+    #[test]
+    fn indirect_read_does_not_block_direct_state_dead_store_elimination() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::LoadPtr {
+                    dst: VReg(2),
+                    ptr: VReg(1),
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 2,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        eliminate_redundant_local_stores(&mut func);
+
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
             inst,
             MInst::Store {
                 base: BaseReg::SimState,

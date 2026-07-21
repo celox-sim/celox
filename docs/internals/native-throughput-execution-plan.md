@@ -5522,6 +5522,66 @@ a time; exact two-state and four-state meaning, Linux tick count, and normal
 power-down are preserved; MIR and emitted code shrink materially, with a
 modest measured execution improvement**.
 
+### Step 58: Alias-aware cleanup after late state forwarding
+
+The fresh Step 57 trace contained direct evidence that late physical-state
+forwarding stopped one pass too early.  Four adjacent packed state bytes had
+the same generated shape.  One byte, at `state + 0x214b0`, was updated as:
+
+```text
+load byte [state + 0x214b0]
+clear bit 1; insert the new bit 1
+store byte [state + 0x214b0]
+clear bit 4; insert the new bit 4
+store byte [state + 0x214b0]
+```
+
+There was no read of that address between the stores.  MemorySSA had already
+proved the second source-level load equivalent to the first stored value and
+late state forwarding had replaced that load with a register copy.  The
+ordinary MIR dead-store pass ran before this late transformation, however, so
+the newly dead first store reached CSSA, allocation, and machine code.
+
+The local dead-store pass now uses the shared physical-memory effect model
+instead of a separate hard-coded alias switch.  In a reverse scan only a read
+can make an earlier value observable.  Exact direct reads invalidate only
+overlapping stores, a bounded indexed read uses its byte envelope, an unknown
+direct read clears only its `SimState` or `StackFrame` domain, and indirect
+runtime memory remains disjoint.  Pure writes are not observation barriers;
+read-modify-write instructions retain their read effects.  The pass is run a
+second time immediately after late state forwarding and before CSSA.
+
+Tracked direct stores use one ordered offset map per direct base and a
+four-bit width set per start offset.  Exact-store lookup and insertion are
+`O(log s)`.  A read which overlaps `k` tracked starts is
+`O(log s + k log s)` and block-local storage is `O(s)`.  Ordinary one-, two-,
+four-, and eight-byte reads examine only starts within seven bytes of their
+range.  This replaces the old HashMap-wide retain on every store, whose
+store-only worst case was quadratic, without constructing a whole-function
+alias graph.
+
+The complete candidate trace is retained at
+`target/heliodor/analysis/step85-late-dse`.  All SIR stages remain identical to
+the authoritative Step 57 HEAD trace.  Full MIR falls from 51,973,923 to
+51,521,543 bytes.  At the concrete `0x214b0`, `0x2f270`, `0x21570`, and
+`0x2f2e0` updates, both bit inserts now stay in a register and only the final
+byte is stored.  The parent A trace at
+`target/heliodor/analysis/step85-ab-a-head` is byte-identical to the earlier
+HEAD trace through complete MIR, so the paired execution did not compare a
+different baseline program.
+
+The focused MIR optimization suite passes 70/70, late state promotion passes
+15/15, and the complete library suite passes 1020/1020.  Every trace-free run
+reached `reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`.  The adjacent
+parent/candidate pair compiled in 73.919/74.250 s and executed in
+91.640/91.492 s.  Two earlier candidate executions were 90.925 and 94.953 s,
+so no generated-code throughput improvement is assigned to this step.
+
+Status: **MemorySSA-exposed intermediate packed-state stores are removed with
+byte-range alias precision and bounded local storage; exact Linux meaning and
+tick count are preserved; emitted MIR shrinks, while measured execution is
+unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5635,6 +5695,7 @@ modest measured execution improvement**.
 | 55 post-RA hot-backedge layout | this step | emitter 17/17 including chain placement and true-edge fall-through | lib 1011/1011; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.074 / 80.882 s; execute 92.371 / 91.962 s | hot continuation falls through to its adjacent copy block; eval body -350 bytes; phi stack/register copies remain |
 | 56 selector-disjoint predicate control flow | `a723fb96` | BranchifyMux 50/50 including selector dispatch, overlap rejection, condition normalization, and store barrier | lib 1015/1015; retained native execution and RTL integration gates | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.732 / 80.566 s; execute 92.905 / 91.147 s | only the selected payload executes; false-edge five-`xchg` cycle and three backedge stores disappear; execution mean unchanged |
 | 57 constant-work machine-word sign replication | this step | ISel 30/30 including executable two-state/four-state repeated-MSB concat | lib 1016/1016; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format, docs | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.348 / 80.444 s; execute 92.280 / 89.330 s | repeated sign bits lower to `neg; shl; or`; MIR -255,946 bytes and eval code -3,946 bytes; execution mean -1.3% |
+| 58 alias-aware late state DSE | this step | MIR optimization 70/70; state promotion 15/15 | lib 1020/1020; workspace check, package all-target strict clippy, format, docs, and diff checks pass | parent/candidate and two additional candidate runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent complete trace is byte-identical to retained HEAD | paired compile 73.919 / 74.250 s; execute 91.640 / 91.492 s | MemorySSA-exposed intermediate byte stores disappear; MIR -452,380 bytes; paired execution unchanged |
 
 ## Related design records
 
