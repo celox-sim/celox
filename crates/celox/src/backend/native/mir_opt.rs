@@ -118,13 +118,21 @@ pub fn optimize(func: &mut MFunction) {
         pass!("fuse_compare_selects", fuse_compare_selects(func));
         pass!("dead_code_eliminate", dead_code_eliminate(func));
     }
-    // The last algebraic/GVN iteration can expose a constant through a copy or
-    // create a constant-valued immediate operation.  Close that pipeline here
-    // instead of handing the resulting artificial long live ranges to
-    // register allocation.
+    // Select fusion and late value numbering can make both arms identical,
+    // while immediate lowering can expose a machine-width identity only after
+    // the main algebraic iterations have finished.  Close those transformations
+    // before allocation: otherwise the dead predicate and identity result both
+    // acquire live ranges, phi copies, and possible spill homes.
+    pass!(
+        "final_simplify_equal_value_selects",
+        simplify_equal_value_selects(func)
+    );
+    pass!("final_algebraic_simplify", algebraic_simplify(func));
     pass!("final_copy_propagate", copy_propagate(func));
     pass!("final_constant_fold", constant_fold(func));
     pass!("final_lower_to_imm_forms", lower_to_imm_forms(func));
+    pass!("post_lower_algebraic_simplify", algebraic_simplify(func));
+    pass!("post_lower_copy_propagate", copy_propagate(func));
     pass!("final_dead_code_eliminate", dead_code_eliminate(func));
     pass!("simplify_cfg", simplify_cfg(func));
     // CFG simplification concatenates linear blocks.  Re-place constants only
@@ -471,6 +479,64 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
             rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
         }
         block.insts = rewritten;
+    }
+}
+
+/// Remove allocation-created trivial values before machine emission.
+///
+/// Allocation can rewrite two distinct incoming values to the same split
+/// representative. Preserve the assigned destination with a Mov, but do not
+/// leave the now-irrelevant predicate graph or rematerializations in the
+/// emitted function. Copy propagation is intentionally not run after
+/// allocation because the source physical register may be clobbered after the
+/// copy; ordinary DCE is safe.
+pub fn post_regalloc_cleanup(func: &mut MFunction) {
+    simplify_equal_value_selects(func);
+    dead_code_eliminate_preserving_phis(func);
+}
+
+/// Replace selects whose result is independent of their predicate with a copy.
+///
+/// This is kept separate from emitter-side physical-register coalescing: doing
+/// it on MIR lets DCE remove the compare, guard, and their complete producer
+/// graphs before they create allocation pressure.
+fn simplify_equal_value_selects(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let replacement = match inst {
+                MInst::Select {
+                    dst,
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::CmpSelect {
+                    dst,
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::CmpImmSelect {
+                    dst,
+                    true_val,
+                    false_val,
+                    ..
+                }
+                | MInst::GuardedCmpSelect {
+                    dst,
+                    true_val,
+                    false_val,
+                    ..
+                } if true_val == false_val => Some(MInst::Mov {
+                    dst: *dst,
+                    src: *true_val,
+                }),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *inst = replacement;
+            }
+        }
     }
 }
 
@@ -4098,6 +4164,16 @@ fn copy_propagate(func: &mut MFunction) {
 
 /// Dead code elimination: remove instructions whose defs are never used.
 fn dead_code_eliminate(func: &mut MFunction) {
+    dead_code_eliminate_impl(func, true);
+}
+
+/// Post-allocation DCE must preserve the phi rows used to construct the
+/// already-verified parallel-copy plan.
+fn dead_code_eliminate_preserving_phis(func: &mut MFunction) {
+    dead_code_eliminate_impl(func, false);
+}
+
+fn dead_code_eliminate_impl(func: &mut MFunction, remove_unused_phis: bool) {
     // Iterate until no more dead code is removed (cascading DCE).
     loop {
         let mut used: std::collections::HashSet<VReg> = std::collections::HashSet::new();
@@ -4140,6 +4216,14 @@ fn dead_code_eliminate(func: &mut MFunction) {
             });
             if block.insts.len() < before {
                 removed = true;
+            }
+
+            if remove_unused_phis {
+                let phi_before = block.phis.len();
+                block.phis.retain(|phi| used.contains(&phi.dst));
+                if block.phis.len() < phi_before {
+                    removed = true;
+                }
             }
         }
 
@@ -4878,6 +4962,123 @@ mod tests {
     }
 
     #[test]
+    fn equal_value_selects_remove_their_complete_predicate_graph() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::CmpImm {
+                    dst: VReg(2),
+                    lhs: VReg(1),
+                    imm: 0,
+                    kind: CmpKind::Ne,
+                },
+                MInst::Select {
+                    dst: VReg(3),
+                    cond: VReg(2),
+                    true_val: VReg(0),
+                    false_val: VReg(0),
+                },
+                MInst::CmpSelect {
+                    dst: VReg(4),
+                    lhs: VReg(1),
+                    rhs: VReg(2),
+                    kind: CmpKind::GtU,
+                    true_val: VReg(3),
+                    false_val: VReg(3),
+                },
+                MInst::CmpImmSelect {
+                    dst: VReg(5),
+                    lhs: VReg(2),
+                    imm: 1,
+                    kind: CmpKind::Eq,
+                    true_val: VReg(4),
+                    false_val: VReg(4),
+                },
+                MInst::GuardedCmpSelect {
+                    dst: VReg(6),
+                    guard: VReg(2),
+                    lhs: VReg(1),
+                    rhs: VReg(0),
+                    kind: CmpKind::LeU,
+                    true_val: VReg(5),
+                    false_val: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(6),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            7,
+        );
+
+        optimize(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [
+                MInst::Load {
+                    dst: VReg(0),
+                    offset: 0,
+                    ..
+                },
+                MInst::Store {
+                    src: VReg(0),
+                    offset: 16,
+                    ..
+                },
+                MInst::Return
+            ]
+        ));
+    }
+
+    #[test]
+    fn dead_code_elimination_removes_unused_phi_chains() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+        func.blocks[0].phis.extend([
+            PhiNode {
+                dst: VReg(2),
+                sources: vec![(BlockId(1), VReg(0)), (BlockId(2), VReg(1))],
+            },
+            PhiNode {
+                dst: VReg(3),
+                sources: vec![(BlockId(1), VReg(2)), (BlockId(2), VReg(2))],
+            },
+        ]);
+
+        dead_code_eliminate(&mut func);
+
+        assert!(func.blocks[0].phis.is_empty());
+        assert!(matches!(func.blocks[0].insts.as_slice(), [MInst::Return]));
+    }
+
+    #[test]
     fn keeps_multi_use_cmp_select_condition() {
         let mut func = make_func(
             vec![
@@ -5058,6 +5259,68 @@ mod tests {
                     ..
                 },
                 MInst::Store { src: VReg(0), .. },
+                MInst::Return
+            ]
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_cleanup_removes_dead_remats_and_equal_select_predicates() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0x100,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::Select {
+                    dst: VReg(3),
+                    cond: VReg(2),
+                    true_val: VReg(1),
+                    false_val: VReg(1),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        post_regalloc_peephole(&mut func);
+        post_regalloc_cleanup(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [
+                MInst::Load {
+                    dst: VReg(1),
+                    offset: 0,
+                    ..
+                },
+                MInst::Mov {
+                    dst: VReg(3),
+                    src: VReg(1)
+                },
+                MInst::Store {
+                    src: VReg(3),
+                    offset: 16,
+                    ..
+                },
                 MInst::Return
             ]
         ));

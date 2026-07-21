@@ -3960,9 +3960,10 @@ fn emit_chained_eu_groups(
     }
     let post_regalloc_start = timing.then(crate::timing::now);
     super::mir_opt::post_regalloc_peephole(&mut mfunc);
+    super::mir_opt::post_regalloc_cleanup(&mut mfunc);
     if let Some(start) = post_regalloc_start {
         eprintln!(
-            "[native-timing] emit_chained post_regalloc_peephole mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
+            "[native-timing] emit_chained post_regalloc_cleanup mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
             mfunc.vregs.count(),

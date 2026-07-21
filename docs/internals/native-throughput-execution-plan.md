@@ -6006,6 +6006,48 @@ winning ties by register number; Linux compile time drops by about 31% and the
 generated program is modestly faster, while the remaining execution gap and
 edge-copy quality remain open**.
 
+### Step 66: Close trivial MIR values before and after allocation
+
+Complete post-allocation MIR inspection exposed predicates whose selected
+values were identical, machine-width identities created after the last
+algebraic pass, unused phi chains retained by instruction-only DCE, and dead
+rematerializations introduced during allocation. These are not harmless
+emitter peepholes: retaining their definitions gives the predicate graph live
+ranges, CSSA snapshots, phi copies, and spill homes before the emitter finally
+discovers that the selected physical register is unchanged.
+
+The final pre-allocation pipeline now folds equal-value `Select`, `CmpSelect`,
+`CmpImmSelect`, and `GuardedCmpSelect`, reruns algebraic simplification after
+immediate-form lowering, propagates the resulting copies, and removes unused
+phis to a fixed cascading DCE boundary. A separate post-allocation cleanup
+folds equal split representatives and removes dead instructions without copy
+propagation. It deliberately preserves phi rows because the verified
+parallel-copy plan has already been constructed at that phase boundary. The
+first Linux-sized trace caught that distinction: removing a post-allocation
+phi correctly failed plan verification, after which instruction-only cleanup
+completed on the same input.
+
+All three SIR dumps are byte-identical to Step 65. The full interval-allocator
+MIR shrank from 53,013,387 to 52,042,443 bytes and from 1,906,113 to 1,877,876
+lines. No equal-value select or self-conditional-move remains in the complete
+trace. The `eval_comb` spill frame fell from 6,184 to 5,696 bytes and its
+emitted body from 630,288 to 618,645 bytes; the fused frame fell from 6,208 to
+5,744 bytes and its body from 860,533 to 848,332 bytes. Immediate stack
+store/reload transitions remain visible and are the next allocator defect.
+
+The focused MIR suite passes 73/73, the library suite 1,045/1,045, native
+testbench 60 passed with one ignored, and counter 9 passed with three ignored;
+the package check, formatting, and clean Heliodor source checks pass. The
+trace-only build took 227.768 s. An independent trace-free full run compiled
+in 228.244 s, reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`, and executed in 102.749 s. That single execution
+sample is above Step 65's 101.035 s and therefore establishes semantics and
+structural removal only, not a throughput improvement.
+
+Status: **dead predicate and identity graphs no longer enter allocation, dead
+phis cascade away before CSSA, and post-allocation cleanup respects the frozen
+parallel-copy plan; immediate split-to-stack transitions remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6127,6 +6169,7 @@ edge-copy quality remain open**.
 | 63 loop-backedge phi affinity through CSSA snapshots | this step | color 7/7; regalloc 302/302 | lib 1037/1037; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; SIR and pre-allocation MIR are byte-identical to Step 62 | compile 63.032 / 62.776 s; execute 89.473 / 90.408 s | exact CSSA snapshots expose only natural-loop backedge affinities; concrete seven-value backedge loses two repeated `xchg`; execute mean -4.1% |
 | 64 convergent machine-interval spilling and sparse split queries | this step | regalloc 304/304 | lib 1039/1039; all-target check, strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 330.241 s; full compile 332.005 s; execute 103.855 s | impossible simultaneous phi reload pressure removed; fused allocation now finishes; generated execution remains 15.5% slower than the Step 63 mean |
 | 65 productive free-prefix selection and transactional stack homes | this step | regalloc 307/307 | lib 1042/1042; all-target check, package strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 228.722 s; full compile 228.524 s; execute 101.035 s | split edits -45%; compile -31%; execute -2.7% vs Step 64; production gap remains 12.3% |
+| 66 trivial-value closure and dead-phi DCE | this step | MIR optimization 73/73 | lib 1045/1045; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.768 s; full compile 228.244 s; execute 102.749 s | full MIR -970,944 bytes; eval/fused frames -488/-464 bytes; one execution sample does not establish a speed gain |
 
 ## Related design records
 
