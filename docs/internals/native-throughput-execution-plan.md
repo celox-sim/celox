@@ -5582,6 +5582,63 @@ byte-range alias precision and bounded local storage; exact Linux meaning and
 tick count are preserved; emitted MIR shrinks, while measured execution is
 unchanged**.
 
+### Step 59: Constant-work repeated-bit chunks in wide concat lowering
+
+Step 58 still contained two complete 64-step shift/OR ladders in one native
+MIR block.  They did not originate in the machine-word concat handled by Step
+57.  The optimized SIR represented a 128-bit signed operand as a wide concat
+whose high chunk contained 64 copies of the same sign bit.  The generic wide
+concat repacker flattened those copies into independent one-bit pieces and
+rebuilt the high word literally:
+
+```text
+sign = shr source, 63
+t1 = shl sign, 1
+a1 = or sign, t1
+t2 = shl sign, 2
+a2 = or a1, t2
+...
+t63 = shl sign, 63
+high = or a62, t63
+```
+
+The wide repacker now coalesces each adjacent run of at least four references
+to the same canonical one-bit VReg.  One `neg` turns that bit into an all-zero
+or all-one machine word, after which the ordinary chunk packer can consume any
+part of the fill.  Runs spanning more than one word are represented by
+at-most-64-bit views of the same fill.  Value and four-state mask planes use
+the same lowering, as do the wide concat arms used by mux chunk blending.
+
+The run compaction reuses the existing flat-part vector in place; its output
+cannot contain more entries than its input.  Repacking consumes every compact
+part once and emits each destination chunk once, so time is
+`O(parts + chunks)` and auxiliary storage beyond the already required part and
+chunk vectors is constant.  The common packer also starts each chunk from its
+first real piece instead of manufacturing a zero followed by `or zero`, while
+preserving masking and cross-chunk extraction for partial pieces.
+
+The executable regression builds `Concat([sign x 64, low64])`, requires one
+`neg` and no concat `shl` per two-state/four-state plane, then JIT-executes the
+128-bit store and checks both value words and both unknown-mask words.  It
+failed before the change with 63 shifts, 64 ORs, and a width-normalizing move
+for every repeated input.  All 31 native ISel tests and all 1021 library tests
+pass after the change.
+
+The complete trace is retained at
+`target/heliodor/analysis/step86-wide-sign-fill`.  Pre-optimized,
+post-optimized, and native-optimized SIR are byte-identical to Step 58.  The
+concrete ladders now read simply as `shr sign, 63; neg sign`, and full MIR falls
+from 51,521,543 to 51,245,987 bytes.  The trace-free non-LTO run reached
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`; compilation took
+73.399 s and execution took 91.489 s.  Step 58's adjacent retained candidate
+executed in 91.492 s, so this large static reduction does not improve the
+Linux workload: the affected wide arithmetic arm is not a dominant executed
+path.
+
+Status: **wide repeated-bit chunks lower in constant work with exact
+two-state/four-state semantics and linear bounded lowering; Linux meaning and
+tick count remain exact; MIR shrinks, while measured execution is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5696,6 +5753,7 @@ unchanged**.
 | 56 selector-disjoint predicate control flow | `a723fb96` | BranchifyMux 50/50 including selector dispatch, overlap rejection, condition normalization, and store barrier | lib 1015/1015; retained native execution and RTL integration gates | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.732 / 80.566 s; execute 92.905 / 91.147 s | only the selected payload executes; false-edge five-`xchg` cycle and three backedge stores disappear; execution mean unchanged |
 | 57 constant-work machine-word sign replication | this step | ISel 30/30 including executable two-state/four-state repeated-MSB concat | lib 1016/1016; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format, docs | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.348 / 80.444 s; execute 92.280 / 89.330 s | repeated sign bits lower to `neg; shl; or`; MIR -255,946 bytes and eval code -3,946 bytes; execution mean -1.3% |
 | 58 alias-aware late state DSE | this step | MIR optimization 70/70; state promotion 15/15 | lib 1020/1020; workspace check, package all-target strict clippy, format, docs, and diff checks pass | parent/candidate and two additional candidate runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent complete trace is byte-identical to retained HEAD | paired compile 73.919 / 74.250 s; execute 91.640 / 91.492 s | MemorySSA-exposed intermediate byte stores disappear; MIR -452,380 bytes; paired execution unchanged |
+| 59 constant-work wide repeated-bit chunks | this step | native ISel 31/31 including executable two-state/four-state 128-bit concat | lib 1021/1021; workspace check, package all-target strict clippy, format, docs, and diff checks pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 73.399 s; execute 91.489 s | two 64-step sign-fill ladders become `shr; neg`; MIR -275,556 bytes; execution unchanged |
 
 ## Related design records
 
