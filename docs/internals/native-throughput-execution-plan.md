@@ -5143,6 +5143,47 @@ Status: **remaining sparse registration is reduced to a register-free bitmap
 set with exact dependencies; Linux meaning and tick count are preserved and
 generated code is smaller, but measured execution is unchanged**.
 
+### Step 51: Fold machine-width algebraic identities
+
+Inspection of the complete optimized MIR found full-word FF copies still
+lowered as `load dst; and.w32 dst, 0; or.w64 src; store dst`.  The emitted x86
+therefore loaded the overwritten destination, zeroed it, ORed in the source,
+and stored it.  This was not a register-allocation artifact: the sequence was
+already present after MIR optimization.
+
+The MIR constant folder and algebraic simplifier handled only the 64-bit ALU
+variants.  They now also model `Add32`, `Sub32`, `Mul32`, `And32`, `Or32`,
+`Xor32`, and `AndImm32`.  Constant results explicitly truncate both operands
+to 32 bits and zero-extend the result.  Identity rewrites produce `Mov32`, not
+`Mov`, so an arbitrary 64-bit source cannot silently retain its upper half;
+the existing known-bits proof may remove that `Mov32` only when the source is
+already known to fit.
+
+The generated full-word sequence is now exactly `load src; store dst`, and the
+overwritten destination load is removed before register allocation.  Focused
+tests cover the concrete masked-merge chain, every 32-bit ALU constant fold,
+and every identity while retaining zero-extension.  The library passes
+1000/1000.  Dynamic-NBA tests pass 33 with one upstream ignore, cross-block NBA
+tests pass 11 with one ignore, flip-flop tests pass 200 with 42 ignores, native
+execution passes 16/16, native testbench passes 60 with one ignore, and counter
+passes 9 with three Veryl ignores.
+
+The complete trace is at
+`target/heliodor/analysis/step71-word32-algebraic`.  Optimized SIR remains
+byte-identical at 19,548,386 bytes.  Full MIR falls from 52,743,850 to
+52,213,544 bytes, and the emitted `eval_comb_apply_ff` body falls by 3,435
+bytes.  Its spill frame remains `0x1500`.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  They compiled in 80.586 and 80.420 s and executed in
+93.621 and 93.701 s.  The 93.661 s mean is within the variation of Step 50's
+93.243 s mean, so no execution-speed or compile-speed claim is made.
+
+Status: **machine-width constant and identity semantics are complete enough to
+remove full-word masked-copy loads before allocation; Linux meaning and tick
+count are preserved and generated code is smaller, while measured execution
+is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5249,6 +5290,7 @@ generated code is smaller, but measured execution is unchanged**.
 | 48 effect-DAG indexed writes and sparse marks | this step | scheduler 19/19; sparse fallthrough emission regression | lib 987/987; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | compile 66.524 s; execute 103.476 s | artificial barriers removed; standalone `apply_ff` frame 232→216 bytes; fused frame and execution unchanged, so no speed claim |
 | 49 direct hazard-free sparse state | this step | round-trip 4/4; publication hazards 7/7; direct bulk-zero plan/emission | lib 996/996; dynamic NBA 33 passed, 1 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two final-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 73.027 / 72.968 s; execute 93.902 / 92.780 s | sparse first-write copy, metadata, and tail Commit removed where complete-event CFG proves no observation; MIR -12.1%; mean execute -9.8%; compile regression remains open |
 | 50 register-free sparse active bitmap | this step | mark/worklist emission; multiword and padding; exact effects/GVN/reload/scheduler dependencies | lib 997/997; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.238 / 79.904 s; execute 91.148 / 95.338 s | each remaining sparse mark is one register-free bitmap `bts`; fused code -15,031 bytes; spill frame unchanged; execution mean unchanged, so no speed claim |
+| 51 machine-width algebraic identities | this step | direct full-word merge; all word32 ALU constants and identities; zero-extension preservation | lib 1000/1000; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.586 / 80.420 s; execute 93.621 / 93.701 s | overwritten destination load and zero-mask merge collapse to a direct store; MIR -530,306 bytes; fused frame unchanged; execution mean unchanged |
 
 ## Related design records
 

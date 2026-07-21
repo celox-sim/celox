@@ -762,20 +762,38 @@ fn constant_fold(func: &mut MFunction) {
                     MInst::Add { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_add)
                     }
+                    MInst::Add32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, u32::wrapping_add)
+                    }
                     MInst::Sub { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_sub)
+                    }
+                    MInst::Sub32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, u32::wrapping_sub)
                     }
                     MInst::Mul { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, u64::wrapping_mul)
                     }
+                    MInst::Mul32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, u32::wrapping_mul)
+                    }
                     MInst::And { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a & b)
+                    }
+                    MInst::And32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, |a, b| a & b)
                     }
                     MInst::Or { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a | b)
                     }
+                    MInst::Or32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, |a, b| a | b)
+                    }
                     MInst::Xor { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a ^ b)
+                    }
+                    MInst::Xor32 { dst, lhs, rhs } => {
+                        fold_bin32(&consts, *dst, *lhs, *rhs, |a, b| a ^ b)
                     }
                     MInst::Shr { dst, lhs, rhs } => {
                         fold_bin(
@@ -808,6 +826,9 @@ fn constant_fold(func: &mut MFunction) {
                     }),
                     // Binary imm with constant src
                     MInst::AndImm { dst, src, imm } => consts.get(src).map(|&v| (*dst, v & *imm)),
+                    MInst::AndImm32 { dst, src, imm } => consts
+                        .get(src)
+                        .map(|&v| (*dst, u64::from((v as u32) & *imm))),
                     MInst::OrImm { dst, src, imm } => consts.get(src).map(|&v| (*dst, v | *imm)),
                     MInst::ShrImm { dst, src, imm } => consts
                         .get(src)
@@ -897,6 +918,20 @@ fn fold_bin(
 ) -> Option<(VReg, u64)> {
     if let (Some(&l), Some(&r)) = (consts.get(&lhs), consts.get(&rhs)) {
         Some((dst, op(l, r)))
+    } else {
+        None
+    }
+}
+
+fn fold_bin32(
+    consts: &HashMap<VReg, u64>,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    op: impl Fn(u32, u32) -> u32,
+) -> Option<(VReg, u64)> {
+    if let (Some(&l), Some(&r)) = (consts.get(&lhs), consts.get(&rhs)) {
+        Some((dst, u64::from(op(l as u32, r as u32))))
     } else {
         None
     }
@@ -2185,6 +2220,17 @@ fn algebraic_simplify(func: &mut MFunction) {
                         None
                     }
                 }
+                // The 32-bit form includes a zero extension, so its identity
+                // replacement must remain Mov32 rather than a full-word copy.
+                MInst::Add32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if const32(&consts, *lhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *rhs))
+                    } else {
+                        None
+                    }
+                }
                 // Identity: sub x, 0 → x; self: sub x, x → 0
                 MInst::Sub { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&0) {
@@ -2195,9 +2241,30 @@ fn algebraic_simplify(func: &mut MFunction) {
                         None
                     }
                 }
+                MInst::Sub32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if lhs == rhs {
+                        Some(Simplification::Const(*dst, 0))
+                    } else {
+                        None
+                    }
+                }
                 // Identity: mul x, 1 → x; annihilation: mul x, 0 → 0
                 // Strength reduction: mul x, 2^n → shl x, n
                 MInst::Mul { dst, lhs, rhs } => try_simplify_mul(*dst, *lhs, *rhs, &consts),
+                MInst::Mul32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(1) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if const32(&consts, *lhs) == Some(1) {
+                        Some(Simplification::Mov32(*dst, *rhs))
+                    } else if const32(&consts, *rhs) == Some(0) || const32(&consts, *lhs) == Some(0)
+                    {
+                        Some(Simplification::Const(*dst, 0))
+                    } else {
+                        None
+                    }
+                }
                 // Identity: and x, -1 → x; annihilation: and x, 0 → 0
                 MInst::And { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&u64::MAX) {
@@ -2208,6 +2275,20 @@ fn algebraic_simplify(func: &mut MFunction) {
                         Some(Simplification::Const(*dst, 0))
                     } else if lhs == rhs {
                         Some(Simplification::Mov(*dst, *lhs))
+                    } else {
+                        None
+                    }
+                }
+                MInst::And32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(u32::MAX) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if const32(&consts, *lhs) == Some(u32::MAX) {
+                        Some(Simplification::Mov32(*dst, *rhs))
+                    } else if const32(&consts, *rhs) == Some(0) || const32(&consts, *lhs) == Some(0)
+                    {
+                        Some(Simplification::Const(*dst, 0))
+                    } else if lhs == rhs {
+                        Some(Simplification::Mov32(*dst, *lhs))
                     } else {
                         None
                     }
@@ -2224,12 +2305,34 @@ fn algebraic_simplify(func: &mut MFunction) {
                         None
                     }
                 }
+                MInst::Or32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if const32(&consts, *lhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *rhs))
+                    } else if lhs == rhs {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else {
+                        None
+                    }
+                }
                 // Identity: xor x, 0 → x; self: xor x, x → 0
                 MInst::Xor { dst, lhs, rhs } => {
                     if consts.get(rhs) == Some(&0) {
                         Some(Simplification::Mov(*dst, *lhs))
                     } else if consts.get(lhs) == Some(&0) {
                         Some(Simplification::Mov(*dst, *rhs))
+                    } else if lhs == rhs {
+                        Some(Simplification::Const(*dst, 0))
+                    } else {
+                        None
+                    }
+                }
+                MInst::Xor32 { dst, lhs, rhs } => {
+                    if const32(&consts, *rhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *lhs))
+                    } else if const32(&consts, *lhs) == Some(0) {
+                        Some(Simplification::Mov32(*dst, *rhs))
                     } else if lhs == rhs {
                         Some(Simplification::Const(*dst, 0))
                     } else {
@@ -2253,6 +2356,15 @@ fn algebraic_simplify(func: &mut MFunction) {
                 MInst::AndImm { dst, src, imm } => {
                     if *imm == u64::MAX {
                         Some(Simplification::Mov(*dst, *src))
+                    } else if *imm == 0 {
+                        Some(Simplification::Const(*dst, 0))
+                    } else {
+                        None
+                    }
+                }
+                MInst::AndImm32 { dst, src, imm } => {
+                    if *imm == u32::MAX {
+                        Some(Simplification::Mov32(*dst, *src))
                     } else if *imm == 0 {
                         Some(Simplification::Const(*dst, 0))
                     } else {
@@ -2309,6 +2421,9 @@ fn algebraic_simplify(func: &mut MFunction) {
                     Simplification::Mov(dst, src) => {
                         *inst = MInst::Mov { dst, src };
                     }
+                    Simplification::Mov32(dst, src) => {
+                        *inst = MInst::Mov32 { dst, src };
+                    }
                     Simplification::Const(dst, value) => {
                         *inst = MInst::LoadImm { dst, value };
                         consts.insert(dst, value);
@@ -2324,8 +2439,13 @@ fn algebraic_simplify(func: &mut MFunction) {
 
 enum Simplification {
     Mov(VReg, VReg),
+    Mov32(VReg, VReg),
     Const(VReg, u64),
     Shl(VReg, VReg, u8),
+}
+
+fn const32(consts: &HashMap<VReg, u64>, value: VReg) -> Option<u32> {
+    consts.get(&value).map(|&value| value as u32)
 }
 
 fn try_simplify_mul(
@@ -3974,6 +4094,240 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn full_word_masked_merge_collapses_to_a_direct_store() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0,
+                },
+                MInst::Or {
+                    dst: VReg(3),
+                    lhs: VReg(2),
+                    rhs: VReg(0),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        optimize(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Load {
+                offset: 0,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Load {
+                offset: 8,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                offset: 8,
+                src: VReg(0),
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::And { .. }
+                | MInst::And32 { .. }
+                | MInst::AndImm { .. }
+                | MInst::AndImm32 { .. }
+                | MInst::Or { .. }
+                | MInst::Or32 { .. }
+                | MInst::OrImm { .. }
+        )));
+    }
+
+    #[test]
+    fn word32_algebraic_identities_keep_their_zero_extension() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 1,
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: u32::MAX as u64,
+                },
+                MInst::Add32 {
+                    dst: VReg(4),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Sub32 {
+                    dst: VReg(5),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Mul32 {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(2),
+                },
+                MInst::And32 {
+                    dst: VReg(7),
+                    lhs: VReg(0),
+                    rhs: VReg(3),
+                },
+                MInst::Or32 {
+                    dst: VReg(8),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Xor32 {
+                    dst: VReg(9),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::AndImm32 {
+                    dst: VReg(10),
+                    src: VReg(0),
+                    imm: u32::MAX,
+                },
+                MInst::Return,
+            ],
+            11,
+        );
+
+        algebraic_simplify(&mut func);
+
+        for (index, dst) in (4..=10).enumerate() {
+            assert!(
+                matches!(
+                    func.blocks[0].insts[index + 4],
+                    MInst::Mov32 {
+                        dst: actual_dst,
+                        src: VReg(0)
+                    } if actual_dst == VReg(dst)
+                ),
+                "word32 identity at v{dst} lost its zero extension"
+            );
+        }
+    }
+
+    #[test]
+    fn word32_constant_fold_truncates_inputs_and_zero_extends_results() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: u64::MAX,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 2,
+                },
+                MInst::Add32 {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Sub32 {
+                    dst: VReg(3),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Mul32 {
+                    dst: VReg(4),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::And32 {
+                    dst: VReg(5),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Or32 {
+                    dst: VReg(6),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Xor32 {
+                    dst: VReg(7),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::AndImm32 {
+                    dst: VReg(8),
+                    src: VReg(0),
+                    imm: 0x8000_0000,
+                },
+                MInst::Return,
+            ],
+            9,
+        );
+
+        constant_fold(&mut func);
+
+        for (index, expected) in [
+            1,
+            0xffff_fffd,
+            0xffff_fffe,
+            2,
+            0xffff_ffff,
+            0xffff_fffd,
+            0x8000_0000,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dst = VReg(index as u32 + 2);
+            assert!(
+                matches!(
+                    func.blocks[0].insts[index + 2],
+                    MInst::LoadImm {
+                        dst: actual_dst,
+                        value
+                    } if actual_dst == dst && value == expected
+                ),
+                "word32 constant fold for {dst} produced the wrong value"
+            );
+        }
     }
 
     #[test]
