@@ -346,12 +346,17 @@ fn find_dead_zero_definitions(
     dead
 }
 
-/// Find a whole-object zero overwrite before sparse lowering expands every
-/// logical Store into data initialization and bitmap updates. Stores to other
-/// objects and unrelated observable events may be interleaved: sparse working
-/// state is private until Commit, and an event which consumes an RTL value has
-/// an explicit register/data dependency on the Load producing that value.
-/// A same-object read, Commit, or non-zero/dynamic Store seals the group.
+fn is_sparse_origin_zero_fill_region(region: u32) -> bool {
+    region == crate::ir::SPARSE_WORKING_REGION || region == crate::ir::STABLE_REGION
+}
+
+/// Find a whole-object zero overwrite before lowering expands every logical
+/// Store. This covers sparse next state and a sparse-origin object which a
+/// complete-event proof redirected to STABLE. Stores to other objects and
+/// unrelated observable events may be interleaved: an event which consumes an
+/// RTL value has an explicit register/data dependency on the Load producing
+/// that value. A same-object read, Commit, or non-zero/dynamic Store seals the
+/// group.
 fn find_sparse_zero_fills(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -368,7 +373,8 @@ fn find_sparse_zero_fills(
                 source,
                 triggers,
                 capture_sites,
-            ) if address.region == crate::ir::SPARSE_WORKING_REGION
+            ) if is_sparse_origin_zero_fill_region(address.region)
+                && layout.sparse_layouts.contains_key(&address.absolute_addr())
                 && *width != 0
                 && triggers.is_empty()
                 && capture_sites.is_empty() =>
@@ -393,7 +399,8 @@ fn find_sparse_zero_fills(
                     source,
                     triggers,
                     capture_sites,
-                ) if address.region == crate::ir::SPARSE_WORKING_REGION
+                ) if is_sparse_origin_zero_fill_region(address.region)
+                    && layout.sparse_layouts.contains_key(&address.absolute_addr())
                     && *width != 0
                     && triggers.is_empty()
                     && capture_sites.is_empty()
@@ -1526,8 +1533,16 @@ mod tests {
     }
 
     fn zero_store(variable: u32, bit_offset: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        zero_store_in_region(crate::ir::SPARSE_WORKING_REGION, variable, bit_offset)
+    }
+
+    fn zero_store_in_region(
+        region: u32,
+        variable: u32,
+        bit_offset: usize,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
         SIRInstruction::Store(
-            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            address(region, variable),
             SIROffset::Static(bit_offset),
             64,
             RegisterId(0),
@@ -1563,6 +1578,21 @@ mod tests {
             plans.root(BlockId(0), 5),
             Some(address(crate::ir::SPARSE_WORKING_REGION, 1))
         );
+    }
+
+    #[test]
+    fn direct_stable_zero_fill_keeps_the_sparse_origin_bulk_plan() {
+        let unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            zero_store_in_region(STABLE_REGION, 0, 0),
+            zero_store_in_region(STABLE_REGION, 0, 64),
+        ]);
+
+        let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        assert!(plans.is_member(BlockId(0), 1));
+        assert!(plans.is_member(BlockId(0), 2));
+        assert_eq!(plans.root(BlockId(0), 2), Some(address(STABLE_REGION, 0)));
+        assert!(plans.is_dead_zero_definition(BlockId(0), 0));
     }
 
     #[test]

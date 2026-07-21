@@ -122,6 +122,36 @@ impl DirectStableStoreHazards {
         }
     }
 
+    fn remove(&mut self, addr: AbsoluteAddr, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        let Some(ranges) = self.ranges.get_mut(&addr) else {
+            return;
+        };
+        let mut remaining = Vec::with_capacity(ranges.len().saturating_add(1));
+        for &(range_start, range_end) in ranges.iter() {
+            if range_end <= start || end <= range_start {
+                remaining.push((range_start, range_end));
+                continue;
+            }
+            if range_start < start {
+                remaining.push((range_start, start));
+            }
+            if end < range_end {
+                remaining.push((end, range_end));
+            }
+        }
+        *ranges = remaining;
+        if ranges.is_empty() {
+            self.ranges.remove(&addr);
+        }
+    }
+
+    fn remove_addr(&mut self, addr: AbsoluteAddr) {
+        self.ranges.remove(&addr);
+    }
+
     pub(crate) fn overlaps(&self, addr: AbsoluteAddr, start: usize, bits: usize) -> bool {
         let end = start.saturating_add(bits);
         self.ranges.get(&addr).is_some_and(|ranges| {
@@ -162,8 +192,24 @@ fn intersect_read_with_written(
     }
 }
 
-/// Bit ranges for which replacing a WORKING write with an immediate STABLE
-/// write could change an old-state read later in this complete event CFG.
+fn intersect_write_with_written(
+    hazards: &mut DirectStableStoreHazards,
+    written: &DirectStableStoreHazards,
+    addr: AbsoluteAddr,
+    offset: &SIROffset,
+    bits: usize,
+) {
+    intersect_read_with_written(hazards, written, addr, offset, bits);
+}
+
+/// Bit ranges for which replacing a WORKING/SPARSE write with an immediate
+/// STABLE write could change an observation in this complete event CFG.
+///
+/// `written` is the may-set of state writes which have not reached their
+/// publishing Commit yet.  A STABLE read observes an old value in the source
+/// program, while a competing STABLE write can change which value the later
+/// Commit publishes.  The publishing Commit closes the interval; reads after
+/// it observe the same value in either program and are not hazards.
 pub(crate) fn direct_stable_store_hazards(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> DirectStableStoreHazards {
@@ -181,6 +227,8 @@ pub(crate) fn direct_stable_store_hazards(
         };
         let mut written = in_written.get(&bid).cloned().unwrap_or_default();
         for inst in &block.instructions {
+            // Record old-state reads before updating the pending-write state
+            // for this instruction.
             match inst {
                 SIRInstruction::Load(_, addr, offset, bits) if addr.region == STABLE_REGION => {
                     intersect_read_with_written(
@@ -200,11 +248,53 @@ pub(crate) fn direct_stable_store_hazards(
                         *bits,
                     );
                 }
+                _ => {}
+            }
+
+            match inst {
                 SIRInstruction::Store(addr, offset, bits, _, _, _)
-                    if addr.region == WORKING_REGION =>
+                    if addr.region == WORKING_REGION || addr.region == SPARSE_WORKING_REGION =>
                 {
                     let (start, end) = instruction_range(offset, *bits);
                     written.insert(addr.absolute_addr(), start, end);
+                }
+                SIRInstruction::Store(addr, offset, bits, _, _, _)
+                    if addr.region == STABLE_REGION =>
+                {
+                    intersect_write_with_written(
+                        &mut hazards,
+                        &written,
+                        addr.absolute_addr(),
+                        offset,
+                        *bits,
+                    );
+                }
+                SIRInstruction::Commit(src, dst, offset, bits, _)
+                    if dst.region == STABLE_REGION
+                        && (src.region == WORKING_REGION
+                            || src.region == SPARSE_WORKING_REGION)
+                        && src.absolute_addr() == dst.absolute_addr() =>
+                {
+                    let addr = src.absolute_addr();
+                    if src.region == SPARSE_WORKING_REGION && matches!(offset, SIROffset::Static(0))
+                    {
+                        // The SIR region contract defines this as a full-range
+                        // sparse publication, even when the preceding indexed
+                        // Store had no statically bounded bit range.
+                        written.remove_addr(addr);
+                    } else {
+                        let (start, end) = instruction_range(offset, *bits);
+                        written.remove(addr, start, end);
+                    }
+                }
+                SIRInstruction::Commit(_, dst, offset, bits, _) if dst.region == STABLE_REGION => {
+                    intersect_write_with_written(
+                        &mut hazards,
+                        &written,
+                        dst.absolute_addr(),
+                        offset,
+                        *bits,
+                    );
                 }
                 _ => {}
             }
@@ -229,7 +319,12 @@ pub(crate) fn direct_stable_store_hazards(
                 propagate(true_block.0);
                 propagate(false_block.0);
             }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            SIRTerminator::Return | SIRTerminator::Error(_) => {
+                // Publishing a redirected state Store on a path where the
+                // source program never reaches its Commit changes the final
+                // state (and can expose state before an Error is reported).
+                hazards.merge_from(&written);
+            }
         }
     }
     hazards
@@ -684,34 +779,137 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_preserves_working_commit_when_old_stable_is_read_later() {
+    fn forwarding_crosses_a_stable_read_after_publication() {
         let mut eu = forwarding_eu(true);
         let hazards = direct_stable_store_hazards(&eu);
-        assert!(hazards.overlaps(addr(STABLE_REGION).absolute_addr(), 0, 8));
+        assert!(hazards.is_empty());
         inline_commit_forwarding_with_hazards(&mut eu, &hazards);
         let instructions = &eu.blocks[&BlockId(0)].instructions;
-        assert!(
-            matches!(instructions[0], SIRInstruction::Store(a, ..) if a.region == WORKING_REGION)
+        assert!(matches!(
+            instructions.as_slice(),
+            [SIRInstruction::Store(a, ..)] if a.region == STABLE_REGION
+        ));
+    }
+
+    #[test]
+    fn forwarding_preserves_working_commit_when_old_stable_is_read_before_it() {
+        let stable = addr(STABLE_REGION);
+        let working = addr(WORKING_REGION);
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions.insert(
+            1,
+            SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 8),
         );
-        assert!(matches!(instructions[1], SIRInstruction::Commit(..)));
+
+        let hazards = direct_stable_store_hazards(&eu);
+        assert!(hazards.overlaps(stable.absolute_addr(), 0, 8));
+        inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(matches!(instructions[0], SIRInstruction::Store(a, ..) if a == working));
+        assert!(matches!(instructions[2], SIRInstruction::Commit(..)));
     }
 
     #[test]
     fn forwarding_ignores_a_later_read_of_a_disjoint_bit_range() {
-        let mut eu = forwarding_eu(true);
-        let SIRInstruction::Load(_, _, offset, _) =
-            &mut eu.blocks.get_mut(&BlockId(1)).unwrap().instructions[0]
-        else {
-            unreachable!()
-        };
-        *offset = SIROffset::Static(8);
+        let stable = addr(STABLE_REGION);
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions.insert(
+            1,
+            SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(8), 8),
+        );
 
         let hazards = direct_stable_store_hazards(&eu);
         assert!(!hazards.overlaps(addr(STABLE_REGION).absolute_addr(), 0, 8));
         inline_commit_forwarding_with_hazards(&mut eu, &hazards);
-        assert!(matches!(
-            eu.blocks[&BlockId(0)].instructions.as_slice(),
-            [SIRInstruction::Store(addr, ..)] if addr.region == STABLE_REGION
-        ));
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(
+            matches!(instructions[0], SIRInstruction::Store(addr, ..) if addr.region == STABLE_REGION)
+        );
+        assert!(matches!(instructions[1], SIRInstruction::Load(..)));
+    }
+
+    #[test]
+    fn sparse_write_makes_an_old_stable_read_hazardous_until_publication() {
+        let stable = addr(STABLE_REGION);
+        let sparse = addr(SPARSE_WORKING_REGION);
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Store(
+                sparse,
+                SIROffset::Element {
+                    index: RegisterId(1),
+                    element_width: 8,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(2), stable, SIROffset::Static(0), 8),
+            SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 64, Vec::new()),
+        ];
+        eu.register_map
+            .insert(RegisterId(2), RegisterType::Logic { width: 8 });
+
+        let hazards = direct_stable_store_hazards(&eu);
+        assert!(hazards.contains_addr(stable.absolute_addr()));
+    }
+
+    #[test]
+    fn sparse_publication_closes_the_old_stable_read_interval() {
+        let stable = addr(STABLE_REGION);
+        let sparse = addr(SPARSE_WORKING_REGION);
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Store(
+                sparse,
+                SIROffset::Element {
+                    index: RegisterId(1),
+                    element_width: 8,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 64, Vec::new()),
+            SIRInstruction::Load(RegisterId(2), stable, SIROffset::Static(0), 8),
+        ];
+        eu.register_map
+            .insert(RegisterId(2), RegisterType::Logic { width: 8 });
+
+        assert!(direct_stable_store_hazards(&eu).is_empty());
+    }
+
+    #[test]
+    fn stable_write_competing_with_an_unpublished_sparse_write_is_hazardous() {
+        let stable = addr(STABLE_REGION);
+        let sparse = addr(SPARSE_WORKING_REGION);
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Store(
+                sparse,
+                SIROffset::Static(0),
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                stable,
+                SIROffset::Static(0),
+                8,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 64, Vec::new()),
+        ];
+
+        assert!(direct_stable_store_hazards(&eu).overlaps(stable.absolute_addr(), 0, 8));
     }
 }

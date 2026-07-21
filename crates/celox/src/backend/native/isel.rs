@@ -327,7 +327,7 @@ pub fn lower_execution_unit(
             }
             if sparse_write_states.is_zero_fill_member(sir_block_id, inst_idx) {
                 if let Some(address) = sparse_write_states.zero_fill_root(sir_block_id, inst_idx) {
-                    emit_sparse_zero_fill(&mut ctx, &mut mblock, address);
+                    emit_state_zero_fill(&mut ctx, &mut mblock, address);
                 }
                 continue;
             }
@@ -3034,14 +3034,32 @@ fn emit_full_sparse_bitset(
     }
 }
 
-/// Lower a complete logical zero overwrite directly into sparse physical
-/// storage. Every byte in each physical element slot may be canonicalized to
-/// zero because padding is not part of RTL state. Marking every data chunk
-/// dirty makes the existing sparse worklist commit publish exactly that value.
-fn emit_sparse_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: RegionedAbsoluteAddr) {
+/// Lower a complete logical zero overwrite directly into physical storage.
+/// Every byte in each physical element slot may be canonicalized to zero
+/// because padding is not part of RTL state. A sparse write marks every data
+/// chunk dirty; a dependency-proved direct STABLE write needs only the fill.
+fn emit_state_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: RegionedAbsoluteAddr) {
     let object = address.absolute_addr();
-    let sparse = ctx.layout.sparse_layouts[&object].clone();
     let plane_size = ctx.layout.plane_size(&object);
+    if address.region == STABLE_REGION {
+        let stable_base = ctx.layout.offsets[&object];
+        block.push(MInst::MemFill {
+            dst_offset: stable_base as i32,
+            byte_len: plane_size,
+            value: 0,
+        });
+        if ctx.is_4state_var(&address) {
+            block.push(MInst::MemFill {
+                dst_offset: (stable_base + plane_size) as i32,
+                byte_len: plane_size,
+                value: 0,
+            });
+        }
+        return;
+    }
+
+    debug_assert_eq!(address.region, crate::ir::SPARSE_WORKING_REGION);
+    let sparse = ctx.layout.sparse_layouts[&object].clone();
     let sparse_base = ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&object];
 
     emit_sparse_mark_active(ctx, block, &sparse);
@@ -12655,6 +12673,71 @@ mod tests {
         layout.merged_total_size = STATE_SIZE;
         layout.triggered_bits_offset = STATE_SIZE;
         layout.scratch_base_offset = STATE_SIZE;
+
+        let mut direct_unit = unit.clone();
+        crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+            &mut direct_unit,
+            &[],
+        );
+        direct_unit.verify();
+        assert!(matches!(
+            direct_unit.blocks[&SirBlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Imm(..), SIRInstruction::Concat(..), SIRInstruction::Store(address, ..)]
+                if address.region == STABLE_REGION
+        ));
+        let mut direct_function = lower_execution_unit(&direct_unit, &layout, false);
+        direct_function.verify();
+        assert_eq!(
+            direct_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == STABLE as i32
+                ))
+                .count(),
+            1,
+            "direct publication must retain the bulk-zero lowering"
+        );
+        assert!(
+            !direct_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::SparseMarkActive { .. }
+                        | MInst::SparseCommit { .. }
+                        | MInst::SparseCommitWorklist { .. }
+                ))
+        );
+
+        mir_legalize::legalize(&mut direct_function);
+        mir_opt::optimize(&mut direct_function);
+        let direct_allocation = regalloc::run_regalloc(&mut direct_function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut direct_function);
+        direct_function.verify();
+        let direct_emitted = emit::emit(
+            &direct_function,
+            &direct_allocation.assignment,
+            direct_allocation.spill_frame_size,
+        )
+        .unwrap();
+        let direct_jit = JitCode::new(&direct_emitted.code).unwrap();
+        let mut direct_state = vec![0xa5u8; STATE_SIZE];
+        let direct_sentinel = direct_state[STABLE + 32];
+        assert_eq!(unsafe { direct_jit.call(&mut direct_state) }, 0);
+        assert_eq!(&direct_state[STABLE..STABLE + 32], &[0; 32]);
+        assert_eq!(direct_state[STABLE + 32], direct_sentinel);
+        assert_eq!(
+            &direct_state[SPARSE..STATE_SIZE],
+            &[0xa5; STATE_SIZE - SPARSE]
+        );
 
         let mut eval_only_unit = unit.clone();
         let removed = eval_only_unit

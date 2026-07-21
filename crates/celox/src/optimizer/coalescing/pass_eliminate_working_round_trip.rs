@@ -1,8 +1,11 @@
 //! Eliminate working memory round-trip for independent FF patterns.
 //!
-//! Each eval_apply EU does: Seed(STABLE→WORKING) + compute + Store(WORKING) + Apply(WORKING→STABLE).
-//! For independent FFs (variable accessed by only one EU), we redirect all WORKING accesses
-//! to STABLE directly, eliminating both Commits (4 MIR instructions saved per variable).
+//! A normal eval/apply EU does
+//! `Seed(STABLE→WORKING) + compute + Store(WORKING) + Apply(WORKING→STABLE)`.
+//! Dynamic FF arrays instead write a sparse next-state region and publish its
+//! dirty chunks at the event tail.  When the complete event CFG proves that no
+//! old STABLE observation or competing write occurs before publication, both
+//! forms can write STABLE directly.
 
 use crate::ir::*;
 
@@ -25,7 +28,14 @@ pub(crate) fn eliminate_working_round_trip(
         has_dynamic: bool,
     }
 
+    struct SparseVarInfo {
+        stable_addr: Option<RegionedAbsoluteAddr>,
+        has_store: bool,
+        invalid_apply: bool,
+    }
+
     let mut vars: HashMap<AbsoluteAddr, VarInfo> = HashMap::new();
+    let mut sparse_vars: HashMap<AbsoluteAddr, SparseVarInfo> = HashMap::new();
 
     // Build block → EU index mapping (for cross-EU independence check)
     let block_to_eu: HashMap<BlockId, usize> = if eu_boundary_blocks.is_empty() {
@@ -58,7 +68,7 @@ pub(crate) fn eliminate_working_round_trip(
 
         for (ii, inst) in block.instructions.iter().enumerate() {
             match inst {
-                SIRInstruction::Commit(src, dst, offset, _bits, _) => {
+                SIRInstruction::Commit(src, dst, offset, _bits, triggers) => {
                     let abs = src.absolute_addr();
                     if src.region == STABLE_REGION && dst.region == WORKING_REGION {
                         // Seed: STABLE → WORKING
@@ -89,6 +99,20 @@ pub(crate) fn eliminate_working_round_trip(
                             entry.has_dynamic = true;
                         }
                         var_eu_access.entry(abs_w).or_default().insert(eu_idx);
+                    } else if src.region == SPARSE_WORKING_REGION && dst.region == STABLE_REGION {
+                        let invalid_apply = src.absolute_addr() != dst.absolute_addr()
+                            || !matches!(offset, SIROffset::Static(0))
+                            || !triggers.is_empty();
+                        let entry = sparse_vars.entry(abs).or_insert(SparseVarInfo {
+                            stable_addr: None,
+                            has_store: false,
+                            invalid_apply: false,
+                        });
+                        if entry.stable_addr.is_some_and(|stable| stable != *dst) {
+                            entry.invalid_apply = true;
+                        }
+                        entry.stable_addr = Some(*dst);
+                        entry.invalid_apply |= invalid_apply;
                     }
                 }
                 SIRInstruction::Load(_, addr, offset, _) if addr.region == WORKING_REGION => {
@@ -106,6 +130,19 @@ pub(crate) fn eliminate_working_round_trip(
                         vars.entry(abs).and_modify(|v| v.has_dynamic = true);
                     }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
+                }
+                SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == SPARSE_WORKING_REGION =>
+                {
+                    let abs = addr.absolute_addr();
+                    sparse_vars
+                        .entry(abs)
+                        .or_insert(SparseVarInfo {
+                            stable_addr: None,
+                            has_store: false,
+                            invalid_apply: false,
+                        })
+                        .has_store = true;
                 }
                 _ => {}
             }
@@ -143,7 +180,21 @@ pub(crate) fn eliminate_working_round_trip(
         .filter(|addr| !unsafe_after_store.contains_addr(*addr))
         .collect();
 
-    if eligible.is_empty() {
+    // Sparse state has no per-EU seed: every producer writes the same pending
+    // value in merged event order.  Therefore producer count is not a safety
+    // condition; only an observation/competing write before the tail Commit is.
+    let sparse_eligible: std::collections::HashSet<AbsoluteAddr> = sparse_vars
+        .iter()
+        .filter(|(addr, info)| {
+            info.has_store
+                && info.stable_addr.is_some()
+                && !info.invalid_apply
+                && !unsafe_after_store.contains_addr(**addr)
+        })
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    if eligible.is_empty() && sparse_eligible.is_empty() {
         return;
     }
 
@@ -151,6 +202,14 @@ pub(crate) fn eliminate_working_round_trip(
     let stable_addrs: HashMap<AbsoluteAddr, RegionedAbsoluteAddr> = eligible
         .iter()
         .filter_map(|abs| vars.get(abs).map(|info| (*abs, info.stable_addr)))
+        .collect();
+    let sparse_stable_addrs: HashMap<AbsoluteAddr, RegionedAbsoluteAddr> = sparse_eligible
+        .iter()
+        .filter_map(|abs| {
+            sparse_vars
+                .get(abs)
+                .and_then(|info| info.stable_addr.map(|stable| (*abs, stable)))
+        })
         .collect();
 
     // Phase 3: Rewrite — redirect WORKING → STABLE, remove Commits
@@ -171,6 +230,12 @@ pub(crate) fn eliminate_working_round_trip(
                             return false;
                         } // remove apply
                     }
+                    if src.region == SPARSE_WORKING_REGION && dst.region == STABLE_REGION {
+                        let abs = src.absolute_addr();
+                        if sparse_eligible.contains(&abs) {
+                            return false;
+                        }
+                    }
                     true
                 }
                 // Redirect Load from WORKING to STABLE
@@ -189,8 +254,219 @@ pub(crate) fn eliminate_working_round_trip(
                     }
                     true
                 }
+                // A proved sparse Store needs neither its lazy chunk copy nor
+                // dirty metadata once it publishes directly to STABLE.
+                SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == SPARSE_WORKING_REGION =>
+                {
+                    let abs = addr.absolute_addr();
+                    if let Some(stable) = sparse_stable_addrs.get(&abs) {
+                        *addr = *stable;
+                    }
+                    true
+                }
                 _ => true,
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HashMap;
+    use veryl_analyzer::ir::VarId;
+
+    fn addr(region: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region,
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        }
+    }
+
+    fn block(
+        id: usize,
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        terminator: SIRTerminator,
+    ) -> BasicBlock<RegionedAbsoluteAddr> {
+        BasicBlock {
+            id: BlockId(id),
+            params: Vec::new(),
+            instructions,
+            terminator,
+        }
+    }
+
+    fn sparse_store() -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            addr(SPARSE_WORKING_REGION),
+            SIROffset::Element {
+                index: RegisterId(0),
+                element_width: 8,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+            },
+            8,
+            RegisterId(1),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn sparse_commit() -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Commit(
+            addr(SPARSE_WORKING_REGION),
+            addr(STABLE_REGION),
+            SIROffset::Static(0),
+            64,
+            Vec::new(),
+        )
+    }
+
+    fn eu(blocks: Vec<BasicBlock<RegionedAbsoluteAddr>>) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 3,
+                signed: false,
+            },
+        );
+        register_map.insert(RegisterId(1), RegisterType::Logic { width: 8 });
+        register_map.insert(RegisterId(2), RegisterType::Logic { width: 8 });
+        register_map.insert(
+            RegisterId(3),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
+            register_map,
+        }
+    }
+
+    #[test]
+    fn indexed_sparse_round_trip_is_redirected_when_the_event_has_no_hazard() {
+        let mut unit = eu(vec![
+            block(
+                0,
+                vec![
+                    SIRInstruction::Load(
+                        RegisterId(2),
+                        addr(STABLE_REGION),
+                        SIROffset::Static(0),
+                        8,
+                    ),
+                    sparse_store(),
+                ],
+                SIRTerminator::Jump(BlockId(1), Vec::new()),
+            ),
+            block(1, vec![sparse_commit()], SIRTerminator::Return),
+        ]);
+
+        eliminate_working_round_trip(&mut unit, &[BlockId(1)]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Load(..), SIRInstruction::Store(address, SIROffset::Element { .. }, ..)]
+                if address.region == STABLE_REGION
+        ));
+        assert!(unit.blocks[&BlockId(1)].instructions.is_empty());
+    }
+
+    #[test]
+    fn indexed_sparse_round_trip_stays_private_across_an_old_stable_read() {
+        let mut unit = eu(vec![
+            block(
+                0,
+                vec![sparse_store()],
+                SIRTerminator::Jump(BlockId(1), Vec::new()),
+            ),
+            block(
+                1,
+                vec![
+                    SIRInstruction::Load(
+                        RegisterId(2),
+                        addr(STABLE_REGION),
+                        SIROffset::Static(0),
+                        8,
+                    ),
+                    sparse_commit(),
+                ],
+                SIRTerminator::Return,
+            ),
+        ]);
+
+        eliminate_working_round_trip(&mut unit, &[BlockId(1)]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions[0],
+            SIRInstruction::Store(address, ..) if address.region == SPARSE_WORKING_REGION
+        ));
+        assert!(matches!(
+            unit.blocks[&BlockId(1)].instructions[1],
+            SIRInstruction::Commit(..)
+        ));
+    }
+
+    #[test]
+    fn sparse_round_trip_preserves_order_across_two_evaluators() {
+        let mut unit = eu(vec![
+            block(
+                0,
+                vec![sparse_store()],
+                SIRTerminator::Jump(BlockId(1), Vec::new()),
+            ),
+            block(
+                1,
+                vec![sparse_store()],
+                SIRTerminator::Jump(BlockId(2), Vec::new()),
+            ),
+            block(2, vec![sparse_commit()], SIRTerminator::Return),
+        ]);
+
+        eliminate_working_round_trip(&mut unit, &[BlockId(1), BlockId(2)]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions[0],
+            SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
+        ));
+        assert!(matches!(
+            unit.blocks[&BlockId(1)].instructions[0],
+            SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
+        ));
+        assert!(unit.blocks[&BlockId(2)].instructions.is_empty());
+    }
+
+    #[test]
+    fn sparse_round_trip_is_not_redirected_on_an_unpublished_exit_path() {
+        let mut unit = eu(vec![
+            block(
+                0,
+                Vec::new(),
+                SIRTerminator::Branch {
+                    cond: RegisterId(3),
+                    true_block: (BlockId(1), Vec::new()),
+                    false_block: (BlockId(2), Vec::new()),
+                },
+            ),
+            block(1, vec![sparse_store()], SIRTerminator::Return),
+            block(2, vec![sparse_commit()], SIRTerminator::Return),
+        ]);
+
+        eliminate_working_round_trip(&mut unit, &[BlockId(2)]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(1)].instructions[0],
+            SIRInstruction::Store(address, ..) if address.region == SPARSE_WORKING_REGION
+        ));
+        assert!(matches!(
+            unit.blocks[&BlockId(2)].instructions[0],
+            SIRInstruction::Commit(..)
+        ));
     }
 }

@@ -5039,6 +5039,66 @@ Status: **indexed writes and sparse metadata marks use exact dependence edges
 instead of artificial region boundaries; Linux semantics are preserved and
 generated MIR is smaller, but measured execution is unchanged**.
 
+### Step 49: Publish hazard-free sparse next state directly
+
+Dynamic FF array writes enter SIR in `SPARSE_WORKING_REGION`. The native
+backend previously copied the current stable chunk on the first write, updated
+the active-region/dirty/summary metadata, wrote the sparse chunk, and drained
+the active worklist at the event tail even when no operation could observe the
+old stable value between the Store and Commit. The existing working-round-trip
+pass did not consider this form at all; it only recognized seeded
+`WORKING_REGION` state and rejected dynamic offsets.
+
+The complete-event hazard analysis now models the interval from each normal or
+sparse next-state Store to its matching publication. A STABLE read during that
+interval is an old-state hazard. An overlapping STABLE write is a publication-
+order hazard. The matching Commit closes the interval, so reads after it are
+correctly allowed, and an exit with an unpublished write is rejected. Dynamic
+and element offsets conservatively alias the complete object. This is a
+forward may-dataflow problem over the actual CFG; it does not preserve source,
+EU, block, or layer order beyond real dependencies.
+
+For a sparse object with a valid full-range tail Commit and no such hazard, all
+sparse Stores are redirected to STABLE and the Commit is removed. Sparse state
+has no per-EU seed, so multiple producer EUs are not an additional legality
+condition: their Stores retain merged event order, and the same CFG analysis
+rejects any intervening observation or competing write. In the generated
+Heliodor SIR, for example, the indexed writes to `inst38.var26` become ordinary
+region-0 Stores in both `eval_apply_ff` and `eval_comb_apply_ff`; their tail
+Commits and associated sparse metadata paths disappear.
+
+Redirecting a sparse whole-object zero overwrite initially bypassed the
+existing sparse zero-fill recognition and expanded reset code into thousands
+of scalar STABLE Stores. Zero-fill recognition now also accepts a direct
+STABLE Store when the object retains sparse-origin layout metadata, and emits
+one physical `MemFill` without sparse metadata. A focused plan test and an
+executable ISel/pass regression cover this path.
+
+Focused round-trip and publication tests pass 4/4 and hazard tests pass 7/7.
+The optimized library passes 996/996. Dynamic-NBA tests pass 33 with one
+upstream ignore, cross-block NBA tests pass 11 with one ignore, and flip-flop
+tests pass 200 with 42 upstream ignores. Native execution passes 16/16, native
+testbench passes 60 with one upstream ignore, and counter passes 9 with three
+Veryl ignores.
+
+The final complete trace is at
+`target/heliodor/analysis/step69-sparse-direct-final`. Native optimized SIR
+falls from 19,619,580 to 19,548,386 bytes. The full MIR trace falls from
+60,304,632 to 53,009,418 bytes after retaining bulk-zero lowering, a 12.1%
+reduction.
+
+Both non-LTO no-dump runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`. They compiled in 73.027 and 72.968 s and executed in
+93.902 and 92.780 s. Against Step 48's adjacent 103.476 s execution, the mean
+is 93.341 s: 10.135 s or 9.8% faster. Compile and execute times are kept
+separate; compile remains slower than Step 48 and no compile-speed claim is
+made.
+
+Status: **hazard-free dynamic FF state bypasses sparse copy/metadata/commit
+machinery without adding a non-semantic ordering rule; Linux meaning and tick
+count are preserved and non-LTO execution improves by 9.8%; remaining compile
+time is a separate target**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5143,6 +5203,7 @@ generated MIR is smaller, but measured execution is unchanged**.
 | 46 control-dependent masked array search | this step | masked-array search and CLI 7/7 | lib 972/972; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final-source run all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | Step 45 execute 106.589 / 102.699 s; candidate 100.532 / 98.778 s; final source 99.781 s | 32 eager element loads and 96 comparisons become a set-bit search; scheduler unchanged; execute mean -4.8% |
 | 47 CFG circular-priority recovery | this step | circular-priority and CLI 10/10 | lib 982/982; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final release/LTO all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | parent execute 98.925 / 106.973 s; candidate 102.461 / 101.181 s; final release 101.637 s | 32 scalar priority iterations become packed rotate and CTZ; scheduler unchanged; mean -1.1% but paired directions disagree, so runtime effect is unconfirmed |
 | 48 effect-DAG indexed writes and sparse marks | this step | scheduler 19/19; sparse fallthrough emission regression | lib 987/987; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | compile 66.524 s; execute 103.476 s | artificial barriers removed; standalone `apply_ff` frame 232→216 bytes; fused frame and execution unchanged, so no speed claim |
+| 49 direct hazard-free sparse state | this step | round-trip 4/4; publication hazards 7/7; direct bulk-zero plan/emission | lib 996/996; dynamic NBA 33 passed, 1 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two final-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 73.027 / 72.968 s; execute 93.902 / 92.780 s | sparse first-write copy, metadata, and tail Commit removed where complete-event CFG proves no observation; MIR -12.1%; mean execute -9.8%; compile regression remains open |
 
 ## Related design records
 
