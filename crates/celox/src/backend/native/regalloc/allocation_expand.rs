@@ -14,7 +14,8 @@ use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::{BlockId, MFunction, PackedStateHome, Uses, VReg};
 
 use super::allocation_ir::{
-    AllocationIr, AllocationIrError, StackHomeId, SyntheticInstructionId, SyntheticOperation,
+    AllocationIr, AllocationIrError, RewrittenStackStore, StackHomeId, SyntheticInstructionId,
+    SyntheticOperation,
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -249,6 +250,73 @@ impl fmt::Display for AllocationExpandError {
 }
 
 impl std::error::Error for AllocationExpandError {}
+
+/// Retarget the exact register operand which defines one expanded stack home.
+///
+/// Strict-SSA splitting is allowed to insert a copy between a logical value and
+/// its fixed stack store.  The allocation IR is the instruction authority, but
+/// the expanded home row also names that exact use for liveness and coloring;
+/// update both facts atomically instead of pinning the store to the original
+/// representative.
+pub(super) fn retarget_stack_store_definition(
+    problem: &mut ExpandedAllocationProblem,
+    store: RewrittenStackStore,
+    original: VReg,
+    replacement: VReg,
+    root: LiveBundleId,
+) -> Result<(), AllocationExpandError> {
+    if replacement.0 >= problem.ir.value_count() {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.STACK_STORE_VALUE",
+            None,
+            Some(root),
+            None,
+            "rewritten stack-store operand is outside allocation IR",
+        ));
+    }
+    let metadata = problem
+        .stack_homes
+        .get_mut(store.home.0 as usize)
+        .filter(|metadata| metadata.id == store.home)
+        .ok_or_else(|| {
+            AllocationExpandError::new(
+                "ALLOCATION_EXPAND.STACK_STORE_HOME",
+                None,
+                Some(root),
+                None,
+                "rewritten stack store references missing expanded-home metadata",
+            )
+        })?;
+    if metadata.root != root {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.STACK_STORE_ROOT",
+            None,
+            Some(root),
+            None,
+            "rewritten stack store belongs to a different logical root",
+        ));
+    }
+    let ExpandedStackDefinition::Store { instruction, value } = &mut metadata.definition else {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.STACK_STORE_DEFINITION",
+            None,
+            Some(root),
+            None,
+            "rewritten stack-store owner names a phi-defined home",
+        ));
+    };
+    if *instruction != store.instruction || *value != original {
+        return Err(AllocationExpandError::new(
+            "ALLOCATION_EXPAND.STACK_STORE_DEFINITION",
+            None,
+            Some(root),
+            None,
+            "expanded stack-store metadata is stale before operand rewrite",
+        ));
+    }
+    *value = replacement;
+    Ok(())
+}
 
 pub(super) struct LoweredMaterialization {
     pub value: VReg,
@@ -1542,6 +1610,83 @@ mod tests {
             "the original add result must remain live only to its explicit stack store"
         );
         assert_eq!(format!("{function:?}"), before);
+    }
+
+    #[test]
+    fn stack_home_metadata_follows_a_split_copy_operand() {
+        let instructions = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 7,
+            },
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0),
+            },
+            MInst::Return,
+        ];
+        let mut function = function(2, instructions);
+        let (cfg, graph) = model(&mut function);
+        let mut problem = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let root = root(&problem, VReg(0)).id;
+        let definition = problem.intervals.intervals[0].as_ref().unwrap().definition;
+        let home = StackHomeId(0);
+        let store = problem
+            .ir
+            .insert_after_definition(
+                definition,
+                SyntheticOperation::StackStore { home },
+                Uses::one(VReg(0)),
+                false,
+            )
+            .unwrap();
+        problem.stack_homes.push(ExpandedStackHome {
+            id: home,
+            root,
+            definition: ExpandedStackDefinition::Store {
+                instruction: store.instruction,
+                value: VReg(0),
+            },
+            kind: ExpandedStackHomeKind::Root,
+        });
+        let changed = BTreeSet::from([BlockId(0)]);
+        refresh(&mut problem, &cfg, &changed).unwrap();
+        let store_use = problem
+            .ir
+            .resolve_stack_store_use_site(store.instruction, home, VReg(0), &problem.intervals)
+            .unwrap();
+
+        problem.ir.begin_instruction_transaction().unwrap();
+        let copied = problem
+            .ir
+            .insert_before_use(
+                store_use,
+                SyntheticOperation::Copy,
+                Uses::one(VReg(0)),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        let owner = problem
+            .ir
+            .rewrite_use_with_stack_owner(store_use, VReg(0), copied)
+            .unwrap()
+            .unwrap();
+        retarget_stack_store_definition(&mut problem, owner, VReg(0), copied, root).unwrap();
+        refresh(&mut problem, &cfg, &changed).unwrap();
+
+        assert_eq!(
+            problem.stack_homes[0].definition,
+            ExpandedStackDefinition::Store {
+                instruction: store.instruction,
+                value: copied,
+            }
+        );
+        problem
+            .ir
+            .resolve_stack_store_use_site(store.instruction, home, copied, &problem.intervals)
+            .unwrap();
     }
 
     #[test]

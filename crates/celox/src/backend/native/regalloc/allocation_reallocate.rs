@@ -210,6 +210,11 @@ pub(super) struct AllocationPressurePoint {
 pub(super) struct RegisterPressureFrontier {
     pub register: PhysReg,
     pub points: Vec<AllocationPressurePoint>,
+    /// Exact machine uses retained in the definition-connected free prefix.
+    pub retained_uses: usize,
+    /// Sparse stable-slot length retained before the first occupancy on every
+    /// reached CFG path. This compares colors for the same candidate only.
+    pub retained_length: u64,
 }
 
 impl AllocationPressurePoint {
@@ -314,6 +319,8 @@ struct FreePrefixWorkspace {
     segment_indices: Vec<usize>,
     entry_epoch: u32,
     entry_marks: Vec<u32>,
+    coverage_starts: Vec<Option<SlotIndex>>,
+    coverage_ends: Vec<Option<SlotIndex>>,
     queue: VecDeque<(usize, SlotIndex)>,
 }
 
@@ -325,6 +332,8 @@ impl FreePrefixWorkspace {
             segment_indices: vec![0; block_count],
             entry_epoch: 0,
             entry_marks: vec![0; block_count],
+            coverage_starts: vec![None; block_count],
+            coverage_ends: vec![None; block_count],
             queue: VecDeque::new(),
         }
     }
@@ -383,6 +392,144 @@ impl FreePrefixWorkspace {
         self.entry_marks[block] = self.entry_epoch;
         self.queue.push_back((block, slot));
         true
+    }
+
+    /// Measure the maximal definition-connected prefix bounded by one exact
+    /// physical-register frontier. The traversal is CFG sparse and reuses the
+    /// same epoch-indexed block storage as interference discovery.
+    fn score_frontier(
+        &mut self,
+        problem: &JointAllocationProblem,
+        cfg: &NormalizedCfg,
+        range: &SparseRange,
+        value: &AllocationValue,
+        points: &[AllocationPressurePoint],
+    ) -> Result<(usize, u64), JointAllocationError> {
+        if points.is_empty() || points.windows(2).any(|pair| pair[0].block >= pair[1].block) {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.FRONTIER_SCORE_POINTS",
+                Some(value.interval.definition.block()),
+                Some(value.value),
+                "frontier scoring requires non-empty block/slot-ordered points",
+            ));
+        }
+        self.index_range(range)?;
+        self.next_entry_epoch();
+        let definition_block = cfg
+            .block_index
+            .get(&value.interval.definition.block())
+            .copied()
+            .ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.FRONTIER_SCORE_DEFINITION",
+                    Some(value.interval.definition.block()),
+                    Some(value.value),
+                    "frontier score definition is outside the normalized CFG",
+                )
+            })?;
+        self.entry_marks[definition_block] = self.entry_epoch;
+        self.queue
+            .push_back((definition_block, value.interval.definition.slot()));
+
+        let mut retained_length = 0_u64;
+        let mut reached_points = 0_usize;
+        while let Some((block, start)) = self.queue.pop_front() {
+            let segment_index = self.segment(block).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.FRONTIER_SCORE_SEGMENT",
+                    None,
+                    Some(value.value),
+                    "frontier score reached a block without candidate liveness",
+                )
+            })?;
+            let segment = range.as_slice()[segment_index];
+            if !segment.contains(start) {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.FRONTIER_SCORE_ENTRY",
+                    Some(segment.block),
+                    Some(value.value),
+                    "frontier score entered outside the candidate segment",
+                ));
+            }
+            let point = points
+                .binary_search_by_key(&segment.block, |point| point.block)
+                .ok()
+                .map(|point| points[point]);
+            let end = if let Some(point) = point {
+                if point.slot < start || !segment.contains(point.slot) {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.FRONTIER_SCORE_CUT",
+                        Some(segment.block),
+                        Some(value.value),
+                        "frontier score cut is outside its reached live segment",
+                    ));
+                }
+                reached_points += 1;
+                point.slot
+            } else {
+                segment.end
+            };
+            self.coverage_starts[block] = Some(start);
+            self.coverage_ends[block] = Some(end);
+            retained_length = retained_length
+                .checked_add(start.distance_to(end).ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.FRONTIER_SCORE_LENGTH",
+                        Some(segment.block),
+                        Some(value.value),
+                        "frontier score endpoints are not in stable program order",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    JointAllocationError::new(
+                        "JOINT_ALLOC.FRONTIER_SCORE_LENGTH",
+                        Some(segment.block),
+                        Some(value.value),
+                        "frontier retained length exceeds u64",
+                    )
+                })?;
+            if point.is_some() {
+                continue;
+            }
+
+            let boundary = problem.block_boundaries[block];
+            if !segment.contains(boundary.exit) {
+                continue;
+            }
+            for &successor in &cfg.successors[block] {
+                let Some(successor_segment) = self.segment(successor) else {
+                    continue;
+                };
+                let entry = problem.block_boundaries[successor].entry;
+                if range.as_slice()[successor_segment].contains(entry) {
+                    self.enqueue_entry(successor, entry);
+                }
+            }
+        }
+        if reached_points != points.len() {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.FRONTIER_SCORE_COVERAGE",
+                Some(value.interval.definition.block()),
+                Some(value.value),
+                "frontier score did not reach every physical pressure point",
+            ));
+        }
+
+        let retained_uses = value
+            .interval
+            .uses
+            .iter()
+            .filter(|site| {
+                let Some(&block) = cfg.block_index.get(&site.block()) else {
+                    return false;
+                };
+                self.entry_marks[block] == self.entry_epoch
+                    && self.coverage_starts[block]
+                        .zip(self.coverage_ends[block])
+                        .is_some_and(|(start, end)| start <= site.slot() && site.slot() < end)
+            })
+            .count();
+        Ok((retained_uses, retained_length))
     }
 }
 
@@ -670,9 +817,7 @@ impl JointAllocationProblem {
                         ));
                     }
                     match home.definition {
-                        ExpandedStackDefinition::Store { instruction, value }
-                            if value == root.origin =>
-                        {
+                        ExpandedStackDefinition::Store { instruction, value } => {
                             expanded
                                 .ir
                                 .resolve_stack_store_use_site_indexed(
@@ -771,13 +916,13 @@ impl JointAllocationProblem {
                     ExpandedStackDefinition::Store {
                         instruction,
                         value: stored,
-                    } if stored == value => {
+                    } => {
                         expanded
                             .ir
                             .resolve_stack_store_use_site_indexed(
                                 instruction,
                                 home.id,
-                                value,
+                                stored,
                                 &expanded.intervals,
                                 &synthetic_instruction_index,
                             )
@@ -2996,10 +3141,14 @@ impl GreedyAllocator {
                     ),
                 ));
             }
-            let candidates = split_frontiers
-                .into_iter()
-                .map(|(candidate, frontiers)| {
-                    let candidate = self.intervals.problem.value(candidate).ok_or_else(|| {
+            let mut candidates = Vec::with_capacity(split_frontiers.len());
+            for (candidate_value, frontiers) in split_frontiers {
+                let candidate = self
+                    .intervals
+                    .problem
+                    .value(candidate_value)
+                    .cloned()
+                    .ok_or_else(|| {
                         JointAllocationError::new(
                             "JOINT_ALLOC.SPLIT_RANGE",
                             Some(value.interval.definition.block()),
@@ -3007,28 +3156,49 @@ impl GreedyAllocator {
                             "split candidate is outside the allocation value table",
                         )
                     })?;
-                    let AllocationValueClass::Region { root, uses } = &candidate.class else {
-                        return Err(JointAllocationError::new(
-                            "JOINT_ALLOC.SPLIT_CLASS",
+                let AllocationValueClass::Region { root, uses } = &candidate.class else {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.SPLIT_CLASS",
+                        Some(candidate.interval.definition.block()),
+                        Some(candidate.value),
+                        "fixed transition was selected as a root split candidate",
+                    ));
+                };
+                let candidate_range = self.matrix.ranges[candidate.value.0 as usize]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.SPLIT_RANGE",
                             Some(candidate.interval.definition.block()),
                             Some(candidate.value),
-                            "fixed transition was selected as a root split candidate",
-                        ));
-                    };
-                    Ok(RegionSplitCandidate {
-                        value: candidate.value,
-                        root: *root,
-                        uses: uses.clone(),
-                        frontiers: frontiers
-                            .into_iter()
-                            .map(|(register, points)| RegisterPressureFrontier {
-                                register,
-                                points: points.into_iter().collect(),
-                            })
-                            .collect(),
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                            "split candidate has no validated sparse range",
+                        )
+                    })?
+                    .clone();
+                let mut scored_frontiers = Vec::with_capacity(frontiers.len());
+                for (register, points) in frontiers {
+                    let points = points.into_iter().collect::<Vec<_>>();
+                    let (retained_uses, retained_length) = self.frontier_workspace.score_frontier(
+                        &self.intervals.problem,
+                        cfg,
+                        &candidate_range,
+                        &candidate,
+                        &points,
+                    )?;
+                    scored_frontiers.push(RegisterPressureFrontier {
+                        register,
+                        points,
+                        retained_uses,
+                        retained_length,
+                    });
+                }
+                candidates.push(RegionSplitCandidate {
+                    value: candidate.value,
+                    root: *root,
+                    uses: uses.clone(),
+                    frontiers: scored_frontiers,
+                });
+            }
             self.queue_value(value.value)?;
             return Ok(JointAllocationOutcome::NeedsSplit(RegionSplitRequest {
                 blocked_value: value.value,
@@ -3828,17 +3998,18 @@ mod tests {
                 owner: OccupancyOwner::Fixed(super::super::interval_union::FixedReservationId(0)),
             }]
         );
+        let frontier = &request.candidates[0].frontiers[0];
+        assert_eq!(frontier.register, PhysReg::RAX);
         assert_eq!(
-            request.candidates[0].frontiers,
-            vec![RegisterPressureFrontier {
+            frontier.points,
+            vec![AllocationPressurePoint {
                 register: PhysReg::RAX,
-                points: vec![AllocationPressurePoint {
-                    register: PhysReg::RAX,
-                    block: BlockId(0),
-                    slot: reservation.segment.start,
-                }],
+                block: BlockId(0),
+                slot: reservation.segment.start,
             }]
         );
+        assert_eq!(frontier.retained_uses, 1);
+        assert!(frontier.retained_length > 0);
     }
 
     #[test]

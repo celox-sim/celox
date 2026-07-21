@@ -673,6 +673,8 @@ fn select_live_range_frontier(
         usize,
         u64,
         u64,
+        usize,
+        u64,
         VReg,
         PhysReg,
         RegionSplitCandidate,
@@ -772,25 +774,53 @@ fn select_live_range_frontier(
                 continue;
             }
 
-            // Fewer copies are preferred. Spill density is used only as a
-            // conventional allocation weight; no home is selected here.
+            // For one candidate, choose the physical color whose maximal free
+            // prefix retains the most machine work per split boundary. Across
+            // different candidates, keep the conventional copy-count and
+            // spill-density ordering; no memory home is selected here.
             let key = (
                 placements.len(),
                 spill_cost,
                 value.live_length,
+                frontier.retained_uses,
+                frontier.retained_length,
                 candidate.value,
                 frontier.register,
             );
             let replace = best.as_ref().is_none_or(
-                |(best_copies, best_cost, best_length, best_value, best_register, _, _)| {
-                    let candidate_density = u128::from(spill_cost) * u128::from(*best_length);
-                    let best_density = u128::from(*best_cost) * u128::from(value.live_length);
-                    placements.len() < *best_copies
-                        || (placements.len() == *best_copies
-                            && (candidate_density < best_density
-                                || (candidate_density == best_density
-                                    && (candidate.value, frontier.register)
-                                        < (*best_value, *best_register))))
+                |(
+                    best_copies,
+                    best_cost,
+                    best_length,
+                    best_retained_uses,
+                    best_retained_length,
+                    best_value,
+                    best_register,
+                    _,
+                    _,
+                )| {
+                    if candidate.value == *best_value {
+                        let productivity = compare_frontier_productivity(
+                            frontier.retained_uses,
+                            frontier.retained_length,
+                            placements.len(),
+                            *best_retained_uses,
+                            *best_retained_length,
+                            *best_copies,
+                        );
+                        productivity.is_gt()
+                            || (productivity == std::cmp::Ordering::Equal
+                                && frontier.register < *best_register)
+                    } else {
+                        let candidate_density = u128::from(spill_cost) * u128::from(*best_length);
+                        let best_density = u128::from(*best_cost) * u128::from(value.live_length);
+                        placements.len() < *best_copies
+                            || (placements.len() == *best_copies
+                                && (candidate_density < best_density
+                                    || (candidate_density == best_density
+                                        && (candidate.value, frontier.register)
+                                            < (*best_value, *best_register))))
+                    }
                 },
             );
             if replace {
@@ -800,13 +830,15 @@ fn select_live_range_frontier(
                     key.2,
                     key.3,
                     key.4,
+                    key.5,
+                    key.6,
                     candidate.clone(),
                     frontier.clone(),
                 ));
             }
         }
     }
-    best.map(|(_, _, _, _, _, candidate, frontier)| (candidate, frontier))
+    best.map(|(_, _, _, _, _, _, _, candidate, frontier)| (candidate, frontier))
         .ok_or_else(|| {
             AllocationSplitError::new(
                 "ALLOCATION_SPLIT.NO_PROGRESS",
@@ -816,6 +848,34 @@ fn select_live_range_frontier(
                 "no requested live interval has a new legal machine boundary before its pressure frontier",
             )
         })
+}
+
+/// Compare how much of one candidate a physical color retains per inserted
+/// split boundary. One virtual definition counts as a unit of useful prefix
+/// even before its first machine use; this avoids trading one immediate copy
+/// for many branch-local copies which retain only one additional use.
+fn compare_frontier_productivity(
+    left_uses: usize,
+    left_length: u64,
+    left_copies: usize,
+    right_uses: usize,
+    right_length: u64,
+    right_copies: usize,
+) -> std::cmp::Ordering {
+    debug_assert!(left_copies != 0 && right_copies != 0);
+    let left_copies = left_copies as u128;
+    let right_copies = right_copies as u128;
+    let left_benefit = (left_uses as u128).saturating_add(1);
+    let right_benefit = (right_uses as u128).saturating_add(1);
+    left_benefit
+        .saturating_mul(right_copies)
+        .cmp(&right_benefit.saturating_mul(left_copies))
+        .then_with(|| {
+            u128::from(left_length)
+                .saturating_mul(right_copies)
+                .cmp(&u128::from(right_length).saturating_mul(left_copies))
+        })
+        .then_with(|| right_copies.cmp(&left_copies))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1107,6 +1167,19 @@ fn apply_live_range_edit(
         )?;
         regions.insert(phi.definition, region);
         region_preferences.insert(phi.definition, child_preference);
+    }
+
+    for rewritten in &edit.rewritten_uses {
+        if let Some(store) = rewritten.stack_store {
+            allocation_expand::retarget_stack_store_definition(
+                expanded,
+                store,
+                candidate.value,
+                rewritten.value,
+                candidate.root,
+            )
+            .map_err(AllocationSplitError::expand)?;
+        }
     }
 
     let rewritten = edit
@@ -2085,6 +2158,8 @@ fn candidate_from_plan(
         frontiers: vec![RegisterPressureFrontier {
             register: plan.register,
             points: plan.cuts.clone(),
+            retained_uses: 0,
+            retained_length: 0,
         }],
     })
 }
@@ -3029,6 +3104,8 @@ mod tests {
                 block: definition.block(),
                 slot: definition.slot(),
             }],
+            retained_uses: 0,
+            retained_length: 0,
         }];
         RegionSplitRequest {
             blocked_value: blocked,
@@ -3099,6 +3176,8 @@ mod tests {
         candidate.frontiers = vec![RegisterPressureFrontier {
             register: PhysReg::RAX,
             points: points.clone(),
+            retained_uses: 0,
+            retained_length: 0,
         }];
 
         let applied = apply_live_range_edit(
@@ -3195,6 +3274,8 @@ mod tests {
         candidate.frontiers = vec![RegisterPressureFrontier {
             register: PhysReg::RAX,
             points,
+            retained_uses: 0,
+            retained_length: 0,
         }];
         apply_live_range_edit(
             &mut expanded,
@@ -3656,12 +3737,12 @@ mod tests {
         let mut candidate = candidate(&joint, VReg(0));
         let slots = &expanded.intervals.block_slots[0];
         let earlier = AllocationPressurePoint {
-            register: PhysReg::RDX,
+            register: PhysReg::RAX,
             block: BlockId(0),
             slot: slots.instruction_use(2).unwrap(),
         };
         let later = AllocationPressurePoint {
-            register: PhysReg::RAX,
+            register: PhysReg::RDX,
             block: BlockId(0),
             slot: slots.instruction_use(3).unwrap(),
         };
@@ -3669,16 +3750,20 @@ mod tests {
             RegisterPressureFrontier {
                 register: earlier.register(),
                 points: vec![earlier],
+                retained_uses: 0,
+                retained_length: 0,
             },
             RegisterPressureFrontier {
                 register: later.register(),
                 points: vec![later],
+                retained_uses: 0,
+                retained_length: 0,
             },
         ];
         candidate
             .frontiers
             .sort_unstable_by_key(|frontier| frontier.register);
-        let request = RegionSplitRequest {
+        let mut request = RegionSplitRequest {
             blocked_value: VReg(0),
             definition: joint.value(VReg(0)).unwrap().interval.definition,
             conflicts: Vec::new(),
@@ -3689,6 +3774,20 @@ mod tests {
         assert_eq!(plan.cuts, vec![later]);
         assert_eq!(plan.retained.len(), 2);
         assert_eq!(plan.moved.len(), 1);
+
+        for frontier in &mut request.candidates[0].frontiers {
+            if frontier.points == [earlier] {
+                frontier.retained_uses = 1;
+                frontier.retained_length = 8;
+            } else {
+                assert_eq!(frontier.points, [later]);
+                frontier.retained_uses = 2;
+                frontier.retained_length = 12;
+            }
+        }
+        let (_, selected) = select_live_range_frontier(&expanded, &joint, &request).unwrap();
+        assert_eq!(selected.register, later.register());
+        assert_eq!(selected.points, [later]);
     }
 
     #[test]
@@ -3758,6 +3857,8 @@ mod tests {
         candidate.frontiers = vec![RegisterPressureFrontier {
             register: PhysReg::RAX,
             points: points.clone(),
+            retained_uses: 0,
+            retained_length: 0,
         }];
         let request = RegionSplitRequest {
             blocked_value: VReg(2),

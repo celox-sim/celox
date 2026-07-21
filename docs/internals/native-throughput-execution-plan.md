@@ -5951,6 +5951,61 @@ interval allocator now converges on the full Linux workload, and its dominant
 compile-time scans are removed; generated-code quality and repeated one-cut
 allocation remain open**.
 
+### Step 65: Productive free prefixes and transactional stack-home definitions
+
+The interval allocator previously chose a physical-register frontier for one
+candidate by copy count and then by register number. It did not compare how
+much of the candidate's live range each equally cheap frontier retained. A
+register blocked immediately after the definition could therefore beat one
+which remained free through many real uses. The resulting tiny fragments were
+then copied, requeued, and split again.
+
+Frontier construction now records the number of retained machine uses and the
+exact stable-slot length reached by each register's maximal free prefix. For
+frontiers of the same candidate, selection first maximizes retained uses per
+inserted copy and then retained length per copy; cross-candidate spill-density
+ordering is unchanged. Coverage is computed by one sparse CFG traversal over
+the candidate interval. Epoch-marked block bounds reuse the existing workspace
+without clearing a block-sized table for each register.
+
+The larger retained prefixes exposed two pre-existing stack-home transaction
+bugs. A later machine spill store used to append at the end of an original
+definition's stable anchor zone. If an older allocator-owned use already
+occupied that zone, the rewritten reload could precede its defining store.
+Store placement now uses the first existing same-block use as an upper boundary
+only when the default append point would cross that use. This preserves all
+actual def/use constraints without imposing source order on independent RTL
+operations. When a later strict-SSA split inserts a copy before a fixed stack
+store, `AllocationIr` now returns the exact store owner and the expanded
+stack-home row is retargeted in the same transaction. The update is `O(1)` by
+dense `StackHomeId`; it does not scan all homes or pin the store to the original
+VReg. A dead stack-defined phi with no remaining reload now consumes neither an
+out-of-SSA copy nor a frame slot.
+
+On the same non-LTO `heliodor-dev` Linux workload, `eval_comb` split edits fell
+from 41,722 to 22,946 and allocator calls from 53,223 to 34,493. The fused
+function fell from 48,456 to 26,392 split edits and from 61,187 to 39,285 calls.
+Compile-only completed in 228.722 s, versus 330.241 s at Step 64. An independent
+trace-free full run compiled in 228.524 s and executed in 101.035 s. It reached
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`. Execution is 2.7%
+below Step 64's 103.855 s, but still 12.3% above the production Step 63 mean of
+89.941 s, so the interval allocator remains opt-in.
+
+All 307 register-allocation tests and all 1,042 library tests pass, including
+regressions for same-zone store/reload order, exact stack-store owner reporting,
+stack-home metadata retargeting, dead phi homes, and productive frontier
+choice. Workspace all-target check, package all-target strict Clippy,
+formatting, diff checks, and the clean Heliodor source check pass. Workspace-wide
+strict Clippy additionally reaches an unrelated pre-existing Rust 1.97
+`explicit_counter_loop` lint in `celox-wasm/src/lib.rs`; that file is unchanged
+by this step. Complete candidate MIR inspection remains the next step rather
+than being replaced by aggregate counters.
+
+Status: **frontier choice now retains useful live-range prefixes instead of
+winning ties by register number; Linux compile time drops by about 31% and the
+generated program is modestly faster, while the remaining execution gap and
+edge-copy quality remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6071,6 +6126,7 @@ allocation remain open**.
 | 62 lazy selector arms and guarded value diamonds | this step | BranchifyMux 50/50; guarded-region sinking 22/22 | lib 1035/1035; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; independently generated final traces are byte-identical | compile 62.985 / 65.635 s; execute 90.748 / 96.790 s | selector payloads and four guarded word divide/remainder regions become control-dependent; MIR -9,907 bytes; execution mean unchanged |
 | 63 loop-backedge phi affinity through CSSA snapshots | this step | color 7/7; regalloc 302/302 | lib 1037/1037; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; SIR and pre-allocation MIR are byte-identical to Step 62 | compile 63.032 / 62.776 s; execute 89.473 / 90.408 s | exact CSSA snapshots expose only natural-loop backedge affinities; concrete seven-value backedge loses two repeated `xchg`; execute mean -4.1% |
 | 64 convergent machine-interval spilling and sparse split queries | this step | regalloc 304/304 | lib 1039/1039; all-target check, strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 330.241 s; full compile 332.005 s; execute 103.855 s | impossible simultaneous phi reload pressure removed; fused allocation now finishes; generated execution remains 15.5% slower than the Step 63 mean |
+| 65 productive free-prefix selection and transactional stack homes | this step | regalloc 307/307 | lib 1042/1042; all-target check, package strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 228.722 s; full compile 228.524 s; execute 101.035 s | split edits -45%; compile -31%; execute -2.7% vs Step 64; production gap remains 12.3% |
 
 ## Related design records
 

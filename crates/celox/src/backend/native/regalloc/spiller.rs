@@ -663,11 +663,11 @@ impl Spiller {
             DefinitionSite::Instruction { .. } => {
                 let instruction = expanded
                     .ir
-                    .insert_after_definition(
+                    .insert_stack_store_after_definition(
                         interval.definition,
-                        SyntheticOperation::StackStore { home: id },
-                        Uses::one(value),
-                        false,
+                        value,
+                        id,
+                        &interval.uses,
                     )
                     .map_err(|error| {
                         SpillerError::new(
@@ -781,9 +781,9 @@ impl Spiller {
                     "generic machine reload did not define a value",
                 )
             })?;
-            expanded
+            let rewritten_stack_store = expanded
                 .ir
-                .rewrite_use(site, value, replacement)
+                .rewrite_use_with_stack_owner(site, value, replacement)
                 .map_err(|error| {
                     SpillerError::new(
                         error.rule,
@@ -793,6 +793,24 @@ impl Spiller {
                         error.message,
                     )
                 })?;
+            if let Some(store) = rewritten_stack_store {
+                allocation_expand::retarget_stack_store_definition(
+                    expanded,
+                    store,
+                    value,
+                    replacement,
+                    root,
+                )
+                .map_err(|error| {
+                    SpillerError::new(
+                        error.rule,
+                        error.block,
+                        Some(value),
+                        error.root.or(Some(root)),
+                        error.message,
+                    )
+                })?;
+            }
             edit.record_use(site);
             let root_row = &mut expanded.roots[root_index];
             for use_ in root_row

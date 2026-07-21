@@ -91,6 +91,34 @@ impl AllocationLowerError {
         )
     }
 
+    fn ir_with_stack_metadata(
+        mut error: AllocationIrError,
+        expanded: &ExpandedAllocationProblem,
+    ) -> Self {
+        if let Some(home) = error.stack_home {
+            let metadata = expanded
+                .stack_homes
+                .get(home.0 as usize)
+                .filter(|metadata| metadata.id == home);
+            if let Some(metadata) = metadata {
+                let origin = expanded
+                    .roots
+                    .get(metadata.root.0 as usize)
+                    .filter(|root| root.id == metadata.root)
+                    .map(|root| root.origin);
+                error.message.push_str(&format!(
+                    "; metadata kind={:?} root={:?} origin={origin:?} definition={:?}",
+                    metadata.kind, metadata.root, metadata.definition
+                ));
+            } else {
+                error
+                    .message
+                    .push_str("; expanded stack-home metadata is missing");
+            }
+        }
+        Self::ir(error)
+    }
+
     fn live(error: LiveIntervalError) -> Self {
         Self::new(
             error.rule,
@@ -161,7 +189,7 @@ pub(super) fn lower(
     expanded
         .ir
         .verify_stack_homes(cfg)
-        .map_err(AllocationLowerError::ir)?;
+        .map_err(|error| AllocationLowerError::ir_with_stack_metadata(error, expanded))?;
     expanded
         .ir
         .verify_state_homes(cfg)
@@ -173,6 +201,12 @@ pub(super) fn lower(
         .map_err(AllocationLowerError::joint)?;
 
     let stack_coloring = stack_color::color(expanded, cfg).map_err(AllocationLowerError::stack)?;
+    let live_stack_homes = stack_coloring
+        .intervals
+        .intervals
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
     let stack_offsets = stack_coloring.offsets;
     let spill_frame_size = stack_coloring.frame_size;
     let stack_slot_count = stack_coloring.slot_count;
@@ -181,7 +215,7 @@ pub(super) fn lower(
         .materialize(original, graph, &stack_offsets)
         .map_err(AllocationLowerError::ir)?;
     let edge_locations = edge_locations(expanded, graph, &stack_offsets)?;
-    let phi_destinations = phi_destinations(expanded, &stack_offsets)?;
+    let phi_destinations = phi_destinations(expanded, &stack_offsets, &live_stack_homes)?;
     let nonregister = edge_locations
         .iter()
         .map(|(source, _)| *source)
@@ -329,7 +363,17 @@ fn mark_semantic_phi_definitions(
 fn phi_destinations(
     expanded: &ExpandedAllocationProblem,
     stack_offsets: &[i32],
+    live_stack_homes: &[bool],
 ) -> Result<Vec<(NonRegisterPhiDefinition, i32)>, AllocationLowerError> {
+    if live_stack_homes.len() != expanded.stack_homes.len() {
+        return Err(AllocationLowerError::new(
+            "ALLOCATION_LOWER.PHI_STACK_LIVENESS",
+            None,
+            None,
+            Vec::new(),
+            "stack-home liveness and expanded metadata have different domains",
+        ));
+    }
     let mut output = Vec::new();
     for home in &expanded.stack_homes {
         let ExpandedStackDefinition::Phi {
@@ -340,6 +384,12 @@ fn phi_destinations(
         else {
             continue;
         };
+        if !live_stack_homes[home.id.0 as usize] {
+            // No reload or direct edge location observes this location-level
+            // merge. Leave the strict-SSA phi semantic-only so out-of-SSA
+            // emits no dead incoming stack copies.
+            continue;
+        }
         let offset = stack_offsets
             .get(home.id.0 as usize)
             .copied()

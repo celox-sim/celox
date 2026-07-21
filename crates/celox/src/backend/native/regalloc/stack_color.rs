@@ -12,7 +12,7 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 
 use super::allocation_expand::{
-    ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition,
+    ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedStackDefinition, ExpandedStackHome,
     ExpandedStackHomeKind, ExpandedUseSource,
 };
 use super::allocation_ir::{
@@ -1530,7 +1530,7 @@ pub(super) fn color(
         ));
     }
 
-    let order = definition_order(&intervals, cfg)?;
+    let order = definition_order(&intervals, &expanded.stack_homes, cfg)?;
     let mut matrix = DynamicIntervalMatrix::new(cfg).map_err(StackColorError::union)?;
     for home in order {
         let interval = intervals.intervals[home].as_ref().ok_or_else(|| {
@@ -1560,15 +1560,10 @@ pub(super) fn color(
     let mut rebuilt = DynamicIntervalMatrix::new(cfg).map_err(StackColorError::union)?;
     let mut rebuild_order = Vec::with_capacity(intervals.intervals.len());
     for (home, interval) in intervals.intervals.iter().enumerate() {
-        let interval = interval.as_ref().ok_or_else(|| {
-            StackColorError::new(
-                "STACK_COLOR.INTERVAL_COVERAGE",
-                None,
-                None,
-                [StackHomeId(home as u32)],
-                "defined stack home has no exact live interval",
-            )
-        })?;
+        let Some(interval) = interval.as_ref() else {
+            verify_dead_phi_home(&expanded.stack_homes, home)?;
+            continue;
+        };
         let bundle = AllocationBundleId(home as u32);
         let slot = matrix.slot(bundle).ok_or_else(|| {
             StackColorError::new(
@@ -1607,6 +1602,14 @@ pub(super) fn color(
 
     let mut offsets = Vec::with_capacity(intervals.intervals.len());
     for home in 0..intervals.intervals.len() {
+        if intervals.intervals[home].is_none() {
+            // A stack-resident phi whose location has no consumer emits no
+            // incoming copies. Keep the dense home->offset table shape, but
+            // do not allocate a physical slot for a semantically dead merge.
+            verify_dead_phi_home(&expanded.stack_homes, home)?;
+            offsets.push(0);
+            continue;
+        }
         let slot = matrix
             .slot(AllocationBundleId(home as u32))
             .ok_or_else(|| {
@@ -1660,6 +1663,7 @@ pub(super) fn color(
 
 fn definition_order(
     intervals: &LiveIntervals,
+    homes: &[ExpandedStackHome],
     cfg: &NormalizedCfg,
 ) -> Result<Vec<usize>, StackColorError> {
     if cfg.idom.is_empty() || cfg.idom[0].is_some() {
@@ -1725,20 +1729,39 @@ fn definition_order(
 
     let mut order = Vec::with_capacity(intervals.intervals.len());
     for (home, interval) in intervals.intervals.iter().enumerate() {
-        let interval = interval.as_ref().ok_or_else(|| {
-            StackColorError::new(
-                "STACK_COLOR.INTERVAL_COVERAGE",
-                None,
-                None,
-                [StackHomeId(home as u32)],
-                "stack-home liveness omitted a defined home",
-            )
-        })?;
+        let Some(interval) = interval.as_ref() else {
+            verify_dead_phi_home(homes, home)?;
+            continue;
+        };
         let block = cfg.block_index[&interval.definition.block()];
         order.push((rank[block], interval.definition.slot(), home));
     }
     order.sort_unstable();
     Ok(order.into_iter().map(|(_, _, home)| home).collect())
+}
+
+fn verify_dead_phi_home(homes: &[ExpandedStackHome], home: usize) -> Result<(), StackColorError> {
+    let metadata = homes.get(home).ok_or_else(|| {
+        StackColorError::new(
+            "STACK_COLOR.INTERVAL_COVERAGE",
+            None,
+            None,
+            [StackHomeId(home as u32)],
+            "stack-home liveness and expanded metadata have different domains",
+        )
+    })?;
+    if metadata.id.0 as usize != home
+        || !matches!(metadata.definition, ExpandedStackDefinition::Phi { .. })
+    {
+        return Err(StackColorError::new(
+            "STACK_COLOR.INTERVAL_COVERAGE",
+            None,
+            None,
+            [StackHomeId(home as u32)],
+            "a stack store or malformed home has no exact liveness",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1886,6 +1909,90 @@ mod tests {
         join.push(MInst::Return);
         function.blocks = vec![entry, left, right, join];
         function
+    }
+
+    #[test]
+    fn unused_stack_phi_emits_no_frame_location() {
+        let mut values = VRegAllocator::new();
+        let condition = values.alloc();
+        let left_value = values.alloc();
+        let right_value = values.alloc();
+        let merged = values.alloc();
+        let mut source = MFunction::new(values, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: left_value,
+            value: 7,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: right_value,
+            value: 11,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), left_value), (BlockId(2), right_value)],
+        });
+        merge.push(MInst::Return);
+        source.blocks = vec![entry, left, right, merge];
+
+        let cfg = cfg::normalize(&mut source).unwrap();
+        let mut ir = AllocationIr::from_mir(&source).unwrap();
+        let home = StackHomeId(0);
+        ir.assign_phi_definition_home(
+            super::super::live_interval::DefinitionSite::Phi {
+                block: BlockId(3),
+                phi: 0,
+                slot: SlotIndex::stable_phi_def(),
+            },
+            merged,
+            home,
+        )
+        .unwrap();
+        let intervals = ir.analyze(&cfg).unwrap();
+        let expanded = ExpandedAllocationProblem {
+            incremental_liveness: live_interval::IncrementalLiveness::build(&ir, &cfg, &intervals)
+                .unwrap(),
+            ir,
+            intervals,
+            shift_encoding: VariableShiftEncoding::Bmi2,
+            roots: Vec::new(),
+            machine_edge_uses: Vec::new(),
+            register_regions: Vec::new(),
+            region_rows: BTreeMap::new(),
+            region_by_value: BTreeMap::new(),
+            next_register_region: 0,
+            stack_homes: vec![ExpandedStackHome {
+                id: home,
+                root: LiveBundleId(0),
+                definition: ExpandedStackDefinition::Phi {
+                    block: BlockId(3),
+                    phi: 0,
+                    destination: merged,
+                },
+                kind: ExpandedStackHomeKind::Machine { value: merged },
+            }],
+            state_homes: Vec::new(),
+        };
+
+        let coloring = color(&expanded, &cfg).unwrap();
+        assert_eq!(coloring.offsets, [0]);
+        assert_eq!(coloring.slot_count, 0);
+        assert!(coloring.intervals.intervals[0].is_none());
     }
 
     #[test]

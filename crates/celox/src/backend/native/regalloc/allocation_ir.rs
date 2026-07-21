@@ -203,6 +203,15 @@ pub(super) struct InsertedSynthetic {
     pub definition: Option<VReg>,
 }
 
+/// Stable external owner of an allocation-IR stack-store operand.  Live-range
+/// editing returns this identity when it renames the operand so the expanded
+/// stack-home side table can be updated in the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RewrittenStackStore {
+    pub instruction: SyntheticInstructionId,
+    pub home: StackHomeId,
+}
+
 /// One legal, stable allocation-IR boundary selected for a real split copy.
 ///
 /// The anchor itself stays private to allocation IR.  SplitEditor may compare
@@ -364,6 +373,7 @@ pub(super) struct AllocationIrError {
     pub block: Option<BlockId>,
     pub instruction: Option<usize>,
     pub values: Vec<VReg>,
+    pub stack_home: Option<StackHomeId>,
     pub message: String,
 }
 
@@ -399,8 +409,14 @@ impl AllocationIrError {
             block,
             instruction,
             values,
+            stack_home: None,
             message: message.into(),
         }
+    }
+
+    fn with_stack_home(mut self, home: StackHomeId) -> Self {
+        self.stack_home = Some(home);
+        self
     }
 
     fn live(error: LiveIntervalError) -> Self {
@@ -1464,12 +1480,89 @@ impl AllocationIr {
         self.insert_synthetic(anchor, operation, uses, defines_value)
     }
 
+    /// Establish a private spill home after one SSA definition and before every
+    /// current same-block use of that value.
+    ///
+    /// A plain `AfterInstruction` insertion appends within its stable anchor
+    /// zone.  If an older allocator-owned use already occupies that zone, a
+    /// later machine spill would otherwise place its defining store after the
+    /// use it is about to rewrite into a reload.  Select the existing first use
+    /// as the upper boundary in exactly that case.  Uses in dominated blocks do
+    /// not constrain the local insertion point, and unrelated instructions are
+    /// deliberately left free to keep their current order.
+    pub(super) fn insert_stack_store_after_definition(
+        &mut self,
+        site: DefinitionSite,
+        value: VReg,
+        home: StackHomeId,
+        current_uses: &[UseSite],
+    ) -> Result<InsertedSynthetic, AllocationIrError> {
+        let default_anchor = match site {
+            DefinitionSite::Phi { block, .. } => SyntheticAnchor::BlockEntry { block },
+            DefinitionSite::Instruction {
+                block, instruction, ..
+            } => self.anchor_after_instruction_definition(block, instruction)?,
+        };
+        let block = self.block(site.block())?;
+        let default_slot = self
+            .next_instruction_slots_at_anchor(block, default_anchor)?
+            .use_slot();
+        let first_local_use = current_uses
+            .iter()
+            .copied()
+            .filter(|use_| use_.block() == site.block())
+            .min_by_key(|use_| use_.slot());
+        let anchor = if let Some(first_use) = first_local_use
+            && default_slot >= first_use.slot()
+        {
+            let anchor = self.anchor_before_use(first_use)?;
+            let store_slot = self
+                .next_instruction_slots_at_anchor(block, anchor)?
+                .use_slot();
+            if store_slot <= site.slot() || store_slot >= first_use.slot() {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.STACK_STORE_PLACEMENT",
+                    Some(site.block()),
+                    match first_use {
+                        UseSite::Instruction { instruction, .. } => Some(instruction),
+                        UseSite::PhiEdge { .. } => None,
+                    },
+                    vec![value],
+                    format!(
+                        "no stable point exists between definition {:?} and first use {:?}",
+                        site, first_use
+                    ),
+                )
+                .with_stack_home(home));
+            }
+            anchor
+        } else {
+            default_anchor
+        };
+        self.insert_synthetic(
+            anchor,
+            SyntheticOperation::StackStore { home },
+            Uses::one(value),
+            false,
+        )
+    }
+
     pub(super) fn rewrite_use(
         &mut self,
         site: UseSite,
         original: VReg,
         replacement: VReg,
     ) -> Result<(), AllocationIrError> {
+        self.rewrite_use_with_stack_owner(site, original, replacement)
+            .map(|_| ())
+    }
+
+    pub(super) fn rewrite_use_with_stack_owner(
+        &mut self,
+        site: UseSite,
+        original: VReg,
+        replacement: VReg,
+    ) -> Result<Option<RewrittenStackStore>, AllocationIrError> {
         if replacement.0 >= self.next_value {
             return Err(AllocationIrError::new(
                 "ALLOCATION_IR.VALUE_RANGE",
@@ -1482,7 +1575,7 @@ impl AllocationIr {
                 "replacement value is outside the allocation IR",
             ));
         }
-        match site {
+        let stack_store = match site {
             UseSite::Instruction {
                 block, instruction, ..
             } => {
@@ -1490,6 +1583,18 @@ impl AllocationIr {
                 let position =
                     self.instruction_position_by_liveness_identity(block_index, instruction)?;
                 let liveness = self.instruction_liveness_snapshot(block_index, position)?;
+                let stack_store = match self.blocks[block_index].instructions[position].origin {
+                    AllocationInstructionOrigin::Synthetic {
+                        id,
+                        operation: SyntheticOperation::StackStore { home },
+                        ..
+                    } => Some(RewrittenStackStore {
+                        instruction: id,
+                        home,
+                    }),
+                    AllocationInstructionOrigin::Original { .. }
+                    | AllocationInstructionOrigin::Synthetic { .. } => None,
+                };
                 let replacement_already_used = liveness.uses.contains(&replacement);
                 if !self.blocks[block_index].instructions[position]
                     .uses
@@ -1519,6 +1624,7 @@ impl AllocationIr {
                             .push((replacement, fact_site));
                     }
                 }
+                stack_store
             }
             UseSite::PhiEdge {
                 predecessor,
@@ -1595,9 +1701,10 @@ impl AllocationIr {
                         .added_uses
                         .push((replacement, fact_site));
                 }
+                None
             }
-        }
-        Ok(())
+        };
+        Ok(stack_store)
     }
 
     /// Resolve one semantic phi source directly from a non-register edge
@@ -2194,8 +2301,14 @@ impl AllocationIr {
                 Some(block.id),
                 Some(location.position),
                 vec![value],
-                "stack-home metadata does not identify the expected fixed store use",
-            ));
+                format!(
+                    "expected store {instruction:?}/{home:?} use={value}, found id={id:?} \
+                     home={candidate_home:?} definition={:?} uses={:?}",
+                    candidate.definition,
+                    candidate.uses.to_vec()
+                ),
+            )
+            .with_stack_home(home));
         }
         let slot = intervals.block_slots[location.block]
             .instruction_use(location.position)
@@ -4178,7 +4291,8 @@ fn verify_stack_home_reaching_definitions(
                     "reload from {:?} is reachable without a prior same-home store",
                     query.home
                 ),
-            ));
+            )
+            .with_stack_home(query.home));
         }
     }
     Ok(())
@@ -5444,5 +5558,97 @@ mod tests {
 
         let error = allocation_ir.verify_stack_homes(&cfg).unwrap_err();
         assert_eq!(error.rule, "ALLOCATION_IR.STACK_RELOAD_ALL_PATH_STORE");
+    }
+
+    #[test]
+    fn later_machine_home_store_precedes_an_existing_same_zone_use() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let initial = allocation_ir.analyze(&cfg).unwrap();
+        let definition = initial.intervals[0].as_ref().unwrap().definition;
+        let old_store = allocation_ir
+            .insert_after_definition(
+                definition,
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(0),
+                },
+                Uses::one(VReg(0)),
+                false,
+            )
+            .unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let interval = intervals.intervals[0].as_ref().unwrap().clone();
+        let old_store_use = interval
+            .uses
+            .iter()
+            .copied()
+            .find(|site| {
+                matches!(
+                    site,
+                    UseSite::Instruction { instruction, .. }
+                        if *instruction
+                            == allocation_ir.blocks[0].original_instruction_count
+                                + old_store.instruction.0 as usize
+                )
+            })
+            .unwrap();
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        allocation_ir
+            .insert_stack_store_after_definition(
+                interval.definition,
+                VReg(0),
+                StackHomeId(1),
+                &interval.uses,
+            )
+            .unwrap();
+        let reload = allocation_ir
+            .insert_before_use(
+                old_store_use,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(1),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap();
+        let rewritten_store = allocation_ir
+            .rewrite_use_with_stack_owner(old_store_use, VReg(0), reload.definition.unwrap())
+            .unwrap();
+        assert_eq!(
+            rewritten_store,
+            Some(RewrittenStackStore {
+                instruction: old_store.instruction,
+                home: StackHomeId(0),
+            })
+        );
+        allocation_ir.publish_instruction_transaction().unwrap();
+
+        let operations = allocation_ir
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction.origin {
+                AllocationInstructionOrigin::Synthetic { operation, .. } => Some(operation),
+                AllocationInstructionOrigin::Original { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            [
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(1)
+                },
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(1)
+                },
+                SyntheticOperation::StackStore {
+                    home: StackHomeId(0)
+                },
+            ]
+        );
+        allocation_ir.analyze(&cfg).unwrap();
+        allocation_ir.verify_stack_homes(&cfg).unwrap();
     }
 }

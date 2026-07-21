@@ -12,7 +12,8 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, VReg};
 
 use super::allocation_ir::{
-    AllocationIr, AllocationIrError, InsertedSplitCopy, InsertedSyntheticPhi, SplitCopyPlacement,
+    AllocationIr, AllocationIrError, InsertedSplitCopy, InsertedSyntheticPhi, RewrittenStackStore,
+    SplitCopyPlacement,
 };
 use super::cfg::NormalizedCfg;
 use super::live_interval::{
@@ -29,6 +30,7 @@ pub(super) struct LiveRangeCut {
 pub(super) struct EditedUse {
     pub site: UseSite,
     pub value: VReg,
+    pub stack_store: Option<RewrittenStackStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,15 +454,20 @@ fn rename_representatives(
                         "dominator rename reached a logical use without a reaching definition",
                     )
                 })?;
-                if replacement != source.value {
-                    ir.rewrite_use(use_.site, source.value, replacement)
+                let stack_store = if replacement != source.value {
+                    let stack_store = ir
+                        .rewrite_use_with_stack_owner(use_.site, source.value, replacement)
                         .map_err(LiveRangeEditError::ir)?;
                     changed_blocks.insert(use_.site.block());
-                }
+                    stack_store
+                } else {
+                    None
+                };
                 if use_.semantic {
                     rewritten_uses.push(EditedUse {
                         site: use_.site,
                         value: replacement,
+                        stack_store,
                     });
                 }
                 use_index += 1;
