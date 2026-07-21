@@ -5775,6 +5775,70 @@ Status: **full-domain FF write ladders recover to direct indexed state stores
 with complete CFG and alias proofs; exact Linux meaning and tick count are
 preserved; SIR/MIR shrink materially, while measured execution is unchanged**.
 
+### Step 62: Lazy selector arms across value-producing CFG regions
+
+Inspection of the complete optimized SIR exposed a case-dispatch defect which
+was larger than the remaining phi-copy cycles.  The cross-block priority
+rewrite moved selector conditions into a branch spine but left each selected
+value in the dominating block.  ScheduleLate then treated an edge argument as
+a use in its predecessor, so it could move an arm DAG only as far as the
+decision block.  Opcode 28 and later therefore computed their shifts, adds,
+bitwise operations, and state projections before testing that opcode.  More
+seriously, four guarded 32-bit `DivS`, `DivU`, `RemS`, and `RemU` regions ran
+before the selector reached opcodes 24--27.
+
+`CrossBlockPriorityChainPlan` now owns the closed single-use pure DAG of every
+case arm as well as the condition DAGs.  It emits explicit selected leaves and
+moves each owned DAG directly into its leaf.  This preserves the source Mux
+priority while making the payload control-dependent instead of merely
+replacing a Mux with a branch after the same eager work.
+
+The division results cross block parameters, so instruction-only placement
+cannot move them.  `GuardedRegionSinkingPass` now recognizes a pure
+single-result diamond whose parameter is used in one later
+control-dependent block.  It bypasses the original diamond and recreates the
+same guard, arm instructions, and result merge inside that selected block.
+The divide-by-zero branch is moved intact; no speculative division or changed
+RTL arithmetic semantics is introduced.  Serial diamonds may share only a
+merge/head boundary, allowing the four word operations to be planned from one
+CFG snapshot.  Arm blocks and destination leaves remain disjoint.
+
+Both analyses are sparse.  Use collection, predecessor validation,
+dominance/postdominance checks, and arm-closure walks are linear in CFG size
+and def-use edges.  There is no path enumeration, block-by-value matrix, or
+selector-domain expansion.  Cyclic regions, effectful arms or destinations,
+multiple result parameters, escaping result uses, and ambiguous predecessor
+sets are rejected.
+
+The final complete trace is retained at
+`target/heliodor/analysis/step97-lazy-selector-arms-final`.  Its pre-optimized
+SIR is 58,711,247 bytes, post-optimized SIR is 18,667,791 bytes,
+native-optimized SIR is 18,888,369 bytes, and MIR is 50,085,749 bytes.  It is
+byte-identical to the independently generated Step 96 trace at all four
+stages.  In both optimized SIR stages, opcode 23's multiply and every later
+payload execute in their selected leaf.  The four word divide/remainder
+instructions occur below their opcode tests and retain their original
+zero-divisor diamonds.  Final x86 likewise performs the selector comparison
+spine before entering the corresponding `div`/`idiv` target.
+
+Focused tests cover payload placement for a cross-block priority chain, one
+guarded divide moved beneath a selected use, and four-shaped serial guarded
+regions transformed atomically.  All 1,035 library tests pass, along with 60
+native-testbench tests with one documented ignore and 9 counter tests with
+three documented ignores.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 62.985 and 65.635 s; generated
+code execution took 90.748 and 96.790 s.  Their 93.769 s mean does not improve
+on Step 61's 93.102 s mean within the observed variance.  The eager-arm defect
+is removed and final MIR is 9,907 bytes smaller, but these particular ALU arms
+are not the dominant remaining Linux path.
+
+Status: **selector payloads and guarded value CFGs execute only in their
+selected arms; exact Linux meaning and tick count are preserved; measured
+Heliodor execution is unchanged, so the dominant throughput gap remains
+open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5892,6 +5956,7 @@ preserved; SIR/MIR shrink materially, while measured execution is unchanged**.
 | 59 constant-work wide repeated-bit chunks | this step | native ISel 31/31 including executable two-state/four-state 128-bit concat | lib 1021/1021; workspace check, package all-target strict clippy, format, docs, and diff checks pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 73.399 s; execute 91.489 s | two 64-step sign-fill ladders become `shr; neg`; MIR -275,556 bytes; execution unchanged |
 | 60 allocator-visible sparse-commit clobbers | this step | executable per-region/worklist clobber and fall-through labels | lib 1023/1023; workspace check, package all-target strict clippy, and format pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; two complete traces and all SIR stages are byte-identical | compile 73.593 s; execute 92.635 s | hidden 7-register per-commit and 14-register worklist saves removed; no replacement spill frame; execution unchanged |
 | 61 full-domain indexed FF stores | this step | indexed recovery/options 7/7; working round-trip 7/7; commit hazards 7/7 | lib 1033/1033; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two byte-identical generated-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; batch and CLI traces are byte-identical to the sequential candidate | compile 62.845 / 63.080 s; execute 93.248 / 92.955 s | 64-way and four-port selector ladders become direct indexed stores; accidental 512-byte round trips removed; SIR/MIR shrink, execution mean unchanged |
+| 62 lazy selector arms and guarded value diamonds | this step | BranchifyMux 50/50; guarded-region sinking 22/22 | lib 1035/1035; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; independently generated final traces are byte-identical | compile 62.985 / 65.635 s; execute 90.748 / 96.790 s | selector payloads and four guarded word divide/remainder regions become control-dependent; MIR -9,907 bytes; execution mean unchanged |
 
 ## Related design records
 

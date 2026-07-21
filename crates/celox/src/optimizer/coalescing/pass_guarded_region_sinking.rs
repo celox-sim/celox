@@ -58,6 +58,23 @@ struct GuardedRegionPlan {
     removable_muxes: HashSet<usize>,
 }
 
+/// A pure value-producing diamond whose sole result is consumed in one later
+/// control-dependent block. Moving the complete diamond preserves guards such
+/// as divide-by-zero handling which cannot be represented by instruction-only
+/// scheduling across the result block parameter.
+#[derive(Clone, Copy)]
+struct DeferredValueDiamondPlan {
+    head: BlockId,
+    true_arm: BlockId,
+    false_arm: BlockId,
+    merge: BlockId,
+    condition: RegisterId,
+    result: RegisterId,
+    true_value: RegisterId,
+    false_value: RegisterId,
+    use_block: BlockId,
+}
+
 /// One reverse-if-conversion of a pure, single-block same-predicate region.
 ///
 /// `true_owned` and `false_owned` are closed backwards slices which are used
@@ -101,6 +118,13 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // blocks are not candidates in this run, so termination needs neither
         // an iteration limit nor a function-size budget.
         form_same_predicate_regions(eu);
+
+        // A case rewrite can leave a guarded value diamond on the common path
+        // while its phi result is consumed in only one selected leaf. Move the
+        // complete diamond, not merely its arm instructions, so operations
+        // such as division retain their original guard. Planning uses one
+        // CFG/use snapshot and no path enumeration.
+        sink_deferred_value_diamonds(eu);
 
         // Recompute CFG facts after region formation. The existing edge
         // sinking transform remains independent and can consume either an
@@ -157,6 +181,249 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             apply_plan(eu, plan, true_id, false_id, &mut reg_counter);
         }
     }
+}
+
+fn sink_deferred_value_diamonds(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let Ok(cfg) = SirCfg::analyze(eu) else {
+        return;
+    };
+    let uses = collect_uses(eu);
+    let mut plans = Vec::<DeferredValueDiamondPlan>::new();
+    let mut removed_arms = HashSet::<BlockId>::default();
+    let mut selected_use_blocks = HashSet::<BlockId>::default();
+    let mut selected_boundaries = HashSet::<BlockId>::default();
+
+    for &head_id in &cfg.block_ids {
+        let head = &eu.blocks[&head_id];
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &head.terminator
+        else {
+            continue;
+        };
+        if !true_block.1.is_empty() || !false_block.1.is_empty() || true_block.0 == false_block.0 {
+            continue;
+        }
+        let (true_id, false_id) = (true_block.0, false_block.0);
+        let (Some(true_arm), Some(false_arm)) = (eu.blocks.get(&true_id), eu.blocks.get(&false_id))
+        else {
+            continue;
+        };
+        if !true_arm.params.is_empty()
+            || !false_arm.params.is_empty()
+            || true_arm
+                .instructions
+                .iter()
+                .any(|inst| !instruction_is_movable(inst))
+            || false_arm
+                .instructions
+                .iter()
+                .any(|inst| !instruction_is_movable(inst))
+        {
+            continue;
+        }
+        let (
+            SIRTerminator::Jump(true_merge, true_args),
+            SIRTerminator::Jump(false_merge, false_args),
+        ) = (&true_arm.terminator, &false_arm.terminator)
+        else {
+            continue;
+        };
+        if true_merge != false_merge || true_args.len() != 1 || false_args.len() != 1 {
+            continue;
+        }
+        let merge_id = *true_merge;
+        let Some(merge) = eu.blocks.get(&merge_id) else {
+            continue;
+        };
+        if merge.params.len() != 1
+            || !has_exact_predecessors(&cfg, true_id, &[head_id])
+            || !has_exact_predecessors(&cfg, false_id, &[head_id])
+            || !has_exact_predecessors(&cfg, merge_id, &[true_id, false_id])
+        {
+            continue;
+        }
+
+        let result = merge.params[0];
+        let Some(result_uses) = uses.get(&result) else {
+            continue;
+        };
+        let Some(use_block) = result_uses.first().map(|site| site.block()) else {
+            continue;
+        };
+        if result_uses.iter().any(|site| site.block() != use_block)
+            || [head_id, true_id, false_id, merge_id].contains(&use_block)
+        {
+            continue;
+        }
+        let Some(use_body) = eu.blocks.get(&use_block) else {
+            continue;
+        };
+        if !use_body.params.is_empty()
+            || use_body.instructions.iter().any(instruction_has_effect)
+            || !cfg.dominates(merge_id, use_block)
+            // A postdominating use executes whenever the original diamond
+            // does, so moving the branch would save no dynamic work.
+            || cfg.postdominates(use_block, merge_id)
+        {
+            continue;
+        }
+        let (Some(head_index), Some(merge_index), Some(use_index)) = (
+            cfg.block_index(head_id),
+            cfg.block_index(merge_id),
+            cfg.block_index(use_block),
+        ) else {
+            continue;
+        };
+        if cfg.sccs[cfg.scc_for_block[head_index]].cyclic
+            || cfg.sccs[cfg.scc_for_block[merge_index]].cyclic
+            || cfg.sccs[cfg.scc_for_block[use_index]].cyclic
+            || removed_arms.contains(&true_id)
+            || removed_arms.contains(&false_id)
+            || removed_arms.contains(&use_block)
+            || selected_boundaries.contains(&use_block)
+            || selected_use_blocks.contains(&use_block)
+            || selected_use_blocks.contains(&true_id)
+            || selected_use_blocks.contains(&false_id)
+            || selected_use_blocks.contains(&head_id)
+            || selected_use_blocks.contains(&merge_id)
+        {
+            continue;
+        }
+
+        // Serial diamonds may share a boundary (`previous.merge ==
+        // next.head`), but their arm blocks and selected leaves are disjoint.
+        // This admits DivS/DivU/RemS/RemU sequences in one linear plan.
+        removed_arms.insert(true_id);
+        removed_arms.insert(false_id);
+        selected_use_blocks.insert(use_block);
+        selected_boundaries.insert(head_id);
+        selected_boundaries.insert(merge_id);
+        plans.push(DeferredValueDiamondPlan {
+            head: head_id,
+            true_arm: true_id,
+            false_arm: false_id,
+            merge: merge_id,
+            condition: *cond,
+            result,
+            true_value: true_args[0],
+            false_value: false_args[0],
+            use_block,
+        });
+    }
+
+    if plans.is_empty() {
+        return;
+    }
+    let Some(additional_blocks) = plans.len().checked_mul(3) else {
+        return;
+    };
+    let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
+    let Some(first_new_block) = max_block.checked_add(1) else {
+        return;
+    };
+    let Some(end_sentinel) = first_new_block.checked_add(additional_blocks) else {
+        return;
+    };
+    if end_sentinel > u32::MAX as usize {
+        return;
+    }
+
+    for (ordinal, plan) in plans.into_iter().enumerate() {
+        let true_id = BlockId(first_new_block + ordinal * 3);
+        let false_id = BlockId(first_new_block + ordinal * 3 + 1);
+        let continuation_id = BlockId(first_new_block + ordinal * 3 + 2);
+        apply_deferred_value_diamond(eu, plan, true_id, false_id, continuation_id);
+    }
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+}
+
+fn has_exact_predecessors(cfg: &SirCfg, block: BlockId, expected: &[BlockId]) -> bool {
+    let Some(block) = cfg.block_index(block) else {
+        return false;
+    };
+    let mut actual = cfg.predecessors[block]
+        .iter()
+        .map(|&predecessor| cfg.block_ids[predecessor])
+        .collect::<Vec<_>>();
+    let mut expected = expected.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    actual == expected
+}
+
+fn apply_deferred_value_diamond(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: DeferredValueDiamondPlan,
+    true_id: BlockId,
+    false_id: BlockId,
+    continuation_id: BlockId,
+) {
+    let true_arm = eu
+        .blocks
+        .remove(&plan.true_arm)
+        .expect("planned deferred true arm must exist");
+    let false_arm = eu
+        .blocks
+        .remove(&plan.false_arm)
+        .expect("planned deferred false arm must exist");
+    let original_use = eu
+        .blocks
+        .remove(&plan.use_block)
+        .expect("planned deferred use block must exist");
+
+    eu.blocks
+        .get_mut(&plan.head)
+        .expect("planned deferred head must exist")
+        .terminator = SIRTerminator::Jump(plan.merge, Vec::new());
+    eu.blocks
+        .get_mut(&plan.merge)
+        .expect("planned deferred merge must exist")
+        .params
+        .clear();
+
+    eu.blocks.insert(
+        plan.use_block,
+        BasicBlock {
+            id: plan.use_block,
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Branch {
+                cond: plan.condition,
+                true_block: (true_id, Vec::new()),
+                false_block: (false_id, Vec::new()),
+            },
+        },
+    );
+    eu.blocks.insert(
+        true_id,
+        BasicBlock {
+            id: true_id,
+            params: Vec::new(),
+            instructions: true_arm.instructions,
+            terminator: SIRTerminator::Jump(continuation_id, vec![plan.true_value]),
+        },
+    );
+    eu.blocks.insert(
+        false_id,
+        BasicBlock {
+            id: false_id,
+            params: Vec::new(),
+            instructions: false_arm.instructions,
+            terminator: SIRTerminator::Jump(continuation_id, vec![plan.false_value]),
+        },
+    );
+    eu.blocks.insert(
+        continuation_id,
+        BasicBlock {
+            id: continuation_id,
+            params: vec![plan.result],
+            instructions: original_use.instructions,
+            terminator: original_use.terminator,
+        },
+    );
 }
 
 fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
@@ -2432,6 +2699,334 @@ mod tests {
         GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
 
         assert_unchanged(&before, &eu);
+    }
+
+    #[test]
+    fn moves_a_guarded_value_diamond_under_its_selected_use() {
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        register_map.insert(RegisterId(1), bit(1));
+        for register in 2..=9 {
+            register_map.insert(RegisterId(register), bit(64));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![
+                RegisterId(0),
+                RegisterId(1),
+                RegisterId(2),
+                RegisterId(3),
+                RegisterId(4),
+                RegisterId(8),
+            ],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(4)]),
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            vec![SIRInstruction::Binary(
+                RegisterId(5),
+                RegisterId(2),
+                BinaryOp::DivU,
+                RegisterId(3),
+            )],
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(5)]),
+        );
+        insert_block(
+            &mut blocks,
+            3,
+            vec![RegisterId(6)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(4), Vec::new()),
+                false_block: (BlockId(5), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            4,
+            Vec::new(),
+            vec![SIRInstruction::Unary(
+                RegisterId(7),
+                UnaryOp::BitNot,
+                RegisterId(6),
+            )],
+            SIRTerminator::Jump(BlockId(6), vec![RegisterId(7)]),
+        );
+        insert_block(
+            &mut blocks,
+            5,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(6), vec![RegisterId(8)]),
+        );
+        insert_block(
+            &mut blocks,
+            6,
+            vec![RegisterId(9)],
+            vec![SIRInstruction::Store(
+                address(99),
+                SIROffset::Static(0),
+                64,
+                RegisterId(9),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+
+        sink_deferred_value_diamonds(&mut eu);
+
+        eu.verify_result().unwrap();
+        assert!(!eu.blocks.contains_key(&BlockId(1)));
+        assert!(!eu.blocks.contains_key(&BlockId(2)));
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(BlockId(3), ref args) if args.is_empty()
+        ));
+        assert!(eu.blocks[&BlockId(3)].params.is_empty());
+        assert!(matches!(
+            eu.blocks[&BlockId(4)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                ..
+            }
+        ));
+        let divide_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Binary(RegisterId(5), _, BinaryOp::DivU, _)
+                    )
+                })
+            })
+            .expect("the guarded divide must retain one definition");
+        let SIRTerminator::Branch { false_block, .. } = &eu.blocks[&BlockId(4)].terminator else {
+            unreachable!()
+        };
+        assert_eq!(false_block.0, divide_block.id);
+        let continuation = eu
+            .blocks
+            .values()
+            .find(|block| block.params == vec![RegisterId(6)])
+            .expect("the selected leaf must merge the guarded value locally");
+        assert!(continuation.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Unary(RegisterId(7), UnaryOp::BitNot, RegisterId(6))
+            )
+        }));
+    }
+
+    #[test]
+    fn moves_a_serial_sequence_of_guarded_values_in_one_cfg_plan() {
+        let mut register_map = HashMap::default();
+        for register in 0..=3 {
+            register_map.insert(RegisterId(register), bit(1));
+        }
+        for register in 4..=17 {
+            register_map.insert(RegisterId(register), bit(64));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![
+                RegisterId(0),
+                RegisterId(1),
+                RegisterId(2),
+                RegisterId(3),
+                RegisterId(4),
+                RegisterId(5),
+                RegisterId(6),
+                RegisterId(9),
+                RegisterId(10),
+                RegisterId(11),
+                RegisterId(16),
+            ],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(6)]),
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            vec![SIRInstruction::Binary(
+                RegisterId(7),
+                RegisterId(4),
+                BinaryOp::DivS,
+                RegisterId(5),
+            )],
+            SIRTerminator::Jump(BlockId(3), vec![RegisterId(7)]),
+        );
+        insert_block(
+            &mut blocks,
+            3,
+            vec![RegisterId(8)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(4), Vec::new()),
+                false_block: (BlockId(5), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            4,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(6), vec![RegisterId(11)]),
+        );
+        insert_block(
+            &mut blocks,
+            5,
+            Vec::new(),
+            vec![SIRInstruction::Binary(
+                RegisterId(12),
+                RegisterId(9),
+                BinaryOp::RemU,
+                RegisterId(10),
+            )],
+            SIRTerminator::Jump(BlockId(6), vec![RegisterId(12)]),
+        );
+        insert_block(
+            &mut blocks,
+            6,
+            vec![RegisterId(13)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(2),
+                true_block: (BlockId(7), Vec::new()),
+                false_block: (BlockId(8), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            7,
+            Vec::new(),
+            vec![SIRInstruction::Unary(
+                RegisterId(14),
+                UnaryOp::BitNot,
+                RegisterId(8),
+            )],
+            SIRTerminator::Jump(BlockId(11), vec![RegisterId(14)]),
+        );
+        insert_block(
+            &mut blocks,
+            8,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(3),
+                true_block: (BlockId(9), Vec::new()),
+                false_block: (BlockId(10), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            9,
+            Vec::new(),
+            vec![SIRInstruction::Unary(
+                RegisterId(15),
+                UnaryOp::BitNot,
+                RegisterId(13),
+            )],
+            SIRTerminator::Jump(BlockId(11), vec![RegisterId(15)]),
+        );
+        insert_block(
+            &mut blocks,
+            10,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(11), vec![RegisterId(16)]),
+        );
+        insert_block(
+            &mut blocks,
+            11,
+            vec![RegisterId(17)],
+            vec![SIRInstruction::Store(
+                address(100),
+                SIROffset::Static(0),
+                64,
+                RegisterId(17),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+
+        sink_deferred_value_diamonds(&mut eu);
+
+        eu.verify_result().unwrap();
+        for removed in [1, 2, 4, 5] {
+            assert!(!eu.blocks.contains_key(&BlockId(removed)));
+        }
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(BlockId(3), ref args) if args.is_empty()
+        ));
+        assert!(matches!(
+            eu.blocks[&BlockId(3)].terminator,
+            SIRTerminator::Jump(BlockId(6), ref args) if args.is_empty()
+        ));
+        assert!(eu.blocks[&BlockId(3)].params.is_empty());
+        assert!(eu.blocks[&BlockId(6)].params.is_empty());
+        assert!(matches!(
+            eu.blocks[&BlockId(7)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                ..
+            }
+        ));
+        assert!(matches!(
+            eu.blocks[&BlockId(9)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                ..
+            }
+        ));
     }
 
     #[test]

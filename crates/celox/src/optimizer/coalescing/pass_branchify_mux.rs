@@ -156,6 +156,11 @@ struct CrossBlockPriorityChainPlan {
     first_mux_idx: usize,
     muxes: Vec<PriorityChainMux>,
     condition_defs: Vec<Vec<LocatedInstruction>>,
+    /// Closed, single-use pure DAGs for the default value followed by each
+    /// Mux's true value.  Keeping these separate from the decision DAG is
+    /// essential: a case dispatch which evaluates its payload before testing
+    /// the selector has removed Muxes without removing any dynamic work.
+    arm_defs: Vec<Vec<LocatedInstruction>>,
 }
 
 #[derive(Clone)]
@@ -1548,6 +1553,46 @@ fn find_cross_block_priority_chain_plan(
                 continue;
             }
 
+            // The old cross-block priority rewrite moved only condition DAGs.
+            // It then passed every already-computed payload directly from a
+            // decision block to the merge.  Recover the disjoint arm slices
+            // while the Mux chain still records which case owns each value.
+            // Single-use closure makes the total walk linear in the number of
+            // collected def-use edges across all arms.
+            let arm_roots =
+                std::iter::once(muxes[0].false_val).chain(muxes.iter().map(|mux| mux.true_val));
+            let mut arm_defs = Vec::with_capacity(muxes.len() + 1);
+            for root in arm_roots {
+                let mut seen = HashSet::default();
+                let Some(defs) = collect_cross_arm_defs(
+                    eu,
+                    &cfg,
+                    use_counts,
+                    &locations,
+                    block_id,
+                    first_mux_idx,
+                    root,
+                    true,
+                    &mut seen,
+                ) else {
+                    valid = false;
+                    break;
+                };
+                for def in &defs {
+                    if !moved_locations.insert((def.block, def.index)) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid {
+                    break;
+                }
+                arm_defs.push(defs);
+            }
+            if !valid || arm_defs.len() != muxes.len() + 1 {
+                continue;
+            }
+
             let head = block
                 .instructions
                 .iter()
@@ -1565,6 +1610,19 @@ fn find_cross_block_priority_chain_plan(
                 .flatten()
                 .map(|def| branchified_instruction_cost(&def.instruction, &eu.register_map))
                 .sum::<u128>();
+            let arm_costs = arm_defs
+                .iter()
+                .map(|defs| {
+                    defs.iter()
+                        .map(|def| branchified_instruction_cost(&def.instruction, &eu.register_map))
+                        .sum::<u128>()
+                })
+                .collect::<Vec<_>>();
+            let avoided_arm_cost = arm_costs
+                .iter()
+                .copied()
+                .sum::<u128>()
+                .saturating_sub(arm_costs.iter().copied().max().unwrap_or(0));
             let removed_mux_cost = muxes
                 .iter()
                 .map(|mux| {
@@ -1595,8 +1653,15 @@ fn find_cross_block_priority_chain_plan(
                     chunks_for(muxes.last().expect("chain has a first mux").dst)
                         .saturating_mul(PHI_COPY_COST_PER_CHUNK),
                 )
-                .saturating_add(live_through_cost);
-            if condition_cost.saturating_add(removed_mux_cost) <= introduced_cost {
+                .saturating_add(live_through_cost)
+                // At most one selected payload leaf executes, hence at most
+                // one additional arm-to-merge transfer is dynamic.
+                .saturating_add(1);
+            if condition_cost
+                .saturating_add(removed_mux_cost)
+                .saturating_add(avoided_arm_cost)
+                <= introduced_cost
+            {
                 continue;
             }
 
@@ -1605,6 +1670,7 @@ fn find_cross_block_priority_chain_plan(
                 first_mux_idx,
                 muxes,
                 condition_defs,
+                arm_defs,
             });
         }
     }
@@ -1617,17 +1683,22 @@ fn apply_cross_block_priority_chain(
     next_block_id: &mut usize,
     reg_counter: &mut usize,
 ) {
-    let true_leaf_id = BlockId(*next_block_id + plan.muxes.len() - 1);
-    let merge_id = BlockId(*next_block_id + plan.muxes.len());
+    let mux_count = plan.muxes.len();
     let decision_ids = (0..plan.muxes.len() - 1)
         .map(|index| BlockId(*next_block_id + index))
         .collect::<Vec<_>>();
-    *next_block_id += plan.muxes.len() + 1;
+    let leaf_base = *next_block_id + decision_ids.len();
+    let leaf_ids = (0..=mux_count)
+        .map(|index| BlockId(leaf_base + index))
+        .collect::<Vec<_>>();
+    let merge_id = BlockId(leaf_base + mux_count + 1);
+    *next_block_id = merge_id.0 + 1;
 
     let removed_locations = plan
         .condition_defs
         .iter()
         .flatten()
+        .chain(plan.arm_defs.iter().flatten())
         .map(located_instruction_key)
         .chain(plan.muxes.iter().map(|mux| (plan.block_id, mux.mux_idx)))
         .collect::<HashSet<_>>();
@@ -1670,7 +1741,7 @@ fn apply_cross_block_priority_chain(
         reg_counter,
     );
     let head_false = if outer_index == 0 {
-        (merge_id, vec![outer.false_val])
+        (leaf_ids[0], Vec::new())
     } else {
         (decision_ids[outer_index - 1], Vec::new())
     };
@@ -1680,7 +1751,7 @@ fn apply_cross_block_priority_chain(
         instructions: head_insts,
         terminator: SIRTerminator::Branch {
             cond: head_cond,
-            true_block: (merge_id, vec![outer.true_val]),
+            true_block: (leaf_ids[outer_index + 1], Vec::new()),
             false_block: head_false,
         },
     };
@@ -1699,15 +1770,11 @@ fn apply_cross_block_priority_chain(
             reg_counter,
         );
         let false_target = if index == 0 {
-            (merge_id, vec![mux.false_val])
+            (leaf_ids[0], Vec::new())
         } else {
             (decision_ids[index - 1], Vec::new())
         };
-        let true_target = if index == 0 {
-            (true_leaf_id, Vec::new())
-        } else {
-            (merge_id, vec![mux.true_val])
-        };
+        let true_target = (leaf_ids[index + 1], Vec::new());
         eu.blocks.insert(
             decision_ids[index],
             BasicBlock {
@@ -1723,16 +1790,25 @@ fn apply_cross_block_priority_chain(
         );
     }
 
-    let final_mux = &plan.muxes[0];
-    eu.blocks.insert(
-        true_leaf_id,
-        BasicBlock {
-            id: true_leaf_id,
-            params: Vec::new(),
-            instructions: Vec::new(),
-            terminator: SIRTerminator::Jump(merge_id, vec![final_mux.true_val]),
-        },
-    );
+    for (arm, leaf_id) in leaf_ids.into_iter().enumerate() {
+        let value = if arm == 0 {
+            plan.muxes[0].false_val
+        } else {
+            plan.muxes[arm - 1].true_val
+        };
+        eu.blocks.insert(
+            leaf_id,
+            BasicBlock {
+                id: leaf_id,
+                params: Vec::new(),
+                instructions: plan.arm_defs[arm]
+                    .iter()
+                    .map(|def| def.instruction.clone())
+                    .collect(),
+                terminator: SIRTerminator::Jump(merge_id, vec![value]),
+            },
+        );
+    }
 
     let suffix = original
         .instructions
@@ -7248,7 +7324,7 @@ mod tests {
     #[test]
     fn short_circuits_a_cross_block_priority_chain() {
         let mut register_map = HashMap::default();
-        for reg in 0..18 {
+        for reg in 0..21 {
             register_map.insert(
                 RegisterId(reg),
                 RegisterType::Bit {
@@ -7301,22 +7377,42 @@ mod tests {
                 id: BlockId(1),
                 params: Vec::new(),
                 instructions: vec![
+                    SIRInstruction::Unary(
+                        RegisterId(17),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(12),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(18),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(1),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(19),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(2),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(20),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(3),
+                    ),
                     SIRInstruction::Mux(
                         RegisterId(13),
                         RegisterId(6),
-                        RegisterId(1),
-                        RegisterId(12),
+                        RegisterId(18),
+                        RegisterId(17),
                     ),
                     SIRInstruction::Mux(
                         RegisterId(14),
                         RegisterId(8),
-                        RegisterId(2),
+                        RegisterId(19),
                         RegisterId(13),
                     ),
                     SIRInstruction::Mux(
                         RegisterId(15),
                         RegisterId(10),
-                        RegisterId(3),
+                        RegisterId(20),
                         RegisterId(14),
                     ),
                     SIRInstruction::Unary(
@@ -7356,6 +7452,24 @@ mod tests {
                 SIRInstruction::Binary(RegisterId(6) | RegisterId(8) | RegisterId(10), ..)
             )
         }));
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        for payload in 17..=20 {
+            let payload_block = eu
+                .blocks
+                .values()
+                .find(|block| {
+                    block
+                        .instructions
+                        .iter()
+                        .any(|instruction| def_reg(instruction) == Some(RegisterId(payload)))
+                })
+                .expect("each selected payload must retain one definition");
+            assert!(matches!(payload_block.terminator, SIRTerminator::Jump(..)));
+            assert!(
+                !cfg.controllers[cfg.block_index(payload_block.id).unwrap()].is_empty(),
+                "payload r{payload} must execute only below its selector edge"
+            );
+        }
     }
 
     #[test]
