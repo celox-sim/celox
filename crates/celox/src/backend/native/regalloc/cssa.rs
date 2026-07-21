@@ -4,9 +4,10 @@
 //! one logical value. That is sound only in conventional SSA, where two
 //! distinct members of the same class never interfere. [`normalize_to_cssa`]
 //! first proves whether the input already has that property and leaves it
-//! unchanged when it does. Interfering phi webs are repaired with Sreedhar
-//! Method I. [`verify_cssa`] deliberately checks actual edge-sensitive
-//! liveness instead of accepting the Method-I syntax as proof.
+//! unchanged when it does. Interfering phi webs are repaired by isolating
+//! every incoming edge value with a fresh copy. [`verify_cssa`] deliberately
+//! checks actual edge-sensitive liveness instead of accepting that syntax as
+//! proof.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -244,20 +245,27 @@ impl fmt::Display for CssaError {
 
 impl std::error::Error for CssaError {}
 
-/// Preserve an already-conventional function, otherwise rewrite its existing
-/// phis using Sreedhar Method I.
+/// Preserve an already-conventional function, otherwise isolate every source
+/// edge of each phi in an interfering congruence class.
 ///
 /// ```text
 /// d = phi(pred_i: s_i)
 ///
 /// pred_i: s'_i = mov s_i       (one fresh copy per incoming edge)
-/// join:   d'   = phi(s'_i)
-///         d    = mov d'         (one fresh phi result)
+/// join:   d    = phi(s'_i)
 /// ```
+///
+/// Every direct source membership of the old interfering class is replaced,
+/// so each rewritten destination belongs only to its own phi and fresh edge
+/// copies. Those edge values die on entry, before the destination is defined.
+/// Keeping the original destination as the phi result also preserves a real
+/// phi definition for a later stack-resident spill instead of forcing
+/// `phi -> copy -> store` in the loop header.
 ///
 /// CFG normalization guarantees that each incoming predecessor is specific to
 /// this edge. The transformation changes neither blocks nor edges, so `cfg`
-/// remains valid afterwards.
+/// remains valid afterwards. The semantic verifier below remains the authority
+/// for conventionality.
 pub(super) fn normalize_to_cssa(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
@@ -283,8 +291,8 @@ pub(super) fn normalize_to_cssa(
     }
 
     // CSSA is a semantic liveness property, not a required syntactic shape.
-    // Most strict-SSA phis already satisfy it. In that common case Method I
-    // would add two copy layers per phi without establishing any new fact.
+    // Most strict-SSA phis already satisfy it. In that common case source
+    // isolation would add an edge-copy layer without establishing a new fact.
     let original_info = CssaInfo::from_function(func)?;
     let interfering = find_interfering_classes(func, cfg, &original_info)?;
     if interfering.is_empty() {
@@ -300,14 +308,12 @@ pub(super) fn normalize_to_cssa(
         }
 
         let mut rewritten_phis = Vec::with_capacity(original_phis.len());
-        let mut entry_copies = Vec::with_capacity(original_phis.len());
         for phi in original_phis {
             if !interfering.contains(&original_info.class(phi.dst)) {
                 rewritten_phis.push(phi);
                 continue;
             }
             let original_destination = phi.dst;
-            let fresh_destination = alloc_snapshot(func, original_destination, block_id)?;
             let mut fresh_sources = Vec::with_capacity(phi.sources.len());
 
             for (predecessor_id, source) in phi.sources {
@@ -342,17 +348,12 @@ pub(super) fn normalize_to_cssa(
             }
 
             rewritten_phis.push(PhiNode {
-                dst: fresh_destination,
-                sources: fresh_sources,
-            });
-            entry_copies.push(MInst::Mov {
                 dst: original_destination,
-                src: fresh_destination,
+                sources: fresh_sources,
             });
         }
 
         func.blocks[block_index].phis = rewritten_phis;
-        func.blocks[block_index].insts.splice(0..0, entry_copies);
     }
 
     for (block, copies) in func.blocks.iter_mut().zip(edge_copies) {
@@ -870,20 +871,24 @@ mod tests {
     }
 
     #[test]
-    fn method_i_repairs_interfering_phi_congruence() {
-        let (mut func, _, _, _) = diamond_with_phi(true);
+    fn edge_source_isolation_repairs_interfering_phi_congruence_without_entry_copy() {
+        let (mut func, _, _, original_destination) = diamond_with_phi(true);
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let old_count = func.vregs.count();
+        let old_entry = func.blocks[cfg.block_index[&BlockId(3)]].insts[0].clone();
 
         let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
-        assert_eq!(func.vregs.count(), old_count + 3);
+        assert_eq!(func.vregs.count(), old_count + 2);
+        let join = &func.blocks[cfg.block_index[&BlockId(3)]];
+        assert_eq!(join.phis[0].dst, original_destination);
+        assert_eq!(join.insts[0], old_entry);
         func.verify();
         verify_cssa(&func, &cfg, &info).unwrap();
     }
 
     #[test]
-    fn method_i_rewrites_only_interfering_phi_classes() {
+    fn edge_source_isolation_rewrites_only_interfering_phi_classes() {
         let (mut func, _, _, _) = diamond_with_phi(true);
         let safe_left = func.vregs.alloc();
         let safe_right = func.vregs.alloc();
@@ -922,7 +927,7 @@ mod tests {
 
         let info = normalize_to_cssa(&mut func, &cfg).unwrap();
 
-        assert_eq!(func.vregs.count(), old_count + 3);
+        assert_eq!(func.vregs.count(), old_count + 2);
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
         assert!(join.phis.iter().any(|phi| {
             phi.dst == safe_merged

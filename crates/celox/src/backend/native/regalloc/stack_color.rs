@@ -876,8 +876,8 @@ fn collect_planned_stack_events(
         })?;
     }
 
-    for (&(predecessor, _successor), operations) in &plan.edge_ops {
-        let Some(block) = func.blocks.get(predecessor) else {
+    for (&(predecessor, successor), operations) in &plan.edge_ops {
+        let Some(predecessor_block) = func.blocks.get(predecessor) else {
             return Err(StackColorError::new(
                 "STACK_COLOR.PLANNED_EDGE_BLOCK",
                 None,
@@ -886,15 +886,17 @@ fn collect_planned_stack_events(
                 "stack edge reload references a predecessor outside the function",
             ));
         };
-        let instruction = block.insts.len().checked_sub(1).ok_or_else(|| {
-            StackColorError::new(
-                "STACK_COLOR.PLANNED_EDGE_POINT",
-                Some(block.id),
-                None,
-                [],
-                "stack edge reload predecessor has no terminator",
-            )
-        })?;
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                StackColorError::new(
+                    "STACK_COLOR.PLANNED_EDGE_POINT",
+                    Some(predecessor_block.id),
+                    None,
+                    [],
+                    "stack edge reload has no single-edge materialization point",
+                )
+            })?;
+        let block = &func.blocks[insertion.block];
         for &operation in operations {
             let PlannedOp::Reload { value, home } = operation else {
                 continue;
@@ -902,8 +904,8 @@ fn collect_planned_stack_events(
             if !is_edge_stack_reload(func, plan, value, home) {
                 continue;
             }
-            events[predecessor].push(PlannedStackEvent {
-                instruction,
+            events[insertion.block].push(PlannedStackEvent {
+                instruction: insertion.instruction,
                 sequence,
                 home,
                 kind: PlannedStackEventKind::Reload,
@@ -914,7 +916,7 @@ fn collect_planned_stack_events(
                 StackColorError::new(
                     "STACK_COLOR.PLANNED_EVENT_RANGE",
                     Some(block.id),
-                    Some(instruction),
+                    Some(insertion.instruction),
                     [StackHomeId(home.0)],
                     "production stack-event count exceeds usize",
                 )

@@ -84,7 +84,7 @@ pub(super) fn select(
     plan.state_homes.clear();
     plan.state_reload_recipes.clear();
 
-    let reloads = reload_locations(func, plan)?;
+    let reloads = reload_locations(func, cfg, plan)?;
     let candidates = candidate_homes(func, plan, reloads.keys().copied());
     if candidates.is_empty() {
         return Ok(());
@@ -177,11 +177,15 @@ pub(super) fn select(
 
     plan.state_homes = selected;
     plan.state_reload_recipes = recipes;
-    verify(func, plan)
+    verify(func, cfg, plan)
 }
 
 /// Check the selected-home table independently from candidate selection.
-pub(super) fn verify(func: &MFunction, plan: &SpillPlan) -> Result<(), StateHomeError> {
+pub(super) fn verify(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    plan: &SpillPlan,
+) -> Result<(), StateHomeError> {
     if let Some(home) = plan
         .state_homes
         .keys()
@@ -196,7 +200,7 @@ pub(super) fn verify(func: &MFunction, plan: &SpillPlan) -> Result<(), StateHome
         ));
     }
 
-    let reloads = reload_locations(func, plan)?;
+    let reloads = reload_locations(func, cfg, plan)?;
     let candidates = candidate_homes(func, plan, plan.state_homes.keys().copied());
     for (&home, &physical) in &plan.state_homes {
         if candidates.get(&home) != Some(&physical) {
@@ -315,6 +319,7 @@ fn candidate_homes(
 
 fn reload_locations(
     func: &MFunction,
+    cfg: &NormalizedCfg,
     plan: &SpillPlan,
 ) -> Result<BTreeMap<SpillHome, BTreeSet<ReloadKey>>, StateHomeError> {
     let mut result = BTreeMap::<SpillHome, BTreeSet<ReloadKey>>::new();
@@ -328,7 +333,7 @@ fn reload_locations(
             .insert((point.block, point.instruction, value));
     }
     for (&(predecessor, successor), operations) in &plan.edge_ops {
-        let block = func.blocks.get(predecessor).ok_or_else(|| {
+        let predecessor_block = func.blocks.get(predecessor).ok_or_else(|| {
             StateHomeError::new(
                 "STATE_HOME.EDGE_PREDECESSOR",
                 None,
@@ -340,27 +345,29 @@ fn reload_locations(
         if func.blocks.get(successor).is_none() {
             return Err(StateHomeError::new(
                 "STATE_HOME.EDGE_SUCCESSOR",
-                Some(block.id),
+                Some(predecessor_block.id),
                 None,
                 Vec::new(),
                 format!("edge successor index {successor} is outside MIR"),
             ));
         }
-        let instruction = block.insts.len().checked_sub(1).ok_or_else(|| {
-            StateHomeError::new(
-                "STATE_HOME.EDGE_TERMINATOR",
-                Some(block.id),
-                None,
-                Vec::new(),
-                "edge predecessor block is empty",
-            )
-        })?;
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                StateHomeError::new(
+                    "STATE_HOME.EDGE_POINT",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    "edge reload has no single-edge materialization point",
+                )
+            })?;
+        let block = &func.blocks[insertion.block];
         for &operation in operations {
             if let PlannedOp::Reload { value, home } = operation {
                 result
                     .entry(home)
                     .or_default()
-                    .insert((block.id, instruction, value));
+                    .insert((block.id, insertion.instruction, value));
             }
         }
     }
@@ -385,7 +392,7 @@ pub(super) fn planned_spills(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    for block in &func.blocks {
+    for (successor, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
             let logical = plan.logical.of(phi.dst);
             if !spilled_phis.contains(&logical) {
@@ -409,9 +416,19 @@ pub(super) fn planned_spills(
                 if plan.s_exit[predecessor].contains(&source) {
                     continue;
                 }
+                let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+                    .ok_or_else(|| {
+                        StateHomeError::new(
+                            "STATE_HOME.PHI_EDGE_POINT",
+                            Some(block.id),
+                            None,
+                            vec![phi.dst, VReg(source.0)],
+                            "spilled phi edge has no single-edge materialization point",
+                        )
+                    })?;
                 result.push(PlannedSpillInsertion {
-                    block: predecessor,
-                    instruction: terminator_index(func, predecessor)?,
+                    block: insertion.block,
+                    instruction: insertion.instruction,
                     value: source,
                     home,
                 });
@@ -438,13 +455,22 @@ pub(super) fn planned_spills(
             home,
         });
     }
-    for (&(predecessor, _successor), operations) in &plan.edge_ops {
-        let instruction = terminator_index(func, predecessor)?;
+    for (&(predecessor, successor), operations) in &plan.edge_ops {
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                StateHomeError::new(
+                    "STATE_HOME.EDGE_POINT",
+                    func.blocks.get(predecessor).map(|block| block.id),
+                    None,
+                    Vec::new(),
+                    "spill edge has no single-edge materialization point",
+                )
+            })?;
         for &operation in operations {
             match operation {
                 PlannedOp::Spill { value, home } => result.push(PlannedSpillInsertion {
-                    block: predecessor,
-                    instruction,
+                    block: insertion.block,
+                    instruction: insertion.instruction,
                     value,
                     home,
                 }),
@@ -569,27 +595,6 @@ fn build_probe(
     })
 }
 
-fn terminator_index(func: &MFunction, block: usize) -> Result<usize, StateHomeError> {
-    let owner = func.blocks.get(block).ok_or_else(|| {
-        StateHomeError::new(
-            "STATE_HOME.EDGE_PREDECESSOR",
-            None,
-            None,
-            Vec::new(),
-            format!("edge predecessor index {block} is outside MIR"),
-        )
-    })?;
-    owner.insts.len().checked_sub(1).ok_or_else(|| {
-        StateHomeError::new(
-            "STATE_HOME.EDGE_TERMINATOR",
-            Some(owner.id),
-            None,
-            Vec::new(),
-            "state-home edge predecessor is empty",
-        )
-    })
-}
-
 fn direct_home_recipe(recipe: &ResolvedRecipe, home: PackedStateHome) -> bool {
     recipe.steps.is_empty()
         && matches!(
@@ -667,6 +672,76 @@ mod tests {
     }
 
     #[test]
+    fn branch_edge_operations_use_the_single_predecessor_successor_entry() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: value,
+            value: 0x1234,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::Return);
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::Return);
+        func.blocks = vec![entry, left, right];
+
+        let cfg = cfg::normalize(&mut func).unwrap();
+        let next_use = next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = blank_plan(&func, &cfg, &next_use);
+        let entry = cfg.block_index[&BlockId(0)];
+        let successor = cfg.successors[entry][0];
+        assert_eq!(cfg.predecessors[successor], [entry]);
+
+        let logical = plan.logical.of(value);
+        let spill_home = plan.homes.of_vreg(value);
+        plan.edge_ops.insert(
+            (entry, successor),
+            vec![
+                PlannedOp::Spill {
+                    value: logical,
+                    home: spill_home,
+                },
+                PlannedOp::Reload {
+                    value: logical,
+                    home: spill_home,
+                },
+            ],
+        );
+
+        assert_eq!(
+            planned_spills(&func, &cfg, &plan).unwrap(),
+            vec![PlannedSpillInsertion {
+                block: successor,
+                instruction: 0,
+                value: logical,
+                home: spill_home,
+            }]
+        );
+        let queries = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
+        assert_eq!(
+            queries,
+            BTreeSet::from([PointUse {
+                block: func.blocks[successor].id,
+                instruction: 0,
+                value: VReg(logical.0),
+            }])
+        );
+    }
+
+    #[test]
     fn selected_home_reconstructs_as_verified_state_store_and_load() {
         let mut vregs = VRegAllocator::new();
         let value = vregs.alloc();
@@ -722,7 +797,7 @@ mod tests {
         assert_eq!(plan.state_homes.get(&spill_home), Some(&home(0, 0)));
         assert_eq!(plan.state_reload_recipes.len(), 1);
 
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let ordinary_recipes = reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
         let result =
             reconstruct::reconstruct(&mut func, &cfg, &plan, &next_use, &ordinary_recipes).unwrap();

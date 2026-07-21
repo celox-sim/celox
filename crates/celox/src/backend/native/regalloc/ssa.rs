@@ -71,7 +71,7 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
-    super::ssa_state_home::verify(func, &plan).map_err(|error| {
+    super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
         super::RegallocError::new(
             "packed state-home verification",
             error.rule,
@@ -92,10 +92,10 @@ pub(super) fn allocate(
 
     // Edge coupling operations are chosen by the spill planner, so their
     // materialization points do not exist as MIR uses during the first recipe
-    // analysis.  Query the exact insertion point (immediately before the
-    // predecessor terminator) only after the complete plan is available.
+    // analysis. Query their exact CFG-isolated insertion points only after the
+    // complete plan is available.
     let phase = timing.then(crate::timing::now);
-    let requested_points = planner_reload_queries(func, &plan)?;
+    let requested_points = planner_reload_queries(func, cfg, &plan)?;
     let reload_recipes = super::reload::analyze_with_queries(func, cfg, &requested_points)
         .map_err(|error| {
             super::reload_recipe_error("spill-planner reload-recipe analysis", error)
@@ -121,7 +121,7 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
-    plan.verify_recipe_homes(func, &reload_recipes)
+    plan.verify_recipe_homes(func, cfg, &reload_recipes)
         .map_err(|error| {
             super::RegallocError::new(
                 "recipe-home verification",
@@ -132,7 +132,7 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
-    super::ssa_state_home::verify(func, &plan).map_err(|error| {
+    super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
         super::RegallocError::new(
             "final packed state-home verification",
             error.rule,
@@ -336,6 +336,7 @@ pub(super) fn allocate(
 
 pub(super) fn planner_reload_queries(
     func: &MFunction,
+    cfg: &NormalizedCfg,
     plan: &SpillPlan,
 ) -> Result<BTreeSet<PointUse>, super::RegallocError> {
     let mut requested = BTreeSet::new();
@@ -349,14 +350,14 @@ pub(super) fn planner_reload_queries(
             value: VReg(value.0),
         });
     }
-    for (&(predecessor, _successor), operations) in &plan.edge_ops {
+    for (&(predecessor, successor), operations) in &plan.edge_ops {
         if !operations
             .iter()
             .any(|operation| matches!(operation, PlannedOp::Reload { .. }))
         {
             continue;
         }
-        let Some(block) = func.blocks.get(predecessor) else {
+        let Some(predecessor_block) = func.blocks.get(predecessor) else {
             return Err(super::RegallocError::new(
                 "spill-planner reload-recipe analysis",
                 "RELOAD_RECIPE.EDGE_PREDECESSOR_EXISTS",
@@ -366,23 +367,35 @@ pub(super) fn planner_reload_queries(
                 format!("edge operation predecessor index {predecessor} is outside function"),
             ));
         };
-        let Some(instruction) = block.insts.len().checked_sub(1) else {
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                super::RegallocError::new(
+                    "spill-planner reload-recipe analysis",
+                    "RELOAD_RECIPE.EDGE_POINT",
+                    Some(predecessor_block.id),
+                    None,
+                    Vec::new(),
+                    "edge reload has no single-edge materialization point",
+                )
+            })?;
+        let block = &func.blocks[insertion.block];
+        if insertion.instruction >= block.insts.len() {
             return Err(super::RegallocError::new(
                 "spill-planner reload-recipe analysis",
-                "RELOAD_RECIPE.EDGE_PREDECESSOR_TERMINATED",
+                "RELOAD_RECIPE.EDGE_POINT",
                 Some(block.id),
-                None,
+                Some(insertion.instruction),
                 Vec::new(),
-                "edge operation predecessor block is empty",
+                "edge reload insertion point is outside its MIR block",
             ));
-        };
+        }
         for operation in operations {
             let PlannedOp::Reload { value, .. } = operation else {
                 continue;
             };
             requested.insert(PointUse {
                 block: block.id,
-                instruction,
+                instruction: insertion.instruction,
                 value: VReg(value.0),
             });
         }

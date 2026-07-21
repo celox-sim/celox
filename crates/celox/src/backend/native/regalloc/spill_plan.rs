@@ -287,8 +287,8 @@ struct EdgeTranslation {
 /// O(1) logical-value translation across normalized phi edges.
 ///
 /// Building the two directions in one pass over phi operands avoids rescanning
-/// every phi (and its predecessor list) for every member of W/S.  Method-I CSSA
-/// gives each phi operand a fresh edge-local name, so both maps are one-to-one.
+/// every phi (and its predecessor list) for every member of W/S.  CSSA gives
+/// each phi operand a distinct edge-local name, so both maps are one-to-one.
 #[derive(Debug)]
 struct EdgeTranslations {
     by_edge: HashMap<(usize, usize), EdgeTranslation>,
@@ -345,7 +345,7 @@ impl EdgeTranslations {
                             None,
                             vec![VReg(source.0), VReg(destination.0)],
                             format!(
-                                "Method-I CSSA edge {predecessor_id} -> {} reuses phi source v{}",
+                                "CSSA edge {predecessor_id} -> {} reuses phi source v{}",
                                 block.id, source.0
                             ),
                         ));
@@ -449,7 +449,7 @@ pub(super) fn plan_with_recipe_costs(
                 registers,
             )
         };
-        result.w_entry[block] = entry;
+        let mut entry = entry;
         let live_entry = next_use.entry[block]
             .keys()
             .copied()
@@ -459,35 +459,39 @@ pub(super) fn plan_with_recipe_costs(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        // S means that a valid home exists on every path.  Every live value
-        // omitted from W_entry therefore requires a home; edge coupling below
-        // materializes any missing predecessor store.  A resident value keeps
-        // an existing home only when every predecessor already has one.
-        let mut spilled = live_entry
-            .difference(&result.w_entry[block])
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if !cfg.predecessors[block].is_empty() {
-            spilled.extend(result.w_entry[block].iter().copied().filter(|value| {
-                cfg.predecessors[block].iter().all(|predecessor| {
-                    let predecessor_value =
-                        edge_translations.to_predecessor(*predecessor, block, *value);
-                    result.s_exit[*predecessor].contains(&predecessor_value)
-                })
-            }));
-        }
-        result.s_entry[block] = spilled.clone();
-        let transition = plan_block_transition(
-            func,
-            next_use,
-            planning_recipes,
-            &result.logical,
-            &result.homes,
-            block,
-            registers,
-            &result.w_entry[block],
-            spilled,
-        )?;
+        let (spilled, transition) = loop {
+            // S means that a valid home exists on every path.  Every live
+            // value omitted from W_entry therefore requires a home; edge
+            // coupling below materializes any missing predecessor store.  A
+            // resident value keeps an existing home only when every
+            // predecessor already has one.
+            let spilled =
+                spilled_at_entry(cfg, &result, &edge_translations, block, &live_entry, &entry);
+            let transition = plan_block_transition(
+                func,
+                next_use,
+                planning_recipes,
+                &result.logical,
+                &result.homes,
+                block,
+                registers,
+                &entry,
+                spilled.clone(),
+            )?;
+            let rejected = entry_residents_evicted_before_first_use(
+                func,
+                next_use,
+                block,
+                &entry,
+                &transition,
+            );
+            if rejected.is_empty() {
+                break (spilled, transition);
+            }
+            entry.retain(|value| !rejected.contains(value));
+        };
+        result.w_entry[block] = entry;
+        result.s_entry[block] = spilled;
         result.point_ops.extend(transition.point_ops);
         result.recipe_reloads.extend(transition.recipe_reloads);
         result.w_exit[block] = transition.w_exit;
@@ -527,6 +531,75 @@ pub(super) fn plan_with_recipe_costs(
         }
     }
     Ok(result)
+}
+
+fn spilled_at_entry(
+    cfg: &NormalizedCfg,
+    plan: &SpillPlan,
+    edge_translations: &EdgeTranslations,
+    block: usize,
+    live_entry: &BTreeSet<LogicalValue>,
+    resident: &BTreeSet<LogicalValue>,
+) -> BTreeSet<LogicalValue> {
+    let mut spilled = live_entry
+        .difference(resident)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if !cfg.predecessors[block].is_empty() {
+        spilled.extend(resident.iter().copied().filter(|value| {
+            cfg.predecessors[block].iter().all(|predecessor| {
+                let predecessor_value =
+                    edge_translations.to_predecessor(*predecessor, block, *value);
+                plan.s_exit[*predecessor].contains(&predecessor_value)
+            })
+        }));
+    }
+    spilled
+}
+
+/// Remove optimistic entry residents that do not survive to their first local
+/// use.  Keeping such a value in W moves its inevitable store from the incoming
+/// edge into the block and occupies a register before providing any use.  S is
+/// therefore no more expensive on the executed path and can reuse an already
+/// valid predecessor home.
+///
+/// Replanning is bounded by the initial W size, which is at most the target's
+/// fixed register count.  Each iteration removes at least one value, so this
+/// remains linear in MIR size for a fixed ISA and needs no CFG-sized copy.
+fn entry_residents_evicted_before_first_use(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    block: usize,
+    resident: &BTreeSet<LogicalValue>,
+    transition: &BlockTransition,
+) -> BTreeSet<LogicalValue> {
+    transition
+        .point_ops
+        .iter()
+        .filter_map(|(point, operation)| match *operation {
+            PlannedOp::Spill { value, .. }
+                if resident.contains(&value)
+                    && next_use
+                        .next_local_use(block, 0, VReg(value.0))
+                        .is_none_or(|first_use| point.instruction < first_use) =>
+            {
+                Some(value)
+            }
+            PlannedOp::Reload { value, .. }
+                if resident.contains(&value)
+                    && !transition.recipe_reloads.contains(&(
+                        func.blocks[block].id,
+                        point.instruction,
+                        value,
+                    ))
+                    && next_use.next_local_use(block, 0, VReg(value.0))
+                        == Some(point.instruction) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1413,15 +1486,26 @@ impl SpillPlan {
                     format!("recipe-home successor index {successor} is outside function"),
                 ));
             }
-            let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
+            let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+                .ok_or_else(|| {
+                    SpillPlanError::new(
+                        "SPILL_PLAN.RECIPE_HOME_EDGE",
+                        Some(predecessor_block.id),
+                        None,
+                        Vec::new(),
+                        "recipe-home edge has no single-edge materialization point",
+                    )
+                })?;
+            let insertion_block = &func.blocks[insertion.block];
+            if insertion.instruction >= insertion_block.insts.len() {
                 return Err(SpillPlanError::new(
                     "SPILL_PLAN.RECIPE_HOME_EDGE",
-                    Some(predecessor_block.id),
-                    None,
+                    Some(insertion_block.id),
+                    Some(insertion.instruction),
                     Vec::new(),
-                    "recipe-home edge predecessor is empty",
+                    "recipe-home edge insertion point is outside its MIR block",
                 ));
-            };
+            }
             for &operation in operations {
                 match operation {
                     PlannedOp::Reload { value, home } => {
@@ -1429,8 +1513,8 @@ impl SpillPlan {
                         let total = baseline_costs.entry(home).or_default();
                         *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
                         let query = PointUse {
-                            block: predecessor_block.id,
-                            instruction,
+                            block: insertion_block.id,
+                            instruction: insertion.instruction,
                             value: VReg(value.0),
                         };
                         if let Some(recipe) = analysis.resolved_recipe_at_point(query) {
@@ -1474,6 +1558,7 @@ impl SpillPlan {
     pub(super) fn verify_recipe_homes(
         &self,
         func: &MFunction,
+        cfg: &NormalizedCfg,
         analysis: &ReloadRecipeAnalysis,
     ) -> Result<(), SpillPlanError> {
         for &home in &self.recipe_homes {
@@ -1524,15 +1609,17 @@ impl SpillPlan {
                         format!("recipe home {home:?} references absent successor {successor}"),
                     ));
                 };
-                let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
-                    return Err(SpillPlanError::new(
-                        "SPILL_PLAN.RECIPE_HOME_EDGE",
-                        Some(predecessor_block.id),
-                        None,
-                        Vec::new(),
-                        "recipe-home edge predecessor is empty",
-                    ));
-                };
+                let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+                    .ok_or_else(|| {
+                        SpillPlanError::new(
+                            "SPILL_PLAN.RECIPE_HOME_EDGE",
+                            Some(predecessor_block.id),
+                            None,
+                            Vec::new(),
+                            "recipe-home edge has no single-edge materialization point",
+                        )
+                    })?;
+                let insertion_block = &func.blocks[insertion.block];
                 for &operation in operations {
                     let PlannedOp::Reload {
                         value,
@@ -1546,8 +1633,8 @@ impl SpillPlan {
                     }
                     reloads += 1;
                     let query = PointUse {
-                        block: predecessor_block.id,
-                        instruction,
+                        block: insertion_block.id,
+                        instruction: insertion.instruction,
                         value: VReg(value.0),
                     };
                     if analysis.resolved_recipe_at_point(query).is_none() {
@@ -1722,13 +1809,13 @@ impl SpillPlan {
                     ),
                 ));
             }
-            if cfg.successors[predecessor].len() != 1 {
+            if super::cfg::edge_insertion_point(func, cfg, predecessor, successor).is_none() {
                 return Err(SpillPlanError::new(
                     "SPILL_PLAN.EDGE_ISOLATED",
                     Some(predecessor_block.id),
                     None,
                     Vec::new(),
-                    "edge operation predecessor must be a dedicated insertion block",
+                    "edge operation has no single-edge materialization point",
                 ));
             }
             if operations.is_empty() {
@@ -1867,6 +1954,95 @@ mod tests {
     use crate::backend::native::mir::{
         BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
+
+    #[test]
+    fn entry_value_evicted_before_first_use_is_planned_as_a_memory_phi() {
+        let mut vregs = VRegAllocator::new();
+        let initial = vregs.alloc();
+        let merged = vregs.alloc();
+        let pressure_a = vregs.alloc();
+        let pressure_b = vregs.alloc();
+        let next = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 1,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+
+        let mut header = MBlock::new(BlockId(1));
+        header.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(0), initial), (BlockId(2), next)],
+        });
+        header.push(MInst::LoadImm {
+            dst: pressure_a,
+            value: 2,
+        });
+        header.push(MInst::LoadImm {
+            dst: pressure_b,
+            value: 3,
+        });
+        header.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: pressure_a,
+            size: OpSize::S64,
+        });
+        header.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: pressure_b,
+            size: OpSize::S64,
+        });
+        header.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: merged,
+            size: OpSize::S64,
+        });
+        header.push(MInst::Jump { target: BlockId(2) });
+
+        let mut latch = MBlock::new(BlockId(2));
+        latch.push(MInst::Mov {
+            dst: next,
+            src: merged,
+        });
+        latch.push(MInst::Branch {
+            cond: merged,
+            true_bb: BlockId(1),
+            false_bb: BlockId(3),
+        });
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Return);
+        func.blocks = vec![entry, header, latch, exit];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let plan = plan(&func, &cfg, &next_use, 2).unwrap();
+        plan.verify(&func, &cfg, 2).unwrap();
+
+        let header = cfg.block_index[&BlockId(1)];
+        let merged = LogicalValue(merged.0);
+        assert!(next_use.region_at_entry(header).is_some());
+        assert!(!plan.w_entry[header].contains(&merged));
+        assert!(plan.point_ops.iter().any(|(point, operation)| {
+            point.block == BlockId(1)
+                && matches!(operation, PlannedOp::SpillPhi { value, .. } if *value == merged)
+        }));
+        assert!(plan.point_ops.iter().any(|(point, operation)| {
+            point.block == BlockId(1)
+                && point.instruction == 4
+                && matches!(operation, PlannedOp::Reload { value, .. } if *value == merged)
+        }));
+        assert!(plan.point_ops.iter().all(|(point, operation)| {
+            point.block != BlockId(1)
+                || !matches!(operation, PlannedOp::Spill { value, .. } if *value == merged)
+        }));
+    }
 
     #[test]
     fn single_predecessor_inherits_residency_without_edge_reconciliation() {
@@ -2551,7 +2727,7 @@ mod tests {
             )
         };
         plan.point_ops.extend([reload(2), reload(5)]);
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
 
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
@@ -2560,10 +2736,10 @@ mod tests {
         plan.point_ops.pop();
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
         assert_eq!(plan.recipe_homes, BTreeSet::from([home]));
-        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
 
         plan.point_ops.push(reload(5));
-        let error = plan.verify_recipe_homes(&func, &recipes).unwrap_err();
+        let error = plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap_err();
         assert_eq!(error.rule, "SPILL_PLAN.RECIPE_HOME_POINT");
         assert_eq!(error.block, Some(BlockId(0)));
         assert_eq!(error.instruction, Some(5));
@@ -2665,7 +2841,7 @@ mod tests {
             ),
         ]);
         plan.recipe_reloads.insert((BlockId(0), 4, logical));
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
         let recipe_cost = |instruction| {
             recipes
@@ -2737,7 +2913,7 @@ mod tests {
                 home,
             },
         ));
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
 
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
@@ -2759,7 +2935,7 @@ mod tests {
             BTreeSet::from([home]),
             "avoiding the spill and reload makes the three-instruction recipe cheaper"
         );
-        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::reload::{
     ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
     ResolvedRecipe, materialize_pure_step,
 };
-use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillPlan};
+use super::spill_plan::{LogicalValue, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan};
 
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
@@ -222,15 +222,16 @@ pub(super) fn reconstruct(
             ));
         };
         let predecessor_id = predecessor_block.id;
-        let Some(instruction) = predecessor_block.insts.len().checked_sub(1) else {
-            return Err(ReconstructError::new(
-                "RECONSTRUCT.EDGE_PREDECESSOR_TERMINATED",
-                Some(predecessor_block.id),
-                None,
-                Vec::new(),
-                "edge operation predecessor block is empty",
-            ));
-        };
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                ReconstructError::new(
+                    "RECONSTRUCT.EDGE_POINT",
+                    Some(predecessor_id),
+                    None,
+                    Vec::new(),
+                    "edge operation has no single-edge materialization point",
+                )
+            })?;
         let mut bundle = EdgeReloadBundle {
             predecessor,
             successor,
@@ -262,15 +263,15 @@ pub(super) fn reconstruct(
                 reload_recipes,
                 predecessor,
                 successor,
-                instruction,
+                insertion,
                 operation,
                 plan,
             )?;
             let materialized = materialize_operation(
                 func,
                 plan,
-                predecessor,
-                instruction,
+                insertion.block,
+                insertion.instruction,
                 operation,
                 &mut logical_for_vreg,
                 &mut insertions,
@@ -302,7 +303,10 @@ pub(super) fn reconstruct(
                     )
                 })?;
         }
-        if reloads_only && !bundle.shape.is_empty() {
+        // Bundle sharing rewrites a predecessor suffix. Successor-entry edge
+        // operations are already shared by that one edge block and have no
+        // predecessor suffix to rewrite.
+        if insertion.block == predecessor && reloads_only && !bundle.shape.is_empty() {
             edge_reload_bundles.push(bundle);
         }
     }
@@ -427,20 +431,6 @@ fn available_recipe_at_point(
     analysis.resolved_recipe_at_point(query)
 }
 
-fn available_recipe_before_terminator(
-    analysis: &ReloadRecipeAnalysis,
-    predecessor: BlockId,
-    instruction: usize,
-    value: LogicalValue,
-) -> Option<&ResolvedRecipe> {
-    let query = PointUse {
-        block: predecessor,
-        instruction,
-        value: VReg(value.0),
-    };
-    analysis.resolved_recipe_at_point(query)
-}
-
 fn reload_recipe_at_point(
     analysis: &ReloadRecipeAnalysis,
     point: ProgramPoint,
@@ -486,7 +476,7 @@ fn reload_recipe_on_edge(
     analysis: &ReloadRecipeAnalysis,
     predecessor: usize,
     successor: usize,
-    instruction: usize,
+    insertion: super::cfg::EdgeInsertionPoint,
     operation: PlannedOp,
     plan: &SpillPlan,
 ) -> Result<Option<ResolvedRecipe>, ReconstructError> {
@@ -495,7 +485,13 @@ fn reload_recipe_on_edge(
     };
     let predecessor_id = func.blocks[predecessor].id;
     let successor_id = func.blocks[successor].id;
-    let key = (predecessor_id, instruction, value);
+    let insertion_block = func.blocks[insertion.block].id;
+    let point = ProgramPoint {
+        block: insertion_block,
+        instruction: insertion.instruction,
+        side: PointSide::Before,
+    };
+    let key = (point.block, point.instruction, value);
     if let Some(recipe) = plan.state_reload_recipes.get(&key) {
         return Ok(Some(recipe.clone()));
     }
@@ -513,7 +509,7 @@ fn reload_recipe_on_edge(
     if !plan.recipe_homes.contains(&home) {
         return Ok(None);
     }
-    available_recipe_before_terminator(analysis, predecessor_id, instruction, value)
+    available_recipe_at_point(analysis, point, value)
         .cloned()
         .map(Some)
         .ok_or_else(|| {
@@ -2111,12 +2107,13 @@ mod tests {
             registers,
         )
         .unwrap();
-        let requested_points = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested_points =
+            super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let recipes =
             super::super::reload::analyze_with_queries(&func, &cfg, &requested_points).unwrap();
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
         plan.verify(&func, &cfg, registers).unwrap();
-        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         let rebuilt_cfg = (!result.shared_reload_blocks.is_empty())
@@ -2183,16 +2180,27 @@ mod tests {
             !(point.block == BlockId(1)
                 && matches!(operation, PlannedOp::Spill { value, .. } if *value == stored))
         }));
-        assert!(plan.point_ops.iter().any(|(point, operation)| {
-            point.block == BlockId(2)
-                && matches!(operation, PlannedOp::Spill { value, .. } if *value == stored)
+        assert!(plan.point_ops.iter().all(|(point, operation)| {
+            !(point.block == BlockId(2)
+                && matches!(operation, PlannedOp::Spill { value, .. } if *value == stored))
         }));
+        let right = cfg.block_index[&BlockId(2)];
+        assert_eq!(cfg.predecessors[right].len(), 1);
+        let right_edge = cfg.predecessors[right][0];
+        assert_eq!(cfg.successors[right_edge], [right]);
+        assert!(
+            plan.edge_ops
+                .get(&(right_edge, right))
+                .is_some_and(|operations| operations.iter().any(|operation| {
+                    matches!(operation, PlannedOp::Spill { value, .. } if *value == stored)
+                }))
+        );
 
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
         plan.verify(&func, &cfg, 2).unwrap();
-        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
@@ -2463,12 +2471,12 @@ mod tests {
             )),
             "{plan:#?}"
         );
-        let requested = super::super::ssa::planner_reload_queries(&func, &plan).unwrap();
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         assert!(!requested.is_empty());
         let recipes = super::super::reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
         plan.select_recipe_homes(&func, &cfg, &recipes).unwrap();
         plan.verify(&func, &cfg, 2).unwrap();
-        plan.verify_recipe_homes(&func, &recipes).unwrap();
+        plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
         super::super::reload::verify_expected_materialized_reloads(

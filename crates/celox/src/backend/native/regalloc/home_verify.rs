@@ -331,23 +331,28 @@ fn verify_with_work(
         !stores.is_empty()
     });
 
-    // An edge definition can be represented without expanding the CFG.  If
-    // the predecessor has one successor, the store is a block-exit
-    // definition.  Otherwise normalization guarantees a dedicated
-    // one-predecessor successor, where it is a block-entry definition.
+    // An edge definition can be represented without expanding the CFG at the
+    // same semantic insertion point used by reconstruction.
     let mut entry_stores = vec![BTreeSet::<SpillHome>::new(); func.blocks.len()];
     let mut exit_stores = vec![BTreeSet::<SpillHome>::new(); func.blocks.len()];
     for (&(predecessor, successor), stores) in &edge_stores {
-        let definition_block = if cfg.successors[predecessor].len() == 1 {
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                structural_error(
+                    "HOME.EDGE_NOT_ISOLATED",
+                    "edge store has no single-edge materialization point",
+                )
+            })?;
+        let definition_block = if insertion.block == predecessor {
             exit_stores[predecessor].extend(stores.iter().copied());
             predecessor
-        } else if cfg.predecessors[successor].as_slice() == [predecessor] {
+        } else if insertion.block == successor {
             entry_stores[successor].extend(stores.iter().copied());
             successor
         } else {
             return Err(structural_error(
                 "HOME.EDGE_NOT_ISOLATED",
-                "edge store is neither on a single-successor predecessor nor a dedicated edge block",
+                "edge store materialization point is not owned by either edge endpoint",
             ));
         };
         for &home in stores {

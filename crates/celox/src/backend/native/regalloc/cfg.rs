@@ -20,6 +20,43 @@ pub(super) struct NormalizedCfg {
     pub loop_for_header: HashMap<usize, usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EdgeInsertionPoint {
+    pub block: usize,
+    pub instruction: usize,
+}
+
+/// Return the concrete point that executes on exactly one normalized CFG edge.
+/// A single-successor predecessor uses its terminator; a branch edge uses the
+/// entry of its dedicated single-predecessor successor block.  CSSA may place
+/// phi-source copies in that successor, so its edge identity must not depend on
+/// the block remaining syntactically Jump-only.
+pub(super) fn edge_insertion_point(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    predecessor: usize,
+    successor: usize,
+) -> Option<EdgeInsertionPoint> {
+    if !cfg.successors.get(predecessor)?.contains(&successor) {
+        return None;
+    }
+    if cfg.successors[predecessor].len() == 1 {
+        return Some(EdgeInsertionPoint {
+            block: predecessor,
+            instruction: func.blocks.get(predecessor)?.insts.len().checked_sub(1)?,
+        });
+    }
+    if cfg.predecessors.get(successor)?.as_slice() == [predecessor]
+        && !func.blocks.get(successor)?.insts.is_empty()
+    {
+        return Some(EdgeInsertionPoint {
+            block: successor,
+            instruction: 0,
+        });
+    }
+    None
+}
+
 impl SsaCfg for NormalizedCfg {
     type FrontierIter<'a> = std::iter::Copied<std::collections::btree_set::Iter<'a, usize>>;
 
@@ -789,6 +826,16 @@ mod tests {
 
         let cfg = normalize(&mut func).unwrap();
         assert_eq!(func.blocks.len(), 9);
+        let entry = cfg.block_index[&BlockId(0)];
+        for &successor in &cfg.successors[entry] {
+            assert_eq!(
+                edge_insertion_point(&func, &cfg, entry, successor),
+                Some(EdgeInsertionPoint {
+                    block: successor,
+                    instruction: 0,
+                })
+            );
+        }
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
         let split_predecessor = join.phis[0]
             .sources
