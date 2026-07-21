@@ -5899,6 +5899,58 @@ the concrete repeated phi permutation is removed, exact Linux meaning and
 tick count are preserved, and two non-LTO runs average 4.1% faster than the
 immediate parent**.
 
+### Step 64: Convergent machine-interval spilling and sparse split queries
+
+The opt-in interval allocator could not previously compile the Linux input.
+At `bb5937`, spilling allocator-created values which fed a machine phi inserted
+one reload for every incoming phi source. Fourteen such reload results were
+then simultaneously live until the same edge; the next ordinary operand made
+fifteen fixed ranges compete for fourteen allocatable GPRs. Further splitting
+could not change that pressure, so allocation ended with
+`JOINT_ALLOC.UNSPLITTABLE_PRESSURE`.
+
+Machine-interval spilling now leaves phi-edge sources in their conventional
+stack homes. Semantic source phis retain their immutable source-MIR identity;
+strict-SSA phis created by SplitEditor retain the synthetic VReg consumed by
+out-of-SSA. Both forms are represented as exact edge locations, participate
+in sparse stack-slot interference, and lower atomically without a fake reload
+live range. Instruction uses still receive one-use reloads. This removes the
+impossible edge pressure without weakening register interference or changing
+the source CFG.
+
+The first successful Linux-sized run then exposed two independent quadratic
+implementation costs. Every edit rebuilt the complete pending allocation heap
+and rescanned all register-region metadata, while every candidate cut
+enumerated every original instruction boundary and repeatedly linearly scanned
+the value's sparse live segments. Pending heap entries are now invalidated
+lazily, active regions have an inverse VReg index, live segments are found by
+block with binary search, and the latest source boundary before a stable cut is
+computed directly from its immutable zone. A split query is now `O(log B)` in
+the number of live blocks for the value plus `O(1)` boundary selection, instead
+of `O(B * I_block)`; local publication touches only changed values and regions.
+
+On the same `heliodor-dev`, non-LTO Linux input, `eval_comb` split selection
+fell from 114.623 s to 0.272 s and edit time from 144.299 s to 43.459 s. Its
+joint reallocation fell from about 357 s to 132.788 s. The fused function,
+which previously did not finish within 900 s, completed joint reallocation in
+247.084 s and total interval allocation in 284.368 s. The timed compile-only
+run completed in 330.241 s; the independent trace-free full run compiled in
+332.005 s.
+
+All 304 register-allocation tests and all 1,039 library tests pass. The full
+run reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`; generated-code execution took 103.855 s. That is
+15.5% slower than Step 63's 89.941 s mean, so the interval allocator remains
+opt-in and no execution-throughput improvement is claimed. Its remaining
+structural defect is explicit: the fused function still performs 48,456 split
+edits and restarts allocation 61,187 times, producing code inferior to the
+production SSA allocator.
+
+Status: **machine-phi spills are represented as edge stack locations, the
+interval allocator now converges on the full Linux workload, and its dominant
+compile-time scans are removed; generated-code quality and repeated one-cut
+allocation remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6018,6 +6070,7 @@ immediate parent**.
 | 61 full-domain indexed FF stores | this step | indexed recovery/options 7/7; working round-trip 7/7; commit hazards 7/7 | lib 1033/1033; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two byte-identical generated-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; batch and CLI traces are byte-identical to the sequential candidate | compile 62.845 / 63.080 s; execute 93.248 / 92.955 s | 64-way and four-port selector ladders become direct indexed stores; accidental 512-byte round trips removed; SIR/MIR shrink, execution mean unchanged |
 | 62 lazy selector arms and guarded value diamonds | this step | BranchifyMux 50/50; guarded-region sinking 22/22 | lib 1035/1035; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; independently generated final traces are byte-identical | compile 62.985 / 65.635 s; execute 90.748 / 96.790 s | selector payloads and four guarded word divide/remainder regions become control-dependent; MIR -9,907 bytes; execution mean unchanged |
 | 63 loop-backedge phi affinity through CSSA snapshots | this step | color 7/7; regalloc 302/302 | lib 1037/1037; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; SIR and pre-allocation MIR are byte-identical to Step 62 | compile 63.032 / 62.776 s; execute 89.473 / 90.408 s | exact CSSA snapshots expose only natural-loop backedge affinities; concrete seven-value backedge loses two repeated `xchg`; execute mean -4.1% |
+| 64 convergent machine-interval spilling and sparse split queries | this step | regalloc 304/304 | lib 1039/1039; all-target check, strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 330.241 s; full compile 332.005 s; execute 103.855 s | impossible simultaneous phi reload pressure removed; fused allocation now finishes; generated execution remains 15.5% slower than the Step 63 mean |
 
 ## Related design records
 

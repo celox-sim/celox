@@ -12,9 +12,10 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, Uses, VReg};
 
 use super::allocation_expand::{
-    self, ExpandedAllocationProblem, ExpandedMaterialization, ExpandedRegisterEntry,
-    ExpandedRegisterRegion, ExpandedStackDefinition, ExpandedStackHome, ExpandedStackHomeKind,
-    ExpandedUseSource, RegisterRegionId,
+    self, ExpandedAllocationProblem, ExpandedEdgeLocation, ExpandedMachineEdgeUse,
+    ExpandedMaterialization, ExpandedRegisterEntry, ExpandedRegisterRegion,
+    ExpandedStackDefinition, ExpandedStackHome, ExpandedStackHomeKind, ExpandedUseSource,
+    RegisterRegionId,
 };
 use super::allocation_ir::{StackHomeId, SyntheticOperation};
 use super::assignment::PhysReg;
@@ -518,6 +519,19 @@ impl Spiller {
                             "new register region duplicates an existing stable identity",
                         ));
                     }
+                    if expanded
+                        .region_by_value
+                        .insert(lowered.value, region)
+                        .is_some()
+                    {
+                        return Err(SpillerError::new(
+                            "SPILLER.REGION_VALUE_IDENTITY",
+                            Some(entry_use.site.block()),
+                            Some(lowered.value),
+                            Some(root),
+                            "new register region duplicates an active machine value",
+                        ));
+                    }
                     expanded.register_regions.push(ExpandedRegisterRegion {
                         id: region,
                         root,
@@ -551,9 +565,12 @@ impl Spiller {
     /// Unlike logical-root home selection, this operation owns every machine
     /// use in the live interval, including older split-copy and merge-phi
     /// transitions. The definition establishes one private stack home and a
-    /// fresh one-use reload is inserted before each exact use. Those reload
-    /// products leave representative metadata and therefore enter the greedy
-    /// queue at `Done` rather than recursively selecting another home.
+    /// fresh one-use reload is inserted before each exact instruction use.
+    /// Semantic phi sources instead retain the spill slot as an edge location;
+    /// eagerly reloading every source before one edge would make all parallel
+    /// phi operands simultaneously register-live. Reload products leave
+    /// representative metadata and therefore enter the greedy queue at `Done`
+    /// rather than recursively selecting another home.
     pub(super) fn materialize_machine_interval(
         &self,
         expanded: &mut ExpandedAllocationProblem,
@@ -674,6 +691,70 @@ impl Spiller {
 
         let uses = interval.uses.iter().copied().collect::<Vec<_>>();
         for site in uses {
+            let semantic_edge_use = if matches!(site, UseSite::PhiEdge { .. }) {
+                let mut matching = expanded.roots[root_index]
+                    .uses
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, use_)| {
+                        (use_.value == value && use_.site == site).then_some(index)
+                    });
+                let first = matching.next();
+                if matching.next().is_some() {
+                    return Err(SpillerError::new(
+                        "SPILLER.MACHINE_EDGE_IDENTITY",
+                        Some(site.block()),
+                        Some(value),
+                        Some(root),
+                        "one machine phi-edge use is owned by more than one semantic root use",
+                    ));
+                }
+                first
+            } else {
+                None
+            };
+            if let Some(use_index) = semantic_edge_use {
+                let semantic = expanded.roots[root_index].origin;
+                expanded
+                    .ir
+                    .assign_phi_edge_home(site, value, semantic)
+                    .map_err(|error| {
+                        SpillerError::new(
+                            error.rule,
+                            error.block,
+                            error.values.first().copied(),
+                            Some(root),
+                            error.message,
+                        )
+                    })?;
+                let target = &mut expanded.roots[root_index].uses[use_index];
+                target.value = semantic;
+                target.source = ExpandedUseSource::Edge(ExpandedEdgeLocation::Stack { home: id });
+                edit.record_use(site);
+                continue;
+            }
+            if matches!(site, UseSite::PhiEdge { .. }) {
+                expanded
+                    .ir
+                    .assign_machine_phi_edge_home(site, value)
+                    .map_err(|error| {
+                        SpillerError::new(
+                            error.rule,
+                            error.block,
+                            error.values.first().copied(),
+                            Some(root),
+                            error.message,
+                        )
+                    })?;
+                expanded.machine_edge_uses.push(ExpandedMachineEdgeUse {
+                    root,
+                    value,
+                    site,
+                    home: id,
+                });
+                edit.record_use(site);
+                continue;
+            }
             let reload = expanded
                 .ir
                 .insert_before_use(
@@ -736,12 +817,7 @@ fn remove_register_representative(
     root: LiveBundleId,
     value: VReg,
 ) -> Result<(), SpillerError> {
-    let Some((region, row)) = expanded
-        .register_regions
-        .iter()
-        .enumerate()
-        .find_map(|(row, metadata)| (metadata.value == value).then_some((metadata.id, row)))
-    else {
+    let Some(region) = expanded.region_by_value.remove(&value) else {
         return Ok(());
     };
     let indexed = expanded.region_rows.remove(&region).ok_or_else(|| {
@@ -753,15 +829,7 @@ fn remove_register_representative(
             "machine-spill source is absent from the representative index",
         )
     })?;
-    if indexed != row {
-        return Err(SpillerError::new(
-            "SPILLER.REGION_IDENTITY",
-            None,
-            Some(value),
-            Some(root),
-            "machine-spill source has inconsistent representative indexes",
-        ));
-    }
+    let row = indexed;
     let removed = expanded.register_regions.swap_remove(row);
     if removed.id != region || removed.root != root || removed.value != value {
         return Err(SpillerError::new(
@@ -1020,8 +1088,8 @@ fn expanded_use(
 mod tests {
     use super::*;
     use crate::backend::native::mir::{
-        BaseReg, MBlock, MFunction, MInst, OpSize, PackedStateHome, SpillDesc, StateHomeId,
-        VRegAllocator,
+        BaseReg, MBlock, MFunction, MInst, OpSize, PackedStateHome, PhiNode, SpillDesc,
+        StateHomeId, VRegAllocator,
     };
 
     #[test]
@@ -1147,5 +1215,129 @@ mod tests {
             .count();
         assert_eq!(state_stores, 1);
         assert_eq!(state_reloads, 2);
+    }
+
+    #[test]
+    fn machine_spill_keeps_semantic_phi_source_in_its_stack_home() {
+        let mut values = VRegAllocator::new();
+        let condition = values.alloc();
+        let left_value = values.alloc();
+        let right_value = values.alloc();
+        let merged = values.alloc();
+        let descriptors = vec![SpillDesc::transient(); 4];
+        let mut function = MFunction::new(values, descriptors);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: condition,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: left_value,
+            value: 7,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: right_value,
+            value: 11,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut merge = MBlock::new(BlockId(3));
+        merge.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), left_value), (BlockId(2), right_value)],
+        });
+        merge.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: merged,
+            size: OpSize::S64,
+        });
+        merge.push(MInst::Return);
+        function.blocks = vec![entry, left, right, merge];
+
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let root = graph
+            .bundles
+            .iter()
+            .find(|bundle| bundle.origin == left_value)
+            .unwrap()
+            .id;
+        let mut expanded = allocation_expand::expand_unallocated(&function, &cfg, &graph).unwrap();
+        let interval = expanded.intervals.intervals[left_value.0 as usize]
+            .as_ref()
+            .unwrap()
+            .clone();
+        let spiller = Spiller::build(&graph).unwrap();
+
+        expanded.ir.begin_instruction_transaction().unwrap();
+        let edit = spiller
+            .materialize_machine_interval(&mut expanded, root, &interval)
+            .unwrap();
+        allocation_expand::refresh(&mut expanded, &cfg, &edit.liveness_blocks).unwrap();
+
+        let root_use = expanded.roots[root.0 as usize]
+            .uses
+            .iter()
+            .find(|use_| {
+                matches!(
+                    use_.site,
+                    UseSite::PhiEdge {
+                        predecessor: BlockId(1),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(root_use.value, left_value);
+        assert!(matches!(
+            root_use.source,
+            ExpandedUseSource::Edge(ExpandedEdgeLocation::Stack {
+                home: StackHomeId(0)
+            })
+        ));
+        assert_eq!(
+            expanded.intervals.intervals.len(),
+            function.spill_descs.len(),
+            "direct phi-edge spilling must not create a reload VReg"
+        );
+        expanded.ir.verify_stack_homes(&cfg).unwrap();
+
+        let allocation = super::super::allocation_split::allocate_with_splitting(
+            &mut expanded,
+            &graph,
+            &cfg,
+            super::super::assignment::ALLOCATABLE_REGS,
+        )
+        .unwrap();
+        let lowered = super::super::allocation_lower::lower(
+            &function,
+            &cfg,
+            &graph,
+            &expanded,
+            &allocation,
+            super::super::assignment::ALLOCATABLE_REGS,
+        )
+        .unwrap();
+        assert!(
+            lowered
+                .assignment
+                .phi_edge_locations
+                .values()
+                .any(|location| matches!(
+                    location,
+                    super::super::assignment::EdgeLocation::Stack(_)
+                ))
+        );
     }
 }

@@ -438,6 +438,44 @@ fn edge_locations(
             ));
         }
     }
+    for use_ in &expanded.machine_edge_uses {
+        let UseSite::PhiEdge {
+            predecessor,
+            successor,
+            phi,
+            ..
+        } = use_.site
+        else {
+            return Err(AllocationLowerError::new(
+                "ALLOCATION_LOWER.MACHINE_EDGE_LOCATION_SITE",
+                Some(use_.site.block()),
+                None,
+                vec![use_.value],
+                "machine edge location is not attached to a phi-edge use",
+            ));
+        };
+        let offset = stack_offsets
+            .get(use_.home.0 as usize)
+            .copied()
+            .ok_or_else(|| {
+                AllocationLowerError::new(
+                    "ALLOCATION_LOWER.MACHINE_EDGE_STACK_HOME",
+                    Some(predecessor),
+                    None,
+                    vec![use_.value],
+                    "machine phi-edge location has no concrete frame slot",
+                )
+            })?;
+        output.push((
+            NonRegisterPhiSource {
+                predecessor,
+                successor,
+                phi,
+                value: use_.value,
+            },
+            EdgeLocation::Stack(offset),
+        ));
+    }
     Ok(output)
 }
 

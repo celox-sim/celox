@@ -1223,11 +1223,7 @@ fn insert_register_representative(
     preferred_register: Option<PhysReg>,
     entry: ExpandedRegisterEntry,
 ) -> Result<RegisterRegionId, AllocationSplitError> {
-    if expanded
-        .register_regions
-        .iter()
-        .any(|metadata| metadata.value == value)
-    {
+    if expanded.region_by_value.contains_key(&value) {
         return Err(AllocationSplitError::new(
             "ALLOCATION_SPLIT.REGION_VALUE_IDENTITY",
             None,
@@ -1258,6 +1254,15 @@ fn insert_register_representative(
             Some(value),
             Some(root),
             "fresh register-representative identity already exists",
+        ));
+    }
+    if expanded.region_by_value.insert(value, id).is_some() {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_VALUE_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "fresh register representative duplicates an active machine value",
         ));
     }
     expanded.register_regions.push(ExpandedRegisterRegion {
@@ -1685,7 +1690,7 @@ fn finish_split_mutations(
                 .map_err(AllocationSplitError::expand)?,
         );
     }
-    prune_dead_register_representatives(expanded, replacements)?;
+    prune_dead_register_representatives(expanded, replacements, &liveness.range_changed_values)?;
     Ok(liveness)
 }
 
@@ -1696,22 +1701,43 @@ fn finish_split_mutations(
 fn prune_dead_register_representatives(
     expanded: &mut ExpandedAllocationProblem,
     replacements: &[(VReg, LiveBundleId)],
+    range_changed_values: &[VReg],
 ) -> Result<(), AllocationSplitError> {
     let changed_roots = replacements
         .iter()
         .map(|(_, root)| *root)
         .collect::<BTreeSet<_>>();
-    let mut retained = Vec::with_capacity(expanded.register_regions.len());
-    for metadata in std::mem::take(&mut expanded.register_regions) {
-        let live = expanded
+    for &value in range_changed_values {
+        if expanded
             .intervals
             .intervals
-            .get(metadata.value.0 as usize)
+            .get(value.0 as usize)
             .and_then(Option::as_ref)
-            .is_some();
-        if live {
-            retained.push(metadata);
+            .is_some()
+        {
             continue;
+        }
+        let Some(region) = expanded.region_by_value.remove(&value) else {
+            continue;
+        };
+        let row = expanded.region_rows.remove(&region).ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPLIT.REGION_IDENTITY",
+                None,
+                Some(value),
+                None,
+                "dead register representative is absent from the stable region index",
+            )
+        })?;
+        let metadata = expanded.register_regions.swap_remove(row);
+        if metadata.id != region || metadata.value != value {
+            return Err(AllocationSplitError::new(
+                "ALLOCATION_SPLIT.REGION_VALUE_IDENTITY",
+                None,
+                Some(value),
+                Some(metadata.root),
+                "dead register representative disagrees with its machine-value index",
+            ));
         }
         if !changed_roots.contains(&metadata.root) {
             return Err(AllocationSplitError::new(
@@ -1741,18 +1767,8 @@ fn prune_dead_register_representatives(
                 "dead machine representative is still claimed by a semantic root use",
             ));
         }
-    }
-    expanded.register_regions = retained;
-    expanded.region_rows.clear();
-    for (row, metadata) in expanded.register_regions.iter().enumerate() {
-        if expanded.region_rows.insert(metadata.id, row).is_some() {
-            return Err(AllocationSplitError::new(
-                "ALLOCATION_SPLIT.REGION_IDENTITY",
-                None,
-                Some(metadata.value),
-                Some(metadata.root),
-                "live register representatives contain a duplicate stable identity",
-            ));
+        if let Some(moved) = expanded.register_regions.get(row) {
+            expanded.region_rows.insert(moved.id, row);
         }
     }
     Ok(())
@@ -1821,19 +1837,40 @@ pub(super) fn allocate_with_splitting(
     cfg: &NormalizedCfg,
     registers: &[PhysReg],
 ) -> Result<JointAllocation, AllocationSplitError> {
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let mut allocate_elapsed = std::time::Duration::ZERO;
+    let mut select_elapsed = std::time::Duration::ZERO;
+    let mut edit_elapsed = std::time::Duration::ZERO;
+    let mut update_elapsed = std::time::Duration::ZERO;
+    let mut allocate_calls = 0_u64;
+    let mut split_edits = 0_u64;
+    let mut spill_edits = 0_u64;
     let spiller = Spiller::build(graph).map_err(AllocationSplitError::spill)?;
     let mut allocator =
         GreedyAllocator::for_function(expanded, cfg, graph, registers, spiller.home_plans())
             .map_err(AllocationSplitError::joint)?;
     loop {
-        match allocator
+        let allocate_start = timing.then(crate::timing::now);
+        let outcome = allocator
             .allocate(cfg, registers)
-            .map_err(AllocationSplitError::joint)?
-        {
+            .map_err(AllocationSplitError::joint)?;
+        allocate_calls += 1;
+        if let Some(start) = allocate_start {
+            allocate_elapsed += start.elapsed();
+        }
+        match outcome {
             JointAllocationOutcome::Complete(allocation) => {
+                if timing {
+                    eprintln!(
+                        "[regalloc-timing] interval_split_session blocks={} calls={allocate_calls} splits={split_edits} spills={spill_edits} allocate={allocate_elapsed:?} select={select_elapsed:?} edit={edit_elapsed:?} update={update_elapsed:?}",
+                        cfg.successors.len(),
+                    );
+                }
                 return Ok(allocation);
             }
             JointAllocationOutcome::NeedsSplit(request) => {
+                let select_start = timing.then(crate::timing::now);
                 let (candidate, frontier) = match select_live_range_frontier(
                     expanded,
                     allocator.live_intervals(),
@@ -1845,10 +1882,17 @@ pub(super) fn allocate_with_splitting(
                         allocator
                             .require_spill(value)
                             .map_err(AllocationSplitError::joint)?;
+                        if let Some(start) = select_start {
+                            select_elapsed += start.elapsed();
+                        }
                         continue;
                     }
                     Err(error) => return Err(error),
                 };
+                if let Some(start) = select_start {
+                    select_elapsed += start.elapsed();
+                }
+                let edit_start = timing.then(crate::timing::now);
                 allocator
                     .release_for_split(candidate.value)
                     .map_err(AllocationSplitError::joint)?;
@@ -1859,6 +1903,11 @@ pub(super) fn allocate_with_splitting(
                     &frontier,
                     cfg,
                 )?;
+                split_edits += 1;
+                if let Some(start) = edit_start {
+                    edit_elapsed += start.elapsed();
+                }
+                let update_start = timing.then(crate::timing::now);
                 allocator
                     .update_after_edit(
                         expanded,
@@ -1873,8 +1922,12 @@ pub(super) fn allocate_with_splitting(
                         spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
+                if let Some(start) = update_start {
+                    update_elapsed += start.elapsed();
+                }
             }
             JointAllocationOutcome::NeedsSpill(request) => {
+                let edit_start = timing.then(crate::timing::now);
                 let applied = apply_spill(
                     expanded,
                     graph,
@@ -1883,6 +1936,11 @@ pub(super) fn allocate_with_splitting(
                     cfg,
                     &spiller,
                 )?;
+                spill_edits += 1;
+                if let Some(start) = edit_start {
+                    edit_elapsed += start.elapsed();
+                }
+                let update_start = timing.then(crate::timing::now);
                 allocator
                     .update_after_edit(
                         expanded,
@@ -1897,6 +1955,9 @@ pub(super) fn allocate_with_splitting(
                         spiller.home_plans(),
                     )
                     .map_err(AllocationSplitError::joint)?;
+                if let Some(start) = update_start {
+                    update_elapsed += start.elapsed();
+                }
             }
         }
     }
@@ -2839,6 +2900,15 @@ fn prune_replaced_register_region(
             "replaced register region is absent from the stable metadata index",
         )
     })?;
+    if expanded.region_by_value.remove(&value) != Some(region) {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPLIT.REGION_VALUE_IDENTITY",
+            None,
+            Some(value),
+            Some(root),
+            "replaced register region is absent from the machine-value index",
+        ));
+    }
     let removed = expanded.register_regions.swap_remove(row);
     if removed.id != region || removed.root != root || removed.value != value {
         return Err(AllocationSplitError::new(

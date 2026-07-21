@@ -68,6 +68,18 @@ pub(super) enum ExpandedEdgeLocation {
     Immediate { value: u64, recipe: RecipeId },
 }
 
+/// A non-register source on an allocator-created phi edge. Semantic source-MIR
+/// phi uses remain attached to [`ExpandedUse`]; these rows cover only machine
+/// phis introduced by live-range editing and retain their synthetic VReg
+/// identity for out-of-SSA translation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExpandedMachineEdgeUse {
+    pub root: LiveBundleId,
+    pub value: VReg,
+    pub site: UseSite,
+    pub home: StackHomeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExpandedUse {
     pub id: BundleUseId,
@@ -165,8 +177,13 @@ pub(super) struct ExpandedAllocationProblem {
     pub incremental_liveness: IncrementalLiveness,
     pub shift_encoding: VariableShiftEncoding,
     pub roots: Vec<ExpandedRoot>,
+    pub machine_edge_uses: Vec<ExpandedMachineEdgeUse>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
     pub region_rows: BTreeMap<RegisterRegionId, usize>,
+    /// Stable machine-value identity to active register-region identity.
+    /// Split publication removes dead representatives through this index
+    /// instead of rescanning every region after each local edit.
+    pub region_by_value: BTreeMap<VReg, RegisterRegionId>,
     pub next_register_region: u32,
     pub stack_homes: Vec<ExpandedStackHome>,
     pub state_homes: Vec<ExpandedStateHome>,
@@ -614,13 +631,19 @@ fn finish_expansion(
         .enumerate()
         .map(|(row, region)| (region.id, row))
         .collect::<BTreeMap<_, _>>();
-    if region_rows.len() != register_regions.len() {
+    let region_by_value = register_regions
+        .iter()
+        .map(|region| (region.value, region.id))
+        .collect::<BTreeMap<_, _>>();
+    if region_rows.len() != register_regions.len()
+        || region_by_value.len() != register_regions.len()
+    {
         return Err(AllocationExpandError::new(
             "ALLOCATION_EXPAND.REGION_IDENTITY",
             None,
             None,
             None,
-            "initial register regions do not have unique identities",
+            "initial register regions do not have unique region or value identities",
         ));
     }
     let next_register_region = u32::try_from(register_regions.len()).map_err(|_| {
@@ -638,8 +661,10 @@ fn finish_expansion(
         incremental_liveness,
         shift_encoding: func.target_features.variable_shift_encoding(),
         roots,
+        machine_edge_uses: Vec::new(),
         register_regions,
         region_rows,
+        region_by_value,
         next_register_region,
         stack_homes,
         state_homes,

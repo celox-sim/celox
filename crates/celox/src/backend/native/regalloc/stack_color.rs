@@ -489,7 +489,7 @@ impl StackLivenessProgram {
                         "direct stack location references a missing successor",
                     ));
                 };
-                if !edge_use_owners.insert((predecessor, successor, phi, home)) {
+                if !edge_use_owners.insert((predecessor, successor, phi)) {
                     return Err(StackColorError::new(
                         "STACK_COLOR.EDGE_USE_IDENTITY",
                         Some(predecessor),
@@ -505,6 +505,67 @@ impl StackLivenessProgram {
                 });
                 edge_recipe_uses.insert((root.id, use_.id, home));
             }
+        }
+        for use_ in &expanded.machine_edge_uses {
+            let home_index = use_.home.0 as usize;
+            let Some(home) = expanded.stack_homes.get(home_index) else {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.HOME_RANGE",
+                    Some(use_.site.block()),
+                    None,
+                    [use_.home],
+                    "machine phi-edge source references a missing stack home",
+                ));
+            };
+            if home.root != use_.root
+                || home.kind != (ExpandedStackHomeKind::Machine { value: use_.value })
+            {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.MACHINE_EDGE_HOME",
+                    Some(use_.site.block()),
+                    None,
+                    [use_.home],
+                    "machine phi-edge source and conventional spill home disagree",
+                ));
+            }
+            let UseSite::PhiEdge {
+                predecessor,
+                successor,
+                phi,
+                ..
+            } = use_.site
+            else {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.EDGE_USE_SITE",
+                    Some(use_.site.block()),
+                    None,
+                    [use_.home],
+                    "machine edge stack location is attached to an instruction use",
+                ));
+            };
+            let Some(&successor_index) = cfg.block_index.get(&successor) else {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.EDGE_USE_CFG",
+                    Some(successor),
+                    None,
+                    [use_.home],
+                    "machine edge stack location references a missing successor",
+                ));
+            };
+            if !edge_use_owners.insert((predecessor, successor, phi)) {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.EDGE_USE_IDENTITY",
+                    Some(predecessor),
+                    None,
+                    [use_.home],
+                    "one phi source has more than one direct stack location",
+                ));
+            }
+            blocks[successor_index].edge_uses.push(StackEdgeUse {
+                predecessor,
+                home: VReg(use_.home.0),
+                phi,
+            });
         }
         for home in &expanded.stack_homes {
             if let ExpandedStackHomeKind::EdgeRecipe { use_id } = home.kind
@@ -1764,8 +1825,10 @@ mod tests {
             incremental_liveness,
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots: Vec::new(),
+            machine_edge_uses: Vec::new(),
             register_regions: Vec::new(),
             region_rows: BTreeMap::new(),
+            region_by_value: BTreeMap::new(),
             next_register_region: 0,
             stack_homes,
             state_homes: Vec::new(),
@@ -2160,8 +2223,10 @@ mod tests {
             intervals,
             shift_encoding: VariableShiftEncoding::Bmi2,
             roots,
+            machine_edge_uses: Vec::new(),
             register_regions: Vec::new(),
             region_rows: BTreeMap::new(),
+            region_by_value: BTreeMap::new(),
             next_register_region: 0,
             stack_homes: homes,
             state_homes: Vec::new(),

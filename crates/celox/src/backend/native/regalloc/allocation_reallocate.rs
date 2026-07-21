@@ -841,12 +841,14 @@ impl JointAllocationProblem {
             ));
         }
         if expanded.region_rows.len() != expanded.register_regions.len()
+            || expanded.region_by_value.len() != expanded.register_regions.len()
             || expanded
                 .register_regions
                 .iter()
                 .enumerate()
                 .any(|(row, region)| {
                     expanded.region_rows.get(&region.id) != Some(&row)
+                        || expanded.region_by_value.get(&region.value) != Some(&region.id)
                         || region.id.0 >= expanded.next_register_region
                 })
         {
@@ -854,7 +856,7 @@ impl JointAllocationProblem {
                 "JOINT_ALLOC.REGION_INDEX",
                 None,
                 None,
-                "stable register-region index differs from active metadata",
+                "stable register-region indexes differ from active metadata",
             ));
         }
 
@@ -2335,35 +2337,17 @@ impl GreedyAllocator {
             self.intervals.problem.fixed_reservations = fixed_reservations;
         }
 
-        let mut pending = self
-            .pending
-            .drain()
-            .map(|item| item.id)
-            .collect::<BTreeSet<_>>();
-        pending.retain(|id| {
-            self.intervals.problem.value(VReg(id.0)).is_some()
-                && self.matrix.assignments[id.0 as usize].is_none()
-        });
-        pending.extend(changed.into_iter().filter_map(|value| {
-            (self.intervals.problem.value(value).is_some()
-                && self.matrix.assignments[value.0 as usize].is_none())
-            .then_some(AllocationBundleId(value.0))
-        }));
-        let mut rebuilt = BinaryHeap::new();
-        for id in pending {
-            let value_id = VReg(id.0);
-            let stage = self.live_ranges.on_enqueue(value_id);
-            let value = self.intervals.problem.bundle(id).ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.SESSION_PENDING_VALUE",
-                    None,
-                    Some(value_id),
-                    "pending session value has no semantic allocation row",
-                )
-            })?;
-            rebuilt.push(allocation_queue_item(value, stage)?);
+        // Keep unchanged worklist entries in place. Rebuilding the complete
+        // heap after every live-range edit makes a split session quadratic in
+        // the number of still-pending values. Changed keys are appended and
+        // superseded or removed entries are discarded lazily by `allocate`.
+        for value in changed {
+            if self.intervals.problem.value(value).is_some()
+                && self.matrix.assignments[value.0 as usize].is_none()
+            {
+                self.queue_value(value)?;
+            }
         }
-        self.pending = rebuilt;
         Ok(())
     }
 
@@ -2779,14 +2763,12 @@ impl GreedyAllocator {
         }
         while let Some(item) = self.pending.pop() {
             let id = item.id;
-            let value = self.intervals.problem.bundle(id).cloned().ok_or_else(|| {
-                JointAllocationError::new(
-                    "JOINT_ALLOC.ORDER_RANGE",
-                    None,
-                    Some(VReg(id.0)),
-                    "definition order references a missing allocation value",
-                )
-            })?;
+            let Some(value) = self.intervals.problem.bundle(id).cloned() else {
+                // Incremental edits leave stale heap entries behind by design.
+                // VReg identities are never reused, so absence proves that
+                // this item belongs to a removed machine interval.
+                continue;
+            };
             let stage = self.live_ranges.stage(value.value);
             if allocation_queue_item(&value, stage)? != item {
                 // Stage changes append a new heap item. The superseded key is
@@ -3923,6 +3905,41 @@ mod tests {
             BTreeSet::from([PhysReg::RAX, PhysReg::RDX])
         );
         problem.verify(&cfg, &registers, &allocation).unwrap();
+    }
+
+    #[test]
+    fn incremental_removal_discards_stale_queue_entries_lazily() {
+        let mut function = function(
+            1,
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 7,
+                },
+                MInst::Return,
+            ],
+        );
+        let (cfg, _) = model(&mut function);
+        let registers = [PhysReg::RAX];
+        let problem = fixed_problem(&function, &cfg, &registers);
+        let mut allocator = GreedyAllocator::new(problem, &cfg, &registers).unwrap();
+        assert_eq!(allocator.pending.len(), 1);
+
+        allocator
+            .apply_value_delta(1, vec![(VReg(0), None)], None, None, &cfg, &registers)
+            .unwrap();
+        assert_eq!(
+            allocator.pending.len(),
+            1,
+            "local publication must not rebuild the complete pending heap"
+        );
+
+        let JointAllocationOutcome::Complete(allocation) =
+            allocator.allocate(&cfg, &registers).unwrap()
+        else {
+            panic!("a stale removed item must not become an allocation obligation");
+        };
+        assert_eq!(allocation.assignments, vec![None]);
     }
 
     #[test]

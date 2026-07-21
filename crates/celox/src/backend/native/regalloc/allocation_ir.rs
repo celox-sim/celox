@@ -1009,7 +1009,10 @@ impl AllocationIr {
         block: BlockId,
         cut: SlotIndex,
     ) -> Result<SplitCopyPlacement, AllocationIrError> {
-        if interval.value.0 >= self.next_value || !interval.covers(block, cut) {
+        let segment = interval
+            .segment_in_block(block)
+            .filter(|segment| segment.contains(cut));
+        let Some(segment) = segment else {
             return Err(AllocationIrError::new(
                 "ALLOCATION_IR.SPLIT_CUT",
                 Some(block),
@@ -1017,49 +1020,183 @@ impl AllocationIr {
                 vec![interval.value],
                 "split cut is outside the source live interval",
             ));
+        };
+        if interval.value.0 >= self.next_value {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.SPLIT_CUT",
+                Some(block),
+                None,
+                vec![interval.value],
+                "split cut references a value outside allocation IR",
+            ));
         }
         let block_index = self.block(block)?;
-        let row = &self.blocks[block_index];
-        let mut anchors = Vec::with_capacity(
-            row.original_instruction_count
-                .saturating_mul(2)
-                .saturating_add(1),
-        );
-        anchors.push(SyntheticAnchor::BlockEntry { block });
-        for instruction in 0..row.original_instruction_count {
-            anchors.push(SyntheticAnchor::BeforeInstruction { block, instruction });
-            if row.original_terminator != Some(instruction) {
-                anchors.push(SyntheticAnchor::AfterInstruction { block, instruction });
-            }
-        }
-
-        let mut best = None::<SplitCopyPlacement>;
-        for anchor in anchors {
-            let slots = self.next_instruction_slots_at_anchor(block_index, anchor)?;
-            let use_slot = slots.use_slot();
-            let definition_slot = slots.definition_slot();
-            if definition_slot >= cut || !interval.covers(block, use_slot) {
-                continue;
-            }
-            let placement = SplitCopyPlacement {
-                anchor,
-                block,
-                use_slot,
-                definition_slot,
-            };
-            if best.is_none_or(|current| current.definition_slot < definition_slot) {
-                best = Some(placement);
-            }
-        }
-        best.ok_or_else(|| {
+        let cut_zone = cut.stable_zone().ok_or_else(|| {
             AllocationIrError::new(
+                "ALLOCATION_IR.SPLIT_CUT",
+                Some(block),
+                None,
+                vec![interval.value],
+                "allocation-IR split cut has no stable instruction zone",
+            )
+        })?;
+        let anchor = self
+            .latest_original_boundary_before_zone(block_index, cut_zone)?
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.NO_LEGAL_SPLIT_POINT",
+                    Some(block),
+                    None,
+                    vec![interval.value],
+                    "no stable instruction boundary can define a split copy before the cut",
+                )
+            })?;
+        let slots = self.next_instruction_slots_at_anchor(block_index, anchor)?;
+        let use_slot = slots.use_slot();
+        let definition_slot = slots.definition_slot();
+        if definition_slot >= cut || !segment.contains(use_slot) {
+            return Err(AllocationIrError::new(
                 "ALLOCATION_IR.NO_LEGAL_SPLIT_POINT",
                 Some(block),
                 None,
                 vec![interval.value],
                 "no stable instruction boundary can define a split copy before the cut",
-            )
+            ));
+        }
+        Ok(SplitCopyPlacement {
+            anchor,
+            block,
+            use_slot,
+            definition_slot,
         })
+    }
+
+    /// Return the latest appendable source-MIR boundary whose stable zone is
+    /// strictly before `cut_zone`.
+    ///
+    /// A source instruction occupies zone `3*i + 2`; its before/after
+    /// boundaries occupy `3*i + 1` and `3*i + 3`.  New operations are appended
+    /// after every existing synthetic row in their boundary zone, so a row in
+    /// the cut's own zone can never precede an existing cut.  This arithmetic
+    /// query replaces a scan over every original instruction in the block.
+    fn latest_original_boundary_before_zone(
+        &self,
+        block: usize,
+        cut_zone: u64,
+    ) -> Result<Option<SyntheticAnchor>, AllocationIrError> {
+        if cut_zone == 0 {
+            return Ok(None);
+        }
+        let row = &self.blocks[block];
+        let instruction_count = u64::try_from(row.original_instruction_count).map_err(|_| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(row.id),
+                None,
+                Vec::new(),
+                "original instruction count exceeds the stable slot domain",
+            )
+        })?;
+        let exit_zone = instruction_count
+            .checked_mul(3)
+            .and_then(|zone| zone.checked_add(1))
+            .ok_or_else(|| {
+                AllocationIrError::new(
+                    "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                    Some(row.id),
+                    None,
+                    Vec::new(),
+                    "block exit exceeds the stable slot domain",
+                )
+            })?;
+        if cut_zone > exit_zone {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(row.id),
+                None,
+                Vec::new(),
+                "split cut exceeds the block's stable slot domain",
+            ));
+        }
+
+        let boundary_zone = match cut_zone % 3 {
+            0 => cut_zone.checked_sub(2),
+            1 if cut_zone == exit_zone
+                && row.original_terminator.is_some_and(|terminator| {
+                    Some(terminator) == row.original_instruction_count.checked_sub(1)
+                }) =>
+            {
+                cut_zone.checked_sub(3)
+            }
+            1 => cut_zone.checked_sub(1),
+            2 => cut_zone.checked_sub(1),
+            _ => unreachable!("stable zones have a remainder in 0..3"),
+        };
+        let Some(boundary_zone) = boundary_zone else {
+            return Ok(None);
+        };
+        if boundary_zone == 0 {
+            return Ok(Some(SyntheticAnchor::BlockEntry { block: row.id }));
+        }
+        match boundary_zone % 3 {
+            0 => {
+                let instruction = usize::try_from(boundary_zone / 3 - 1).map_err(|_| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(row.id),
+                        None,
+                        Vec::new(),
+                        "after-instruction split boundary exceeds usize",
+                    )
+                })?;
+                if instruction >= row.original_instruction_count
+                    || row.original_terminator == Some(instruction)
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(row.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "split boundary does not name an appendable source instruction",
+                    ));
+                }
+                Ok(Some(SyntheticAnchor::AfterInstruction {
+                    block: row.id,
+                    instruction,
+                }))
+            }
+            1 => {
+                let instruction = usize::try_from((boundary_zone - 1) / 3).map_err(|_| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(row.id),
+                        None,
+                        Vec::new(),
+                        "before-instruction split boundary exceeds usize",
+                    )
+                })?;
+                if instruction >= row.original_instruction_count {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                        Some(row.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "split boundary does not name a source instruction",
+                    ));
+                }
+                Ok(Some(SyntheticAnchor::BeforeInstruction {
+                    block: row.id,
+                    instruction,
+                }))
+            }
+            _ => Err(AllocationIrError::new(
+                "ALLOCATION_IR.INSTRUCTION_ORDER_RANGE",
+                Some(row.id),
+                None,
+                Vec::new(),
+                "split boundary resolved inside a source instruction",
+            )),
+        }
     }
 
     /// Insert a previously selected split copy without changing its physical
@@ -1472,6 +1609,35 @@ impl AllocationIr {
         current: VReg,
         semantic: VReg,
     ) -> Result<(), AllocationIrError> {
+        if semantic.0 >= self.original_value_count {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.EDGE_SEMANTIC_VALUE",
+                Some(site.block()),
+                None,
+                vec![semantic],
+                "non-register phi location must retain an immutable source-MIR value identity",
+            ));
+        }
+        self.assign_phi_edge_location(site, current, semantic)
+    }
+
+    /// Resolve an allocator-created phi source directly from its conventional
+    /// machine spill slot. Unlike a semantic root edge, the synthetic VReg is
+    /// the identity consumed by out-of-SSA and therefore remains in the phi.
+    pub(super) fn assign_machine_phi_edge_home(
+        &mut self,
+        site: UseSite,
+        current: VReg,
+    ) -> Result<(), AllocationIrError> {
+        self.assign_phi_edge_location(site, current, current)
+    }
+
+    fn assign_phi_edge_location(
+        &mut self,
+        site: UseSite,
+        current: VReg,
+        retained: VReg,
+    ) -> Result<(), AllocationIrError> {
         let UseSite::PhiEdge {
             predecessor,
             successor,
@@ -1534,16 +1700,7 @@ impl AllocationIr {
                 "phi-edge source differs from the register use being assigned a home",
             ));
         }
-        if semantic.0 >= self.original_value_count {
-            return Err(AllocationIrError::new(
-                "ALLOCATION_IR.EDGE_SEMANTIC_VALUE",
-                Some(successor),
-                None,
-                vec![semantic],
-                "non-register phi location must retain an immutable source-MIR value identity",
-            ));
-        }
-        phi_row.sources[source_index].1 = semantic;
+        phi_row.sources[source_index].1 = retained;
         phi_row.register_sources[source_index] = false;
         self.pending_liveness.changed_blocks.insert(predecessor);
         self.pending_liveness.removed_uses.push((
@@ -4570,6 +4727,39 @@ mod tests {
                 .iter()
                 .any(|segment| segment.block == BlockId(3))
         );
+
+        let left_edge = intervals.intervals[left_copy.0 as usize]
+            .as_ref()
+            .unwrap()
+            .uses
+            .iter()
+            .copied()
+            .find(|site| {
+                matches!(
+                    site,
+                    UseSite::PhiEdge {
+                        predecessor: BlockId(1),
+                        successor: BlockId(3),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        allocation_ir
+            .assign_machine_phi_edge_home(left_edge, left_copy)
+            .unwrap();
+        let delta = allocation_ir.take_liveness_delta();
+        incremental
+            .update_fact_delta(&allocation_ir, &cfg, &mut intervals, delta)
+            .unwrap();
+        assert!(
+            intervals.intervals[left_copy.0 as usize]
+                .as_ref()
+                .unwrap()
+                .uses
+                .is_empty()
+        );
+        assert_eq!(intervals, allocation_ir.analyze(&cfg).unwrap());
 
         let lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
         lowered.verify_result().unwrap();

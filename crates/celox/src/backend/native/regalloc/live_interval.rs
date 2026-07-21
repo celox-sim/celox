@@ -413,10 +413,16 @@ pub(super) struct LiveInterval {
 }
 
 impl LiveInterval {
-    pub fn covers(&self, block: BlockId, slot: SlotIndex) -> bool {
+    pub(super) fn segment_in_block(&self, block: BlockId) -> Option<LiveSegment> {
         self.segments
-            .iter()
-            .any(|segment| segment.block == block && segment.contains(slot))
+            .binary_search_by_key(&block, |segment| segment.block)
+            .ok()
+            .map(|index| self.segments[index])
+    }
+
+    pub fn covers(&self, block: BlockId, slot: SlotIndex) -> bool {
+        self.segment_in_block(block)
+            .is_some_and(|segment| segment.contains(slot))
     }
 
     pub fn interferes(&self, other: &Self) -> bool {
