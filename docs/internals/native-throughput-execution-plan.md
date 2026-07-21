@@ -6094,6 +6094,49 @@ Status: **adjacent stack and MemorySSA-state reloads no longer reread a value
 which is still in a register; semantics and allocation remain independently
 verified, while the measured generated-code gap is unchanged**.
 
+### Step 68: Select widened whole-variable loads at physical width
+
+Complete initial MIR inspection showed that a SIR load widened to a 64-bit
+result could still name a 32-bit variable in the physical state layout. ISel
+first emitted `load.i64` into a transient VReg and then `mov.w32` into the SIR
+result. Besides the redundant instruction and wider memory access, this
+created another allocator value whose live range existed only to perform the
+zero extension already provided by an x86-64 32-bit load.
+
+Two-state whole-variable loads now use the exact native 8/16/32-bit physical
+access when the memory layout proves that access covers the complete variable.
+The load defines the original SIR result VReg directly and its state-home
+recipe records the physical width. This is not a general VReg-width
+inference: non-native widths such as 27 bits retain the explicit load-and-mask
+sequence, and four-state values retain their separate value/mask handling.
+The concrete Heliodor sequence changed from
+`v50204 = load.i64 [sim + 33900268]; v43843 = mov.w32 v50204` to
+`v43843 = load.i32 [sim + 33900268]` in initial MIR.
+
+All three SIR dumps are byte-identical to Step 67. The complete interval MIR
+lost 127 lines, while its textual dump grew by 9,582 bytes because the smaller
+pre-allocation graph perturbed later VReg assignment. The `eval_comb` and
+fused spill frames each fell by 40 bytes, to 5,656 and 5,704 bytes. The emitted
+`eval_comb` body grew by 847 bytes while the fused body fell by 403 bytes;
+across all five emitted bodies the net change is a 355-byte increase. This is
+direct evidence that allocator/coalescing instability can outweigh a locally
+strictly smaller value graph, rather than evidence for retaining the
+redundant load.
+
+The two focused ISel regressions pass, including the non-native-width guard.
+The library suite passes 1,049/1,049, native testbench 60 passed with one
+ignored, counter 9 passed with three ignored, and package/workspace checks,
+package strict Clippy, formatting, diff, and clean Heliodor source checks pass.
+The final trace took 230.028 s. A trace-free run compiled in 226.570 s, reached
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`, and executed in
+102.671 s. The single execution sample establishes semantics only; no
+throughput gain is claimed.
+
+Status: **widened native state loads no longer create a redundant transient
+and truncating copy; the resulting allocation perturbation reinforces that
+stable phi affinity and coalescing, rather than more local peepholes, are the
+next code-quality problem**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6217,6 +6260,7 @@ verified, while the measured generated-code gap is unchanged**.
 | 65 productive free-prefix selection and transactional stack homes | this step | regalloc 307/307 | lib 1042/1042; all-target check, package strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 228.722 s; full compile 228.524 s; execute 101.035 s | split edits -45%; compile -31%; execute -2.7% vs Step 64; production gap remains 12.3% |
 | 66 trivial-value closure and dead-phi DCE | this step | MIR optimization 73/73 | lib 1045/1045; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.768 s; full compile 228.244 s; execute 102.749 s | full MIR -970,944 bytes; eval/fused frames -488/-464 bytes; one execution sample does not establish a speed gain |
 | 67 adjacent allocator-home forwarding | this step | stack/state forwarding 2/2 | lib 1047/1047; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.839 s; full compile 226.362 s; execute 106.059 s | adjacent stack/state reloads removed; eval/fused code -753/-803 bytes; no speed gain claimed |
+| 68 physical-width widened loads | this step | native/non-native widened-load ISel 2/2 | lib 1049/1049; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 230.028 s; full compile 226.570 s; execute 102.671 s | redundant `load.i64; mov.w32` removed; frames -40/-40 bytes; allocator perturbation leaves aggregate emitted code +355 bytes, so no speed gain claimed |
 
 ## Related design records
 

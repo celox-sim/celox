@@ -4995,14 +4995,38 @@ fn lower_instruction(
                             .copied()
                             .unwrap_or(*width_bits);
                         if var_width < *width_bits && var_width < 64 {
-                            let raw = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: raw,
-                                base: BaseReg::SimState,
-                                offset: byte_off,
-                                size: op_size,
-                            });
-                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
+                            if !ctx.four_state
+                                && OpSize::from_bits(var_width).is_some()
+                                && let Some(load_size) =
+                                    ctx.full_static_load_size(addr, *bit_off, var_width)
+                            {
+                                // SIR may widen a whole-variable load even
+                                // though the physical variable still has a
+                                // native 8/16/32-bit representation. Loading
+                                // that representation already performs the
+                                // required zero extension; a wider load plus a
+                                // second truncating VReg only lengthens
+                                // allocation ranges and may read adjacent
+                                // packed state.
+                                ctx.spill_descs[vreg.0 as usize] =
+                                    SpillDesc::sim_state(*addr, *bit_off, var_width, false);
+                                block.push(MInst::Load {
+                                    dst: vreg,
+                                    base: BaseReg::SimState,
+                                    offset: byte_off,
+                                    size: load_size,
+                                });
+                                ctx.known_bits.insert(vreg, var_width);
+                            } else {
+                                let raw = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: raw,
+                                    base: BaseReg::SimState,
+                                    offset: byte_off,
+                                    size: op_size,
+                                });
+                                ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
+                            }
                         } else {
                             block.push(MInst::Load {
                                 dst: vreg,
@@ -12294,6 +12318,105 @@ mod tests {
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: vec![],
         }
+    }
+
+    fn lower_widened_whole_variable_load(variable_width: usize) -> MFunction {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let loaded = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Load(
+                        loaded,
+                        address,
+                        SIROffset::Static(0),
+                        64,
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(loaded, RegisterType::Logic { width: 64 })]
+                .into_iter()
+                .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        let byte_width = variable_width.div_ceil(8);
+        layout.offsets.insert(absolute, 0);
+        layout.widths.insert(absolute, variable_width);
+        layout.is_4states.insert(absolute, false);
+        layout.total_size = byte_width;
+        layout.working_base_offset = byte_width;
+        layout.sparse_base_offset = byte_width;
+        layout.sparse_active_bits_offset = byte_width;
+        layout.merged_total_size = byte_width;
+        layout.triggered_bits_offset = byte_width;
+        layout.scratch_base_offset = byte_width;
+
+        lower_execution_unit(&unit, &layout, false)
+    }
+
+    #[test]
+    fn widened_whole_native_variable_loads_at_physical_width() {
+        let function = lower_widened_whole_variable_load(32);
+        let instructions = &function.blocks[0].insts;
+
+        assert_eq!(instructions.len(), 2);
+        assert!(matches!(
+            instructions[0],
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S32,
+            }
+        ));
+        assert!(matches!(instructions[1], MInst::Return));
+        assert!(matches!(
+            function.spill_descs[0].kind,
+            SpillKind::SimState {
+                bit_offset: 0,
+                width_bits: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn widened_whole_non_native_variable_keeps_explicit_mask() {
+        let function = lower_widened_whole_variable_load(27);
+        let instructions = &function.blocks[0].insts;
+
+        assert_eq!(instructions.len(), 3);
+        assert!(matches!(
+            instructions[0],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            }
+        ));
+        assert!(matches!(instructions[2], MInst::Return));
+        assert!(matches!(
+            instructions[1],
+            MInst::AndImm32 {
+                dst: VReg(0),
+                src: VReg(1),
+                imm: 0x07ff_ffff,
+            }
+        ));
     }
 
     #[test]
