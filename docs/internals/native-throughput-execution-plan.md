@@ -5839,6 +5839,66 @@ selected arms; exact Linux meaning and tick count are preserved; measured
 Heliodor execution is unchanged, so the dominant throughput gap remains
 open**.
 
+### Step 63: Loop-backedge phi affinity through CSSA snapshots
+
+The complete Step 62 x86 still paid parallel-copy permutations on repeated
+loop edges.  The concrete fused-function loop near `0x279` has seven header
+phis.  Its entry values already occupied the header registers when the header
+was colored, while the backedge values did not yet have colors.  CSSA had also
+isolated the interfering backedge sources as
+`snapshot = mov.w64 source`.  The existing affinity graph therefore contained
+`source <-> snapshot <-> header phi`, but the dominance-order streaming
+colorer could see only `snapshot <-> header phi` after `source` had already
+been colored.  It matched the one-time entry edge and repaired the 64-times
+repeated backedge with two `xchg` instructions on every continuation.
+
+The colorer now contracts that exact `Mov` node for affinity purposes when,
+and only when, the phi belongs to a natural-loop header and its predecessor is
+inside that same loop.  The original source receives a soft preference for
+the already-colored header result.  Register liveness, interference,
+fixed-register constraints, and forbidden colors remain authoritative, and
+the MIR instruction and CFG order are unchanged.  Ordinary joins are not
+contracted.  Construction scans the VReg domain, MIR instructions, and phi
+rows once, using one optional source entry per VReg; time and storage are
+`O(V + I + P)` with no live-set matrix or path enumeration.
+
+Two broader trials were rejected before this final form.  Contracting exact
+copies at every join moved copy cycles into unrelated one-shot CFG arms.
+Applying the loop preference only to phi bundles left scalar backedge updates
+in their old colors and recreated the same edge permutations.  Neither trial
+is retained.  The final implementation also preserves one affinity vote per
+CFG edge rather than deduplicating equal VReg neighbors.  In the accepted
+trace, the seven concrete backedge sources and header results use identical
+registers.  The old sequence at `0x3e0` containing two `xchg` instructions is
+absent.  Across `eval_comb`, `xchg` falls from 1,168 to 1,119; across the fused
+function it falls from 915 to 860.
+
+The complete accepted trace is retained at
+`target/heliodor/analysis/step98e-loop-backedge-affinity-final`.  All three SIR
+files and all MIR through pressure scheduling are byte-identical to Step 62.
+Their SIR sizes remain 58,711,247, 18,667,791, and 18,888,369 bytes.  Physical
+assignment and out-of-SSA code change; the complete MIR trace falls from
+50,085,749 to 50,077,640 bytes.
+
+Focused color tests cover both a loop-backedge snapshot which must expose its
+source affinity and an ordinary join which must remain uncontracted.  All 302
+register-allocation tests and all 1,037 library tests pass.  Native testbench
+passes 60 tests with one documented ignore, counter passes 9 with three
+documented ignores, and all-target check, strict Clippy, formatting, and diff
+checks pass.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 63.032 and 62.776 s;
+generated-code execution took 89.473 and 90.408 s.  Their 89.941 s execution
+mean is 3.829 s, or 4.1%, below Step 62's 93.769 s mean.  This is a measured
+improvement from repeated-edge register placement; it does not yet address
+the remaining stack reloads or non-loop parallel copies.
+
+Status: **CSSA no longer hides an available natural-loop backedge affinity;
+the concrete repeated phi permutation is removed, exact Linux meaning and
+tick count are preserved, and two non-LTO runs average 4.1% faster than the
+immediate parent**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5957,6 +6017,7 @@ open**.
 | 60 allocator-visible sparse-commit clobbers | this step | executable per-region/worklist clobber and fall-through labels | lib 1023/1023; workspace check, package all-target strict clippy, and format pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; two complete traces and all SIR stages are byte-identical | compile 73.593 s; execute 92.635 s | hidden 7-register per-commit and 14-register worklist saves removed; no replacement spill frame; execution unchanged |
 | 61 full-domain indexed FF stores | this step | indexed recovery/options 7/7; working round-trip 7/7; commit hazards 7/7 | lib 1033/1033; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two byte-identical generated-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; batch and CLI traces are byte-identical to the sequential candidate | compile 62.845 / 63.080 s; execute 93.248 / 92.955 s | 64-way and four-port selector ladders become direct indexed stores; accidental 512-byte round trips removed; SIR/MIR shrink, execution mean unchanged |
 | 62 lazy selector arms and guarded value diamonds | this step | BranchifyMux 50/50; guarded-region sinking 22/22 | lib 1035/1035; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; independently generated final traces are byte-identical | compile 62.985 / 65.635 s; execute 90.748 / 96.790 s | selector payloads and four guarded word divide/remainder regions become control-dependent; MIR -9,907 bytes; execution mean unchanged |
+| 63 loop-backedge phi affinity through CSSA snapshots | this step | color 7/7; regalloc 302/302 | lib 1037/1037; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy, format, and diff checks pass | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; SIR and pre-allocation MIR are byte-identical to Step 62 | compile 63.032 / 62.776 s; execute 89.473 / 90.408 s | exact CSSA snapshots expose only natural-loop backedge affinities; concrete seven-value backedge loses two repeated `xchg`; execute mean -4.1% |
 
 ## Related design records
 

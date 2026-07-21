@@ -130,7 +130,7 @@ pub(super) fn color_ssa(
     let registers = &ALLOCATABLE_REGS[..register_count];
     let required = required_colors(func)?;
     let forbidden = forbidden_colors(func, analysis)?;
-    let preferences = phi_preferences(func);
+    let preferences = phi_preferences(func, cfg);
     let mut colors = vec![None; func.vregs.count() as usize];
     let mut perm_matching = HashMap::<VReg, PhysReg>::new();
     let mut boundary_for_block = HashMap::<BlockId, &PermBoundary>::new();
@@ -545,17 +545,61 @@ fn forbid(
     Ok(())
 }
 
-fn phi_preferences(func: &MFunction) -> HashMap<VReg, Vec<VReg>> {
-    let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
+fn phi_preferences(func: &MFunction, cfg: &NormalizedCfg) -> HashMap<VReg, Vec<VReg>> {
+    // CSSA isolates an interfering phi source with an exact snapshot copy:
+    //
+    //     snapshot = mov source
+    //     result   = phi(... snapshot ...)
+    //
+    // The snapshot is colored after `source`.  At a loop header `result` is
+    // colored before either of them, so retaining only the two immediate
+    // affinities prevents the header color from ever reaching `source`.
+    // Contract that artificial copy node for preference purposes only on an
+    // internal edge of the natural loop whose header owns the phi. Ordinary
+    // one-shot joins keep their existing choices. This is a soft affinity
+    // only: ordinary liveness and forbidden-color checks still reject
+    // coalescing whenever `source` and `result` interfere.
+    let mut exact_copy_source = vec![None; func.vregs.count() as usize];
     for block in &func.blocks {
+        for inst in &block.insts {
+            let MInst::Mov { dst, src } = inst else {
+                continue;
+            };
+            if let Some(slot) = exact_copy_source.get_mut(dst.0 as usize) {
+                *slot = Some(*src);
+            }
+        }
+    }
+
+    let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        let natural_loop = cfg
+            .loop_for_header
+            .get(&block_index)
+            .and_then(|&loop_index| cfg.loops.get(loop_index));
         for phi in &block.phis {
-            for &(_, source) in &phi.sources {
-                preferences.entry(phi.dst).or_default().push(source);
-                preferences.entry(source).or_default().push(phi.dst);
+            for &(predecessor, source) in &phi.sources {
+                add_preference(&mut preferences, phi.dst, source);
+                let is_repeated_loop_edge = natural_loop.is_some_and(|natural_loop| {
+                    cfg.block_index
+                        .get(&predecessor)
+                        .is_some_and(|predecessor| natural_loop.blocks.contains(predecessor))
+                });
+                if is_repeated_loop_edge
+                    && let Some(original) =
+                        exact_copy_source.get(source.0 as usize).copied().flatten()
+                {
+                    add_preference(&mut preferences, phi.dst, original);
+                }
             }
         }
     }
     preferences
+}
+
+fn add_preference(preferences: &mut HashMap<VReg, Vec<VReg>>, left: VReg, right: VReg) {
+    preferences.entry(left).or_default().push(right);
+    preferences.entry(right).or_default().push(left);
 }
 
 /// x86 two-address affinity for a definition whose operand dies at the same
@@ -1108,6 +1152,162 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, vec![PhysReg::RDX, PhysReg::RAX]);
+    }
+
+    #[test]
+    fn loop_phi_bundle_sees_through_an_exact_backedge_snapshot() {
+        let mut vregs = VRegAllocator::new();
+        let initial = vregs.alloc();
+        let loop_condition = vregs.alloc();
+        let intermediate = vregs.alloc();
+        let snapshot = vregs.alloc();
+        let outer_destination = vregs.alloc();
+        let left_source = vregs.alloc();
+        let right_source = vregs.alloc();
+        let inner = PhiNode {
+            dst: intermediate,
+            sources: vec![(BlockId(10), left_source), (BlockId(11), right_source)],
+        };
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 7]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 0,
+        });
+        entry.push(MInst::LoadImm {
+            dst: loop_condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: left_source,
+            value: 2,
+        });
+        entry.push(MInst::LoadImm {
+            dst: right_source,
+            value: 3,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        func.push_block(entry);
+
+        let mut outer_header = MBlock::new(BlockId(1));
+        outer_header.phis.push(PhiNode {
+            dst: outer_destination,
+            sources: vec![(BlockId(0), initial), (BlockId(2), snapshot)],
+        });
+        outer_header.push(MInst::Branch {
+            cond: loop_condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        func.push_block(outer_header);
+
+        let mut backedge = MBlock::new(BlockId(2));
+        backedge.push(MInst::LoadImm {
+            dst: intermediate,
+            value: 4,
+        });
+        backedge.push(MInst::Mov {
+            dst: snapshot,
+            src: intermediate,
+        });
+        backedge.push(MInst::Jump { target: BlockId(1) });
+        func.push_block(backedge);
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Return);
+        func.push_block(exit);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let preferences = phi_preferences(&func, &cfg);
+        assert!(
+            preferences
+                .get(&intermediate)
+                .is_some_and(|neighbors| neighbors.contains(&outer_destination))
+        );
+
+        let required = vec![None; 7];
+        let forbidden = vec![ColorMask::empty(); 7];
+        let colors = vec![
+            None,
+            None,
+            None,
+            None,
+            Some(PhysReg::RAX),
+            Some(PhysReg::RDX),
+            Some(PhysReg::RBX),
+        ];
+        let result = choose_phi_bundle_colors(
+            BlockId(2),
+            &[&inner],
+            &[PhysReg::RAX, PhysReg::RDX, PhysReg::RBX],
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &ActiveColors::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![PhysReg::RAX]);
+    }
+
+    #[test]
+    fn ordinary_join_does_not_contract_an_edge_snapshot() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let original = vregs.alloc();
+        let snapshot = vregs.alloc();
+        let other = vregs.alloc();
+        let destination = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: original,
+            value: 2,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        func.push_block(entry);
+
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.push(MInst::Mov {
+            dst: snapshot,
+            src: original,
+        });
+        true_block.push(MInst::Jump { target: BlockId(3) });
+        func.push_block(true_block);
+
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.push(MInst::LoadImm {
+            dst: other,
+            value: 3,
+        });
+        false_block.push(MInst::Jump { target: BlockId(3) });
+        func.push_block(false_block);
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: destination,
+            sources: vec![(BlockId(1), snapshot), (BlockId(2), other)],
+        });
+        join.push(MInst::Return);
+        func.push_block(join);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let preferences = phi_preferences(&func, &cfg);
+        let destination_preferences = preferences.get(&destination).unwrap();
+        assert!(destination_preferences.contains(&snapshot));
+        assert!(destination_preferences.contains(&other));
+        assert!(!destination_preferences.contains(&original));
     }
 
     #[test]
