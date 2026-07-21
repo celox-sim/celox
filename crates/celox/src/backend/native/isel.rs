@@ -7298,6 +7298,9 @@ fn lower_instruction(
             if try_lower_concat_of_muxes(ctx, block, *dst, args, sir_block, sir_defs) {
                 return;
             }
+            if try_lower_repeated_msb_concat(ctx, block, *dst, args) {
+                return;
+            }
 
             // Concat: build a wide value from chunks.
             // For ≤64-bit result, shift and OR the pieces together.
@@ -7815,6 +7818,105 @@ fn lower_sir_bool_value(
         ctx.reg_map.get(reg)
     };
     Some(lower_bool_value(ctx, block, raw))
+}
+
+/// Lower a machine-word concat whose high part is a repeated one-bit value.
+///
+/// HDL sign extension commonly reaches SIR as
+///
+/// ```text
+/// Concat([sign, sign, ..., sign, low_bits])
+/// ```
+///
+/// Expanding that literally emits one shift and one OR per repeated bit. A
+/// one-bit value is exactly zero or one in each value/mask plane, so negating
+/// it creates the required all-zero/all-one fill word. Shifting that fill to
+/// the high part and ORing the low value implements the complete concat with
+/// constant work. Keep this rule at the native 64-bit boundary; narrower
+/// results require an additional canonical-width mask and wider values use the
+/// normal chunk lowering.
+fn try_lower_repeated_msb_concat(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    args: &[RegisterId],
+) -> bool {
+    const MIN_REPEATED_BITS: usize = 4;
+
+    if ctx.sir_width(&dst) != 64 || args.len() <= MIN_REPEATED_BITS {
+        return false;
+    }
+
+    let repeated = args[0];
+    let suffix = *args.last().expect("non-empty concat");
+    let repeated_bits = args.len() - 1;
+    let suffix_width = ctx.sir_width(&suffix);
+    if ctx.sir_width(&repeated) != 1
+        || repeated_bits < MIN_REPEATED_BITS
+        || repeated_bits + suffix_width != 64
+        || !args[..repeated_bits]
+            .iter()
+            .all(|candidate| *candidate == repeated)
+    {
+        return false;
+    }
+
+    fn lower_plane(
+        ctx: &mut ISelContext,
+        block: &mut MBlock,
+        repeated: VReg,
+        suffix: VReg,
+        suffix_width: usize,
+        destination: Option<VReg>,
+    ) -> VReg {
+        if repeated == suffix && suffix_width == 1 {
+            let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
+            block.push(MInst::Neg {
+                dst: result,
+                src: repeated,
+            });
+            return result;
+        }
+
+        let fill = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Neg {
+            dst: fill,
+            src: repeated,
+        });
+        let high = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm {
+            dst: high,
+            src: fill,
+            imm: suffix_width as u8,
+        });
+        let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
+        block.push(MInst::Or {
+            dst: result,
+            lhs: suffix,
+            rhs: high,
+        });
+        result
+    }
+
+    let destination = ctx.reg_map.get(dst);
+    let value = lower_plane(
+        ctx,
+        block,
+        ctx.reg_map.get(repeated),
+        ctx.reg_map.get(suffix),
+        suffix_width,
+        Some(destination),
+    );
+    debug_assert_eq!(value, destination);
+
+    if ctx.four_state {
+        let repeated_mask = ctx.get_mask(repeated, block);
+        let suffix_mask = ctx.get_mask(suffix, block);
+        let result_mask = lower_plane(ctx, block, repeated_mask, suffix_mask, suffix_width, None);
+        ctx.set_mask(dst, result_mask);
+    }
+
+    true
 }
 
 fn try_lower_concat_of_muxes(
@@ -12248,6 +12350,138 @@ mod tests {
             runtime_event_slot_size: 0,
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: vec![],
+        }
+    }
+
+    #[test]
+    fn repeated_msb_concat_uses_constant_work_in_both_planes() {
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let sign = RegisterId(0);
+        let low = RegisterId(1);
+        let result = RegisterId(2);
+        let low_value = 0x89ab_cdefu64;
+        let low_mask = 0x00ff_00ffu64;
+
+        for four_state in [false, true] {
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                blocks: [(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                sign,
+                                SIRValue::new_four_state(1u8, u8::from(four_state)),
+                            ),
+                            SIRInstruction::Imm(
+                                low,
+                                SIRValue::new_four_state(
+                                    low_value,
+                                    if four_state { low_mask } else { 0 },
+                                ),
+                            ),
+                            SIRInstruction::Concat(
+                                result,
+                                std::iter::repeat_n(sign, 32)
+                                    .chain(std::iter::once(low))
+                                    .collect(),
+                            ),
+                            SIRInstruction::Store(
+                                output,
+                                SIROffset::Static(0),
+                                64,
+                                result,
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [
+                    (sign, RegisterType::Logic { width: 1 }),
+                    (low, RegisterType::Logic { width: 32 }),
+                    (result, RegisterType::Logic { width: 64 }),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            unit.verify();
+
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.offsets.insert(output_abs, 0);
+            layout.widths.insert(output_abs, 64);
+            layout.is_4states.insert(output_abs, four_state);
+            layout.total_size = if four_state { 16 } else { 8 };
+            layout.working_base_offset = layout.total_size;
+            layout.sparse_base_offset = layout.total_size;
+            layout.merged_total_size = layout.total_size;
+            layout.triggered_bits_offset = layout.total_size;
+            layout.scratch_base_offset = layout.total_size;
+
+            let mut function = lower_execution_unit(&unit, &layout, four_state);
+            function.verify();
+            let instructions = function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .collect::<Vec<_>>();
+            let expected_planes = if four_state { 2 } else { 1 };
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Neg { .. }))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::ShlImm { imm: 32, .. }))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Or { .. }))
+                    .count(),
+                expected_planes
+            );
+
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = vec![0u8; layout.total_size];
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[..8].try_into().unwrap()),
+                0xffff_ffff_0000_0000 | low_value
+            );
+            if four_state {
+                assert_eq!(
+                    u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                    0xffff_ffff_0000_0000 | low_mask
+                );
+            }
         }
     }
 

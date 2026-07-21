@@ -5445,6 +5445,83 @@ Status: **mutually exclusive selector payloads execute only on their selected
 paths; the concrete join copy cycle and backedge stores shrink while Linux
 meaning and tick count remain exact; measured execution is unchanged**.
 
+### Step 57: Constant-work machine-word sign replication
+
+The Step 56 native trace exposed a separate instruction-selection defect that
+does not require profiling or aggregate statistics to diagnose.  SIR expresses
+a signed value widened to one machine word as a concat of the low suffix and
+many repetitions of its one-bit sign.  Native ISel lowered each repeated bit
+independently.  For a 32-bit suffix, the emitted sequence began as follows and
+continued once for every destination bit through bit 63:
+
+```text
+mov r8d, r9d
+shr r9, 31
+and r9d, 1
+mov r10, r9
+shl r10, 32
+or  r8, r10
+mov r10, r9
+shl r10, 33
+or  r8, r10
+...
+```
+
+The same value now lowers in constant work:
+
+```text
+mov r8d, r9d
+shr r9, 31
+and r9d, 1
+neg r9
+shl r9, 32
+or  r8, r9
+```
+
+The new selector rule is intentionally limited to the native machine-word
+boundary.  It requires an exactly 64-bit concat, at least four repetitions of
+the same one-bit SIR register in the high part, and one suffix whose width plus
+the repetition count is exactly 64.  Negating a canonical one-bit plane makes
+the required all-zero or all-one fill; shifting it by the suffix width and
+ORing the suffix reconstructs the concat exactly.  If all 64 inputs are the
+same bit, only the negation is required.  Four-state execution applies the
+same operation independently to the value and unknown-mask planes, preserving
+the existing representation rather than inventing width metadata on MIR
+virtual registers.  Recognition and lowering are linear in the concat input
+list and emit a constant number of MIR instructions.
+
+The complete trace is retained at
+`target/heliodor/analysis/step78-repeated-msb-concat`.  Every SIR stage is
+byte-identical to Step 56: 58,711,247 bytes before optimization, 19,610,333
+bytes after SIR optimization, and 19,547,796 bytes after native SIR
+optimization.  MIR falls from 52,177,456 to 51,921,510 bytes.  The end of the
+emitted `eval_comb` body moves from approximately `0x86ff7` to `0x8608d`, a
+3,946-byte reduction, while its 5,344-byte spill frame is unchanged.  The
+same collapse occurs for concrete 16-, 32-, and 48-bit suffix forms found in
+the generated workload.
+
+The executable ISel regression covers both two-state and four-state results,
+checks the exact `Neg`/`Shl`/`Or` instruction counts, and validates both value
+and unknown-mask planes.  All 30 ISel tests and all 1016 library tests pass.
+Dynamic-NBA tests pass 33 with one ignore, cross-block NBA tests pass 11 with
+one ignore, flip-flop tests pass 200 with 42 ignores, native execution passes
+16/16, native testbench passes 60 with one ignore, and counter passes 9 with
+three ignores.  Workspace check, package all-target strict clippy, formatting,
+and the documentation build pass.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 80.348 and 80.444 s;
+generated-code execution took 92.280 and 89.330 s.  Their 90.805 s mean is
+1.3% below Step 56's mean, but historical variance is too large to assign a
+larger claim.  The static defect and instruction reduction are exact; the
+remaining runtime gap is still dominated by hot state traffic, overlapping
+live ranges, spills, reloads, and residual join copies.
+
+Status: **machine-word sign replication no longer expands one repeated bit at
+a time; exact two-state and four-state meaning, Linux tick count, and normal
+power-down are preserved; MIR and emitted code shrink materially, with a
+modest measured execution improvement**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5556,7 +5633,8 @@ meaning and tick count remain exact; measured execution is unchanged**.
 | 53 demanded-prefix state forwarding | this step | same/cross-block forwarding; full-width use; partial overwrite; MemoryPhi join | regalloc 299/299; lib 1007/1007; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.079 / 81.077 s; execute 96.678 / 93.437 s | MemorySSA-proved wider state loads disappear; MIR -33,721 bytes; eval/fused raw frames -8 bytes; no runtime-speed claim |
 | 54 controlled-join arm sinking | this step | BranchifyMux 46/46 including multi-load sinking, write barrier, repeated-predicate edge | lib 1009/1009; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.256 s; execute 93.630 s | five match-result loads move to the selected predecessor; generic predicate short-circuit trial rejected; hot backedge layout and phi copies remain |
 | 55 post-RA hot-backedge layout | this step | emitter 17/17 including chain placement and true-edge fall-through | lib 1011/1011; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.074 / 80.882 s; execute 92.371 / 91.962 s | hot continuation falls through to its adjacent copy block; eval body -350 bytes; phi stack/register copies remain |
-| 56 selector-disjoint predicate control flow | this step | BranchifyMux 50/50 including selector dispatch, overlap rejection, condition normalization, and store barrier | lib 1015/1015; retained native execution and RTL integration gates | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.732 / 80.566 s; execute 92.905 / 91.147 s | only the selected payload executes; false-edge five-`xchg` cycle and three backedge stores disappear; execution mean unchanged |
+| 56 selector-disjoint predicate control flow | `a723fb96` | BranchifyMux 50/50 including selector dispatch, overlap rejection, condition normalization, and store barrier | lib 1015/1015; retained native execution and RTL integration gates | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.732 / 80.566 s; execute 92.905 / 91.147 s | only the selected payload executes; false-edge five-`xchg` cycle and three backedge stores disappear; execution mean unchanged |
+| 57 constant-work machine-word sign replication | this step | ISel 30/30 including executable two-state/four-state repeated-MSB concat | lib 1016/1016; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format, docs | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.348 / 80.444 s; execute 92.280 / 89.330 s | repeated sign bits lower to `neg; shl; or`; MIR -255,946 bytes and eval code -3,946 bytes; execution mean -1.3% |
 
 ## Related design records
 
