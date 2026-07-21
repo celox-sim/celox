@@ -25,7 +25,7 @@ pub(crate) fn eliminate_working_round_trip(
         stable_addr: RegionedAbsoluteAddr,
         seed_locs: Vec<(BlockId, usize)>,  // Commit(STABLE→WORKING)
         apply_locs: Vec<(BlockId, usize)>, // Commit(WORKING→STABLE)
-        has_dynamic: bool,
+        has_dynamic_commit: bool,
     }
 
     struct SparseVarInfo {
@@ -77,11 +77,11 @@ pub(crate) fn eliminate_working_round_trip(
                             stable_addr: *src,
                             seed_locs: Vec::new(),
                             apply_locs: Vec::new(),
-                            has_dynamic: false,
+                            has_dynamic_commit: false,
                         });
                         entry.seed_locs.push((bid, ii));
                         if has_dynamic {
-                            entry.has_dynamic = true;
+                            entry.has_dynamic_commit = true;
                         }
                         var_eu_access.entry(abs).or_default().insert(eu_idx);
                     } else if src.region == WORKING_REGION && dst.region == STABLE_REGION {
@@ -92,11 +92,11 @@ pub(crate) fn eliminate_working_round_trip(
                             stable_addr: *dst,
                             seed_locs: Vec::new(),
                             apply_locs: Vec::new(),
-                            has_dynamic: false,
+                            has_dynamic_commit: false,
                         });
                         entry.apply_locs.push((bid, ii));
                         if has_dynamic {
-                            entry.has_dynamic = true;
+                            entry.has_dynamic_commit = true;
                         }
                         var_eu_access.entry(abs_w).or_default().insert(eu_idx);
                     } else if src.region == SPARSE_WORKING_REGION && dst.region == STABLE_REGION {
@@ -115,20 +115,12 @@ pub(crate) fn eliminate_working_round_trip(
                         entry.invalid_apply |= invalid_apply;
                     }
                 }
-                SIRInstruction::Load(_, addr, offset, _) if addr.region == WORKING_REGION => {
+                SIRInstruction::Load(_, addr, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
-                    if offset.is_dynamic() {
-                        vars.entry(abs).and_modify(|v| v.has_dynamic = true);
-                    }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
-                SIRInstruction::Store(addr, offset, _, _, _, _)
-                    if addr.region == WORKING_REGION =>
-                {
+                SIRInstruction::Store(addr, _, _, _, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
-                    if offset.is_dynamic() {
-                        vars.entry(abs).and_modify(|v| v.has_dynamic = true);
-                    }
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
@@ -157,8 +149,12 @@ pub(crate) fn eliminate_working_round_trip(
             if info.seed_locs.is_empty() || info.apply_locs.is_empty() {
                 return false;
             }
-            // No dynamic offsets
-            if info.has_dynamic {
+            // Removing a partial dynamically addressed seed/apply would change
+            // which bytes are initialized or published.  Dynamic data accesses
+            // themselves are safe: the CFG memory-dependence analysis below
+            // uses a conservative alias envelope and rejects every path with
+            // an intervening STABLE observation or competing write.
+            if info.has_dynamic_commit {
                 return false;
             }
             // Independence: only accessed by one original EU
@@ -324,6 +320,42 @@ mod tests {
         )
     }
 
+    fn working_seed(offset: SIROffset, bits: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Commit(
+            addr(STABLE_REGION),
+            addr(WORKING_REGION),
+            offset,
+            bits,
+            Vec::new(),
+        )
+    }
+
+    fn working_apply(offset: SIROffset, bits: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Commit(
+            addr(WORKING_REGION),
+            addr(STABLE_REGION),
+            offset,
+            bits,
+            Vec::new(),
+        )
+    }
+
+    fn indexed_working_store() -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            addr(WORKING_REGION),
+            SIROffset::Element {
+                index: RegisterId(0),
+                element_width: 8,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+            },
+            8,
+            RegisterId(1),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
     fn eu(blocks: Vec<BasicBlock<RegionedAbsoluteAddr>>) -> ExecutionUnit<RegionedAbsoluteAddr> {
         let mut register_map = HashMap::default();
         register_map.insert(
@@ -347,6 +379,80 @@ mod tests {
             blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
             register_map,
         }
+    }
+
+    #[test]
+    fn indexed_working_round_trip_is_redirected_when_the_event_has_no_hazard() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(SIROffset::Static(0), 64),
+                indexed_working_store(),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+
+        eliminate_working_round_trip(&mut unit, &[]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Store(address, SIROffset::Element { .. }, ..)]
+                if address.region == STABLE_REGION
+        ));
+    }
+
+    #[test]
+    fn indexed_working_round_trip_stays_private_across_an_old_stable_read() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(SIROffset::Static(0), 64),
+                indexed_working_store(),
+                SIRInstruction::Load(RegisterId(2), addr(STABLE_REGION), SIROffset::Static(0), 8),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+
+        eliminate_working_round_trip(&mut unit, &[]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [
+                SIRInstruction::Commit(..),
+                SIRInstruction::Store(address, SIROffset::Element { .. }, ..),
+                SIRInstruction::Load(..),
+                SIRInstruction::Commit(..),
+            ] if address.region == WORKING_REGION
+        ));
+    }
+
+    #[test]
+    fn dynamically_addressed_seed_and_apply_are_not_removed() {
+        let dynamic = || SIROffset::Element {
+            index: RegisterId(0),
+            element_width: 8,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        };
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                working_seed(dynamic(), 8),
+                indexed_working_store(),
+                working_apply(dynamic(), 8),
+            ],
+            SIRTerminator::Return,
+        )]);
+
+        eliminate_working_round_trip(&mut unit, &[]);
+
+        assert_eq!(unit.blocks[&BlockId(0)].instructions.len(), 3);
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions[1],
+            SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+        ));
     }
 
     #[test]

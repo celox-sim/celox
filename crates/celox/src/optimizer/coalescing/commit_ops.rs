@@ -168,21 +168,62 @@ impl DirectStableStoreHazards {
     }
 }
 
-fn instruction_range(offset: &SIROffset, bits: usize) -> (usize, usize) {
+fn register_value_count(
+    register_map: &HashMap<RegisterId, RegisterType>,
+    register: RegisterId,
+) -> Option<usize> {
+    let width = reg_width(register_map, register)?;
+    if width >= usize::BITS as usize {
+        return None;
+    }
+    1usize.checked_shl(width as u32)
+}
+
+fn instruction_range(
+    register_map: &HashMap<RegisterId, RegisterType>,
+    offset: &SIROffset,
+    bits: usize,
+) -> (usize, usize) {
     match offset {
         SIROffset::Static(start) => (*start, start.saturating_add(bits)),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => (0, usize::MAX),
+        SIROffset::Dynamic(register) => {
+            let Some(value_count) = register_value_count(register_map, *register) else {
+                return (0, usize::MAX);
+            };
+            (0, value_count.saturating_sub(1).saturating_add(bits))
+        }
+        SIROffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset: None,
+        } => {
+            let Some(element_count) = register_value_count(register_map, *index) else {
+                return (0, usize::MAX);
+            };
+            let end = element_count
+                .saturating_sub(1)
+                .saturating_mul(*element_width)
+                .saturating_add(*bit_offset)
+                .saturating_add(bits);
+            (*bit_offset, end)
+        }
+        SIROffset::Element {
+            dynamic_bit_offset: Some(_),
+            ..
+        } => (0, usize::MAX),
     }
 }
 
 fn intersect_read_with_written(
     hazards: &mut DirectStableStoreHazards,
     written: &DirectStableStoreHazards,
+    register_map: &HashMap<RegisterId, RegisterType>,
     addr: AbsoluteAddr,
     offset: &SIROffset,
     bits: usize,
 ) {
-    let (read_start, read_end) = instruction_range(offset, bits);
+    let (read_start, read_end) = instruction_range(register_map, offset, bits);
     if let Some(ranges) = written.ranges.get(&addr) {
         for &(write_start, write_end) in ranges {
             let start = read_start.max(write_start);
@@ -195,11 +236,12 @@ fn intersect_read_with_written(
 fn intersect_write_with_written(
     hazards: &mut DirectStableStoreHazards,
     written: &DirectStableStoreHazards,
+    register_map: &HashMap<RegisterId, RegisterType>,
     addr: AbsoluteAddr,
     offset: &SIROffset,
     bits: usize,
 ) {
-    intersect_read_with_written(hazards, written, addr, offset, bits);
+    intersect_read_with_written(hazards, written, register_map, addr, offset, bits);
 }
 
 /// Bit ranges for which replacing a WORKING/SPARSE write with an immediate
@@ -234,6 +276,7 @@ pub(crate) fn direct_stable_store_hazards(
                     intersect_read_with_written(
                         &mut hazards,
                         &written,
+                        &eu.register_map,
                         addr.absolute_addr(),
                         offset,
                         *bits,
@@ -243,6 +286,7 @@ pub(crate) fn direct_stable_store_hazards(
                     intersect_read_with_written(
                         &mut hazards,
                         &written,
+                        &eu.register_map,
                         src.absolute_addr(),
                         offset,
                         *bits,
@@ -255,7 +299,7 @@ pub(crate) fn direct_stable_store_hazards(
                 SIRInstruction::Store(addr, offset, bits, _, _, _)
                     if addr.region == WORKING_REGION || addr.region == SPARSE_WORKING_REGION =>
                 {
-                    let (start, end) = instruction_range(offset, *bits);
+                    let (start, end) = instruction_range(&eu.register_map, offset, *bits);
                     written.insert(addr.absolute_addr(), start, end);
                 }
                 SIRInstruction::Store(addr, offset, bits, _, _, _)
@@ -264,6 +308,7 @@ pub(crate) fn direct_stable_store_hazards(
                     intersect_write_with_written(
                         &mut hazards,
                         &written,
+                        &eu.register_map,
                         addr.absolute_addr(),
                         offset,
                         *bits,
@@ -283,7 +328,7 @@ pub(crate) fn direct_stable_store_hazards(
                         // Store had no statically bounded bit range.
                         written.remove_addr(addr);
                     } else {
-                        let (start, end) = instruction_range(offset, *bits);
+                        let (start, end) = instruction_range(&eu.register_map, offset, *bits);
                         written.remove(addr, start, end);
                     }
                 }
@@ -291,6 +336,7 @@ pub(crate) fn direct_stable_store_hazards(
                     intersect_write_with_written(
                         &mut hazards,
                         &written,
+                        &eu.register_map,
                         dst.absolute_addr(),
                         offset,
                         *bits,

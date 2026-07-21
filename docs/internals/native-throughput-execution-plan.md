@@ -5704,6 +5704,77 @@ per-commit stack saves are removed without replacement spills; exact Linux
 meaning and tick count are preserved; measured Heliodor execution is
 unchanged**.
 
+### Step 61: Recover full-domain indexed FF stores
+
+The Step 60 SIR still represented one register-file write as a linear chain of
+exact selector comparisons.  The floating-point PRF had 64 stages and the
+integer PRF repeated the same 64-stage shape for four write ports.  Every
+stage branched to one static element Store or an empty arm and reconverged
+before testing the next selector value.  This is an O(element-count) lowered
+form of one O(1) unpacked-array write, not an instruction-selection problem.
+
+`IndexedStoreRecoveryPass` now recovers the source operation before native
+lowering.  It uses the complete shared `SirCfg` and requires all of the
+following: two-state execution; a declared unpacked-array shape; exact coverage
+of the selector's complete domain; key `k` writing static element `k`; one
+unobserved Store per selected arm; empty non-selected arms; exclusive joins;
+and alpha-equivalent pure value DAGs.  Definitions removed with the ladder may
+not escape it.  Only after the complete proof succeeds does the pass replace
+the chain with one `SIROffset::Element` Store.  The production default is also
+exposed as the `indexed_store_recovery` `SirPass`, so pass-disable diagnostics
+can reproduce the unoptimized pipeline exactly.
+
+All disjoint ladders are collected from one CFG snapshot, prepared
+transactionally, rewritten together, and followed by one reachability/DCE
+cleanup.  Exact constant results are memoized.  CFG construction, stage
+indexing, chain validation, and rewrite storage are therefore linear in the
+execution unit and the removed arm DAGs; there is no repeated whole-CFG scan,
+path enumeration, selector-domain expansion, or size cap.
+
+The first candidate exposed a separate state-publication defect.  A dynamic
+WORKING access was rejected unconditionally by the direct round-trip rewrite,
+so native lowering copied the complete 512-byte PRF from STABLE to WORKING,
+performed one indexed Store, and copied all 512 bytes back.  That version still
+booted correctly but regressed execution to 96.533 s.  Dynamic data access is
+not itself a semantic barrier.  The rewrite now rejects dynamically addressed
+seed/apply Commits, while ordinary dynamic Loads and Stores are governed by
+the existing complete-CFG memory-dependence proof.  An Element access without
+a dynamic intra-element offset gets a finite conservative range from its SIR
+selector width and element width.  Old-STABLE observations, competing writes,
+and exits before publication still reject direct publication.
+
+The final complete trace is retained at
+`target/heliodor/analysis/step93-indexed-store-cli`.  Its pre-optimized SIR
+is 58,711,247 bytes, post-optimized SIR is 18,663,178 bytes, native-optimized
+SIR is 18,841,073 bytes, and MIR is 50,095,656 bytes.  Relative to Step 60,
+post-optimized SIR falls by 946,380 bytes and MIR by 1,103,770 bytes.  The PRF
+hot path is now one direct
+`store.i64 [sim + 186400 + index]` or
+`store.i64 [sim + 187552 + index]`; its 512-byte copy-out is absent.  Complete
+MIR `memcopy` occurrences fall from 72 to 36.  The sequential Step 91,
+batch-rewrite Step 92, and final CLI-addressable Step 93 are byte-identical at
+every retained SIR stage and in complete MIR.
+
+The seven focused recovery/option tests include exhaustive selector-result
+comparison, incomplete-domain and observable-effect rejection, four-state
+rejection, two independent ladders recovered from one CFG analysis, and
+CLI/default and explicit-disable behavior.  Seven working round-trip tests and
+seven commit-hazard tests pass.  The common gates pass all
+1,033 library tests, 60 native-testbench tests with one documented ignore, and
+9 counter tests with three documented ignores.  Package check, all-target
+strict clippy, formatting, and diff checks pass.
+
+Both final trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  Code generation took 62.845 and 63.080 s; generated
+code execution took 93.248 and 92.955 s.  The 93.102 s mean is within the
+existing variation around Step 60's 92.635 s, so no throughput improvement is
+assigned to this step.  The static O(N) defect and accidental whole-object
+round trip are removed, but they are not the dominant remaining Linux path.
+
+Status: **full-domain FF write ladders recover to direct indexed state stores
+with complete CFG and alias proofs; exact Linux meaning and tick count are
+preserved; SIR/MIR shrink materially, while measured execution is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5820,6 +5891,7 @@ unchanged**.
 | 58 alias-aware late state DSE | this step | MIR optimization 70/70; state promotion 15/15 | lib 1020/1020; workspace check, package all-target strict clippy, format, docs, and diff checks pass | parent/candidate and two additional candidate runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent complete trace is byte-identical to retained HEAD | paired compile 73.919 / 74.250 s; execute 91.640 / 91.492 s | MemorySSA-exposed intermediate byte stores disappear; MIR -452,380 bytes; paired execution unchanged |
 | 59 constant-work wide repeated-bit chunks | this step | native ISel 31/31 including executable two-state/four-state 128-bit concat | lib 1021/1021; workspace check, package all-target strict clippy, format, docs, and diff checks pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 73.399 s; execute 91.489 s | two 64-step sign-fill ladders become `shr; neg`; MIR -275,556 bytes; execution unchanged |
 | 60 allocator-visible sparse-commit clobbers | this step | executable per-region/worklist clobber and fall-through labels | lib 1023/1023; workspace check, package all-target strict clippy, and format pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; two complete traces and all SIR stages are byte-identical | compile 73.593 s; execute 92.635 s | hidden 7-register per-commit and 14-register worklist saves removed; no replacement spill frame; execution unchanged |
+| 61 full-domain indexed FF stores | this step | indexed recovery/options 7/7; working round-trip 7/7; commit hazards 7/7 | lib 1033/1033; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check, all-target strict clippy, format, and diff checks pass | two byte-identical generated-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; batch and CLI traces are byte-identical to the sequential candidate | compile 62.845 / 63.080 s; execute 93.248 / 92.955 s | 64-way and four-port selector ladders become direct indexed stores; accidental 512-byte round trips removed; SIR/MIR shrink, execution mean unchanged |
 
 ## Related design records
 

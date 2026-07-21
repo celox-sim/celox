@@ -174,6 +174,7 @@ pub enum SirPass {
     VectorizeConcat,
     MaskedArrayAny,
     CircularPriority,
+    IndexedStoreRecovery,
     BranchifyMux,
     SplitCoalescedStores,
     PartialForward,
@@ -201,6 +202,7 @@ impl SirPass {
         SirPass::VectorizeConcat,
         SirPass::MaskedArrayAny,
         SirPass::CircularPriority,
+        SirPass::IndexedStoreRecovery,
         SirPass::BranchifyMux,
         SirPass::SplitCoalescedStores,
         SirPass::PartialForward,
@@ -228,6 +230,7 @@ impl SirPass {
             SirPass::VectorizeConcat => "vectorize_concat",
             SirPass::MaskedArrayAny => "masked_array_any",
             SirPass::CircularPriority => "circular_priority",
+            SirPass::IndexedStoreRecovery => "indexed_store_recovery",
             SirPass::BranchifyMux => "branchify_mux",
             SirPass::SplitCoalescedStores => "split_coalesced_stores",
             SirPass::PartialForward => "partial_forward",
@@ -256,6 +259,7 @@ impl SirPass {
             "vectorize_concat" => Some(SirPass::VectorizeConcat),
             "masked_array_any" => Some(SirPass::MaskedArrayAny),
             "circular_priority" => Some(SirPass::CircularPriority),
+            "indexed_store_recovery" => Some(SirPass::IndexedStoreRecovery),
             "branchify_mux" => Some(SirPass::BranchifyMux),
             "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
             "partial_forward" => Some(SirPass::PartialForward),
@@ -479,5 +483,25 @@ mod tests {
         assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::CircularPriority));
         assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::CircularPriority));
         assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::CircularPriority));
+    }
+
+    #[test]
+    fn indexed_store_recovery_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("indexed_store_recovery"),
+            Some(SirPass::IndexedStoreRecovery)
+        );
+        assert_eq!(
+            SirPass::IndexedStoreRecovery.as_str(),
+            "indexed_store_recovery"
+        );
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(
+            !OptimizeOptions::new(OptLevel::O2)
+                .disable(SirPass::IndexedStoreRecovery)
+                .is_enabled(SirPass::IndexedStoreRecovery)
+        );
     }
 }

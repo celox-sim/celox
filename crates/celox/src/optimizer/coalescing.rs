@@ -23,6 +23,7 @@ mod pass_guarded_region_sinking;
 mod pass_gvn;
 mod pass_hoist_common_branch_loads;
 mod pass_identity_store_bypass;
+mod pass_indexed_store_recovery;
 mod pass_inline_commit_forwarding;
 mod pass_loop_idiom;
 mod pass_manager;
@@ -156,6 +157,7 @@ use pass_eliminate_dead_working_stores::EliminateDeadWorkingStoresPass;
 use pass_guarded_region_sinking::GuardedRegionSinkingPass;
 use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
+use pass_indexed_store_recovery::IndexedStoreRecoveryPass;
 use pass_loop_idiom::LoopIdiomPass;
 use pass_manager::{ExecutionUnitPass, ExecutionUnitPassManager};
 use pass_masked_array_any::MaskedArrayAnyPass;
@@ -506,6 +508,9 @@ fn optimize_with_options(
             ff_passes.add_pass(PostGvnCfgCleanupPass);
         }
     }
+    if on(SirPass::IndexedStoreRecovery) {
+        ff_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
+    }
     if on(SirPass::ConcatFolding) {
         ff_passes.add_pass(ConcatFoldingPass);
     }
@@ -571,6 +576,9 @@ fn optimize_with_options(
         if on(SirPass::ControlFlowSimplify) {
             eval_only_passes.add_pass(PostGvnCfgCleanupPass);
         }
+    }
+    if on(SirPass::IndexedStoreRecovery) {
+        eval_only_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
     }
     if on(SirPass::ConcatFolding) {
         eval_only_passes.add_pass(ConcatFoldingPass);
@@ -758,6 +766,12 @@ fn optimize_with_options(
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, &options);
+        }
+    }
+    if on(SirPass::IndexedStoreRecovery) {
+        let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, &options);
         }
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
