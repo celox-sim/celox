@@ -1,10 +1,11 @@
 //! Sparse late forwarding for direct SimState round trips.
 //!
 //! Physical byte ranges and reaching memory definitions are provided by the
-//! IR-independent celox-analysis MemorySSA. This adapter only maps MIR effects
-//! and selects exact same-shaped Store-to-Load clusters.
+//! IR-independent celox-analysis MemorySSA. This adapter maps MIR effects and
+//! selects exact same-shaped Store-to-Load clusters as well as low-prefix
+//! loads whose every user discards the bytes not established by the store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
@@ -22,6 +23,7 @@ type ProgramPoint = (usize, usize);
 #[derive(Debug)]
 struct ForwardMemoryAnalysis {
     memory: ForwardMemoryState,
+    prefix_demands: BTreeMap<ProgramPoint, PrefixLoadDemand>,
 }
 
 #[derive(Debug)]
@@ -43,6 +45,24 @@ enum ForwardClobber {
     Definition(ProgramPoint),
     Phi(usize),
     Indeterminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixLoadDemand {
+    destination: VReg,
+    load_size: OpSize,
+    prefix_size: OpSize,
+    users: Vec<ProgramPoint>,
+}
+
+#[derive(Debug)]
+struct PrefixDemandBuilder {
+    instruction: ProgramPoint,
+    destination: VReg,
+    load_size: OpSize,
+    required_bits: u8,
+    users: Vec<ProgramPoint>,
+    valid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +112,112 @@ fn exact_location(base: BaseReg, offset: i32, size: OpSize) -> MemoryLocation<Me
     }
 }
 
+fn demanded_low_prefix_bits(inst: &MInst, value: VReg) -> Option<u8> {
+    match inst {
+        MInst::AndImm32 { src, imm, .. } if *src == value => {
+            Some((u32::BITS - imm.leading_zeros()) as u8)
+        }
+        MInst::AndImm { src, imm, .. } if *src == value => {
+            Some((u64::BITS - imm.leading_zeros()) as u8)
+        }
+        MInst::Mov32 { src, .. } if *src == value => Some(32),
+        _ => None,
+    }
+}
+
+fn prefix_op_size(required_bits: u8) -> Option<OpSize> {
+    match required_bits {
+        1..=8 => Some(OpSize::S8),
+        9..=16 => Some(OpSize::S16),
+        17..=32 => Some(OpSize::S32),
+        33..=64 => Some(OpSize::S64),
+        _ => None,
+    }
+}
+
+/// Find direct loads for which every SSA user observes one low-bit prefix.
+///
+/// This is deliberately an all-users proof. One unsupported phi, shift, store,
+/// or other full-width use keeps the original load intact instead of guessing
+/// which bits that consumer observes.
+fn demanded_prefix_loads(func: &MFunction) -> BTreeMap<ProgramPoint, PrefixLoadDemand> {
+    let mut by_value = HashMap::<VReg, PrefixDemandBuilder>::new();
+    for (block, row) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in row.insts.iter().enumerate() {
+            let MInst::Load {
+                dst,
+                base: BaseReg::SimState,
+                size,
+                ..
+            } = inst
+            else {
+                continue;
+            };
+            by_value.insert(
+                *dst,
+                PrefixDemandBuilder {
+                    instruction: (block, instruction),
+                    destination: *dst,
+                    load_size: *size,
+                    required_bits: 0,
+                    users: Vec::new(),
+                    valid: true,
+                },
+            );
+        }
+    }
+    if by_value.is_empty() {
+        return BTreeMap::new();
+    }
+
+    for row in &func.blocks {
+        for phi in &row.phis {
+            for &(_, source) in &phi.sources {
+                if let Some(demand) = by_value.get_mut(&source) {
+                    demand.valid = false;
+                }
+            }
+        }
+    }
+    for (block, row) in func.blocks.iter().enumerate() {
+        for (instruction, inst) in row.insts.iter().enumerate() {
+            let point = (block, instruction);
+            for value in inst.uses() {
+                let Some(demand) = by_value.get_mut(&value) else {
+                    continue;
+                };
+                let Some(required_bits) = demanded_low_prefix_bits(inst, value) else {
+                    demand.valid = false;
+                    continue;
+                };
+                demand.required_bits = demand.required_bits.max(required_bits);
+                if demand.users.last() != Some(&point) {
+                    demand.users.push(point);
+                }
+            }
+        }
+    }
+
+    by_value
+        .into_values()
+        .filter_map(|demand| {
+            let prefix_size = prefix_op_size(demand.required_bits)?;
+            (demand.valid
+                && !demand.users.is_empty()
+                && prefix_size.bytes() < demand.load_size.bytes())
+            .then_some((
+                demand.instruction,
+                PrefixLoadDemand {
+                    destination: demand.destination,
+                    load_size: demand.load_size,
+                    prefix_size,
+                    users: demand.users,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn analyze(
     func: &MFunction,
     cfg: &NormalizedCfg,
@@ -104,6 +230,7 @@ fn analyze(
             "normalized CFG does not cover every MIR block",
         ));
     }
+    let prefix_demands = demanded_prefix_loads(func);
     let mut events =
         vec![Vec::<MemoryAccessEvent<ProgramPoint, ProgramPoint>>::new(); func.blocks.len()];
     let mut writes_by_definition = BTreeMap::<ProgramPoint, Vec<MemoryEffect<MemoryObject>>>::new();
@@ -124,6 +251,10 @@ fn analyze(
             {
                 let location = exact_location(BaseReg::SimState, *offset, *size);
                 reads.push(MemoryEffect::Exact(location));
+                if let Some(demand) = prefix_demands.get(&point) {
+                    let prefix = exact_location(BaseReg::SimState, *offset, demand.prefix_size);
+                    reads.push(MemoryEffect::Exact(prefix));
+                }
             }
             if !reads.is_empty() || !writes.is_empty() {
                 for &effect in reads.iter().chain(&writes) {
@@ -217,7 +348,10 @@ fn analyze(
         });
     }
     let memory = ForwardMemoryState { reads };
-    Ok(ForwardMemoryAnalysis { memory })
+    Ok(ForwardMemoryAnalysis {
+        memory,
+        prefix_demands,
+    })
 }
 
 fn validate_memory_effect(
@@ -260,6 +394,15 @@ struct ForwardCluster {
     loads: Vec<ForwardCandidate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixForwardCandidate {
+    store: ProgramPoint,
+    load: ProgramPoint,
+    destination: VReg,
+    source: VReg,
+    users: Vec<ProgramPoint>,
+}
+
 fn exact_forward_candidates(
     func: &MFunction,
     analysis: &ForwardMemoryAnalysis,
@@ -286,12 +429,7 @@ fn exact_forward_candidates(
             ));
         };
         if read.read_index != 0 {
-            return Err(StatePromotionError::new(
-                "STATE_PROMOTE.LOAD_QUERY",
-                func.blocks.get(load_block).map(|block| block.id),
-                Some(load_instruction),
-                "direct MIR load has an unexpected MemorySSA query index",
-            ));
+            continue;
         }
         let expected_location = exact_location(BaseReg::SimState, *load_offset, *load_size);
         if read.effect != MemoryEffect::Exact(expected_location) {
@@ -334,6 +472,93 @@ fn exact_forward_candidates(
         });
     }
     candidates.sort_unstable_by_key(|candidate| (candidate.block, candidate.instruction));
+    Ok(candidates)
+}
+
+fn prefix_forward_candidates(
+    func: &MFunction,
+    analysis: &ForwardMemoryAnalysis,
+    exact_loads: &BTreeMap<ProgramPoint, ()>,
+) -> Result<Vec<PrefixForwardCandidate>, StatePromotionError> {
+    let mut candidates = Vec::new();
+    for read in &analysis.memory.reads {
+        if read.read_index != 1 || exact_loads.contains_key(&read.instruction) {
+            continue;
+        }
+        let (load_block, load_instruction) = read.instruction;
+        let Some(demand) = analysis.prefix_demands.get(&read.instruction) else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.PREFIX_QUERY",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "MemorySSA prefix query has no matching demanded-bits proof",
+            ));
+        };
+        let Some(MInst::Load {
+            dst,
+            base: BaseReg::SimState,
+            offset: load_offset,
+            size: load_size,
+        }) = func
+            .blocks
+            .get(load_block)
+            .and_then(|block| block.insts.get(load_instruction))
+        else {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.PREFIX_LOAD",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "demanded-prefix query no longer names a direct SimState load",
+            ));
+        };
+        if *dst != demand.destination || *load_size != demand.load_size {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.PREFIX_LOAD",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "demanded-prefix load identity changed after analysis",
+            ));
+        }
+        let expected = exact_location(BaseReg::SimState, *load_offset, demand.prefix_size);
+        if read.effect != MemoryEffect::Exact(expected) {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.PREFIX_LOCATION",
+                func.blocks.get(load_block).map(|block| block.id),
+                Some(load_instruction),
+                "MemorySSA prefix query differs from the demanded low bytes",
+            ));
+        }
+
+        let ForwardClobber::Definition(store) = read.clobber else {
+            continue;
+        };
+        let Some(MInst::Store {
+            base: BaseReg::SimState,
+            offset: store_offset,
+            src,
+            size: store_size,
+        }) = func
+            .blocks
+            .get(store.0)
+            .and_then(|block| block.insts.get(store.1))
+        else {
+            continue;
+        };
+        if store_offset != load_offset
+            || store_size.bytes() < demand.prefix_size.bytes()
+            || *src == demand.destination
+        {
+            continue;
+        }
+        candidates.push(PrefixForwardCandidate {
+            store,
+            load: read.instruction,
+            destination: demand.destination,
+            source: *src,
+            users: demand.users.clone(),
+        });
+    }
+    candidates.sort_unstable_by_key(|candidate| candidate.load);
     Ok(candidates)
 }
 
@@ -421,20 +646,27 @@ fn canonicalize_store_value(
     Ok((canonical, Some(normalization)))
 }
 
-/// Forward exact same-shaped state round trips after pressure scheduling.
+/// Forward MemorySSA-proved state round trips after pressure scheduling.
 ///
 /// Each original store remains the packed-state home. Loads reached by that
 /// exact store share one canonical store value and become ordinary copy
 /// affinities. If the cluster is evicted, point-specific MemorySSA
 /// rematerialization recreates a load at the corresponding use. No state cell,
-/// terminal writeback, or synthetic phi is added here.
-pub(super) fn forward_exact_round_trips(
+/// terminal writeback, or synthetic phi is added here. A wider load may also
+/// disappear when every SSA user observes only a low prefix fully established
+/// by one reaching store; unsupported users retain the full load.
+pub(super) fn forward_state_round_trips(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
 ) -> Result<usize, StatePromotionError> {
     let analysis = analyze(func, cfg)?;
     let candidates = exact_forward_candidates(func, &analysis)?;
-    if candidates.is_empty() {
+    let exact_loads = candidates
+        .iter()
+        .map(|candidate| ((candidate.block, candidate.instruction), ()))
+        .collect::<BTreeMap<_, _>>();
+    let prefix_candidates = prefix_forward_candidates(func, &analysis, &exact_loads)?;
+    if candidates.is_empty() && prefix_candidates.is_empty() {
         return Ok(0);
     }
 
@@ -450,6 +682,8 @@ pub(super) fn forward_exact_round_trips(
     })?;
     let mut stores = BTreeMap::<(usize, usize), (VReg, Option<MInst>)>::new();
     let mut loads = BTreeMap::<(usize, usize), (VReg, VReg)>::new();
+    let mut removed_prefix_loads = BTreeMap::<ProgramPoint, VReg>::new();
+    let mut prefix_users = BTreeMap::<ProgramPoint, (VReg, VReg)>::new();
     let mut forwarded = 0usize;
     for cluster in clusters {
         let (canonical, normalization) = canonicalize_store_value(
@@ -481,6 +715,33 @@ pub(super) fn forward_exact_round_trips(
             forwarded = forwarded.saturating_add(1);
         }
     }
+    for candidate in prefix_candidates {
+        if removed_prefix_loads
+            .insert(candidate.load, candidate.destination)
+            .is_some()
+        {
+            return Err(StatePromotionError::new(
+                "STATE_PROMOTE.PREFIX_LOAD_UNIQUE",
+                rewritten.blocks.get(candidate.load.0).map(|block| block.id),
+                Some(candidate.load.1),
+                "one load has multiple demanded-prefix forwarding plans",
+            ));
+        }
+        for user in candidate.users {
+            if prefix_users
+                .insert(user, (candidate.destination, candidate.source))
+                .is_some()
+            {
+                return Err(StatePromotionError::new(
+                    "STATE_PROMOTE.PREFIX_USER_UNIQUE",
+                    rewritten.blocks.get(user.0).map(|block| block.id),
+                    Some(user.1),
+                    "one instruction consumes multiple demanded-prefix loads",
+                ));
+            }
+        }
+        forwarded = forwarded.saturating_add(1);
+    }
 
     for block in 0..rewritten.blocks.len() {
         let original = std::mem::take(&mut rewritten.blocks[block].insts);
@@ -504,6 +765,28 @@ pub(super) fn forward_exact_round_trips(
                     ));
                 };
                 *src = canonical;
+            }
+            if let Some(&(load, source)) = prefix_users.get(&(block, instruction)) {
+                if demanded_low_prefix_bits(&inst, load).is_none() {
+                    return Err(StatePromotionError::new(
+                        "STATE_PROMOTE.PREFIX_USER",
+                        Some(rewritten.blocks[block].id),
+                        Some(instruction),
+                        "demanded-prefix user changed before atomic publication",
+                    ));
+                }
+                inst.rewrite_use(load, source);
+            }
+            if let Some(&destination) = removed_prefix_loads.get(&(block, instruction)) {
+                if !matches!(inst, MInst::Load { dst, .. } if dst == destination) {
+                    return Err(StatePromotionError::new(
+                        "STATE_PROMOTE.PREFIX_LOAD",
+                        Some(rewritten.blocks[block].id),
+                        Some(instruction),
+                        "demanded-prefix load changed before removal",
+                    ));
+                }
+                continue;
             }
             if let Some(&(destination, canonical)) = loads.get(&(block, instruction)) {
                 instructions.push(MInst::Mov {
@@ -593,7 +876,7 @@ mod tests {
         let mut function = function(3, vec![block]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 2);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 2);
         assert!(matches!(
             function.blocks[0].insts[1],
             MInst::AndImm32 {
@@ -655,7 +938,7 @@ mod tests {
         let mut function = function(2, vec![block]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
         assert_eq!(function.vregs.count(), 2);
         assert!(matches!(
             function.blocks[0].insts[1],
@@ -670,6 +953,279 @@ mod tests {
             MInst::Mov {
                 dst: VReg(1),
                 src: VReg(0),
+            }
+        ));
+    }
+
+    #[test]
+    fn wider_load_forwards_when_every_user_observes_the_stored_prefix() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0x1234_5678,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(1),
+                imm: 0x07ff_ffff,
+            },
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 0,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(3, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert_eq!(function.blocks[0].insts.len(), 5);
+        assert!(function.blocks[0].insts.iter().all(|inst| !matches!(
+            inst,
+            MInst::Load {
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(matches!(
+            function.blocks[0].insts[2],
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(0),
+                imm: 0x07ff_ffff,
+            }
+        ));
+    }
+
+    #[test]
+    fn one_full_width_user_keeps_the_wider_load() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0x1234_5678,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S32,
+            },
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(1),
+                imm: 0x07ff_ffff,
+            },
+            MInst::ShrImm {
+                dst: VReg(3),
+                src: VReg(1),
+                imm: 40,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 0);
+        assert!(matches!(
+            function.blocks[0].insts[2],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            }
+        ));
+        assert!(matches!(
+            function.blocks[0].insts[3],
+            MInst::AndImm32 { src: VReg(1), .. }
+        ));
+    }
+
+    #[test]
+    fn later_partial_prefix_write_blocks_wider_load_forwarding() {
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0x1234_5678,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S32,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0xaa,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(1),
+                size: OpSize::S8,
+            },
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: 0x07ff_ffff,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, vec![block]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 0);
+        assert!(matches!(
+            function.blocks[0].insts[4],
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            }
+        ));
+    }
+
+    #[test]
+    fn dominating_store_forwards_a_wider_load_across_cfg_blocks() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0x1234_5678,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(0),
+                size: OpSize::S32,
+            },
+            MInst::Jump { target: BlockId(1) },
+        ];
+        let mut successor = MBlock::new(BlockId(1));
+        successor.insts = vec![
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(1),
+                imm: 0x07ff_ffff,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(3, vec![entry, successor]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
+        let successor = cfg.block_index[&BlockId(1)];
+        assert!(
+            function.blocks[successor]
+                .insts
+                .iter()
+                .all(|inst| !matches!(inst, MInst::Load { .. }))
+        );
+        assert!(matches!(
+            function.blocks[successor].insts[0],
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(0),
+                imm: 0x07ff_ffff,
+            }
+        ));
+    }
+
+    #[test]
+    fn one_arm_prefix_store_keeps_the_wider_join_load() {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut dirty = MBlock::new(BlockId(1));
+        dirty.insts = vec![
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0x1234_5678,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(1),
+                size: OpSize::S32,
+            },
+            MInst::Jump { target: BlockId(3) },
+        ];
+        let mut clean = MBlock::new(BlockId(2));
+        clean.insts = vec![MInst::Jump { target: BlockId(3) }];
+        let mut join = MBlock::new(BlockId(3));
+        join.insts = vec![
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: 0x07ff_ffff,
+            },
+            MInst::Return,
+        ];
+        let mut function = function(4, vec![entry, dirty, clean, join]);
+        let cfg = normalize(&mut function);
+
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 0);
+        let join = cfg.block_index[&BlockId(3)];
+        assert!(matches!(
+            function.blocks[join].insts[0],
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
             }
         ));
     }
@@ -709,7 +1265,7 @@ mod tests {
         let mut function = function(3, vec![block]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 0);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 0);
         assert!(matches!(
             function.blocks[0].insts[4],
             MInst::Load {
@@ -764,7 +1320,7 @@ mod tests {
         let mut function = function(3, vec![entry, dirty, clean, join]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 0);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 0);
         let join = cfg.block_index[&BlockId(3)];
         assert!(function.blocks[join].phis.is_empty());
         assert!(matches!(
@@ -910,7 +1466,7 @@ mod tests {
         let mut function = function(4, vec![block]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
         assert!(matches!(
             function.blocks[0].insts[5],
             MInst::Mov {
@@ -988,7 +1544,7 @@ mod tests {
         let mut function = function(4, vec![entry, dirty, clean, join]);
         let cfg = normalize(&mut function);
 
-        assert_eq!(forward_exact_round_trips(&mut function, &cfg).unwrap(), 1);
+        assert_eq!(forward_state_round_trips(&mut function, &cfg).unwrap(), 1);
         let clean = cfg.block_index[&BlockId(2)];
         let join = cfg.block_index[&BlockId(3)];
         assert!(matches!(

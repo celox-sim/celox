@@ -463,7 +463,7 @@ fn run_regalloc_in_place(
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
     let state_forward_start = timing.then(crate::timing::now);
     let forwarded =
-        state_promote::forward_exact_round_trips(func, &normalized_cfg).map_err(|error| {
+        state_promote::forward_state_round_trips(func, &normalized_cfg).map_err(|error| {
             RegallocError::new(
                 "late physical-state forwarding",
                 error.rule,

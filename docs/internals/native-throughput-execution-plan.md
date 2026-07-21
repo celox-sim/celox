@@ -5231,6 +5231,57 @@ shared without weakening MemorySSA identity or logical SSA ownership; Linux
 meaning and tick count are preserved, but this local repair does not address
 the dominant throughput gap**.
 
+### Step 53: MemorySSA-proved demanded-prefix state forwarding
+
+Inspection of the complete scheduled and post-allocation MIR found direct
+state traffic such as `store.i32 [sim + 33897184]` followed by a same-address
+`load.i64`, even though every SSA user immediately discarded all but the low
+27 bits.  The load was therefore not required by RTL semantics: the reaching
+32-bit store already established every bit any consumer could observe.
+
+Late state forwarding now computes an all-users low-prefix demand for direct
+SimState loads and asks the shared MemorySSA for the definition reaching that
+exact byte prefix.  It forwards only when one dominating direct store starts
+at the same address and covers the complete demanded prefix.  A full-width or
+unsupported user, phi use, MemoryPhi at a CFG join, unknown write, or later
+overlapping partial write retains the original load.  Exact same-shaped
+round-trip forwarding still takes precedence.  The pass remains after
+pressure scheduling, so it does not reorder the scheduler's memory effects.
+
+In the concrete hot path, post-scheduling MIR changes from a 64-bit state load
+plus 27-bit mask to applying that mask directly to the reaching store source.
+Final x86 changes from `mov r8,[r15+2053AE0h]` followed later by
+`and esi,7FFFFFFh` to a register copy from the value already stored in `ebx`.
+Pressure-selected edge rematerializations that remain use a 32-bit state load,
+not the unneeded 64-bit load.
+
+Focused tests cover same-block and cross-block forwarding, a full-width user,
+an intervening partial write, and a one-arm-store MemoryPhi join.  All 299
+register-allocation tests and all 1007 library tests pass.  Dynamic-NBA tests
+pass 33 with one ignore, cross-block NBA tests pass 11 with one ignore,
+flip-flop tests pass 200 with 42 ignores, native execution passes 16/16,
+native testbench passes 60 with one ignore, and counter passes 9 with three
+ignores.  Package all-target check, strict clippy, and format gates pass.
+
+The complete trace is at
+`target/heliodor/analysis/step73-width-aware-state-forwarding`.  All three SIR
+dumps are byte-identical to Step 52.  Full MIR falls from 52,212,355 to
+52,178,634 bytes.  The raw spill frames fall from 5,352 to 5,344 bytes for
+`eval_comb` and from 5,368 to 5,360 bytes for the fused function; their x86
+stack allocations fall from `0x14f0` to `0x14e0` and from `0x1500` to `0x14f0`
+after alignment.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  They compiled in 81.079 and 81.077 s and executed in
+96.678 and 93.437 s.  The 95.058 s execution mean is above Step 52's 93.093 s
+mean and within the historical run-to-run spread, so no execution-speed or
+compile-speed claim is made.
+
+Status: **a wider physical-state reload is removed only when an all-users
+width proof and the exact MemorySSA reaching definition make it redundant;
+Linux meaning and tick count are preserved, generated MIR and spill frames
+are smaller, but the dominant throughput gap remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5339,6 +5390,7 @@ the dominant throughput gap**.
 | 50 register-free sparse active bitmap | this step | mark/worklist emission; multiword and padding; exact effects/GVN/reload/scheduler dependencies | lib 997/997; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.238 / 79.904 s; execute 91.148 / 95.338 s | each remaining sparse mark is one register-free bitmap `bts`; fused code -15,031 bytes; spill frame unchanged; execution mean unchanged, so no speed claim |
 | 51 machine-width algebraic identities | this step | direct full-word merge; all word32 ALU constants and identities; zero-extension preservation | lib 1000/1000; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.586 / 80.420 s; execute 93.621 / 93.701 s | overwritten destination load and zero-mask merge collapse to a direct store; MIR -530,306 bytes; fused frame unchanged; execution mean unchanged |
 | 52 exact reconstruction recipe prefixes | this step | exact prefix sharing; distinct final SSA ownership | regalloc 294/294; lib 1002/1002; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.720 / 80.216 s; execute 92.850 / 93.337 s | duplicate state load/mask prefixes become one exact DAG; MIR -1,189 bytes; frames unchanged; execution mean difference too small for a speed claim |
+| 53 demanded-prefix state forwarding | this step | same/cross-block forwarding; full-width use; partial overwrite; MemoryPhi join | regalloc 299/299; lib 1007/1007; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.079 / 81.077 s; execute 96.678 / 93.437 s | MemorySSA-proved wider state loads disappear; MIR -33,721 bytes; eval/fused raw frames -8 bytes; no runtime-speed claim |
 
 ## Related design records
 
