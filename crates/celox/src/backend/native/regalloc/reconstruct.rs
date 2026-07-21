@@ -10,11 +10,9 @@ use crate::backend::native::mir::{
 use super::allocation_ir::{MaterializedStateReload, MaterializedStateStore};
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
-#[cfg(test)]
-use super::reload::PureStep;
 use super::reload::{
-    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
-    ResolvedRecipe, materialize_pure_step,
+    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, PureStep, ReloadRecipeAnalysis,
+    ResolvedBase, ResolvedRecipe, materialize_pure_step,
 };
 use super::spill_plan::{LogicalValue, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan};
 
@@ -85,6 +83,18 @@ enum MaterializedOp {
 struct PreparedRecipe {
     expected: ResolvedRecipe,
     instructions: Vec<MInst>,
+}
+
+/// Exact recipe prefixes already emitted at one concrete insertion point.
+///
+/// VRegs are sufficient node identities because every cached prefix has one
+/// unique SSA definition.  Keeping one flat edge table avoids a separately
+/// allocated hash table for every trie node.  Final recipe results are never
+/// cached: each logical reload must retain its own SSA representative.
+#[derive(Default)]
+struct PreparedRecipeCache {
+    bases: HashMap<ResolvedBase, VReg>,
+    steps: HashMap<(VReg, PureStep), VReg>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,7 +195,13 @@ pub(super) fn reconstruct(
             .phis
             .retain(|phi| !spilled_phis.contains(&plan.logical.of(phi.dst)));
     }
+    let mut cached_point = None;
+    let mut point_recipe_cache = PreparedRecipeCache::default();
     for &(point, operation) in &plan.point_ops {
+        if cached_point != Some(point) {
+            point_recipe_cache = PreparedRecipeCache::default();
+            cached_point = Some(point);
+        }
         if !matches!(operation, PlannedOp::Reload { .. }) {
             continue;
         }
@@ -209,6 +225,7 @@ pub(super) fn reconstruct(
             &mut insertions,
             &mut reload_blocks,
             recipe,
+            &mut point_recipe_cache,
         )?;
     }
     for (&(predecessor, successor), operations) in &plan.edge_ops {
@@ -241,6 +258,7 @@ pub(super) fn reconstruct(
             instruction_count: 0,
         };
         let mut reloads_only = true;
+        let mut recipe_cache = PreparedRecipeCache::default();
         for &operation in operations {
             match operation {
                 PlannedOp::Spill { .. } => {
@@ -277,6 +295,7 @@ pub(super) fn reconstruct(
                 &mut insertions,
                 &mut reload_blocks,
                 recipe,
+                &mut recipe_cache,
             )?;
             let Some(materialized) = materialized else {
                 return Err(ReconstructError::new(
@@ -795,6 +814,7 @@ fn materialize_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     recipe: Option<ResolvedRecipe>,
+    recipe_cache: &mut PreparedRecipeCache,
 ) -> Result<Option<MaterializedReload>, ReconstructError> {
     let (operation, reload) = match operation {
         PlannedOp::Spill { value, home } | PlannedOp::SpillPhi { value, home } => {
@@ -811,7 +831,8 @@ fn materialize_operation(
                 |recipe| ReloadMaterialization::Recipe(recipe.clone()),
             );
             let (fresh, recipe, definitions, instruction_count) = if let Some(recipe) = recipe {
-                let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, value, recipe)?;
+                let (fresh, prepared) =
+                    prepare_recipe(func, logical_for_vreg, value, recipe, recipe_cache)?;
                 let definitions = prepared
                     .instructions
                     .iter()
@@ -857,24 +878,40 @@ fn prepare_recipe(
     logical_for_vreg: &mut Vec<LogicalValue>,
     logical: LogicalValue,
     expected: ResolvedRecipe,
+    cache: &mut PreparedRecipeCache,
 ) -> Result<(VReg, PreparedRecipe), ReconstructError> {
     let mut instructions = Vec::with_capacity(expected.steps.len() + 1);
-    let mut current = alloc_fresh(func, logical_for_vreg, logical)?;
-    instructions.push(match &expected.base {
-        ResolvedBase::Constant(value) => MInst::LoadImm {
-            dst: current,
-            value: *value,
-        },
-        ResolvedBase::State(state) => MInst::Load {
-            dst: current,
-            base: BaseReg::SimState,
-            offset: state.load.offset,
-            size: state.load.size,
-        },
-    });
-    for &step in &expected.steps {
+    if expected.steps.is_empty() {
+        let result = alloc_fresh(func, logical_for_vreg, logical)?;
+        instructions.push(materialize_recipe_base(&expected.base, result));
+        return Ok((
+            result,
+            PreparedRecipe {
+                expected,
+                instructions,
+            },
+        ));
+    }
+
+    let mut current = if let Some(&cached) = cache.bases.get(&expected.base) {
+        cached
+    } else {
+        let base = alloc_fresh(func, logical_for_vreg, logical)?;
+        instructions.push(materialize_recipe_base(&expected.base, base));
+        cache.bases.insert(expected.base.clone(), base);
+        base
+    };
+    for (index, &step) in expected.steps.iter().enumerate() {
+        let is_final = index + 1 == expected.steps.len();
+        if !is_final && let Some(&cached) = cache.steps.get(&(current, step)) {
+            current = cached;
+            continue;
+        }
         let destination = alloc_fresh(func, logical_for_vreg, logical)?;
         instructions.push(materialize_pure_step(step, destination, current));
+        if !is_final {
+            cache.steps.insert((current, step), destination);
+        }
         current = destination;
     }
     Ok((
@@ -884,6 +921,21 @@ fn prepare_recipe(
             instructions,
         },
     ))
+}
+
+fn materialize_recipe_base(base: &ResolvedBase, destination: VReg) -> MInst {
+    match base {
+        ResolvedBase::Constant(value) => MInst::LoadImm {
+            dst: destination,
+            value: *value,
+        },
+        ResolvedBase::State(state) => MInst::Load {
+            dst: destination,
+            base: BaseReg::SimState,
+            offset: state.load.offset,
+            size: state.load.size,
+        },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1663,6 +1715,109 @@ mod tests {
             alloc_fresh(&mut func, &mut logical_for_vreg, LogicalValue(original.0)).unwrap();
 
         assert_eq!(logical_for_vreg[fresh.0 as usize], LogicalValue(original.0));
+    }
+
+    #[test]
+    fn recipe_materialization_shares_exact_intermediate_prefixes() {
+        let mut vregs = VRegAllocator::new();
+        let first_logical = vregs.alloc();
+        let second_logical = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut logical_for_vreg = vec![
+            LogicalValue(first_logical.0),
+            LogicalValue(second_logical.0),
+        ];
+        let mut cache = PreparedRecipeCache::default();
+        let common_mask = PureStep::AndImm32 {
+            immediate: 0x07ff_ffff,
+        };
+
+        let (first_result, first) = prepare_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(first_logical.0),
+            ResolvedRecipe {
+                base: ResolvedBase::Constant(0x1234_5678),
+                steps: vec![common_mask, PureStep::ShrImm64 { immediate: 18 }],
+            },
+            &mut cache,
+        )
+        .unwrap();
+        let (second_result, second) = prepare_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(second_logical.0),
+            ResolvedRecipe {
+                base: ResolvedBase::Constant(0x1234_5678),
+                steps: vec![common_mask, PureStep::ShrImm64 { immediate: 9 }],
+            },
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(first.instructions.len(), 3);
+        assert_eq!(second.instructions.len(), 1);
+        let common = match first.instructions[1] {
+            MInst::AndImm32 {
+                dst,
+                imm: 0x07ff_ffff,
+                ..
+            } => dst,
+            ref instruction => panic!("expected cached mask, got {instruction:?}"),
+        };
+        assert!(matches!(
+            second.instructions[0],
+            MInst::ShrImm {
+                dst,
+                src,
+                imm: 9,
+            } if dst == second_result && src == common
+        ));
+        assert_ne!(first_result, second_result);
+    }
+
+    #[test]
+    fn recipe_materialization_never_shares_final_results() {
+        let mut vregs = VRegAllocator::new();
+        let first_logical = vregs.alloc();
+        let second_logical = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut logical_for_vreg = vec![
+            LogicalValue(first_logical.0),
+            LogicalValue(second_logical.0),
+        ];
+        let mut cache = PreparedRecipeCache::default();
+        let recipe = ResolvedRecipe {
+            base: ResolvedBase::Constant(0x1234_5678),
+            steps: vec![
+                PureStep::AndImm32 {
+                    immediate: 0x07ff_ffff,
+                },
+                PureStep::ShrImm64 { immediate: 18 },
+            ],
+        };
+
+        let (first_result, first) = prepare_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(first_logical.0),
+            recipe.clone(),
+            &mut cache,
+        )
+        .unwrap();
+        let (second_result, second) = prepare_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(second_logical.0),
+            recipe,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(first.instructions.len(), 3);
+        assert_eq!(second.instructions.len(), 1);
+        assert_ne!(first_result, second_result);
+        assert_eq!(second.instructions[0].def(), Some(second_result));
     }
 
     #[test]

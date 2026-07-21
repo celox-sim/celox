@@ -5184,6 +5184,53 @@ remove full-word masked-copy loads before allocation; Linux meaning and tick
 count are preserved and generated code is smaller, while measured execution
 is unchanged**.
 
+### Step 52: Exact reconstruction recipe-prefix sharing
+
+Inspection of the complete post-allocation MIR found independent reload
+recipes at one CFG edge rebuilding the same value prefix.  One concrete edge
+loaded `[sim + 33897184]` twice, applied the same 27-bit `and.w32` twice, and
+then shifted the two copies by 18 and 9.  This duplication was introduced by
+SSA spill reconstruction, not by the inactive interval allocator: every
+selected recipe was previously expanded as a separate instruction chain.
+
+Reconstruction now interns exact intermediate recipe prefixes at one concrete
+program point or CFG-edge insertion point.  The flat trie is keyed by the
+complete `ResolvedBase` and `(prefix VReg, PureStep)`; state-base equality
+therefore includes the physical load shape, observed bit range, and exact
+MemorySSA snapshot.  Cache lifetime never crosses an insertion point or edge.
+The final result of every recipe is deliberately excluded so each logical
+reload retains a distinct SSA representative.  Expected time is linear in the
+number of recipe steps, and extra storage is bounded by unique intermediate
+prefixes at the current insertion point rather than the whole function.
+
+The concrete MIR is now one `load`, one `and.w32`, and two shifts.  Emitted x86
+likewise changes from two loads and two masks to one load/mask, a register copy,
+and two shifts; the associated edge no longer needs the two `xchg` instructions
+which arranged the independently materialized results.  Focused tests prove
+common-prefix sharing and distinct final definitions.  All 294 register-
+allocation tests and all 1002 library tests pass.  Dynamic-NBA tests pass 33
+with one upstream ignore, cross-block NBA tests pass 11 with one ignore,
+flip-flop tests pass 200 with 42 ignores, native execution passes 16/16,
+native testbench passes 60 with one ignore, and counter passes 9 with three
+Veryl ignores.  Package all-target check, strict clippy, and format gates pass.
+
+The complete trace is at
+`target/heliodor/analysis/step72-shared-recipe-prefixes`.  All three SIR dumps
+are byte-identical to Step 51.  Full MIR falls from 52,213,544 to 52,212,355
+bytes.  The concrete `eval_comb` x86 body ends at `0x87718` instead of
+`0x87726`, while its 5,352-byte spill frame and the fused `0x1500` prologue
+remain unchanged.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  They compiled in 80.720 and 80.216 s and executed in
+92.850 and 93.337 s.  The 93.093 s execution mean is only 0.6% below Step 51's
+93.661 s mean, so no runtime-speed or compile-speed claim is made.
+
+Status: **exact duplicate reload-recipe prefixes at one insertion point are
+shared without weakening MemorySSA identity or logical SSA ownership; Linux
+meaning and tick count are preserved, but this local repair does not address
+the dominant throughput gap**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5291,6 +5338,7 @@ is unchanged**.
 | 49 direct hazard-free sparse state | this step | round-trip 4/4; publication hazards 7/7; direct bulk-zero plan/emission | lib 996/996; dynamic NBA 33 passed, 1 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two final-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 73.027 / 72.968 s; execute 93.902 / 92.780 s | sparse first-write copy, metadata, and tail Commit removed where complete-event CFG proves no observation; MIR -12.1%; mean execute -9.8%; compile regression remains open |
 | 50 register-free sparse active bitmap | this step | mark/worklist emission; multiword and padding; exact effects/GVN/reload/scheduler dependencies | lib 997/997; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.238 / 79.904 s; execute 91.148 / 95.338 s | each remaining sparse mark is one register-free bitmap `bts`; fused code -15,031 bytes; spill frame unchanged; execution mean unchanged, so no speed claim |
 | 51 machine-width algebraic identities | this step | direct full-word merge; all word32 ALU constants and identities; zero-extension preservation | lib 1000/1000; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.586 / 80.420 s; execute 93.621 / 93.701 s | overwritten destination load and zero-mask merge collapse to a direct store; MIR -530,306 bytes; fused frame unchanged; execution mean unchanged |
+| 52 exact reconstruction recipe prefixes | this step | exact prefix sharing; distinct final SSA ownership | regalloc 294/294; lib 1002/1002; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.720 / 80.216 s; execute 92.850 / 93.337 s | duplicate state load/mask prefixes become one exact DAG; MIR -1,189 bytes; frames unchanged; execution mean difference too small for a speed claim |
 
 ## Related design records
 
