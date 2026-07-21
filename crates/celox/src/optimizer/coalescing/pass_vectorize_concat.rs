@@ -397,6 +397,45 @@ fn concat_width(
     })
 }
 
+/// Resolve `low = source & ((1 << low_width) - 1)` to `source`.
+///
+/// Frontend lowering commonly represents the low part of a signed extension
+/// this way even though the destination register already has `low_width`.
+/// Keeping the mask in the value graph must not hide the relationship between
+/// the low part and its separately extracted sign bit.
+fn low_masked_source(
+    low: RegisterId,
+    low_width: usize,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<RegisterId> {
+    if low_width == 0 || low_width > 64 {
+        return None;
+    }
+    let expected_mask = if low_width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << low_width) - 1
+    };
+    let SIRInstruction::Binary(_, lhs, BinaryOp::And, rhs) = defs.get(&low)? else {
+        return None;
+    };
+
+    let is_mask = |register: RegisterId| {
+        matches!(
+            defs.get(&register),
+            Some(SIRInstruction::Imm(_, value))
+                if sir_value_to_u64(value) == Some(expected_mask)
+        )
+    };
+    if is_mask(*rhs) {
+        Some(*lhs)
+    } else if is_mask(*lhs) {
+        Some(*rhs)
+    } else {
+        None
+    }
+}
+
 fn sign_bit_matches_low_msb(
     sign: RegisterId,
     low: RegisterId,
@@ -420,6 +459,9 @@ fn sign_bit_matches_low_msb(
             source,
             bit_position,
         }) => {
+            if bit_position == sign_bit && low_masked_source(low, low_width, defs) == Some(source) {
+                return true;
+            }
             if let Some(SIRInstruction::Slice(_, low_source, base, width)) = defs.get(&low)
                 && source == *low_source
                 && low_width == *width
@@ -1770,6 +1812,60 @@ mod tests {
                     RegisterId(0),
                 ],
             ),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(1)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        let block = eu.blocks.get(&BlockId(0)).unwrap();
+
+        assert!(block.instructions.iter().any(|inst| matches!(
+            inst,
+            SIRInstruction::Binary(RegisterId(1), _, BinaryOp::Sar, _)
+        )));
+        assert!(
+            !block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Concat(..)))
+        );
+    }
+
+    #[test]
+    fn sign_extend_concat_from_masked_low_part() {
+        let mut register_map = HashMap::default();
+        for (reg, width) in [
+            (0, 64),
+            (1, 64),
+            (2, 8),
+            (3, 64),
+            (4, 1),
+            (5, 1),
+            (6, 8),
+            (7, 8),
+        ] {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            );
+        }
+
+        let mut concat_args = vec![RegisterId(5); 56];
+        concat_args.push(RegisterId(7));
+        let instructions = vec![
+            SIRInstruction::Imm(RegisterId(2), SIRValue::new(7u64)),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(0), BinaryOp::Shr, RegisterId(2)),
+            SIRInstruction::Imm(RegisterId(4), SIRValue::new(1u64)),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(3), BinaryOp::And, RegisterId(4)),
+            SIRInstruction::Imm(RegisterId(6), SIRValue::new(0xffu64)),
+            SIRInstruction::Binary(RegisterId(7), RegisterId(0), BinaryOp::And, RegisterId(6)),
+            SIRInstruction::Concat(RegisterId(1), concat_args),
             SIRInstruction::RuntimeEvent {
                 site_id: 0,
                 args: vec![RegisterId(1)],
