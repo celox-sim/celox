@@ -3528,13 +3528,9 @@ mod tests {
                 offset: load_offset,
                 size: OpSize::S64,
             });
-            block.push(MInst::Scratch { dst: values[2] });
             block.push(MInst::SparseMarkActive {
-                scratch: values[2],
                 active_index: 3,
-                active_count_offset: 100,
-                active_flags_offset: 200,
-                active_list_offset: 300,
+                active_bits_offset: 200,
                 active_capacity: 16,
             });
             block.push(MInst::Mov {
@@ -3550,14 +3546,14 @@ mod tests {
         let (unrelated, unrelated_analysis) = fixture(40);
         assert!(unrelated_analysis.state_valid_at_point(PointUse {
             block: BlockId(0),
-            instruction: 3,
+            instruction: 2,
             value: unrelated,
         }));
 
-        let (metadata, metadata_analysis) = fixture(100);
+        let (metadata, metadata_analysis) = fixture(200);
         assert!(!metadata_analysis.state_valid_at_point(PointUse {
             block: BlockId(0),
-            instruction: 3,
+            instruction: 2,
             value: metadata,
         }));
     }

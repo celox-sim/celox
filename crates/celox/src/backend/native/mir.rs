@@ -730,23 +730,18 @@ pub enum MInst {
         summary_word_count: usize,
         four_state: bool,
     },
-    /// Add one sparse region to the fixed-capacity active-region worklist.
-    /// The active byte makes repeated stores to the same region idempotent.
+    /// Mark one sparse region active in the event-local bitmap. Repeated marks
+    /// are naturally idempotent and need no temporary register.
     SparseMarkActive {
-        scratch: VReg,
         active_index: u32,
-        active_count_offset: i32,
-        active_flags_offset: i32,
-        active_list_offset: i32,
+        active_bits_offset: i32,
         active_capacity: usize,
     },
-    /// Drain active sparse regions and commit their dirty chunks through one
+    /// Drain the sparse active bitmap and commit dirty chunks through one
     /// shared generated loop. Descriptor rows are indexed by active_index.
     SparseCommitWorklist {
         descriptor_table: ConstantTableId,
-        active_count_offset: i32,
-        active_flags_offset: i32,
-        active_list_offset: i32,
+        active_bits_offset: i32,
         active_capacity: usize,
     },
 
@@ -1041,15 +1036,8 @@ impl fmt::Display for MInst {
                 f,
                 "sparse_commit [sim + {dst_offset}], [sim + {src_offset}], bytes={byte_size}, dirty_words={dirty_word_count}, summary_words={summary_word_count}, four_state={four_state}"
             ),
-            MInst::SparseMarkActive {
-                scratch,
-                active_index,
-                ..
-            } => {
-                write!(
-                    f,
-                    "sparse_mark_active region={active_index}, scratch={scratch}"
-                )
+            MInst::SparseMarkActive { active_index, .. } => {
+                write!(f, "sparse_mark_active region={active_index}")
             }
             MInst::SparseCommitWorklist {
                 descriptor_table,
@@ -1306,8 +1294,8 @@ impl MInst {
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. } => Uses::none(),
-            MInst::SparseMarkActive { scratch, .. } => Uses::one(*scratch),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1620,15 +1608,11 @@ impl MInst {
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
-            MInst::SparseMarkActive { scratch, .. } => {
-                if *scratch == old {
-                    *scratch = new;
-                }
-            }
         }
     }
 
@@ -1978,14 +1962,11 @@ mod tests {
             UseCase {
                 name: "SparseMarkActive",
                 inst: MInst::SparseMarkActive {
-                    scratch: a,
                     active_index: 0,
-                    active_count_offset: 0,
-                    active_flags_offset: 8,
-                    active_list_offset: 16,
+                    active_bits_offset: 8,
                     active_capacity: 1,
                 },
-                expected: vec![a],
+                expected: vec![],
             },
             UseCase {
                 name: "Add",

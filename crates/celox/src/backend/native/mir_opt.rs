@@ -7257,16 +7257,12 @@ mod tests {
                 MInst::Load {
                     dst: VReg(1),
                     base: BaseReg::SimState,
-                    offset: 100,
+                    offset: 200,
                     size: OpSize::S64,
                 },
-                MInst::Scratch { dst: VReg(4) },
                 MInst::SparseMarkActive {
-                    scratch: VReg(4),
                     active_index: 3,
-                    active_count_offset: 100,
-                    active_flags_offset: 200,
-                    active_list_offset: 300,
+                    active_bits_offset: 200,
                     active_capacity: 16,
                 },
                 MInst::Load {
@@ -7278,7 +7274,7 @@ mod tests {
                 MInst::Load {
                     dst: VReg(3),
                     base: BaseReg::SimState,
-                    offset: 100,
+                    offset: 200,
                     size: OpSize::S64,
                 },
                 MInst::Store {
@@ -7307,19 +7303,19 @@ mod tests {
                 },
                 MInst::Return,
             ],
-            5,
+            4,
         );
 
         global_gvn(&mut func);
 
         assert_eq!(
-            func.blocks[0].insts[4],
+            func.blocks[0].insts[3],
             MInst::Mov {
                 dst: VReg(2),
                 src: VReg(0),
             }
         );
-        assert!(matches!(func.blocks[0].insts[5], MInst::Load { .. }));
+        assert!(matches!(func.blocks[0].insts[4], MInst::Load { .. }));
     }
 
     #[test]

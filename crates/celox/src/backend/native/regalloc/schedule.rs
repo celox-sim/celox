@@ -734,11 +734,8 @@ mod tests {
         let mut tracker = MemoryDependencyTracker::<MemoryObject, usize>::default();
         for index in 0..MARKS {
             let inst = MInst::SparseMarkActive {
-                scratch: VReg(index as u32),
                 active_index: index as u32,
-                active_count_offset: 0,
-                active_flags_offset: 1024,
-                active_list_offset: 1_000_000,
+                active_bits_offset: 1024,
                 active_capacity: ACTIVE_CAPACITY,
             };
             let mut dependencies = BTreeSet::new();
@@ -750,17 +747,16 @@ mod tests {
                 analysis_effects(&writes),
                 &mut dependencies,
             );
-            if index != 0 {
+            if index % 64 != 0 {
                 assert!(dependencies.contains(&(index - 1)));
+            } else if index != 0 {
+                assert!(!dependencies.contains(&(index - 1)));
             }
         }
 
         let mark = MInst::SparseMarkActive {
-            scratch: VReg(MARKS as u32),
             active_index: MARKS as u32,
-            active_count_offset: 0,
-            active_flags_offset: 1024,
-            active_list_offset: 1_000_000,
+            active_bits_offset: 1024,
             active_capacity: ACTIVE_CAPACITY,
         };
         assert!(

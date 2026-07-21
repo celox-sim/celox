@@ -223,9 +223,7 @@ fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedErr
 fn emit_sparse_commit_worklist(
     asm: &mut CodeAssembler,
     descriptor_label: CodeLabel,
-    active_count_offset: i32,
-    active_flags_offset: i32,
-    active_list_offset: i32,
+    active_bits_offset: i32,
     active_capacity: usize,
 ) -> Result<(), IcedError> {
     if active_capacity == 0 {
@@ -240,31 +238,36 @@ fn emit_sparse_commit_worklist(
         asm.push(reg)?;
     }
 
-    // r12 = active-list cursor, r13 = captured entry count.
-    asm.mov(
-        r13,
-        qword_ptr(mem_operand(BaseReg::SimState, active_count_offset)),
-    )?;
-    asm.mov(
-        qword_ptr(mem_operand(BaseReg::SimState, active_count_offset)),
-        0i32,
-    )?;
+    // r12 = active bitmap word index, r13 = captured bits in that word.
+    // Clear each word before processing it. Sparse writes cannot execute
+    // concurrently with this event-tail commit, so no mark can be lost.
     asm.xor(r12d, r12d)?;
 
-    let mut active_loop = asm.create_label();
+    let active_word_count = active_capacity.div_ceil(64);
+    let mut active_word_loop = asm.create_label();
+    let mut active_bits = asm.create_label();
+    let mut active_word_next = asm.create_label();
     let mut active_next = asm.create_label();
     let mut active_done = asm.create_label();
-    asm.set_label(&mut active_loop)?;
-    asm.cmp(r12, r13)?;
-    asm.jae(active_done)?;
-    // Corrupt checkpoint metadata must not index beyond the fixed worklist.
-    asm.cmp(r12, active_capacity as i32)?;
+    asm.set_label(&mut active_word_loop)?;
+    asm.cmp(r12, active_word_count as i32)?;
     asm.jae(active_done)?;
 
-    asm.mov(eax, dword_ptr(SIM_BASE + r12 * 4 + active_list_offset))?;
+    asm.mov(r13, qword_ptr(SIM_BASE + r12 * 8 + active_bits_offset))?;
+    asm.mov(qword_ptr(SIM_BASE + r12 * 8 + active_bits_offset), 0i32)?;
+
+    asm.set_label(&mut active_bits)?;
+    asm.test(r13, r13)?;
+    asm.je(active_word_next)?;
+    asm.bsf(rcx, r13)?;
+    asm.btr(r13, rcx)?;
+    asm.mov(rax, r12)?;
+    asm.shl(rax, 6)?;
+    asm.add(rax, rcx)?;
+    // Ignore padding bits in the bitmap's final word. They can only be set by
+    // malformed checkpoint state, but must not index beyond the table.
     asm.cmp(rax, active_capacity as i32)?;
-    asm.jae(active_next)?;
-    asm.mov(byte_ptr(SIM_BASE + rax + active_flags_offset), 0i32)?;
+    asm.jae(active_bits)?;
 
     // Descriptor rows contain eight u64 fields and are ordered by active id.
     asm.shl(rax, 6)?;
@@ -272,7 +275,7 @@ fn emit_sparse_commit_worklist(
     asm.add(rbx, rax)?;
 
     // A sparse value of at most one native chunk has exactly one dirty word
-    // and one summary bit.  Active-list membership already tells us which
+    // and one summary bit. Active-bitmap membership already tells us which
     // descriptor to visit, so scanning both bitmap levels is pure overhead.
     let mut generic_summary = asm.create_label();
     asm.cmp(qword_ptr(rbx + 16), 8i32)?;
@@ -396,8 +399,10 @@ fn emit_sparse_commit_worklist(
     asm.jmp(summary_loop)?;
 
     asm.set_label(&mut active_next)?;
+    asm.jmp(active_bits)?;
+    asm.set_label(&mut active_word_next)?;
     asm.inc(r12)?;
-    asm.jmp(active_loop)?;
+    asm.jmp(active_word_loop)?;
     asm.set_label(&mut active_done)?;
 
     for reg in [
@@ -2213,62 +2218,32 @@ fn emit_inst(
         }
 
         MInst::SparseMarkActive {
-            scratch,
             active_index,
-            active_count_offset,
-            active_flags_offset,
-            active_list_offset,
-            active_capacity,
+            active_bits_offset,
+            ..
         } => {
-            let scratch = preg_to_reg64(resolve(assignment, *scratch));
-            let mut local_done = asm.create_label();
-            let done = continuation_label
-                .as_ref()
-                .map_or(local_done, |label| **label);
-            let flag = mem_operand(
-                BaseReg::SimState,
-                *active_flags_offset + *active_index as i32,
-            );
-            asm.cmp(byte_ptr(flag), 0i32)?;
-            asm.jne(done)?;
-            asm.mov(byte_ptr(flag), 1i32)?;
-            asm.mov(
-                scratch,
-                qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
+            let word_offset = i32::try_from((*active_index as usize / 64) * 8)
+                .expect("verified sparse active bitmap offset fits i32");
+            let bit = *active_index % 64;
+            asm.bts(
+                qword_ptr(mem_operand(
+                    BaseReg::SimState,
+                    active_bits_offset
+                        .checked_add(word_offset)
+                        .expect("verified sparse active bitmap offset fits i32"),
+                )),
+                bit,
             )?;
-            // This is unreachable for valid state because active bytes dedupe
-            // entries, but keep malformed checkpoint metadata memory-safe.
-            asm.cmp(scratch, *active_capacity as i32)?;
-            asm.jae(done)?;
-            asm.mov(
-                dword_ptr(SIM_BASE + scratch * 4 + *active_list_offset),
-                *active_index as i32,
-            )?;
-            asm.inc(scratch)?;
-            asm.mov(
-                qword_ptr(mem_operand(BaseReg::SimState, *active_count_offset)),
-                scratch,
-            )?;
-            if let Some(done) = continuation_label {
-                asm.set_label(done)?;
-                bound_continuation = true;
-            } else {
-                asm.set_label(&mut local_done)?;
-            }
         }
 
         MInst::SparseCommitWorklist {
             descriptor_table,
-            active_count_offset,
-            active_flags_offset,
-            active_list_offset,
+            active_bits_offset,
             active_capacity,
         } => emit_sparse_commit_worklist(
             asm,
             constant_table_labels[descriptor_table.0],
-            *active_count_offset,
-            *active_flags_offset,
-            *active_list_offset,
+            *active_bits_offset,
             *active_capacity,
         )?,
 
@@ -4559,36 +4534,31 @@ mod shift_encoding_tests {
     }
 
     #[test]
-    fn sparse_mark_active_uses_allocated_scratch_without_save_restore() {
+    fn sparse_mark_active_is_register_free_and_preserves_live_values() {
         const OUTPUT: usize = 0;
-        const ACTIVE_COUNT: usize = 8;
-        const ACTIVE_FLAGS: usize = 16;
-        const ACTIVE_LIST: usize = 20;
+        const INPUT: usize = 8;
+        const ACTIVE_BITS: usize = 16;
+        const ACTIVE_INDEX: u32 = 65;
 
         let mut vregs = VRegAllocator::new();
-        let old_count = vregs.alloc();
-        let scratch = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let live_value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::Load {
-            dst: old_count,
+            dst: live_value,
             base: BaseReg::SimState,
-            offset: ACTIVE_COUNT as i32,
+            offset: INPUT as i32,
             size: OpSize::S64,
         });
-        block.push(MInst::Scratch { dst: scratch });
         block.push(MInst::SparseMarkActive {
-            scratch,
-            active_index: 0,
-            active_count_offset: ACTIVE_COUNT as i32,
-            active_flags_offset: ACTIVE_FLAGS as i32,
-            active_list_offset: ACTIVE_LIST as i32,
-            active_capacity: 10,
+            active_index: ACTIVE_INDEX,
+            active_bits_offset: ACTIVE_BITS as i32,
+            active_capacity: 70,
         });
         block.push(MInst::Store {
             base: BaseReg::SimState,
             offset: OUTPUT as i32,
-            src: old_count,
+            src: live_value,
             size: OpSize::S64,
         });
         block.push(MInst::Return);
@@ -4597,87 +4567,49 @@ mod shift_encoding_tests {
         mir_legalize::legalize(&mut func);
         mir_opt::optimize(&mut func);
         let allocation = regalloc::run_regalloc(&mut func).unwrap();
-        let live_after_mark = func
-            .blocks
-            .iter()
-            .flat_map(|block| &block.insts)
-            .find_map(|inst| match inst {
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset,
-                    src,
-                    ..
-                } if *offset == OUTPUT as i32 => Some(*src),
-                _ => None,
-            })
-            .expect("fixture output store disappeared");
-        let allocated_scratch = func
-            .blocks
-            .iter()
-            .flat_map(|block| &block.insts)
-            .find_map(|inst| match inst {
-                MInst::SparseMarkActive { scratch, .. } => Some(*scratch),
-                _ => None,
-            })
-            .expect("fixture sparse mark disappeared");
-        assert_ne!(
-            allocation.assignment.get(live_after_mark),
-            allocation.assignment.get(allocated_scratch),
-            "SparseMarkActive scratch overlapped a value live through the pseudo"
-        );
         let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
 
         let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut bit_sets = 0;
         while decoder.can_decode() {
             let instruction = decoder.decode();
+            bit_sets += usize::from(instruction.mnemonic() == Mnemonic::Bts);
             assert!(
                 !matches!(instruction.mnemonic(), Mnemonic::Push | Mnemonic::Pop)
                     || instruction.op0_register() != Register::RAX,
                 "SparseMarkActive emitted a hidden RAX save/restore: {instruction}"
             );
         }
+        assert_eq!(bit_sets, 1);
 
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0u8; 64];
-        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].copy_from_slice(&7u64.to_le_bytes());
+        state[INPUT..INPUT + 8].copy_from_slice(&7u64.to_le_bytes());
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(
             u64::from_le_bytes(state[OUTPUT..OUTPUT + 8].try_into().unwrap()),
             7
         );
         assert_eq!(
-            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
-            8
-        );
-        assert_eq!(state[ACTIVE_FLAGS], 1);
-        assert_eq!(
-            u32::from_le_bytes(
-                state[ACTIVE_LIST + 7 * 4..ACTIVE_LIST + 8 * 4]
-                    .try_into()
-                    .unwrap()
-            ),
+            u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
             0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_BITS + 8..ACTIVE_BITS + 16].try_into().unwrap()),
+            1 << (ACTIVE_INDEX % 64)
         );
     }
 
     #[test]
     fn sparse_mark_active_shares_a_fallthrough_block_label() {
-        const ACTIVE_COUNT: usize = 0;
-        const ACTIVE_FLAGS: usize = 8;
-        const ACTIVE_LIST: usize = 16;
+        const ACTIVE_BITS: usize = 8;
         const ACTIVE_INDEX: u32 = 3;
 
-        let mut vregs = VRegAllocator::new();
-        let scratch = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
         let mut entry = MBlock::new(BlockId(0));
-        entry.push(MInst::Scratch { dst: scratch });
         entry.push(MInst::SparseMarkActive {
-            scratch,
             active_index: ACTIVE_INDEX,
-            active_count_offset: ACTIVE_COUNT as i32,
-            active_flags_offset: ACTIVE_FLAGS as i32,
-            active_list_offset: ACTIVE_LIST as i32,
+            active_bits_offset: ACTIVE_BITS as i32,
             active_capacity: 4,
         });
         entry.push(MInst::Jump { target: BlockId(1) });
@@ -4695,13 +4627,8 @@ mod shift_encoding_tests {
 
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(
-            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
-            1
-        );
-        assert_eq!(state[ACTIVE_FLAGS + ACTIVE_INDEX as usize], 1);
-        assert_eq!(
-            u32::from_le_bytes(state[ACTIVE_LIST..ACTIVE_LIST + 4].try_into().unwrap()),
-            ACTIVE_INDEX
+            u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
+            1 << ACTIVE_INDEX
         );
     }
 
@@ -4712,13 +4639,9 @@ mod shift_encoding_tests {
         const SPARSE: usize = 32;
         const DIRTY: usize = 64;
         const SUMMARY: usize = 72;
-        const ACTIVE_COUNT: usize = 80;
-        const ACTIVE_FLAGS: usize = 88;
-        const ACTIVE_LIST: usize = 92;
+        const ACTIVE_BITS: usize = 80;
 
-        let mut vregs = VRegAllocator::new();
-        let scratches = [vregs.alloc(), vregs.alloc()];
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); scratches.len()]);
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
         let descriptor = SparseCommitDescriptor {
             src_offset: SPARSE as u64,
             dst_offset: STABLE as u64,
@@ -4731,32 +4654,22 @@ mod shift_encoding_tests {
         };
         let table = func.intern_constant_table(descriptor.words().to_vec());
         let mut block = MBlock::new(BlockId(0));
-        for scratch in scratches {
-            block.push(MInst::Scratch { dst: scratch });
+        for _ in 0..2 {
             block.push(MInst::SparseMarkActive {
-                scratch,
                 active_index: 0,
-                active_count_offset: ACTIVE_COUNT as i32,
-                active_flags_offset: ACTIVE_FLAGS as i32,
-                active_list_offset: ACTIVE_LIST as i32,
+                active_bits_offset: ACTIVE_BITS as i32,
                 active_capacity: 1,
             });
         }
         block.push(MInst::SparseCommitWorklist {
             descriptor_table: table,
-            active_count_offset: ACTIVE_COUNT as i32,
-            active_flags_offset: ACTIVE_FLAGS as i32,
-            active_list_offset: ACTIVE_LIST as i32,
+            active_bits_offset: ACTIVE_BITS as i32,
             active_capacity: 1,
         });
         block.push(MInst::Return);
         func.push_block(block);
 
-        let mut assignment = AssignmentMap::default();
-        for scratch in scratches {
-            assignment.set(scratch, PhysReg::RAX);
-        }
-        let emitted = emit(&func, &assignment, 0).unwrap();
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0xa5u8; 128];
         state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);
@@ -4765,9 +4678,7 @@ mod shift_encoding_tests {
         }
         state[DIRTY..DIRTY + 8].copy_from_slice(&3u64.to_le_bytes());
         state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
-        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
-        state[ACTIVE_FLAGS] = 0;
-        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        state[ACTIVE_BITS..ACTIVE_BITS + 8].fill(0);
         let stable_sentinel = state[STABLE + BYTE_SIZE * 2];
 
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
@@ -4785,10 +4696,9 @@ mod shift_encoding_tests {
             0
         );
         assert_eq!(
-            u64::from_le_bytes(state[ACTIVE_COUNT..ACTIVE_COUNT + 8].try_into().unwrap()),
+            u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
             0
         );
-        assert_eq!(state[ACTIVE_FLAGS], 0);
     }
 
     #[test]
@@ -4798,13 +4708,9 @@ mod shift_encoding_tests {
         const SPARSE: usize = 16;
         const DIRTY: usize = 32;
         const SUMMARY: usize = 40;
-        const ACTIVE_COUNT: usize = 48;
-        const ACTIVE_FLAGS: usize = 56;
-        const ACTIVE_LIST: usize = 60;
+        const ACTIVE_BITS: usize = 48;
 
-        let mut vregs = VRegAllocator::new();
-        let scratch = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
         let descriptor = SparseCommitDescriptor {
             src_offset: SPARSE as u64,
             dst_offset: STABLE as u64,
@@ -4817,28 +4723,20 @@ mod shift_encoding_tests {
         };
         let table = func.intern_constant_table(descriptor.words().to_vec());
         let mut block = MBlock::new(BlockId(0));
-        block.push(MInst::Scratch { dst: scratch });
         block.push(MInst::SparseMarkActive {
-            scratch,
             active_index: 0,
-            active_count_offset: ACTIVE_COUNT as i32,
-            active_flags_offset: ACTIVE_FLAGS as i32,
-            active_list_offset: ACTIVE_LIST as i32,
+            active_bits_offset: ACTIVE_BITS as i32,
             active_capacity: 1,
         });
         block.push(MInst::SparseCommitWorklist {
             descriptor_table: table,
-            active_count_offset: ACTIVE_COUNT as i32,
-            active_flags_offset: ACTIVE_FLAGS as i32,
-            active_list_offset: ACTIVE_LIST as i32,
+            active_bits_offset: ACTIVE_BITS as i32,
             active_capacity: 1,
         });
         block.push(MInst::Return);
         func.push_block(block);
 
-        let mut assignment = AssignmentMap::default();
-        assignment.set(scratch, PhysReg::RAX);
-        let emitted = emit(&func, &assignment, 0).unwrap();
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0xa5u8; 80];
         state[STABLE..STABLE + BYTE_SIZE * 2].fill(0);
@@ -4847,9 +4745,7 @@ mod shift_encoding_tests {
         }
         state[DIRTY..DIRTY + 8].copy_from_slice(&1u64.to_le_bytes());
         state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
-        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
-        state[ACTIVE_FLAGS] = 0;
-        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        state[ACTIVE_BITS..ACTIVE_BITS + 8].fill(0);
         let sentinel = state[STABLE + BYTE_SIZE * 2];
 
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
@@ -4866,7 +4762,76 @@ mod shift_encoding_tests {
             u64::from_le_bytes(state[SUMMARY..SUMMARY + 8].try_into().unwrap()),
             0
         );
-        assert_eq!(state[ACTIVE_FLAGS], 0);
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
+            0
+        );
+    }
+
+    #[test]
+    fn sparse_worklist_scans_later_bitmap_words_and_ignores_padding_bits() {
+        const CAPACITY: usize = 66;
+        const ACTIVE_INDEX: usize = 65;
+        const STABLE: usize = 0;
+        const SPARSE: usize = 8;
+        const DIRTY: usize = 16;
+        const SUMMARY: usize = 24;
+        const ACTIVE_BITS: usize = 32;
+
+        let descriptor = SparseCommitDescriptor {
+            src_offset: SPARSE as u64,
+            dst_offset: STABLE as u64,
+            byte_size: 8,
+            dirty_words_offset: DIRTY as u64,
+            dirty_word_count: 1,
+            summary_words_offset: SUMMARY as u64,
+            summary_word_count: 1,
+            four_state: 0,
+        };
+        let mut rows = vec![0; CAPACITY * SparseCommitDescriptor::WORDS];
+        let row = ACTIVE_INDEX * SparseCommitDescriptor::WORDS;
+        rows[row..row + SparseCommitDescriptor::WORDS].copy_from_slice(&descriptor.words());
+
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let table = func.intern_constant_table(rows);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::SparseMarkActive {
+            active_index: ACTIVE_INDEX as u32,
+            active_bits_offset: ACTIVE_BITS as i32,
+            active_capacity: CAPACITY,
+        });
+        block.push(MInst::SparseCommitWorklist {
+            descriptor_table: table,
+            active_bits_offset: ACTIVE_BITS as i32,
+            active_capacity: CAPACITY,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        func.verify();
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 64];
+        state[SPARSE..SPARSE + 8].copy_from_slice(&0xdead_beef_cafe_babeu64.to_le_bytes());
+        state[DIRTY..DIRTY + 8].copy_from_slice(&1u64.to_le_bytes());
+        state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
+        // Bit 127 is padding outside CAPACITY and models a malformed restored
+        // checkpoint. The generated mark adds valid bit 65 in the same word.
+        state[ACTIVE_BITS + 8..ACTIVE_BITS + 16].copy_from_slice(&(1u64 << 63).to_le_bytes());
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE..STABLE + 8].try_into().unwrap()),
+            0xdead_beef_cafe_babe
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[ACTIVE_BITS + 8..ACTIVE_BITS + 16].try_into().unwrap()),
+            0
+        );
     }
 
     #[test]

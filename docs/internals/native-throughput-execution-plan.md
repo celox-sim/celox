@@ -5099,6 +5099,50 @@ machinery without adding a non-semantic ordering rule; Linux meaning and tick
 count are preserved and non-LTO execution improves by 9.8%; remaining compile
 time is a separate target**.
 
+### Step 50: Register-free sparse active bitmap
+
+Sparse regions which cannot use Step 49's direct-publication proof still need
+event-local registration before their dirty chunks are committed.  The old
+registration expanded every `SparseMarkActive` into a flag load and branch,
+flag store, active-count load and capacity branch, descriptor-index store, and
+count increment/store.  It also defined a scratch VReg, extending allocation
+pressure around every remaining sparse write.  This machinery implemented an
+idempotent set with a byte flag plus a counted index list.
+
+The registration state is now one fixed bitmap.  A mark has no VReg operands
+and emits one `bts qword [sim + active_word], immediate_bit`.  The event-tail
+worklist walks the five bitmap words needed by Heliodor's 280 descriptors,
+clears each word before visiting its set bits, and ignores malformed padding
+bits in the final word.  Memory effects name the exact eight-byte bitmap word,
+so the scheduler retains same-word read-modify-write dependencies without
+adding a global sparse-order barrier.  This changes only private native
+runtime metadata; optimized SIR is byte-identical to Step 49.
+
+Focused tests cover register-free marking across a live value, fallthrough
+placement, repeated marks, later bitmap words, final-word padding, exact memory
+effects, GVN invalidation, reload recipes, and scheduler dependencies.  The
+optimized library passes 997/997.  Dynamic-NBA tests pass 33 with one upstream
+ignore, cross-block NBA tests pass 11 with one ignore, flip-flop tests pass 200
+with 42 ignores, native execution passes 16/16, native testbench passes 60 with
+one ignore, and counter passes 9 with three Veryl ignores.
+
+The complete trace is at
+`target/heliodor/analysis/step70-active-bitmap`.  Native optimized SIR remains
+19,548,386 bytes.  Full MIR falls from 53,009,418 to 52,743,850 bytes, and the
+emitted `eval_comb_apply_ff` body falls by 15,031 bytes.  Its spill frame remains
+`0x1500`, confirming that this does not repair the larger live-range and edge-
+copy problem.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  They compiled in 80.238 and 79.904 s and executed in
+91.148 and 95.338 s.  The 93.243 s execution mean is effectively unchanged
+from Step 49's 93.341 s mean, so no runtime-speed or compile-speed claim is
+made.
+
+Status: **remaining sparse registration is reduced to a register-free bitmap
+set with exact dependencies; Linux meaning and tick count are preserved and
+generated code is smaller, but measured execution is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5204,6 +5248,7 @@ time is a separate target**.
 | 47 CFG circular-priority recovery | this step | circular-priority and CLI 10/10 | lib 982/982; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check, strict clippy, format, and diff checks | fixed-CPU parent/candidate/parent/candidate and final release/LTO all pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | parent execute 98.925 / 106.973 s; candidate 102.461 / 101.181 s; final release 101.637 s | 32 scalar priority iterations become packed rotate and CTZ; scheduler unchanged; mean -1.1% but paired directions disagree, so runtime effect is unconfirmed |
 | 48 effect-DAG indexed writes and sparse marks | this step | scheduler 19/19; sparse fallthrough emission regression | lib 987/987; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete SIR/MIR retained | compile 66.524 s; execute 103.476 s | artificial barriers removed; standalone `apply_ff` frame 232→216 bytes; fused frame and execution unchanged, so no speed claim |
 | 49 direct hazard-free sparse state | this step | round-trip 4/4; publication hazards 7/7; direct bulk-zero plan/emission | lib 996/996; dynamic NBA 33 passed, 1 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two final-code non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 73.027 / 72.968 s; execute 93.902 / 92.780 s | sparse first-write copy, metadata, and tail Commit removed where complete-event CFG proves no observation; MIR -12.1%; mean execute -9.8%; compile regression remains open |
+| 50 register-free sparse active bitmap | this step | mark/worklist emission; multiword and padding; exact effects/GVN/reload/scheduler dependencies | lib 997/997; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.238 / 79.904 s; execute 91.148 / 95.338 s | each remaining sparse mark is one register-free bitmap `bts`; fused code -15,031 bytes; spill frame unchanged; execution mean unchanged, so no speed claim |
 
 ## Related design records
 

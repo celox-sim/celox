@@ -314,9 +314,7 @@ pub fn lower_execution_unit(
                     mblock.push(MInst::SparseCommitWorklist {
                         descriptor_table: sparse_descriptor_table
                             .expect("planned sparse worklist must have descriptor table"),
-                        active_count_offset: layout.sparse_active_count_offset as i32,
-                        active_flags_offset: layout.sparse_active_flags_offset as i32,
-                        active_list_offset: layout.sparse_active_list_offset as i32,
+                        active_bits_offset: layout.sparse_active_bits_offset as i32,
                         active_capacity: layout.sparse_active_capacity,
                     });
                 }
@@ -2991,14 +2989,9 @@ fn emit_sparse_mark_active(
     sparse: &crate::backend::memory_layout::SparseWorkingLayout,
 ) {
     if ctx.sparse_descriptor_table.is_some() {
-        let scratch = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Scratch { dst: scratch });
         block.push(MInst::SparseMarkActive {
-            scratch,
             active_index: sparse.active_index as u32,
-            active_count_offset: ctx.layout.sparse_active_count_offset as i32,
-            active_flags_offset: ctx.layout.sparse_active_flags_offset as i32,
-            active_list_offset: ctx.layout.sparse_active_list_offset as i32,
+            active_bits_offset: ctx.layout.sparse_active_bits_offset as i32,
             active_capacity: ctx.layout.sparse_active_capacity,
         });
     }
@@ -12244,9 +12237,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 0,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 0,
-            sparse_active_flags_offset: 0,
-            sparse_active_list_offset: 0,
+            sparse_active_bits_offset: 0,
             sparse_active_capacity: 0,
             merged_total_size: 0,
             triggered_bits_offset: 0,
@@ -12427,9 +12418,7 @@ mod tests {
         const SPARSE: usize = 32;
         const DIRTY: usize = 64;
         const SUMMARY: usize = 72;
-        const ACTIVE_COUNT: usize = 80;
-        const ACTIVE_FLAGS: usize = 88;
-        const ACTIVE_LIST: usize = 92;
+        const ACTIVE_BITS: usize = 88;
         const STATE_SIZE: usize = 96;
 
         let absolute = AbsoluteAddr {
@@ -12521,9 +12510,7 @@ mod tests {
                 summary_word_count: 1,
             },
         );
-        layout.sparse_active_count_offset = ACTIVE_COUNT;
-        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
-        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
         layout.sparse_active_capacity = 1;
         layout.merged_total_size = STATE_SIZE;
         layout.triggered_bits_offset = STATE_SIZE;
@@ -12579,8 +12566,7 @@ mod tests {
         assert_eq!(state[STABLE + 24] & 1, 1);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
-        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
-        assert_eq!(state[ACTIVE_FLAGS], 0);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
     }
 
     #[test]
@@ -12589,9 +12575,7 @@ mod tests {
         const SPARSE: usize = 40;
         const DIRTY: usize = 72;
         const SUMMARY: usize = 80;
-        const ACTIVE_COUNT: usize = 88;
-        const ACTIVE_FLAGS: usize = 96;
-        const ACTIVE_LIST: usize = 100;
+        const ACTIVE_BITS: usize = 96;
         const STATE_SIZE: usize = 112;
 
         let absolute = AbsoluteAddr {
@@ -12666,9 +12650,7 @@ mod tests {
                 summary_word_count: 1,
             },
         );
-        layout.sparse_active_count_offset = ACTIVE_COUNT;
-        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
-        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
         layout.sparse_active_capacity = 1;
         layout.merged_total_size = STATE_SIZE;
         layout.triggered_bits_offset = STATE_SIZE;
@@ -12803,17 +12785,14 @@ mod tests {
         let mut state = vec![0xa5u8; STATE_SIZE];
         state[DIRTY..DIRTY + 8].fill(0);
         state[SUMMARY..SUMMARY + 8].fill(0);
-        state[ACTIVE_COUNT..ACTIVE_COUNT + 8].fill(0);
-        state[ACTIVE_FLAGS] = 0;
-        state[ACTIVE_LIST..ACTIVE_LIST + 4].fill(0);
+        state[ACTIVE_BITS..ACTIVE_BITS + 8].fill(0);
         let sentinel = state[STABLE + 32];
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(&state[STABLE..STABLE + 32], &[0; 32]);
         assert_eq!(state[STABLE + 32], sentinel);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
-        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
-        assert_eq!(state[ACTIVE_FLAGS], 0);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
     }
 
     #[test]
@@ -12822,9 +12801,7 @@ mod tests {
         const SPARSE: usize = 8;
         const DIRTY: usize = 16;
         const SUMMARY: usize = 24;
-        const ACTIVE_COUNT: usize = 32;
-        const ACTIVE_FLAGS: usize = 40;
-        const ACTIVE_LIST: usize = 44;
+        const ACTIVE_BITS: usize = 40;
         const STATE_SIZE: usize = 48;
 
         let absolute = AbsoluteAddr {
@@ -12898,9 +12875,7 @@ mod tests {
                 summary_word_count: 1,
             },
         );
-        layout.sparse_active_count_offset = ACTIVE_COUNT;
-        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
-        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
         layout.sparse_active_capacity = 1;
         layout.merged_total_size = STATE_SIZE;
         layout.triggered_bits_offset = STATE_SIZE;
@@ -12939,8 +12914,7 @@ mod tests {
         assert_eq!(state[STABLE], 0xa6);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
-        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
-        assert_eq!(state[ACTIVE_FLAGS], 0);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
     }
 
     #[test]
@@ -12949,9 +12923,7 @@ mod tests {
         const SPARSE: usize = 32;
         const DIRTY: usize = 64;
         const SUMMARY: usize = 72;
-        const ACTIVE_COUNT: usize = 80;
-        const ACTIVE_FLAGS: usize = 88;
-        const ACTIVE_LIST: usize = 92;
+        const ACTIVE_BITS: usize = 88;
         const STATE_SIZE: usize = 96;
 
         let absolute = AbsoluteAddr {
@@ -13042,9 +13014,7 @@ mod tests {
                 summary_word_count: 1,
             },
         );
-        layout.sparse_active_count_offset = ACTIVE_COUNT;
-        layout.sparse_active_flags_offset = ACTIVE_FLAGS;
-        layout.sparse_active_list_offset = ACTIVE_LIST;
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
         layout.sparse_active_capacity = 1;
         layout.merged_total_size = STATE_SIZE;
         layout.triggered_bits_offset = STATE_SIZE;
@@ -13235,8 +13205,7 @@ mod tests {
         );
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
-        assert_eq!(&state[ACTIVE_COUNT..ACTIVE_COUNT + 8], &[0; 8]);
-        assert_eq!(state[ACTIVE_FLAGS], 0);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
     }
 
     #[test]
@@ -13312,9 +13281,7 @@ mod tests {
             layout.total_size = 40;
             layout.working_base_offset = 40;
             layout.sparse_base_offset = 40;
-            layout.sparse_active_count_offset = 40;
-            layout.sparse_active_flags_offset = 40;
-            layout.sparse_active_list_offset = 40;
+            layout.sparse_active_bits_offset = 40;
             layout.merged_total_size = 40;
             layout.triggered_bits_offset = 40;
             layout.scratch_base_offset = 40;
@@ -13557,9 +13524,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -13777,9 +13742,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: total_size,
-            sparse_active_flags_offset: total_size,
-            sparse_active_list_offset: total_size,
+            sparse_active_bits_offset: total_size,
             sparse_active_capacity: 0,
             merged_total_size: total_size,
             triggered_bits_offset: total_size,
@@ -14014,9 +13977,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: total_size,
-            sparse_active_flags_offset: total_size,
-            sparse_active_list_offset: total_size,
+            sparse_active_bits_offset: total_size,
             sparse_active_capacity: 0,
             merged_total_size: total_size,
             triggered_bits_offset: total_size,
@@ -14166,9 +14127,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 112,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 112,
-            sparse_active_flags_offset: 112,
-            sparse_active_list_offset: 112,
+            sparse_active_bits_offset: 112,
             sparse_active_capacity: 0,
             merged_total_size: 112,
             triggered_bits_offset: 112,
@@ -14724,9 +14683,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -14929,9 +14886,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: state_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: state_size,
-            sparse_active_flags_offset: state_size,
-            sparse_active_list_offset: state_size,
+            sparse_active_bits_offset: state_size,
             sparse_active_capacity: 0,
             merged_total_size: state_size,
             triggered_bits_offset: state_size,
@@ -15120,9 +15075,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -15270,9 +15223,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,

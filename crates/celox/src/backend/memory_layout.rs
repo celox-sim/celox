@@ -90,11 +90,9 @@ pub struct MemoryLayout {
     pub sparse_offsets: HashMap<AbsoluteAddr, usize>,
     pub sparse_base_offset: usize,
     pub sparse_layouts: HashMap<AbsoluteAddr, SparseWorkingLayout>,
-    /// Fixed-capacity worklist of sparse regions touched by the current FF
-    /// evaluation.  A region appears at most once, guarded by its active byte.
-    pub sparse_active_count_offset: usize,
-    pub sparse_active_flags_offset: usize,
-    pub sparse_active_list_offset: usize,
+    /// Event-local bitmap of sparse regions touched by the current FF
+    /// evaluation. One bit per descriptor makes repeated marks idempotent.
+    pub sparse_active_bits_offset: usize,
     pub sparse_active_capacity: usize,
     /// Unified memory buffer size in bytes (stable + working).
     pub merged_total_size: usize,
@@ -275,11 +273,9 @@ impl MemoryLayout {
             );
         }
 
-        let sparse_active_count_offset = (sparse_metadata_offset + 7) & !7;
-        let sparse_active_flags_offset = sparse_active_count_offset + 8;
-        let sparse_active_list_offset =
-            (sparse_active_flags_offset + sparse_active_capacity + 3) & !3;
-        sparse_metadata_offset = sparse_active_list_offset + sparse_active_capacity * 4;
+        let sparse_active_bits_offset = (sparse_metadata_offset + 7) & !7;
+        sparse_metadata_offset =
+            sparse_active_bits_offset + sparse_active_capacity.div_ceil(64) * 8;
 
         // Triggered bits region (1 bit per event canonical ID)
         let num_potential_triggers = program.num_events();
@@ -335,9 +331,7 @@ impl MemoryLayout {
             sparse_offsets,
             sparse_base_offset,
             sparse_layouts,
-            sparse_active_count_offset,
-            sparse_active_flags_offset,
-            sparse_active_list_offset,
+            sparse_active_bits_offset,
             sparse_active_capacity,
             merged_total_size,
             triggered_bits_offset,

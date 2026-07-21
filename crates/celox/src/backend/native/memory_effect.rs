@@ -200,29 +200,27 @@ fn sparse_commit_read_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
     ])
 }
 
-fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 3]> {
+fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 1]> {
     let MInst::SparseMarkActive {
         active_index,
-        active_count_offset,
-        active_flags_offset,
-        active_list_offset,
+        active_bits_offset,
         active_capacity,
         ..
     } = inst
     else {
         return None;
     };
-    let flag_offset = i64::from(*active_flags_offset).checked_add(i64::from(*active_index))?;
-    let flag_offset = i32::try_from(flag_offset).ok()?;
-    Some([
-        checked_range(BaseReg::SimState, *active_count_offset, 8)?,
-        checked_range(BaseReg::SimState, flag_offset, 1)?,
-        checked_range(
-            BaseReg::SimState,
-            *active_list_offset,
-            active_capacity.checked_mul(4)?,
-        )?,
-    ])
+    if *active_capacity == 0 || *active_index as usize >= *active_capacity {
+        return None;
+    }
+    let word = usize::try_from(*active_index).ok()? / 64;
+    let byte_offset = word.checked_mul(8)?;
+    let offset = i64::from(*active_bits_offset).checked_add(i64::try_from(byte_offset).ok()?)?;
+    Some([checked_range(
+        BaseReg::SimState,
+        i32::try_from(offset).ok()?,
+        8,
+    )?])
 }
 
 pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
@@ -329,11 +327,8 @@ mod tests {
     #[test]
     fn sparse_mark_active_has_only_metadata_write_ranges() {
         let inst = MInst::SparseMarkActive {
-            scratch: VReg(0),
             active_index: 3,
-            active_count_offset: 100,
-            active_flags_offset: 200,
-            active_list_offset: 300,
+            active_bits_offset: 200,
             active_capacity: 16,
         };
         let effect = writes(&inst);
@@ -341,23 +336,11 @@ mod tests {
         assert_eq!(effect.unknown_memory(), None);
         assert_eq!(
             effect.ranges().collect::<Vec<_>>(),
-            vec![
-                MemoryRange {
-                    base: BaseReg::SimState,
-                    offset: 100,
-                    byte_len: 8,
-                },
-                MemoryRange {
-                    base: BaseReg::SimState,
-                    offset: 203,
-                    byte_len: 1,
-                },
-                MemoryRange {
-                    base: BaseReg::SimState,
-                    offset: 300,
-                    byte_len: 64,
-                },
-            ]
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 200,
+                byte_len: 8,
+            }]
         );
     }
 
@@ -419,11 +402,8 @@ mod tests {
     #[test]
     fn sparse_mark_active_reads_the_metadata_it_updates() {
         let inst = MInst::SparseMarkActive {
-            scratch: VReg(0),
             active_index: 3,
-            active_count_offset: 100,
-            active_flags_offset: 200,
-            active_list_offset: 300,
+            active_bits_offset: 200,
             active_capacity: 16,
         };
 
