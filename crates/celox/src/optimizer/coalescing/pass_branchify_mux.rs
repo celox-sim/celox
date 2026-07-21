@@ -72,6 +72,10 @@ struct ControlledMuxPlan {
     false_val: RegisterId,
     /// Each incoming edge is classified by the original branch's truth value.
     incoming: Vec<ControlledIncomingEdge>,
+    /// Join-local single-use definitions moved to the selected predecessor.
+    /// Moving and Mux removal are published together, so the intermediate
+    /// non-dominating SSA shape is never observable by another pass.
+    moved: Vec<ControlledMovedInstruction>,
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +84,12 @@ struct ControlledIncomingEdge {
     select_true: bool,
     /// `Some(true)`/`Some(false)` identifies a branch edge. `None` is a jump.
     edge_truth: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControlledMovedInstruction {
+    predecessor: BlockId,
+    index: usize,
 }
 
 struct PathFacts {
@@ -3108,6 +3118,21 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
     };
     let def_blocks = all_def_blocks(eu);
     let def_locations = instruction_def_locations(eu);
+    let use_counts = count_uses(eu);
+    let first_effect = eu
+        .blocks
+        .iter()
+        .map(|(&block_id, block)| {
+            let index = block
+                .instructions
+                .iter()
+                .position(|instruction| {
+                    memory_write(instruction).is_some() || is_memory_barrier(instruction)
+                })
+                .unwrap_or(block.instructions.len());
+            (block_id, index)
+        })
+        .collect::<HashMap<_, _>>();
     let mut branches_by_root = HashMap::<RegisterId, Vec<BranchInfo>>::default();
 
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
@@ -3158,6 +3183,8 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
                         *dst,
                         *true_val,
                         *false_val,
+                        &use_counts,
+                        &first_effect,
                     )
                 })
                 .or_else(|| {
@@ -3180,38 +3207,116 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
         }
     }
 
-    // Removing instructions changes indices, so apply plans in descending
-    // order within each join.  Edge arguments are appended in the same order
-    // as the new block parameters and therefore remain type/arity-correct.
-    plans.sort_unstable_by_key(|plan| (plan.join.0, std::cmp::Reverse(plan.mux_idx)));
+    apply_controlled_join_mux_plans(eu, plans);
+}
+
+fn apply_controlled_join_mux_plans(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plans: Vec<ControlledMuxPlan>,
+) {
+    let mut by_join = HashMap::<BlockId, Vec<ControlledMuxPlan>>::default();
     for plan in plans {
-        let Some(join) = eu.blocks.get_mut(&plan.join) else {
+        by_join.entry(plan.join).or_default().push(plan);
+    }
+    let mut joins = by_join.keys().copied().collect::<Vec<_>>();
+    joins.sort_unstable_by_key(|block| block.0);
+
+    for join_id in joins {
+        let Some(mut plans) = by_join.remove(&join_id) else {
             continue;
         };
-        if plan.mux_idx >= join.instructions.len()
-            || !matches!(
-                join.instructions[plan.mux_idx],
-                SIRInstruction::Mux(dst, ..) if dst == plan.dst
-            )
+        plans.sort_unstable_by_key(|plan| plan.mux_idx);
+        let Some(original) = eu.blocks.get(&join_id).cloned() else {
+            continue;
+        };
+
+        let mut removed = BTreeSet::new();
+        let mut moved_by_predecessor = HashMap::<BlockId, BTreeSet<usize>>::default();
+        let mut valid = true;
+        for plan in &plans {
+            if !matches!(
+                original.instructions.get(plan.mux_idx),
+                Some(SIRInstruction::Mux(dst, ..)) if *dst == plan.dst
+            ) || !removed.insert(plan.mux_idx)
+            {
+                valid = false;
+                break;
+            }
+            for moved in &plan.moved {
+                if removed.contains(&moved.index)
+                    || !moved_by_predecessor
+                        .entry(moved.predecessor)
+                        .or_default()
+                        .insert(moved.index)
+                {
+                    valid = false;
+                    break;
+                }
+                removed.insert(moved.index);
+            }
+            if !valid {
+                break;
+            }
+        }
+        if !valid
+            || moved_by_predecessor.iter().any(|(&predecessor, _)| {
+                !matches!(
+                    eu.blocks.get(&predecessor).map(|block| &block.terminator),
+                    Some(SIRTerminator::Jump(target, _)) if *target == join_id
+                )
+            })
         {
             continue;
         }
-        join.instructions.remove(plan.mux_idx);
-        join.params.push(plan.dst);
 
-        for edge in plan.incoming {
-            let value = if edge.select_true {
-                plan.true_val
-            } else {
-                plan.false_val
-            };
-            append_controlled_edge_argument(
-                eu,
-                edge.predecessor,
-                plan.join,
-                edge.edge_truth,
-                value,
-            );
+        let mut predecessors = moved_by_predecessor.keys().copied().collect::<Vec<_>>();
+        predecessors.sort_unstable_by_key(|block| block.0);
+        for predecessor in predecessors {
+            let instructions = moved_by_predecessor[&predecessor]
+                .iter()
+                .map(|&index| original.instructions[index].clone())
+                .collect::<Vec<_>>();
+            eu.blocks
+                .get_mut(&predecessor)
+                .expect("preflighted controlled predecessor must remain present")
+                .instructions
+                .extend(instructions);
+        }
+
+        {
+            let join = eu
+                .blocks
+                .get_mut(&join_id)
+                .expect("controlled join must remain present");
+            join.instructions = original
+                .instructions
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| {
+                    (!removed.contains(&index)).then_some(instruction)
+                })
+                .collect();
+            join.params.extend(plans.iter().map(|plan| plan.dst));
+        }
+
+        // Parameter order and edge-argument order are both the ascending Mux
+        // order above.  This publishes the edge-sunk definitions and the
+        // select-to-phi rewrite as one valid SSA change.
+        for plan in plans {
+            for edge in plan.incoming {
+                let value = if edge.select_true {
+                    plan.true_val
+                } else {
+                    plan.false_val
+                };
+                append_controlled_edge_argument(
+                    eu,
+                    edge.predecessor,
+                    plan.join,
+                    edge.edge_truth,
+                    value,
+                );
+            }
         }
     }
 }
@@ -3228,6 +3333,8 @@ fn plan_controlled_join_mux(
     dst: RegisterId,
     true_val: RegisterId,
     false_val: RegisterId,
+    use_counts: &HashMap<RegisterId, usize>,
+    first_effect: &HashMap<BlockId, usize>,
 ) -> Option<ControlledMuxPlan> {
     if branch.source == join
         || !cfg.graph.dominates(branch.source, join)
@@ -3254,6 +3361,7 @@ fn plan_controlled_join_mux(
 
     let mut incoming = Vec::with_capacity(incoming_edges.len());
     let mut seen_predecessors = HashSet::default();
+    let mut moved = HashMap::<usize, BlockId>::default();
     for (predecessor, edge_truth) in incoming_edges {
         // A block with two edges to the same join has no unambiguous edge
         // classification for this transform.  Leave it to the general
@@ -3271,9 +3379,26 @@ fn plan_controlled_join_mux(
                 .facts_on_edge(eu, def_locations, predecessor, join, edge_truth)?;
         let selected = known_condition_truth(eu, def_locations, &facts, condition)?;
         let selected_value = if selected { true_val } else { false_val };
-        let def_block = def_blocks.get(&selected_value)?;
-        if !cfg.graph.dominates(*def_block, predecessor) {
-            return None;
+        for definition in controlled_value_availability(
+            eu,
+            cfg,
+            def_blocks,
+            def_locations,
+            use_counts,
+            first_effect,
+            join,
+            mux_idx,
+            predecessor,
+            selected_value,
+        )? {
+            if moved
+                .insert(definition.index, definition.predecessor)
+                .is_some_and(|owner| owner != definition.predecessor)
+            {
+                // One SSA definition cannot be moved to two predecessor
+                // blocks without cloning and renaming its complete DAG.
+                return None;
+            }
         }
 
         incoming.push(ControlledIncomingEdge {
@@ -3290,7 +3415,134 @@ fn plan_controlled_join_mux(
         true_val,
         false_val,
         incoming,
+        moved: moved
+            .into_iter()
+            .map(|(index, predecessor)| ControlledMovedInstruction { predecessor, index })
+            .collect(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controlled_value_availability(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &CfgAnalysis,
+    def_blocks: &HashMap<RegisterId, BlockId>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_counts: &HashMap<RegisterId, usize>,
+    first_effect: &HashMap<BlockId, usize>,
+    join: BlockId,
+    mux_idx: usize,
+    predecessor: BlockId,
+    value: RegisterId,
+) -> Option<Vec<ControlledMovedInstruction>> {
+    let &definition_block = def_blocks.get(&value)?;
+    if cfg.graph.dominates(definition_block, predecessor) {
+        return Some(Vec::new());
+    }
+    if definition_block != join
+        || !matches!(
+            eu.blocks.get(&predecessor).map(|block| &block.terminator),
+            Some(SIRTerminator::Jump(target, _)) if *target == join
+        )
+    {
+        return None;
+    }
+
+    let block = eu.blocks.get(&join)?;
+    let mut definitions = HashSet::default();
+    collect_controlled_edge_defs(
+        block,
+        join,
+        def_locations,
+        use_counts,
+        mux_idx,
+        value,
+        &mut definitions,
+    );
+    let &(_, root_index) = def_locations.get(&value)?;
+    if !definitions.contains(&root_index) {
+        return None;
+    }
+
+    let moved_values = definitions
+        .iter()
+        .filter_map(|&index| def_reg(&block.instructions[index]))
+        .collect::<HashSet<_>>();
+    for &index in &definitions {
+        let instruction = &block.instructions[index];
+        // A state read can move from the join entry to the predecessor edge
+        // only if it crosses no write or runtime-observation point.  The first
+        // effect index is one scalar per block, avoiding a dense per-load
+        // prefix table on very large EUs.
+        if matches!(instruction, SIRInstruction::Load(..))
+            && index >= first_effect.get(&join).copied().unwrap_or(0)
+        {
+            return None;
+        }
+        for operand in inst_uses(instruction) {
+            if moved_values.contains(&operand) {
+                continue;
+            }
+            let &operand_block = def_blocks.get(&operand)?;
+            if !cfg.graph.dominates(operand_block, predecessor) {
+                return None;
+            }
+        }
+    }
+
+    let mut definitions = definitions.into_iter().collect::<Vec<_>>();
+    definitions.sort_unstable();
+    Some(
+        definitions
+            .into_iter()
+            .map(|index| ControlledMovedInstruction { predecessor, index })
+            .collect(),
+    )
+}
+
+fn collect_controlled_edge_defs(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_counts: &HashMap<RegisterId, usize>,
+    user_index: usize,
+    value: RegisterId,
+    definitions: &mut HashSet<usize>,
+) {
+    if use_counts.get(&value).copied().unwrap_or(0) != 1 {
+        return;
+    }
+    let Some(&(definition_block, index)) = def_locations.get(&value) else {
+        return;
+    };
+    if definition_block != block_id || index >= user_index || definitions.contains(&index) {
+        return;
+    }
+    let instruction = &block.instructions[index];
+    if !matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Load(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+    ) {
+        return;
+    }
+
+    definitions.insert(index);
+    for operand in inst_uses(instruction) {
+        collect_controlled_edge_defs(
+            block,
+            block_id,
+            def_locations,
+            use_counts,
+            index,
+            operand,
+            definitions,
+        );
+    }
 }
 
 fn plan_path_conditioned_join_mux(
@@ -3350,6 +3602,7 @@ fn plan_path_conditioned_join_mux(
         true_val,
         false_val,
         incoming,
+        moved: Vec::new(),
     })
 }
 
@@ -5743,6 +5996,156 @@ mod tests {
     }
 
     #[test]
+    fn controlled_join_sinks_multiple_join_loads_to_the_selected_predecessor() {
+        let element = |index| SIROffset::Element {
+            index: RegisterId(index),
+            element_width: 64,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        };
+        let blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(1), Vec::new()),
+                    false_block: (BlockId(2), Vec::new()),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                params: Vec::new(),
+                instructions: vec![
+                    SIRInstruction::Load(RegisterId(4), addr(0), element(1), 64),
+                    SIRInstruction::Load(RegisterId(6), addr(1), element(1), 64),
+                    SIRInstruction::Mux(RegisterId(5), RegisterId(0), RegisterId(4), RegisterId(2)),
+                    SIRInstruction::Mux(RegisterId(7), RegisterId(0), RegisterId(6), RegisterId(3)),
+                    SIRInstruction::Concat(RegisterId(8), vec![RegisterId(5), RegisterId(7)]),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        ];
+        let mut eu = cfg_unit(9, &[0], blocks);
+        eu.register_map.insert(
+            RegisterId(8),
+            RegisterType::Bit {
+                width: 128,
+                signed: false,
+            },
+        );
+
+        eliminate_controlled_join_muxes(&mut eu);
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert_eq!(
+            eu.blocks[&BlockId(3)].params,
+            vec![RegisterId(5), RegisterId(7)]
+        );
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(
+                    instruction,
+                    SIRInstruction::Load(..) | SIRInstruction::Mux(..)
+                ))
+        );
+        assert!(matches!(
+            &eu.blocks[&BlockId(1)].instructions[..],
+            [
+                SIRInstruction::Load(RegisterId(4), ..),
+                SIRInstruction::Load(RegisterId(6), ..)
+            ]
+        ));
+        assert!(eu.blocks[&BlockId(2)].instructions.is_empty());
+        assert!(matches!(
+            &eu.blocks[&BlockId(1)].terminator,
+            SIRTerminator::Jump(BlockId(3), args)
+                if args == &vec![RegisterId(4), RegisterId(6)]
+        ));
+        assert!(matches!(
+            &eu.blocks[&BlockId(2)].terminator,
+            SIRTerminator::Jump(BlockId(3), args)
+                if args == &vec![RegisterId(2), RegisterId(3)]
+        ));
+    }
+
+    #[test]
+    fn controlled_join_does_not_move_a_load_before_a_join_write() {
+        let blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(1), Vec::new()),
+                    false_block: (BlockId(2), Vec::new()),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                params: Vec::new(),
+                instructions: vec![
+                    store(0, 1),
+                    SIRInstruction::Load(RegisterId(3), addr(0), SIROffset::Static(0), 64),
+                    SIRInstruction::Mux(RegisterId(4), RegisterId(0), RegisterId(3), RegisterId(2)),
+                    store(1, 4),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        ];
+        let mut eu = cfg_unit(5, &[0], blocks);
+
+        eliminate_controlled_join_muxes(&mut eu);
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(eu.blocks[&BlockId(1)].instructions.is_empty());
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Mux(
+                            RegisterId(4),
+                            RegisterId(0),
+                            RegisterId(3),
+                            RegisterId(2)
+                        )
+                    )
+                })
+        );
+    }
+
+    #[test]
     fn uses_per_edge_path_facts_for_reconvergent_mux() {
         let mut register_map = HashMap::default();
         for reg in 0..6 {
@@ -5846,12 +6249,12 @@ mod tests {
     }
 
     #[test]
-    fn does_not_use_an_ancestor_branch_for_a_repeated_mux_predicate() {
+    fn repeated_predicate_sinks_the_join_value_to_the_actual_selected_edge() {
         // `b0` and `b2` branch on the same SSA predicate.  Structurally, b2
         // dominates b3, so an ancestor-only arm classification would label
         // b3 as b0's false arm.  But b3 is reached on b2's true edge, where
-        // the Mux must select r6.  r6 is defined in the join itself and
-        // therefore cannot be passed on b3's incoming edge.
+        // the Mux must select r6.  The join-local definition of r6 must move
+        // to b3, never to the infeasible ancestor classification.
         let mut register_map = HashMap::default();
         for reg in 0..8 {
             register_map.insert(
@@ -5938,18 +6341,38 @@ mod tests {
         eliminate_controlled_join_muxes(&mut eu);
 
         assert_eq!(eu.verify_result(), Ok(()));
-        assert!(eu.blocks[&BlockId(5)].params.is_empty());
+        assert_eq!(eu.blocks[&BlockId(5)].params, vec![RegisterId(7)]);
         assert!(
-            eu.blocks[&BlockId(5)]
+            !eu.blocks[&BlockId(5)]
                 .instructions
                 .iter()
                 .any(|instruction| {
                     matches!(instruction, SIRInstruction::Mux(RegisterId(7), ..))
                 })
         );
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Unary(
+                            RegisterId(6),
+                            crate::ir::UnaryOp::BitNot,
+                            RegisterId(1)
+                        )
+                    )
+                })
+        );
+        assert!(eu.blocks[&BlockId(4)].instructions.is_empty());
         assert!(matches!(
             &eu.blocks[&BlockId(3)].terminator,
-            SIRTerminator::Jump(BlockId(5), args) if args.is_empty()
+            SIRTerminator::Jump(BlockId(5), args) if args == &vec![RegisterId(6)]
+        ));
+        assert!(matches!(
+            &eu.blocks[&BlockId(4)].terminator,
+            SIRTerminator::Jump(BlockId(5), args) if args == &vec![RegisterId(1)]
         ));
     }
 

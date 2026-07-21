@@ -5282,6 +5282,60 @@ width proof and the exact MemorySSA reaching definition make it redundant;
 Linux meaning and tick count are preserved, generated MIR and spill frames
 are smaller, but the dominant throughput gap remains open**.
 
+### Step 54: CFG-controlled join arm sinking
+
+The Step 53 hot search loop still loaded a 44-bit result and four one-bit
+result fields before selecting between those values and the loop-carried
+values.  The branch controlling that selection already existed, so executing
+the result loads on the non-matching edge was unnecessary.
+
+Controlled-join elimination now moves a join-local, single-use load or pure
+definition DAG to the direct predecessor that actually selects it.  A moved
+load must precede the join's first write or memory barrier, and every external
+operand must dominate the selected predecessor.  Plans for one join are
+validated and published atomically: moved definitions, removed Muxes, join
+parameters, and incoming edge arguments cannot expose an intermediate invalid
+SSA graph.  The analysis stores one first-effect index per block rather than a
+dense instruction-prefix table; recursive work is restricted to the selected
+single-use DAGs.
+
+In the concrete loop, all five result loads now occur only in the matching
+predecessor.  The non-matching predecessor passes the seven loop-carried values
+directly.  Focused tests cover several result loads, a join write that forbids
+motion, and a repeated predicate whose actual selected edge differs from an
+ancestor branch classification.  All 46 BranchifyMux tests and all 1009
+library tests pass.  Dynamic-NBA tests pass 33 with one ignore, cross-block NBA
+tests pass 11 with one ignore, flip-flop tests pass 200 with 42 ignores, native
+execution passes 16/16, native testbench passes 60 with one ignore, and counter
+passes 9 with three ignores.  Package all-target check, strict clippy, format,
+and diff gates pass.
+
+The complete trace is at
+`target/heliodor/analysis/step74-controlled-join-arm-sinking`.  Pre-optimized
+SIR remains 58,711,247 bytes.  Post-optimized SIR falls by 666 bytes, native
+SIR by 1,258 bytes, and full MIR by 2,418 bytes.  One trace-free non-LTO run
+reached `reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`; it compiled
+in 80.256 s and executed in 93.630 s.  This single sample does not establish a
+runtime gain.
+
+A follow-up generic predicate-short-circuit trial was rejected.  It evaluated
+all three 9/18/27-bit payload alternatives first, delayed only four field
+loads, added a branch, and increased the non-match parallel-copy sequence from
+five to six `xchg` instructions.  It still booted with the exact marker, but
+executed in 94.515 s, so the trial was removed rather than committed.
+
+Final x86 inspection exposes the larger remaining defect.  A 64-iteration
+loop backedge transfers from approximately `0xf0b0` to an edge-copy block near
+`0x8718d`, performs five stack stores plus reload/copy work, and jumps back near
+`0xeec6`.  Plain RPO places the isolated backedge block at the function tail,
+while MIR textual display uses dominance order and obscures that physical
+layout.  Phi coalescing must remove the copies; emission layout must also keep
+any residual hot backedge block adjacent to its loop.
+
+Status: **match-only result loads are no longer executed on the non-matching
+edge and Linux meaning is preserved; measured execution is unchanged, and
+loop-phi allocation plus physical block layout are the next large target**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5391,6 +5445,7 @@ are smaller, but the dominant throughput gap remains open**.
 | 51 machine-width algebraic identities | this step | direct full-word merge; all word32 ALU constants and identities; zero-extension preservation | lib 1000/1000; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete final SIR/MIR retained | compile 80.586 / 80.420 s; execute 93.621 / 93.701 s | overwritten destination load and zero-mask merge collapse to a direct store; MIR -530,306 bytes; fused frame unchanged; execution mean unchanged |
 | 52 exact reconstruction recipe prefixes | this step | exact prefix sharing; distinct final SSA ownership | regalloc 294/294; lib 1002/1002; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.720 / 80.216 s; execute 92.850 / 93.337 s | duplicate state load/mask prefixes become one exact DAG; MIR -1,189 bytes; frames unchanged; execution mean difference too small for a speed claim |
 | 53 demanded-prefix state forwarding | this step | same/cross-block forwarding; full-width use; partial overwrite; MemoryPhi join | regalloc 299/299; lib 1007/1007; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.079 / 81.077 s; execute 96.678 / 93.437 s | MemorySSA-proved wider state loads disappear; MIR -33,721 bytes; eval/fused raw frames -8 bytes; no runtime-speed claim |
+| 54 controlled-join arm sinking | this step | BranchifyMux 46/46 including multi-load sinking, write barrier, repeated-predicate edge | lib 1009/1009; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.256 s; execute 93.630 s | five match-result loads move to the selected predecessor; generic predicate short-circuit trial rejected; hot backedge layout and phi copies remain |
 
 ## Related design records
 
