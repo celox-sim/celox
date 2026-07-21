@@ -574,6 +574,7 @@ fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
         | MInst::BitNot { src, .. }
         | MInst::Neg { src, .. }
         | MInst::Popcnt { src, .. }
+        | MInst::Bsf { src, .. }
         | MInst::Bsr { src, .. }
         | MInst::BsrOr { src, .. } => [Some(*src), None],
         MInst::Add { lhs, rhs, .. }

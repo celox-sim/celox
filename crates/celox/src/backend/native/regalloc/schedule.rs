@@ -620,6 +620,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::BitNot { .. }
         | MInst::Neg { .. }
         | MInst::Popcnt { .. }
+        | MInst::Bsf { .. }
         | MInst::Bsr { .. }
         | MInst::BsrOr { .. }
         | MInst::Pext { .. }

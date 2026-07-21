@@ -831,6 +831,9 @@ fn constant_fold(func: &mut MFunction) {
                     MInst::Popcnt { dst, src } => {
                         consts.get(src).map(|&v| (*dst, v.count_ones() as u64))
                     }
+                    MInst::Bsf { dst, src } => consts
+                        .get(src)
+                        .and_then(|&v| (v != 0).then_some((*dst, v.trailing_zeros() as u64))),
                     MInst::Bsr { dst, src } => consts
                         .get(src)
                         .and_then(|&v| (v != 0).then_some((*dst, 63 - v.leading_zeros() as u64))),
@@ -1200,9 +1203,9 @@ fn compute_possible_one_bits(
         MInst::ShlImm { src, imm, .. } => bits(*src).checked_shl(u32::from(*imm)).unwrap_or(0),
         MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
         MInst::Popcnt { .. } => 0x7f,
-        // Bsr's destination is unspecified for a zero input.  This pass has
+        // Bit-scan destinations are unspecified for a zero input. This pass has
         // no path-sensitive nonzero fact, so every output bit remains possible.
-        MInst::Bsr { .. } => u64::MAX,
+        MInst::Bsf { .. } | MInst::Bsr { .. } => u64::MAX,
         MInst::BsrOr { zero_value, .. } => 0x3f | u64::from(*zero_value),
         MInst::Select {
             true_val,
@@ -1426,8 +1429,9 @@ fn gvn_key(
         MInst::BitNot { src, .. } => Some(GvnKey::Unary(GvnOpcode::BitNot, value(*src))),
         MInst::Neg { src, .. } => Some(GvnKey::Unary(GvnOpcode::Neg, value(*src))),
         MInst::Popcnt { src, .. } => Some(GvnKey::Unary(GvnOpcode::Popcnt, value(*src))),
-        // Bsr has an unspecified result for zero, so it has no reusable value.
-        MInst::Bsr { .. } => None,
+        // Unchecked bit scans have an unspecified result for zero, so they
+        // have no reusable value.
+        MInst::Bsf { .. } | MInst::Bsr { .. } => None,
         MInst::BsrOr {
             src, zero_value, ..
         } => Some(GvnKey::BinaryImmU64(

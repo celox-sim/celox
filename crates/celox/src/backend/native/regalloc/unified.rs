@@ -410,6 +410,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::BitNot { .. } => "not",
         MInst::Neg { .. } => "neg",
         MInst::Popcnt { .. } => "popcnt",
+        MInst::Bsf { .. } => "bsf",
         MInst::Bsr { .. } => "bsr",
         MInst::BsrOr { .. } => "bsr_or",
         MInst::Pext { .. } => "pext",

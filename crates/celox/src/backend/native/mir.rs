@@ -837,6 +837,11 @@ pub enum MInst {
     Neg { dst: VReg, src: VReg },
     /// dst = popcnt(src) (population count — number of set bits)
     Popcnt { dst: VReg, src: VReg },
+    /// dst = bsf(src). The result is unspecified when src == 0.
+    ///
+    /// This is intended for guarded lowering where the result is consumed only
+    /// on a path or select arm that has already proven src != 0.
+    Bsf { dst: VReg, src: VReg },
     /// dst = bsr(src). The result is unspecified when src == 0.
     ///
     /// This is intended for guarded lowering where the result is consumed only
@@ -1099,6 +1104,7 @@ impl fmt::Display for MInst {
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
+            MInst::Bsf { dst, src } => write!(f, "{dst} = bsf {src}"),
             MInst::Bsr { dst, src } => write!(f, "{dst} = bsr {src}"),
             MInst::BsrOr {
                 dst,
@@ -1259,6 +1265,7 @@ impl MInst {
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
+            | MInst::Bsf { dst, .. }
             | MInst::Bsr { dst, .. }
             | MInst::BsrOr { dst, .. }
             | MInst::Pext { dst, .. }
@@ -1349,6 +1356,7 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. }
+            | MInst::Bsf { src, .. }
             | MInst::Bsr { src, .. }
             | MInst::BsrOr { src, .. } => Uses::one(*src),
             MInst::CmpImm { lhs, .. } => Uses::one(*lhs),
@@ -1504,6 +1512,7 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. }
+            | MInst::Bsf { src, .. }
             | MInst::Bsr { src, .. }
             | MInst::BsrOr { src, .. } => {
                 if *src == old {
@@ -2203,6 +2212,11 @@ mod tests {
                 expected: vec![a],
             },
             UseCase {
+                name: "Bsf",
+                inst: MInst::Bsf { dst, src: a },
+                expected: vec![a],
+            },
+            UseCase {
                 name: "Bsr",
                 inst: MInst::Bsr { dst, src: a },
                 expected: vec![a],
@@ -2313,7 +2327,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            56,
+            57,
             "the MInst variant table must stay exhaustive"
         );
 

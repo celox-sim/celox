@@ -1859,6 +1859,11 @@ fn emit_inst_with_stack_mem(
             asm.popcnt(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
             Ok(true)
         }
+        MInst::Bsf { dst, src } if *src == stack_vreg => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            asm.bsf(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            Ok(true)
+        }
         MInst::Bsr { dst, src } if *src == stack_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             asm.bsr(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
@@ -2677,6 +2682,12 @@ fn emit_inst(
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
             asm.popcnt(d, s)?;
+        }
+
+        MInst::Bsf { dst, src } => {
+            let d = preg_to_reg64(resolve(assignment, *dst));
+            let s = preg_to_reg64(resolve(assignment, *src));
+            asm.bsf(d, s)?;
         }
 
         MInst::Bsr { dst, src } => {
@@ -3944,6 +3955,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::BitNot { .. }
                 | MInst::Neg { .. }
                 | MInst::Popcnt { .. }
+                | MInst::Bsf { .. }
                 | MInst::Bsr { .. }
                 | MInst::BsrOr { .. }
                 | MInst::Pext { .. }
@@ -4029,6 +4041,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     MInst::BitNot { .. }
                     | MInst::Neg { .. }
                     | MInst::Popcnt { .. }
+                    | MInst::Bsf { .. }
                     | MInst::Bsr { .. }
                     | MInst::BsrOr { .. }
                     | MInst::Pext { .. }

@@ -1868,7 +1868,7 @@ fn canonical_instruction_bits(
         MInst::ShlImm { src, imm, .. } => known(*src)?.saturating_add(*imm).min(64),
         MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
         MInst::Popcnt { .. } => 7,
-        MInst::Bsr { .. } | MInst::BsrOr { .. } => 6,
+        MInst::Bsf { .. } | MInst::Bsr { .. } | MInst::BsrOr { .. } => 6,
         MInst::Select {
             true_val,
             false_val,

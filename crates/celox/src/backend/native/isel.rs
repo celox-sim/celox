@@ -9734,31 +9734,17 @@ fn clz_word_candidate(
     (bit_count_nonzero(ctx, block, src), candidate)
 }
 
-/// Return `(src != 0, offset + ctz(src))`.  `x ^ (x - 1)` is non-zero for
-/// every x and its highest set bit is ctz(x) whenever x itself is non-zero.
+/// Return `(src != 0, offset + ctz(src))`.  BSF's result is unspecified for
+/// zero, but the paired predicate ensures that candidate is selected only for
+/// a non-zero source.
 fn ctz_word_candidate(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     src: VReg,
     offset: u64,
 ) -> (VReg, VReg) {
-    let decremented = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::SubImm {
-        dst: decremented,
-        src,
-        imm: 1,
-    });
-    let low_span = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Xor {
-        dst: low_span,
-        lhs: src,
-        rhs: decremented,
-    });
     let local = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Bsr {
-        dst: local,
-        src: low_span,
-    });
+    block.push(MInst::Bsf { dst: local, src });
     let candidate = if offset == 0 {
         local
     } else {
@@ -14768,6 +14754,7 @@ mod tests {
     }
 
     fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> CompiledBitCount {
+        let expect_native_bsf = !four_state && matches!(op, UnaryOp::CountTrailingZeros);
         let result_width = op.result_width(source_width);
         let input_bytes = source_width.div_ceil(8);
         let output_bytes = result_width.div_ceil(8);
@@ -14880,6 +14867,15 @@ mod tests {
         function.verify();
         mir_opt::optimize(&mut function);
         function.verify();
+        if expect_native_bsf {
+            let mut instructions = function.blocks.iter().flat_map(|block| &block.insts);
+            assert!(
+                instructions
+                    .clone()
+                    .any(|inst| matches!(inst, MInst::Bsf { .. }))
+            );
+            assert!(!instructions.any(|inst| matches!(inst, MInst::Bsr { .. })));
+        }
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
         mir_opt::post_regalloc_peephole(&mut function);
         function.verify();
