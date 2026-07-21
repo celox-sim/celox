@@ -155,6 +155,16 @@ impl AllocationLowerError {
         let block = error.successor.or(error.predecessor);
         Self::new(error.rule, block, None, values, error.message)
     }
+
+    fn assignment(error: super::verify::AllocationError) -> Self {
+        Self::new(
+            "ALLOCATION_LOWER.FORWARDED_ASSIGNMENT",
+            Some(error.block),
+            error.instruction,
+            Vec::new(),
+            error.message,
+        )
+    }
 }
 
 impl fmt::Display for AllocationLowerError {
@@ -210,7 +220,7 @@ pub(super) fn lower(
     let stack_offsets = stack_coloring.offsets;
     let spill_frame_size = stack_coloring.frame_size;
     let stack_slot_count = stack_coloring.slot_count;
-    let function = expanded
+    let mut function = expanded
         .ir
         .materialize(original, graph, &stack_offsets)
         .map_err(AllocationLowerError::ir)?;
@@ -298,6 +308,17 @@ pub(super) fn lower(
         assignment.set_edge_spill_slot(definition.value, offset);
     }
     mark_semantic_phi_definitions(&function, expanded, &mut assignment)?;
+    expanded
+        .ir
+        .forward_adjacent_stack_reloads(&mut function)
+        .map_err(AllocationLowerError::ir)?;
+    expanded
+        .ir
+        .forward_adjacent_state_reloads(&mut function)
+        .map_err(AllocationLowerError::ir)?;
+    let analysis = super::analysis::analyze_for_assignment(&function, &assignment);
+    super::verify::verify(&function, &analysis, &assignment)
+        .map_err(AllocationLowerError::assignment)?;
     let ssa_destruction =
         crate::backend::native::ssa_destroy::SsaDestructionPlan::build(&function, &assignment)
             .map_err(AllocationLowerError::ssa)?;

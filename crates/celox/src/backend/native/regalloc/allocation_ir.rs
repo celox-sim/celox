@@ -1001,6 +1001,339 @@ impl AllocationIr {
         Ok(output)
     }
 
+    /// Forward a stack home's defining value into an immediately following
+    /// reload after physical allocation has completed.
+    ///
+    /// The stack store remains visible for every later reload and phi-edge
+    /// use. Only the first reload is replaced, and only when allocation IR
+    /// proves that it names the exact same [`StackHomeId`] with no intervening
+    /// instruction. Extending the store operand through that adjacent copy
+    /// crosses no machine operation: every value live before the copy was
+    /// already live at the store use. The completed assignment can therefore
+    /// be verified unchanged after this rewrite.
+    pub(super) fn forward_adjacent_stack_reloads(
+        &self,
+        function: &mut MFunction,
+    ) -> Result<usize, AllocationIrError> {
+        self.verify_structure()?;
+        if function.blocks.len() != self.blocks.len() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STACK_FORWARD_SHAPE",
+                function.blocks.first().map(|block| block.id),
+                None,
+                Vec::new(),
+                "materialized MIR does not cover the allocation-IR block domain",
+            ));
+        }
+
+        let mut forwarded = 0usize;
+        for (block_index, allocation_block) in self.blocks.iter().enumerate() {
+            let materialized = &function.blocks[block_index];
+            if materialized.id != allocation_block.id
+                || materialized.insts.len() != allocation_block.instructions.len()
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.STACK_FORWARD_SHAPE",
+                    Some(allocation_block.id),
+                    None,
+                    Vec::new(),
+                    "materialized MIR instruction rows differ from allocation IR",
+                ));
+            }
+
+            let mut replacements = Vec::<(usize, VReg, VReg)>::new();
+            for position in 1..allocation_block.instructions.len() {
+                let store = &allocation_block.instructions[position - 1];
+                let reload = &allocation_block.instructions[position];
+                let (
+                    AllocationInstructionOrigin::Synthetic {
+                        operation: SyntheticOperation::StackStore { home: store_home },
+                        ..
+                    },
+                    AllocationInstructionOrigin::Synthetic {
+                        operation: SyntheticOperation::StackReload { home: reload_home },
+                        ..
+                    },
+                ) = (store.origin, reload.origin)
+                else {
+                    continue;
+                };
+                if store_home != reload_home {
+                    continue;
+                }
+                let operands = store.uses.to_vec();
+                let ([source], Some(destination)) = (operands.as_slice(), reload.definition) else {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_FORWARD_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        operands,
+                        "adjacent stack store/reload has an invalid allocation-IR signature",
+                    )
+                    .with_stack_home(store_home));
+                };
+                if !reload.uses.is_empty() || store.definition.is_some() || *source == destination {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_FORWARD_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        vec![*source, destination],
+                        "adjacent stack store/reload cannot be represented as an SSA copy",
+                    )
+                    .with_stack_home(store_home));
+                }
+
+                let (store_offset, stored_value) = match &materialized.insts[position - 1] {
+                    MInst::Store {
+                        base: BaseReg::StackFrame,
+                        offset,
+                        src,
+                        size: OpSize::S64,
+                    } => (*offset, *src),
+                    _ => {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.STACK_FORWARD_LOWERING",
+                            Some(allocation_block.id),
+                            Some(position - 1),
+                            vec![*source],
+                            "stack-home definition did not lower to a 64-bit frame store",
+                        )
+                        .with_stack_home(store_home));
+                    }
+                };
+                let loaded_value = match &materialized.insts[position] {
+                    MInst::Load {
+                        dst,
+                        base: BaseReg::StackFrame,
+                        offset,
+                        size: OpSize::S64,
+                    } if *offset == store_offset => *dst,
+                    _ => {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.STACK_FORWARD_LOWERING",
+                            Some(allocation_block.id),
+                            Some(position),
+                            vec![destination],
+                            "same-home reload did not lower from its defining frame slot",
+                        )
+                        .with_stack_home(store_home));
+                    }
+                };
+                if stored_value != *source || loaded_value != destination {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_FORWARD_LOWERING",
+                        Some(allocation_block.id),
+                        Some(position),
+                        vec![stored_value, *source, loaded_value, destination],
+                        "materialized stack-home operands differ from allocation IR",
+                    )
+                    .with_stack_home(store_home));
+                }
+                replacements.push((position, destination, *source));
+            }
+
+            for (position, destination, source) in replacements {
+                function.blocks[block_index].insts[position] = MInst::Mov {
+                    dst: destination,
+                    src: source,
+                };
+                forwarded = forwarded.checked_add(1).ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.STACK_FORWARD_RANGE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        vec![destination, source],
+                        "forwarded reload count exceeds usize",
+                    )
+                })?;
+            }
+        }
+
+        function.verify_result().map_err(|error| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.STACK_FORWARD_MIR",
+                error.block,
+                error.instruction,
+                Vec::new(),
+                error.message,
+            )
+        })?;
+        Ok(forwarded)
+    }
+
+    /// Forward an allocator-owned packed-state reload from an immediately
+    /// preceding exact store.
+    ///
+    /// State-home verification has already proved the reload's MemorySSA
+    /// version. Requiring an adjacent direct store with the same byte range is
+    /// stronger still: no read, write, commit, or unknown effect can occur
+    /// between the value written and read. Narrow stores are normalized to the
+    /// zero-extended value produced by their matching load.
+    pub(super) fn forward_adjacent_state_reloads(
+        &self,
+        function: &mut MFunction,
+    ) -> Result<usize, AllocationIrError> {
+        self.verify_structure()?;
+        if function.blocks.len() != self.blocks.len() {
+            return Err(AllocationIrError::new(
+                "ALLOCATION_IR.STATE_FORWARD_SHAPE",
+                function.blocks.first().map(|block| block.id),
+                None,
+                Vec::new(),
+                "materialized MIR does not cover the allocation-IR block domain",
+            ));
+        }
+
+        let mut forwarded = 0usize;
+        for (block_index, allocation_block) in self.blocks.iter().enumerate() {
+            let materialized = &function.blocks[block_index];
+            if materialized.id != allocation_block.id
+                || materialized.insts.len() != allocation_block.instructions.len()
+            {
+                return Err(AllocationIrError::new(
+                    "ALLOCATION_IR.STATE_FORWARD_SHAPE",
+                    Some(allocation_block.id),
+                    None,
+                    Vec::new(),
+                    "materialized MIR instruction rows differ from allocation IR",
+                ));
+            }
+
+            let mut replacements = Vec::<(usize, MInst)>::new();
+            for position in 1..allocation_block.instructions.len() {
+                let reload = &allocation_block.instructions[position];
+                let AllocationInstructionOrigin::Synthetic { operation, .. } = reload.origin else {
+                    continue;
+                };
+                let recorded_home = match operation {
+                    SyntheticOperation::StateReload { home } => Some(home),
+                    // Ordinary MemorySSA state recipes lower their leaf load
+                    // as a RecipeNode rather than the deferred-home opcode.
+                    // The materialized exact load and adjacent exact store
+                    // below remain the semantic authority for this case.
+                    SyntheticOperation::RecipeNode { .. } => None,
+                    SyntheticOperation::Copy
+                    | SyntheticOperation::StackStore { .. }
+                    | SyntheticOperation::StackReload { .. }
+                    | SyntheticOperation::StateStore { .. } => continue,
+                };
+                let Some(destination) = reload.definition else {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STATE_FORWARD_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        Vec::new(),
+                        "state reload has no SSA destination",
+                    ));
+                };
+                let (load_offset, load_size) = match &materialized.insts[position] {
+                    MInst::Load {
+                        dst,
+                        base: BaseReg::SimState,
+                        offset,
+                        size,
+                    } if *dst == destination => (*offset, *size),
+                    _ if recorded_home.is_none() => continue,
+                    _ => {
+                        return Err(AllocationIrError::new(
+                            "ALLOCATION_IR.STATE_FORWARD_LOWERING",
+                            Some(allocation_block.id),
+                            Some(position),
+                            vec![destination],
+                            "state-home reload did not lower from its recorded byte range",
+                        ));
+                    }
+                };
+                if !reload.uses.is_empty() {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STATE_FORWARD_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        reload.uses.to_vec(),
+                        "direct state recipe load unexpectedly has register operands",
+                    ));
+                }
+                if let Some(home) = recorded_home
+                    && (load_offset != home.offset || load_size != home.size)
+                {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STATE_FORWARD_LOWERING",
+                        Some(allocation_block.id),
+                        Some(position),
+                        vec![destination],
+                        "state-home reload byte range differs from its recorded home",
+                    ));
+                }
+                let MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    src: source,
+                    size,
+                } = &materialized.insts[position - 1]
+                else {
+                    continue;
+                };
+                if *offset != load_offset || *size != load_size {
+                    continue;
+                }
+                if *source == destination {
+                    return Err(AllocationIrError::new(
+                        "ALLOCATION_IR.STATE_FORWARD_SIGNATURE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        vec![*source, destination],
+                        "state reload cannot be represented as an SSA normalization",
+                    ));
+                }
+                let replacement = match load_size {
+                    OpSize::S8 => MInst::AndImm32 {
+                        dst: destination,
+                        src: *source,
+                        imm: u8::MAX.into(),
+                    },
+                    OpSize::S16 => MInst::AndImm32 {
+                        dst: destination,
+                        src: *source,
+                        imm: u16::MAX.into(),
+                    },
+                    OpSize::S32 => MInst::Mov32 {
+                        dst: destination,
+                        src: *source,
+                    },
+                    OpSize::S64 => MInst::Mov {
+                        dst: destination,
+                        src: *source,
+                    },
+                };
+                replacements.push((position, replacement));
+            }
+
+            for (position, replacement) in replacements {
+                function.blocks[block_index].insts[position] = replacement;
+                forwarded = forwarded.checked_add(1).ok_or_else(|| {
+                    AllocationIrError::new(
+                        "ALLOCATION_IR.STATE_FORWARD_RANGE",
+                        Some(allocation_block.id),
+                        Some(position),
+                        Vec::new(),
+                        "forwarded state reload count exceeds usize",
+                    )
+                })?;
+            }
+        }
+
+        function.verify_result().map_err(|error| {
+            AllocationIrError::new(
+                "ALLOCATION_IR.STATE_FORWARD_MIR",
+                error.block,
+                error.instruction,
+                Vec::new(),
+                error.message,
+            )
+        })?;
+        Ok(forwarded)
+    }
+
     pub(super) fn insert_before_use(
         &mut self,
         site: UseSite,
@@ -5650,5 +5983,187 @@ mod tests {
         );
         allocation_ir.analyze(&cfg).unwrap();
         allocation_ir.verify_stack_homes(&cfg).unwrap();
+    }
+
+    #[test]
+    fn adjacent_same_home_reload_is_forwarded_after_verified_materialization() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let interval = intervals.intervals[0].as_ref().unwrap().clone();
+        let use_site = interval.uses[0];
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        allocation_ir
+            .insert_stack_store_after_definition(
+                interval.definition,
+                VReg(0),
+                StackHomeId(0),
+                &interval.uses,
+            )
+            .unwrap();
+        let reload = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::StackReload {
+                    home: StackHomeId(0),
+                },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        allocation_ir
+            .rewrite_use(use_site, VReg(0), reload)
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+        allocation_ir.verify_stack_homes(&cfg).unwrap();
+
+        let mut lowered = allocation_ir.materialize(&function, &graph, &[0]).unwrap();
+        assert!(matches!(
+            lowered.blocks[0].insts.as_slice(),
+            [
+                MInst::LoadImm { dst: VReg(0), .. },
+                MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst,
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Mov { src, .. },
+                MInst::Return,
+            ] if *dst == reload && *src == reload
+        ));
+
+        assert_eq!(
+            allocation_ir
+                .forward_adjacent_stack_reloads(&mut lowered)
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            lowered.blocks[0].insts.as_slice(),
+            [
+                MInst::LoadImm { dst: VReg(0), .. },
+                MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Mov { dst, src: VReg(0) },
+                MInst::Mov { src, .. },
+                MInst::Return,
+            ] if *dst == reload && *src == reload
+        ));
+        lowered.verify_result().unwrap();
+    }
+
+    #[test]
+    fn adjacent_state_reload_uses_the_canonical_stored_value() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let interval = intervals.intervals[0].as_ref().unwrap().clone();
+        let use_site = interval.uses[0];
+        let home = packed_home(0, 7, OpSize::S8);
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        allocation_ir
+            .insert_after_definition(
+                interval.definition,
+                SyntheticOperation::StateStore { home },
+                Uses::one(VReg(0)),
+                false,
+            )
+            .unwrap();
+        let reload = allocation_ir
+            .insert_before_use(
+                use_site,
+                SyntheticOperation::StateReload { home },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap();
+        allocation_ir
+            .rewrite_use(use_site, VReg(0), reload)
+            .unwrap();
+        allocation_ir.publish_instruction_transaction().unwrap();
+        allocation_ir.verify_state_homes(&cfg).unwrap();
+
+        let mut lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
+        assert!(matches!(
+            lowered.blocks[0].insts.as_slice(),
+            [
+                MInst::LoadImm { dst: VReg(0), .. },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 7,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst,
+                    base: BaseReg::SimState,
+                    offset: 7,
+                    size: OpSize::S8,
+                },
+                MInst::Mov { src, .. },
+                MInst::Return,
+            ] if *dst == reload && *src == reload
+        ));
+
+        // Non-deferred MemorySSA homes represent the same direct load as a
+        // recipe leaf. Preserve the already materialized instruction and
+        // exercise that allocator-owned identity used by the real workload.
+        let AllocationInstructionOrigin::Synthetic { operation, .. } =
+            &mut allocation_ir.blocks[0].instructions[2].origin
+        else {
+            panic!("state reload did not retain its synthetic identity");
+        };
+        *operation = SyntheticOperation::RecipeNode {
+            root: LiveBundleId(0),
+            node: RecipeId(0),
+        };
+
+        assert_eq!(
+            allocation_ir
+                .forward_adjacent_state_reloads(&mut lowered)
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            lowered.blocks[0].insts.as_slice(),
+            [
+                MInst::LoadImm { dst: VReg(0), .. },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 7,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst,
+                    src: VReg(0),
+                    imm: 0xff,
+                },
+                MInst::Mov { src, .. },
+                MInst::Return,
+            ] if *dst == reload && *src == reload
+        ));
+        lowered.verify_result().unwrap();
     }
 }

@@ -6048,6 +6048,52 @@ Status: **dead predicate and identity graphs no longer enter allocation, dead
 phis cascade away before CSSA, and post-allocation cleanup respects the frozen
 parallel-copy plan; immediate split-to-stack transitions remain open**.
 
+### Step 67: Forward adjacent allocator-home reloads
+
+Complete post-allocation MIR inspection showed two forms of reload which the
+interval allocator introduced between otherwise adjacent operations. A
+machine value was stored to its private stack home and immediately reloaded
+for its first use. More broadly, a value already present in a register was
+stored to one packed-state word, reloaded through a MemorySSA state recipe,
+and then stored to a second word. The scheduled MIR used the same register for
+both state stores; only home selection introduced the intervening load.
+
+Atomic allocation lowering now performs a bounded post-color forwarding pass.
+A stack reload is replaced only when allocation IR records the immediately
+preceding store with the same `StackHomeId`. A deferred-state reload or direct
+state-recipe leaf is replaced only when its materialized direct load is
+immediately preceded by an exact `SimState` store with the same offset and
+width. Narrow state values use an 8/16-bit mask or a 32-bit move so the
+zero-extension produced by the original load is retained. Stores remain in
+place for later reloads and observable state. No CFG search, physical stack
+offset inference, or RTL source rewrite is involved. The pass is linear in
+allocation instructions and retains replacement rows for only one block at a
+time. The completed physical assignment and SSA-destruction plan are rebuilt
+and independently verified after forwarding.
+
+For example, the final interval MIR changed from
+`store.i64 [sim + 182496]; load.i64 [sim + 182496]; store.i64 [sim + 183728]`
+back to the scheduled dataflow `store; mov; store`; a later non-adjacent load
+from the same state remains. All three SIR dumps are byte-identical to Step 66.
+The full MIR fell from 52,042,443 to 52,031,555 bytes and from 1,877,876 to
+1,877,701 lines. The `eval_comb` emitted body fell from 618,645 to 617,892
+bytes and the fused body from 848,332 to 847,529 bytes; spill frames are
+unchanged.
+
+The two focused home-forwarding regressions pass, including narrow state
+canonicalization. The library suite passes 1,047/1,047, native testbench 60
+passed with one ignored, counter 9 passed with three ignored, and package check
+and formatting pass. The final trace took 227.839 s. A trace-free run compiled
+in 226.362 s, reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`, and executed in 106.059 s. This is a proved memory
+traffic and code-size reduction, but the execution sample is slower than the
+previous samples, so no throughput gain is claimed. Wider load normalization
+and phi/coalescing quality remain larger targets.
+
+Status: **adjacent stack and MemorySSA-state reloads no longer reread a value
+which is still in a register; semantics and allocation remain independently
+verified, while the measured generated-code gap is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6170,6 +6216,7 @@ parallel-copy plan; immediate split-to-stack transitions remain open**.
 | 64 convergent machine-interval spilling and sparse split queries | this step | regalloc 304/304 | lib 1039/1039; all-target check, strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 330.241 s; full compile 332.005 s; execute 103.855 s | impossible simultaneous phi reload pressure removed; fused allocation now finishes; generated execution remains 15.5% slower than the Step 63 mean |
 | 65 productive free-prefix selection and transactional stack homes | this step | regalloc 307/307 | lib 1042/1042; all-target check, package strict clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile-only 228.722 s; full compile 228.524 s; execute 101.035 s | split edits -45%; compile -31%; execute -2.7% vs Step 64; production gap remains 12.3% |
 | 66 trivial-value closure and dead-phi DCE | this step | MIR optimization 73/73 | lib 1045/1045; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.768 s; full compile 228.244 s; execute 102.749 s | full MIR -970,944 bytes; eval/fused frames -488/-464 bytes; one execution sample does not establish a speed gain |
+| 67 adjacent allocator-home forwarding | this step | stack/state forwarding 2/2 | lib 1047/1047; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.839 s; full compile 226.362 s; execute 106.059 s | adjacent stack/state reloads removed; eval/fused code -753/-803 bytes; no speed gain claimed |
 
 ## Related design records
 
