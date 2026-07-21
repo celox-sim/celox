@@ -5336,6 +5336,55 @@ Status: **match-only result loads are no longer executed on the non-matching
 edge and Linux meaning is preserved; measured execution is unchanged, and
 loop-phi allocation plus physical block layout are the next large target**.
 
+### Step 55: Post-allocation hot-backedge layout
+
+The Step 54 MIR retained a dedicated copy block for a hot loop backedge.  The
+MIR printer displayed blocks in dominance order, but the emitter consumed the
+stored RPO.  That physical order placed the copy block at the function tail:
+each of the 64 loop iterations took a near conditional jump from approximately
+`0xf0b0` to `0x8718d`, executed the edge stores, reloads, and register copies,
+then jumped back to approximately `0xeec6`.  This was a layout defect separate
+from the still-excessive phi copies themselves.
+
+Emission now identifies a conservative post-allocation backedge chain.  The
+chain must start at a branch successor, consist only of phi-free blocks with
+one predecessor and an unconditional jump, and eventually jump to a block
+which dominates the branch predecessor.  It is moved only in the physical
+emission order, immediately after that predecessor; MIR, allocation, edge
+identity, and scheduler order are unchanged.  Empty-block label aliasing uses
+the same physical order.  If the true successor becomes physically adjacent,
+the emitter inverts the condition so that the hot edge is an actual
+fall-through.  The layout walk is `O(B + E)` after the shared forward CFG
+analysis, with no instruction-sized or pairwise value structure.
+
+In the complete final trace at
+`target/heliodor/analysis/step76-loop-edge-layout`, the loop latch is a short
+`je` to the exit at `0xf0d2`; its continuation falls directly into the edge
+copy block at `0xf0d4`, followed by one jump back to `0xeee8`.  The five stack
+stores, state reload, stack reload, and register copies are intentionally still
+present.  All pre-, post-, and native-optimized SIR files are byte-identical to
+Step 54, and the eval-comb spill frame remains 5,344 bytes.  The emitted
+`eval_comb` body is 350 bytes smaller because the remote branch island and its
+long transfers disappear.
+
+Focused emitter tests pass 17/17, including exact chain placement and branch
+inversion.  The optimized library passes 1011/1011.  Dynamic-NBA tests pass 33
+with one ignore, cross-block NBA tests pass 11 with one ignore, flip-flop tests
+pass 200 with 42 ignores, native execution passes 16/16, native testbench
+passes 60 with one ignore, and counter passes 9 with three ignores.  Workspace
+all-target check, package all-target strict clippy, format, and diff gates pass.
+
+Both trace-free non-LTO runs reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.  They compiled in 81.074 and 80.882 s and executed in
+92.371 and 91.962 s.  Both execution samples are below Step 54's 93.630 s, by
+1.3% and 1.8%, respectively, but the historical variation is large enough
+that this is not claimed as the dominant speed repair.
+
+Status: **a residual hot backedge no longer round-trips through the function
+tail; Linux meaning and tick count are preserved and both final samples are
+slightly faster, while phi coalescing, stack round trips, and eager predicate
+payload evaluation remain the larger targets**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5446,6 +5495,7 @@ loop-phi allocation plus physical block layout are the next large target**.
 | 52 exact reconstruction recipe prefixes | this step | exact prefix sharing; distinct final SSA ownership | regalloc 294/294; lib 1002/1002; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.720 / 80.216 s; execute 92.850 / 93.337 s | duplicate state load/mask prefixes become one exact DAG; MIR -1,189 bytes; frames unchanged; execution mean difference too small for a speed claim |
 | 53 demanded-prefix state forwarding | this step | same/cross-block forwarding; full-width use; partial overwrite; MemoryPhi join | regalloc 299/299; lib 1007/1007; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.079 / 81.077 s; execute 96.678 / 93.437 s | MemorySSA-proved wider state loads disappear; MIR -33,721 bytes; eval/fused raw frames -8 bytes; no runtime-speed claim |
 | 54 controlled-join arm sinking | this step | BranchifyMux 46/46 including multi-load sinking, write barrier, repeated-predicate edge | lib 1009/1009; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.256 s; execute 93.630 s | five match-result loads move to the selected predecessor; generic predicate short-circuit trial rejected; hot backedge layout and phi copies remain |
+| 55 post-RA hot-backedge layout | this step | emitter 17/17 including chain placement and true-edge fall-through | lib 1011/1011; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.074 / 80.882 s; execute 92.371 / 91.962 s | hot continuation falls through to its adjacent copy block; eval body -350 bytes; phi stack/register copies remain |
 
 ## Related design records
 

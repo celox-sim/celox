@@ -10,6 +10,8 @@ use std::fmt;
 use iced_x86::BlockEncoderOptions;
 use iced_x86::code_asm::*;
 
+use celox_analysis::cfg::ForwardControlFlowGraph;
+
 use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
 use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
@@ -844,12 +846,16 @@ impl BlockLabels {
         func: &MFunction,
         assignment: &AssignmentMap,
         plan: &SsaDestructionPlan,
+        block_order: &[usize],
     ) -> Self {
         let mut labels = Vec::new();
         let mut canonical = HashMap::new();
 
-        for (index, block) in func.blocks.iter().enumerate().rev() {
-            let next = func.blocks.get(index + 1).map(|next| next.id);
+        for (position, &block_index) in block_order.iter().enumerate().rev() {
+            let block = &func.blocks[block_index];
+            let next = block_order
+                .get(position + 1)
+                .map(|&next_index| func.blocks[next_index].id);
             let canonical_index = next
                 .filter(|&next| block_is_empty_fallthrough(block, next, assignment, plan))
                 .and_then(|next| canonical.get(&next).copied())
@@ -994,6 +1000,127 @@ fn block_is_empty_fallthrough(
             .all(|inst| instruction_emits_no_code(inst, assignment))
 }
 
+/// Choose physical block order after allocation without changing MIR or its
+/// SSA edge identities. RPO deliberately places a backedge-only successor
+/// late: DFS finishes that edge before walking the loop exit and reversing
+/// postorder moves it behind the complete exit region. That is useful for
+/// forward allocation, but disastrous when a dedicated CSSA/spill edge block
+/// executes on every loop iteration.
+///
+/// Pull only a linear, single-predecessor, phi-free chain which eventually
+/// jumps to a block dominating the branch predecessor. Every selected chain
+/// is disjoint because its first and subsequent blocks each have exactly one
+/// predecessor. The layout walk itself is `O(B + E)` after the shared forward
+/// CFG analysis; that analysis additionally owns its dominance-frontier and
+/// natural-loop membership costs. No instruction-sized or pairwise value
+/// structure is built here.
+fn emission_block_order(func: &MFunction) -> Vec<usize> {
+    let identity = (0..func.blocks.len()).collect::<Vec<_>>();
+    if func.blocks.len() < 2 {
+        return identity;
+    }
+
+    let block_index = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect::<HashMap<_, _>>();
+    let successors = func
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .successors()
+                .into_iter()
+                .filter_map(|successor| block_index.get(&successor).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let Ok(cfg) = ForwardControlFlowGraph::analyze(successors, 0) else {
+        // Input verification reports malformed or unreachable CFGs. Layout is
+        // only an optimization, so retain the supplied order on raw inputs.
+        return identity;
+    };
+
+    fn backedge_chain(
+        func: &MFunction,
+        block_index: &HashMap<BlockId, usize>,
+        cfg: &ForwardControlFlowGraph,
+        predecessor: usize,
+        successor: BlockId,
+    ) -> Option<Vec<usize>> {
+        let mut expected_predecessor = predecessor;
+        let mut current = *block_index.get(&successor)?;
+        let mut chain = Vec::new();
+
+        while chain.len() < func.blocks.len() {
+            // Only pull blocks currently after the latch. This preserves the
+            // existing forward layout and makes every chosen chain unplaced
+            // when the latch is visited during the final linear walk.
+            if current <= predecessor
+                || cfg.predecessors.get(current)?.as_slice() != [expected_predecessor]
+                || !func.blocks[current].phis.is_empty()
+            {
+                return None;
+            }
+            let MInst::Jump { target } = func.blocks[current].terminator()? else {
+                return None;
+            };
+            let target = *block_index.get(target)?;
+            chain.push(current);
+            if cfg.dominators.dominates(target, predecessor) {
+                return Some(chain);
+            }
+            expected_predecessor = current;
+            current = target;
+        }
+        None
+    }
+
+    let mut claimed = vec![false; func.blocks.len()];
+    let mut after = vec![Vec::<usize>::new(); func.blocks.len()];
+    for (predecessor, block) in func.blocks.iter().enumerate() {
+        let Some(MInst::Branch {
+            true_bb, false_bb, ..
+        }) = block.terminator()
+        else {
+            continue;
+        };
+        for successor in [*true_bb, *false_bb] {
+            let Some(chain) = backedge_chain(func, &block_index, &cfg, predecessor, successor)
+            else {
+                continue;
+            };
+            if chain.iter().any(|&index| claimed[index]) {
+                continue;
+            }
+            for &index in &chain {
+                claimed[index] = true;
+            }
+            after[predecessor] = chain;
+            break;
+        }
+    }
+
+    let mut placed = vec![false; func.blocks.len()];
+    let mut order = Vec::with_capacity(func.blocks.len());
+    for block in 0..func.blocks.len() {
+        if placed[block] {
+            continue;
+        }
+        placed[block] = true;
+        order.push(block);
+        for &edge_block in &after[block] {
+            debug_assert!(!placed[edge_block]);
+            placed[edge_block] = true;
+            order.push(edge_block);
+        }
+    }
+    debug_assert_eq!(order.len(), func.blocks.len());
+    order
+}
+
 fn branch_label(labels: &BlockLabels, block: BlockId) -> Result<CodeLabel, EmitError> {
     labels.label(block).map_err(|_| {
         EmitInputError::new(
@@ -1029,8 +1156,15 @@ fn emit_branch_with_edge_copies(
 
     match (true_edge, false_edge) {
         (None, None) => {
-            emit_condition_jump(asm, true_label, condition, true)?;
-            if next_block != Some(false_block) {
+            if next_block == Some(true_block) {
+                // Invert the branch so the physical true successor is a real
+                // fallthrough instead of a taken jump to the next instruction
+                // followed by an unconditional false-edge jump.
+                emit_condition_jump(asm, false_label, condition, false)?;
+            } else {
+                emit_condition_jump(asm, true_label, condition, true)?;
+            }
+            if next_block != Some(false_block) && next_block != Some(true_block) {
                 asm.jmp(false_label)?;
             }
         }
@@ -1286,12 +1420,13 @@ fn emit_planned(
     plan: &SsaDestructionPlan,
 ) -> Result<EmitResult, EmitError> {
     let mut asm = CodeAssembler::new(64)?;
+    let block_order = emission_block_order(func);
 
     // Empty layout fallthrough chains share the label of the next block that
     // emits code. iced permits only one label on an instruction, so distinct
     // BlockIds at the same machine-code IP must be aliases here rather than
     // zero-length pseudo instructions in the assembler stream.
-    let mut block_labels = BlockLabels::new(&mut asm, func, assignment, plan);
+    let mut block_labels = BlockLabels::new(&mut asm, func, assignment, plan, &block_order);
     let mut constant_table_labels = func
         .constant_tables()
         .iter()
@@ -1317,7 +1452,6 @@ fn emit_planned(
     }
 
     // ── Blocks ──
-    let block_order: Vec<usize> = (0..func.blocks.len()).collect();
     let mut previous_canonical_label = None;
     for (order_idx, &bi) in block_order.iter().enumerate() {
         let block = &func.blocks[bi];
@@ -4363,6 +4497,94 @@ mod shift_encoding_tests {
     use crate::backend::native::jit_mem::JitCode;
     use crate::backend::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
+
+    #[test]
+    fn emission_layout_pulls_a_backedge_chain_next_to_its_latch() {
+        let mut vregs = VRegAllocator::new();
+        let outer_condition = vregs.alloc();
+        let loop_condition = vregs.alloc();
+        let edge_value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut header = MBlock::new(BlockId(1));
+        header.push(MInst::Branch {
+            cond: outer_condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        let mut latch = MBlock::new(BlockId(2));
+        latch.push(MInst::Branch {
+            cond: loop_condition,
+            true_bb: BlockId(4),
+            false_bb: BlockId(3),
+        });
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Return);
+        let mut first_edge = MBlock::new(BlockId(4));
+        first_edge.push(MInst::Jump { target: BlockId(5) });
+        let mut second_edge = MBlock::new(BlockId(5));
+        second_edge.push(MInst::Mov {
+            dst: edge_value,
+            src: outer_condition,
+        });
+        second_edge.push(MInst::Jump { target: BlockId(1) });
+        func.blocks = vec![entry, header, latch, exit, first_edge, second_edge];
+
+        let order = emission_block_order(&func)
+            .into_iter()
+            .map(|index| func.blocks[index].id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            vec![
+                BlockId(0),
+                BlockId(1),
+                BlockId(2),
+                BlockId(4),
+                BlockId(5),
+                BlockId(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_inverts_when_true_successor_is_the_physical_fallthrough() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.push(MInst::Return);
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.push(MInst::Return);
+        func.blocks = vec![entry, true_block, false_block];
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(condition, PhysReg::RAX);
+        let emitted = emit(&func, &assignment, 0).unwrap();
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut conditional_branches = Vec::new();
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if matches!(instruction.mnemonic(), Mnemonic::Je | Mnemonic::Jne) {
+                conditional_branches.push(instruction.mnemonic());
+            }
+        }
+
+        assert_eq!(conditional_branches, vec![Mnemonic::Je]);
+    }
 
     fn decode_shift(
         op: ShiftOp,
