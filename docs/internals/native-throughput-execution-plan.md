@@ -5639,6 +5639,71 @@ Status: **wide repeated-bit chunks lower in constant work with exact
 two-state/four-state semantics and linear bounded lowering; Linux meaning and
 tick count remain exact; MIR shrinks, while measured execution is unchanged**.
 
+### Step 60: Allocator-visible sparse-commit scratch clobbers
+
+The emitted standalone `apply_ff` body still hid every register used by each
+`SparseCommit` loop from register allocation.  At the first concrete commit,
+the empty-bitmap path was:
+
+```text
+push rax; push rcx; push rdx; push rsi; push rdi; push r8; push r9
+mov rax, [summary]
+mov [summary], 0
+test rax, rax
+je done
+...
+done:
+pop r9; pop r8; pop rdi; pop rsi; pop rdx; pop rcx; pop rax
+```
+
+Thus a commit with no dirty chunk still performed fourteen hidden stack
+operations.  The shared `SparseCommitWorklist` similarly saved all fourteen
+allocatable GPRs around its complete loop.  Both pseudos now declare their
+fixed scratch sets as ordinary target clobbers.  Existing pressure analysis,
+spill planning, coloring, and allocation verification therefore keep only
+genuinely live-through values out of those registers.  Caller-saved scratch
+needs no emitter save, while any callee-saved scratch used by the worklist is
+included once in the function prologue and epilogue.
+
+Removing the local saves exposed an existing native-label contract: the final
+internal loop label and the following fall-through MIR block occupied the same
+machine instruction.  The sparse emitters now bind that terminal label using
+the continuation block's label, as the branchy select emitters already do,
+instead of adding a nop or retaining a semantically unnecessary pop.  Split
+fall-through regressions execute a value live across each pseudo and verify
+both the clobber result and the one-label layout.  Zero-capacity pseudos are
+also treated as true no-code instructions by allocation and layout.
+
+Clobber discovery adds only a fixed seven- or fourteen-bit register mask at
+each pseudo.  Callee-save discovery scans MIR instructions once, so the added
+time is `O(instructions)` and auxiliary storage remains one fixed register
+set.  No pairwise live-range relation or instruction-sized side table is
+introduced.
+
+The complete candidate trace is retained at
+`target/heliodor/analysis/step88-sparse-commit-clobbers`.  All three SIR stages
+are byte-identical to Step 59, including across two independently generated
+candidate traces.  Complete MIR changes from 51,245,987 to 51,199,426 bytes.
+At `apply_ff` offset `0x5d`, the summary load now follows the six initial state
+copies directly; the seven pushes and seven matching pops are absent.  Later
+commits have the same form.  The allocator chose `rbx`, `rbp`, and `r12` for
+live-through values and saves them once at function entry; the spill frame
+remains zero bytes.
+
+Both focused executable clobber/fall-through tests and all 1023 library tests
+pass.  The trace-free non-LTO Linux run reached `reboot: Power down` and
+exactly `cy=9ae070 x3=aa pass=1`; compilation took 73.593 s and execution took
+92.635 s.  The earlier worklist-only run executed in 92.028 s, and Step 59 in
+91.489 s, so no Heliodor throughput improvement is assigned to this change.
+The hot fused scheduler path does not repeatedly execute the standalone
+per-region commit sequence; the structural defect is fixed, but the observed
+Linux gap remains in the combined body.
+
+Status: **sparse pseudo scratch ownership is explicit and verified; hidden
+per-commit stack saves are removed without replacement spills; exact Linux
+meaning and tick count are preserved; measured Heliodor execution is
+unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5754,6 +5819,7 @@ tick count remain exact; MIR shrinks, while measured execution is unchanged**.
 | 57 constant-work machine-word sign replication | this step | ISel 30/30 including executable two-state/four-state repeated-MSB concat | lib 1016/1016; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format, docs | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 80.348 / 80.444 s; execute 92.280 / 89.330 s | repeated sign bits lower to `neg; shl; or`; MIR -255,946 bytes and eval code -3,946 bytes; execution mean -1.3% |
 | 58 alias-aware late state DSE | this step | MIR optimization 70/70; state promotion 15/15 | lib 1020/1020; workspace check, package all-target strict clippy, format, docs, and diff checks pass | parent/candidate and two additional candidate runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent complete trace is byte-identical to retained HEAD | paired compile 73.919 / 74.250 s; execute 91.640 / 91.492 s | MemorySSA-exposed intermediate byte stores disappear; MIR -452,380 bytes; paired execution unchanged |
 | 59 constant-work wide repeated-bit chunks | this step | native ISel 31/31 including executable two-state/four-state 128-bit concat | lib 1021/1021; workspace check, package all-target strict clippy, format, docs, and diff checks pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 73.399 s; execute 91.489 s | two 64-step sign-fill ladders become `shr; neg`; MIR -275,556 bytes; execution unchanged |
+| 60 allocator-visible sparse-commit clobbers | this step | executable per-region/worklist clobber and fall-through labels | lib 1023/1023; workspace check, package all-target strict clippy, and format pass | trace-free non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; two complete traces and all SIR stages are byte-identical | compile 73.593 s; execute 92.635 s | hidden 7-register per-commit and 14-register worklist saves removed; no replacement spill frame; execution unchanged |
 
 ## Related design records
 

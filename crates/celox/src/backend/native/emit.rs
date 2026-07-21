@@ -14,7 +14,7 @@ use celox_analysis::cfg::ForwardControlFlowGraph;
 
 use crate::backend::native::features::VariableShiftEncoding;
 use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet};
+use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet, clobbers};
 use crate::backend::native::ssa_destroy::{
     EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
     SsaDestructionPlan,
@@ -227,18 +227,17 @@ fn emit_sparse_commit_worklist(
     descriptor_label: CodeLabel,
     active_bits_offset: i32,
     active_capacity: usize,
-) -> Result<(), IcedError> {
+    continuation_label: Option<&mut CodeLabel>,
+) -> Result<bool, IcedError> {
     if active_capacity == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
-    // The pseudo has no MIR operands, so preserve all scratch registers once
-    // for the complete worklist rather than once per sparse region.
-    for reg in [
-        rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14,
-    ] {
-        asm.push(reg)?;
-    }
+    // SparseCommitWorklist's complete scratch set is an explicit MIR
+    // clobber.  Register allocation therefore protects only values that are
+    // actually live through this point; the emitter must not blanket-save
+    // registers here.  Callee-saved scratch registers are preserved once by
+    // the function prologue/epilogue.
 
     // r12 = active bitmap word index, r13 = captured bits in that word.
     // Clear each word before processing it. Sparse writes cannot execute
@@ -250,7 +249,11 @@ fn emit_sparse_commit_worklist(
     let mut active_bits = asm.create_label();
     let mut active_word_next = asm.create_label();
     let mut active_next = asm.create_label();
-    let mut active_done = asm.create_label();
+    let mut local_active_done = asm.create_label();
+    let active_done = continuation_label
+        .as_deref()
+        .copied()
+        .unwrap_or(local_active_done);
     asm.set_label(&mut active_word_loop)?;
     asm.cmp(r12, active_word_count as i32)?;
     asm.jae(active_done)?;
@@ -405,14 +408,13 @@ fn emit_sparse_commit_worklist(
     asm.set_label(&mut active_word_next)?;
     asm.inc(r12)?;
     asm.jmp(active_word_loop)?;
-    asm.set_label(&mut active_done)?;
-
-    for reg in [
-        r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax,
-    ] {
-        asm.pop(reg)?;
+    if let Some(done) = continuation_label {
+        asm.set_label(done)?;
+        Ok(true)
+    } else {
+        asm.set_label(&mut local_active_done)?;
+        Ok(false)
     }
-    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -427,10 +429,18 @@ const CALLEE_SAVED: &[PhysReg] = &[
     PhysReg::R14,
 ];
 
-fn used_callee_saved(assignment: &AssignmentMap) -> Vec<PhysReg> {
+fn used_callee_saved(func: &MFunction, assignment: &AssignmentMap) -> Vec<PhysReg> {
     let mut used = PhysRegSet::new();
     for &preg in assignment.map.values() {
         used.insert(preg);
+    }
+    // Inline pseudos may use fixed scratch registers without defining a
+    // VReg.  Their explicit clobber sets participate in allocation, and must
+    // also participate in the System V callee-save contract.
+    for inst in func.blocks.iter().flat_map(|block| &block.insts) {
+        for &preg in clobbers(inst) {
+            used.insert(preg);
+        }
     }
     CALLEE_SAVED
         .iter()
@@ -981,6 +991,14 @@ fn instruction_emits_no_code(inst: &MInst, assignment: &AssignmentMap) -> bool {
                     && dst == false_val
         ),
         MInst::MemCopy { byte_len: 0, .. } | MInst::MemFill { byte_len: 0, .. } => true,
+        MInst::Scratch { .. }
+        | MInst::SparseCommit {
+            summary_word_count: 0,
+            ..
+        }
+        | MInst::SparseCommitWorklist {
+            active_capacity: 0, ..
+        } => true,
         _ => false,
     }
 }
@@ -1319,7 +1337,7 @@ fn verify_emission_inputs(
     // x86-64's `sub rsp, imm32` encodes a signed immediate.  Include the
     // alignment padding and callee-save pushes in the proof rather than
     // allowing a large (but otherwise well-formed) frame to wrap at encoding.
-    checked_frame_size(spill_frame_size, used_callee_saved(assignment).len())?;
+    checked_frame_size(spill_frame_size, used_callee_saved(func, assignment).len())?;
     Ok(())
 }
 
@@ -1433,7 +1451,7 @@ fn emit_planned(
         .map(|_| asm.create_label())
         .collect::<Vec<_>>();
 
-    let callee_saved = used_callee_saved(assignment);
+    let callee_saved = used_callee_saved(func, assignment);
     let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
 
     let mut epilogue_label = asm.create_label();
@@ -2033,7 +2051,7 @@ fn emit_inst(
     assignment: &AssignmentMap,
     func: &MFunction,
     constant_table_labels: &[CodeLabel],
-    continuation_label: Option<&mut CodeLabel>,
+    mut continuation_label: Option<&mut CodeLabel>,
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
     match inst {
@@ -2234,11 +2252,9 @@ fn emit_inst(
             summary_word_count,
             four_state,
         } => {
-            // This pseudo has no MIR operands.  Preserve every scratch register
-            // so values allocated across the commit remain intact.
-            for reg in [rax, rcx, rdx, rsi, rdi, r8, r9] {
-                asm.push(reg)?;
-            }
+            // The fixed scratch set is an explicit MIR clobber.  Allocation
+            // keeps live-through values in other registers or gives them a
+            // home, so the generated loop needs no hidden save/restore pair.
             let chunk_count = byte_size.div_ceil(8);
             let last_chunk = chunk_count.saturating_sub(1);
             let last_len = byte_size.saturating_sub(last_chunk * 8);
@@ -2256,7 +2272,17 @@ fn emit_inst(
                 )?;
                 let mut summary_loop = asm.create_label();
                 let mut summary_next = asm.create_label();
-                let mut summary_done = asm.create_label();
+                let final_summary = summary_index + 1 == *summary_word_count;
+                let use_continuation = final_summary && continuation_label.is_some();
+                let mut local_summary_done = asm.create_label();
+                let summary_done = if use_continuation {
+                    continuation_label
+                        .as_deref()
+                        .copied()
+                        .expect("checked sparse continuation label")
+                } else {
+                    local_summary_done
+                };
                 asm.set_label(&mut summary_loop)?;
                 asm.test(rax, rax)?;
                 asm.je(summary_done)?;
@@ -2344,10 +2370,16 @@ fn emit_inst(
                 asm.jmp(dirty_loop)?;
                 asm.set_label(&mut summary_next)?;
                 asm.jmp(summary_loop)?;
-                asm.set_label(&mut summary_done)?;
-            }
-            for reg in [r9, r8, rdi, rsi, rdx, rcx, rax] {
-                asm.pop(reg)?;
+                if use_continuation {
+                    asm.set_label(
+                        continuation_label
+                            .as_deref_mut()
+                            .expect("checked sparse continuation label"),
+                    )?;
+                    bound_continuation = true;
+                } else {
+                    asm.set_label(&mut local_summary_done)?;
+                }
             }
         }
 
@@ -2374,12 +2406,15 @@ fn emit_inst(
             descriptor_table,
             active_bits_offset,
             active_capacity,
-        } => emit_sparse_commit_worklist(
-            asm,
-            constant_table_labels[descriptor_table.0],
-            *active_bits_offset,
-            *active_capacity,
-        )?,
+        } => {
+            bound_continuation = emit_sparse_commit_worklist(
+                asm,
+                constant_table_labels[descriptor_table.0],
+                *active_bits_offset,
+                *active_capacity,
+                continuation_label,
+            )?;
+        }
 
         MInst::LoadPtr {
             dst,
@@ -4855,6 +4890,99 @@ mod shift_encoding_tests {
     }
 
     #[test]
+    fn sparse_commit_clobbers_preserve_live_values_without_hidden_pushes() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 16;
+        const DIRTY: usize = 32;
+        const SUMMARY: usize = 40;
+        const OLD_OUTPUT: usize = 48;
+
+        let mut vregs = VRegAllocator::new();
+        let old_stable = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: old_stable,
+            base: BaseReg::SimState,
+            offset: STABLE as i32,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::SparseCommit {
+            src_offset: SPARSE as i32,
+            dst_offset: STABLE as i32,
+            byte_size: 8,
+            dirty_words_offset: DIRTY as i32,
+            dirty_word_count: 1,
+            summary_words_offset: SUMMARY as i32,
+            summary_word_count: 1,
+            four_state: false,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: OLD_OUTPUT as i32,
+            src: old_stable,
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        func.push_block(entry);
+        func.push_block(exit);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+
+        let hidden_scratch = [
+            Register::RAX,
+            Register::RCX,
+            Register::RDX,
+            Register::RSI,
+            Register::RDI,
+            Register::R8,
+            Register::R9,
+        ];
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if matches!(instruction.mnemonic(), Mnemonic::Push | Mnemonic::Pop) {
+                assert!(
+                    !hidden_scratch.contains(&instruction.op0_register()),
+                    "SparseCommit emitted a hidden scratch save/restore: {instruction}"
+                );
+            }
+        }
+
+        let old = 0x0123_4567_89ab_cdefu64;
+        let new = 0xfedc_ba98_7654_3210u64;
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 64];
+        state[STABLE..STABLE + 8].copy_from_slice(&old.to_le_bytes());
+        state[SPARSE..SPARSE + 8].copy_from_slice(&new.to_le_bytes());
+        state[DIRTY..DIRTY + 8].copy_from_slice(&1u64.to_le_bytes());
+        state[SUMMARY..SUMMARY + 8].copy_from_slice(&1u64.to_le_bytes());
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE..STABLE + 8].try_into().unwrap()),
+            new
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[OLD_OUTPUT..OLD_OUTPUT + 8].try_into().unwrap()),
+            old
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[DIRTY..DIRTY + 8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[SUMMARY..SUMMARY + 8].try_into().unwrap()),
+            0
+        );
+    }
+
+    #[test]
     fn sparse_worklist_deduplicates_regions_and_commits_tail_bytes() {
         const BYTE_SIZE: usize = 13;
         const STABLE: usize = 0;
@@ -4920,6 +5048,95 @@ mod shift_encoding_tests {
         assert_eq!(
             u64::from_le_bytes(state[ACTIVE_BITS..ACTIVE_BITS + 8].try_into().unwrap()),
             0
+        );
+    }
+
+    #[test]
+    fn sparse_worklist_clobbers_are_allocated_and_saved_once_per_function() {
+        const INPUT: usize = 0;
+        const OUTPUT: usize = 8;
+        const ACTIVE_BITS: usize = 16;
+
+        let mut vregs = VRegAllocator::new();
+        let live_through = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let descriptor = func.intern_constant_table(vec![0; SparseCommitDescriptor::WORDS]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: live_through,
+            base: BaseReg::SimState,
+            offset: INPUT as i32,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::SparseCommitWorklist {
+            descriptor_table: descriptor,
+            active_bits_offset: ACTIVE_BITS as i32,
+            active_capacity: 1,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(1));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: OUTPUT as i32,
+            src: live_through,
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        func.push_block(entry);
+        func.push_block(exit);
+
+        mir_legalize::legalize(&mut func);
+        mir_opt::optimize(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        assert!(
+            allocation.spill_frame_size >= 8,
+            "a value live through an all-GPR clobber needs a stack home"
+        );
+        let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut pushes = Vec::new();
+        let mut pops = Vec::new();
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            match instruction.mnemonic() {
+                Mnemonic::Push => pushes.push(instruction.op0_register()),
+                Mnemonic::Pop => pops.push(instruction.op0_register()),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            pushes,
+            vec![
+                Register::RBX,
+                Register::RBP,
+                Register::R12,
+                Register::R13,
+                Register::R14,
+                Register::R15,
+            ],
+            "the worklist must not emit a second blanket scratch save"
+        );
+        assert_eq!(
+            pops,
+            vec![
+                Register::R15,
+                Register::R14,
+                Register::R13,
+                Register::R12,
+                Register::RBP,
+                Register::RBX,
+            ],
+            "callee-saved scratch registers are restored once in the epilogue"
+        );
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 32];
+        state[INPUT..INPUT + 8].copy_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[OUTPUT..OUTPUT + 8].try_into().unwrap()),
+            0x0123_4567_89ab_cdef
         );
     }
 

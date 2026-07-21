@@ -138,6 +138,34 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         | MInst::SDiv { .. }
         | MInst::SRem { .. }
         | MInst::UMulHi { .. } => &[PhysReg::RAX, PhysReg::RDX],
+        MInst::SparseCommit {
+            summary_word_count: 0,
+            ..
+        }
+        | MInst::SparseCommitWorklist {
+            active_capacity: 0, ..
+        } => &[],
+        // The per-region sparse loop uses only caller-saved scratch registers.
+        // Express them as an allocation barrier instead of saving all seven
+        // unconditionally in the emitter, including on the common empty-
+        // bitmap path.
+        MInst::SparseCommit { .. } => &[
+            PhysReg::RAX,
+            PhysReg::RCX,
+            PhysReg::RDX,
+            PhysReg::RSI,
+            PhysReg::RDI,
+            PhysReg::R8,
+            PhysReg::R9,
+        ],
+        // The shared sparse-commit loop is an inline machine-code region, not
+        // a call.  It nevertheless owns every allocatable GPR while it walks
+        // the active/summary/dirty worklists.  Keeping that ownership hidden
+        // in the emitter forced an unconditional save/restore of all fourteen
+        // registers, even when the pseudo was the final operation before
+        // Return.  Model the clobber at the allocation boundary instead so
+        // only genuinely live-through values are moved to their homes.
+        MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
         _ => &[],
     }
 }
