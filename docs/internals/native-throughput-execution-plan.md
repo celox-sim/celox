@@ -5385,6 +5385,66 @@ tail; Linux meaning and tick count are preserved and both final samples are
 slightly faster, while phi coalescing, stack round trips, and eager predicate
 payload evaluation remain the larger targets**.
 
+### Step 56: Selector-disjoint predicate control flow
+
+The Step 55 trace evaluated every payload in a selector sum before testing
+which selector value was active.  The concrete predicate had the form
+`common && ((kind == 0 && payload0) || (kind == 1 && payload1) ||
+(kind == 2 && payload2))`; its 27-, 18-, and 9-bit payload DAGs were therefore
+all live at the same time even though at most one could affect the result.
+Besides executing unused work, that overlap increased pressure at the join
+and amplified its parallel copies.
+
+BranchifyMux now recognizes a bounded selector-disjoint Boolean sum and turns
+it into explicit control flow.  It first branches on the common condition,
+then tests each distinct constant of the same selector, and evaluates only the
+chosen payload.  The analysis takes one execution-unit-wide definition/use
+snapshot and publishes at most one plan per original block.  It accepts two
+through eight arms and keeps definitions shared by several arms in the head,
+so its storage and traversal are linear in the execution unit plus the bounded
+moved DAGs rather than combinatorial in possible paths.
+
+The transform is deliberately semantic rather than speculative.  It is
+two-state only; each generated branch condition is normalized explicitly with
+`ToTwoState`.  The source block may contain only pure immediate, load, unary,
+binary, concat, slice, and mux instructions.  A store, commit, event, or other
+observable effect rejects the plan.  Every moved definition must be closed to
+its branch and may not be used by the retained head, another arm, an edge, or
+an external block.  Selector constants must be known and pairwise distinct.
+
+In the Heliodor block around `b135`, the head now loads the common selector
+state, then the `kind == 2`, `kind == 1`, and `kind == 0` paths evaluate only
+their respective 9-, 18-, and 27-bit payloads.  On the formerly eager false
+edge, four stack loads and a five-`xchg` parallel-copy cycle become one stack
+load with no such cycle.  The loop backedge falls from five stack stores to two
+stores and one `xchg`.  This is an important interaction with phi lowering:
+shortening mutually exclusive live ranges removes copies before a later
+parallel-copy resolver has to repair them.
+
+The complete trace is retained at
+`target/heliodor/analysis/step77b-selector-payload-cfg`.  Pre-optimized SIR is
+58,711,247 bytes, post-optimized SIR is 19,610,333 bytes, native-optimized SIR
+is 19,547,796 bytes, and MIR is 52,177,456 bytes.  Relative to Step 55, the
+extra CFG adds only 348 bytes of post-optimized SIR, 668 bytes of native SIR,
+and 1,168 bytes of MIR.  The fused spill frame remains 5,344 bytes.
+
+All 50 BranchifyMux tests pass, including selected-payload placement,
+duplicate-selector rejection, branch-condition normalization, and rejection
+across a store.  Both trace-free non-LTO runs reached `reboot: Power down` and
+exactly `cy=9ae070 x3=aa pass=1`.  Code generation took 80.732 and 80.566 s;
+generated-code execution took 92.905 and 91.147 s.  Their 92.026 s mean is
+effectively unchanged from Step 55's 92.166 s mean, so no runtime improvement
+is assigned to this step.
+
+A similar eager expression around `b144` remains because one of its predicate
+values is reused after a join.  Moving that value requires explicit CFG-aware
+value placement or duplication; violating the closure proof would change SSA
+meaning.  That extension remains separate from this safe first transform.
+
+Status: **mutually exclusive selector payloads execute only on their selected
+paths; the concrete join copy cycle and backedge stores shrink while Linux
+meaning and tick count remain exact; measured execution is unchanged**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -5496,6 +5556,7 @@ payload evaluation remain the larger targets**.
 | 53 demanded-prefix state forwarding | this step | same/cross-block forwarding; full-width use; partial overwrite; MemoryPhi join | regalloc 299/299; lib 1007/1007; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.079 / 81.077 s; execute 96.678 / 93.437 s | MemorySSA-proved wider state loads disappear; MIR -33,721 bytes; eval/fused raw frames -8 bytes; no runtime-speed claim |
 | 54 controlled-join arm sinking | this step | BranchifyMux 46/46 including multi-load sinking, write barrier, repeated-predicate edge | lib 1009/1009; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; all-target check/strict clippy/format | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.256 s; execute 93.630 s | five match-result loads move to the selected predecessor; generic predicate short-circuit trial rejected; hot backedge layout and phi copies remain |
 | 55 post-RA hot-backedge layout | this step | emitter 17/17 including chain placement and true-edge fall-through | lib 1011/1011; dynamic NBA 33 passed, 1 ignored; cross-block NBA 11 passed, 1 ignored; FF 200 passed, 42 ignored; native execution 16/16; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict clippy, format | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 81.074 / 80.882 s; execute 92.371 / 91.962 s | hot continuation falls through to its adjacent copy block; eval body -350 bytes; phi stack/register copies remain |
+| 56 selector-disjoint predicate control flow | this step | BranchifyMux 50/50 including selector dispatch, overlap rejection, condition normalization, and store barrier | lib 1015/1015; retained native execution and RTL integration gates | two trace-free non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; complete trace retained | compile 80.732 / 80.566 s; execute 92.905 / 91.147 s | only the selected payload executes; false-edge five-`xchg` cycle and three backedge stores disappear; execution mean unchanged |
 
 ## Related design records
 
