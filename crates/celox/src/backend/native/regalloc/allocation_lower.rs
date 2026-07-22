@@ -316,7 +316,7 @@ pub(super) fn lower(
         .ir
         .forward_adjacent_state_reloads(&mut function)
         .map_err(AllocationLowerError::ir)?;
-    crate::backend::native::mir_opt::post_regalloc_state_load_cse(&mut function, &assignment);
+    crate::backend::native::mir_opt::post_regalloc_direct_load_cse(&mut function, &assignment);
     let analysis = super::analysis::analyze_for_assignment(&function, &assignment);
     super::verify::verify(&function, &analysis, &assignment)
         .map_err(AllocationLowerError::assignment)?;

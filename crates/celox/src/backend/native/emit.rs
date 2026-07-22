@@ -3961,7 +3961,7 @@ fn emit_chained_eu_groups(
     let post_regalloc_start = timing.then(crate::timing::now);
     super::mir_opt::post_regalloc_peephole(&mut mfunc);
     super::mir_opt::post_regalloc_cleanup(&mut mfunc);
-    super::mir_opt::post_regalloc_state_load_cse(&mut mfunc, &ra.assignment);
+    super::mir_opt::post_regalloc_direct_load_cse(&mut mfunc, &ra.assignment);
     regalloc::verify_assignment(&mfunc, &ra.assignment)?;
     if let Some(start) = post_regalloc_start {
         eprintln!(

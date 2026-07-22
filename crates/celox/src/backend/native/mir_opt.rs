@@ -496,39 +496,45 @@ pub fn post_regalloc_cleanup(func: &mut MFunction) {
     dead_code_eliminate_preserving_phis(func);
 }
 
-/// Reuse an exact state load while its assigned physical register still
+/// Reuse an exact direct load while its assigned physical register still
 /// contains that value.
 ///
 /// CSSA intentionally gives interfering phi rows distinct edge snapshots.
 /// Several snapshots can nevertheless have the same MemorySSA recipe, and
-/// allocation can materialize each snapshot as an independent load. At this
-/// late boundary the completed assignment tells us exactly whether a prior
-/// loaded value remains physically available, so a duplicate load can become
-/// a copy without guessing at an extended live range.
+/// allocation can materialize each snapshot as an independent state load.
+/// Spill splitting can likewise reload one stack home repeatedly inside a
+/// block. At this late boundary the completed assignment tells us exactly
+/// whether a prior loaded value remains physically available, so a duplicate
+/// load can become a copy without guessing at an extended live range.
 ///
 /// Availability is local to one block. Any definition or explicit target
 /// clobber kills the value in its assigned register; overlapping or unknown
-/// `SimState` writes kill the corresponding memory value. At most one value
-/// is tracked per allocatable register, making the pass O(instructions *
-/// target-registers) time and O(target-registers) space per block.
-pub(crate) fn post_regalloc_state_load_cse(
+/// writes to the same direct base kill the corresponding memory value. At most
+/// one value is tracked per allocatable register, making the pass
+/// O(instructions * target-registers) time and O(target-registers) space per
+/// block.
+pub(crate) fn post_regalloc_direct_load_cse(
     func: &mut MFunction,
     assignment: &AssignmentMap,
 ) -> usize {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct StateLoadKey {
+    struct DirectLoadKey {
+        base: BaseReg,
         offset: i32,
         size: OpSize,
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct AvailableStateLoad {
-        key: StateLoadKey,
+    struct AvailableDirectLoad {
+        key: DirectLoadKey,
         value: VReg,
         available_since: usize,
     }
 
-    fn overlaps(key: StateLoadKey, range: memory_effect::MemoryRange) -> bool {
+    fn overlaps(key: DirectLoadKey, range: memory_effect::MemoryRange) -> bool {
+        if key.base != range.base {
+            return false;
+        }
         let load_start = i64::from(key.offset);
         let load_end = load_start + i64::from(key.size.bytes());
         range
@@ -538,21 +544,15 @@ pub(crate) fn post_regalloc_state_load_cse(
 
     let mut reused = 0usize;
     for block in &mut func.blocks {
-        let mut available = HashMap::<PhysReg, AvailableStateLoad>::new();
+        let mut available = HashMap::<PhysReg, AvailableDirectLoad>::new();
         let mut replacements = Vec::<(usize, VReg, VReg)>::new();
         for (position, instruction) in block.insts.iter().enumerate() {
             let writes = memory_effect::writes(instruction);
-            if writes.unknown_memory()
-                == Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
-            {
-                available.clear();
-            } else {
-                for range in writes
-                    .ranges()
-                    .filter(|range| range.base == BaseReg::SimState)
-                {
-                    available.retain(|_, loaded| !overlaps(loaded.key, range));
-                }
+            if let Some(memory_effect::UnknownMemory::Direct(base)) = writes.unknown_memory() {
+                available.retain(|_, loaded| loaded.key.base != base);
+            }
+            for range in writes.ranges() {
+                available.retain(|_, loaded| !overlaps(loaded.key, range));
             }
             for &register in clobbers(instruction) {
                 available.remove(&register);
@@ -561,12 +561,13 @@ pub(crate) fn post_regalloc_state_load_cse(
             let direct_load = match instruction {
                 MInst::Load {
                     dst,
-                    base: BaseReg::SimState,
+                    base,
                     offset,
                     size,
                 } => Some((
                     *dst,
-                    StateLoadKey {
+                    DirectLoadKey {
+                        base: *base,
                         offset: *offset,
                         size: *size,
                     },
@@ -604,7 +605,7 @@ pub(crate) fn post_regalloc_state_load_cse(
             }
             available.insert(
                 register,
-                AvailableStateLoad {
+                AvailableDirectLoad {
                     key,
                     value: destination,
                     available_since: position,
@@ -5397,10 +5398,10 @@ mod tests {
         assignment.set(VReg(1), PhysReg::R9);
         assignment.set(VReg(2), PhysReg::R8);
 
-        assert_eq!(post_regalloc_state_load_cse(&mut func, &assignment), 2);
+        assert_eq!(post_regalloc_direct_load_cse(&mut func, &assignment), 2);
         post_regalloc_peephole(&mut func);
         post_regalloc_cleanup(&mut func);
-        post_regalloc_state_load_cse(&mut func, &assignment);
+        post_regalloc_direct_load_cse(&mut func, &assignment);
 
         assert_eq!(
             func.blocks[0]
@@ -5473,7 +5474,7 @@ mod tests {
         assignment.set(VReg(1), PhysReg::R10);
         assignment.set(VReg(2), PhysReg::R10);
 
-        assert_eq!(post_regalloc_state_load_cse(&mut func, &assignment), 2);
+        assert_eq!(post_regalloc_direct_load_cse(&mut func, &assignment), 2);
         assert!(matches!(
             func.blocks[0].insts[2],
             MInst::Mov {
@@ -5486,6 +5487,69 @@ mod tests {
             MInst::Mov {
                 dst: VReg(2),
                 src: VReg(1)
+            }
+        ));
+        super::super::regalloc::verify_assignment(&func, &assignment).unwrap();
+    }
+
+    #[test]
+    fn late_direct_load_cse_reuses_stack_home_until_overlapping_store() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::StackFrame,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R9);
+        assignment.set(VReg(1), PhysReg::R10);
+        assignment.set(VReg(2), PhysReg::R8);
+
+        assert_eq!(post_regalloc_direct_load_cse(&mut func, &assignment), 1);
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Mov {
+                dst: VReg(1),
+                src: VReg(0)
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[4],
+            MInst::Load {
+                dst: VReg(2),
+                base: BaseReg::StackFrame,
+                offset: 0,
+                size: OpSize::S64
             }
         ));
         super::super::regalloc::verify_assignment(&func, &assignment).unwrap();

@@ -6191,6 +6191,60 @@ reloading an identical physically available state value; exact invalidation,
 assignment, and Linux semantics are verified, while broader phi coalescing and
 spill placement remain open**.
 
+### Step 70: Reuse physically available private stack reloads
+
+Complete post-allocation MIR still reread an unchanged private stack home in
+the same basic block.  One concrete sequence loaded `[sp + 40]` separately for
+an add and a following subtract even though the first loaded physical value
+survived.  This is the non-adjacent case which Step 67 could not see: the store
+and first reload need not be adjacent, and ordinary instructions may appear
+between two reloads.
+
+The bounded post-allocation availability pass from Step 69 now keys direct
+loads by base, offset, and machine width, and therefore handles both
+`SimState` and the allocator-owned `StackFrame`.  A physical-register
+definition still kills the value in that register.  A direct write kills only
+overlapping values of the same base; an unknown direct write kills values of
+that base.  Runtime-owned indirect memory is disjoint from both direct bases
+under the native memory-effect model.  Availability remains block-local and
+bounded by the 14 allocatable registers, so the extension retains
+`O(instructions * 14)` time and `O(14)` additional space and does not create a
+global stack-slot table or extend any live range.
+
+The Step 69 candidate trace is
+`target/heliodor/analysis/step112-state-load-cse-final`; the new complete trace
+is `target/heliodor/analysis/step114-stack-home-load-cse`.  All three SIR dumps
+remain byte-identical, with hashes `51b1befa...`, `7c19aec1...`, and
+`fe40b3d4...`.  Complete MIR falls from 51,848,787 to 51,822,976 bytes and from
+1,874,850 to 1,874,559 lines.  Spill frames remain 5,656 and 5,704 bytes.  The
+five emitted bodies shrink by another 5,429 bytes: `eval_comb` by 2,695 bytes,
+the fused body by 2,641 bytes, `eval_only` by 91 bytes, and `eval_apply_ff` by
+2 bytes.
+
+In the inspected `[sp + 40]` sequence, the two common-block memory operands
+become one load followed by register arithmetic.  A path-local predecessor
+load correctly remains because availability is not speculated across the
+join.  A separate `[sp + 72]` pair also correctly remains: the allocator gave
+the first reload and an intervening arithmetic result the same physical
+register, destroying the reusable value before the second reload.  That is
+direct evidence that allocation/coalescing choice, rather than a broader late
+load rewrite, is the next structural target.
+
+Six focused availability regressions cover state and stack reuse, base and
+range separation, overlapping writes, physical-register redefinition,
+copy-fold ordering, and destination-register preference.  The library suite
+passes 1,055/1,055, native testbench 60 passed with one ignored, counter 9
+passed with three ignored, and package/workspace checks, package all-target
+strict Clippy, formatting, diff, and clean Heliodor source checks pass.  The
+trace-free non-LTO interval-allocator run compiled in 342.395 s, reached
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`, and executed in
+96.556 s.  This single sample is 3.600 s below Step 69 but is not sufficient to
+claim a stable throughput gain.
+
+Status: **unchanged private stack homes are no longer reread while an exact
+physical value survives; Linux semantics and bounded invalidation are
+verified, and avoidable allocator-created register destruction remains open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6316,6 +6370,7 @@ spill placement remain open**.
 | 67 adjacent allocator-home forwarding | this step | stack/state forwarding 2/2 | lib 1047/1047; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.839 s; full compile 226.362 s; execute 106.059 s | adjacent stack/state reloads removed; eval/fused code -753/-803 bytes; no speed gain claimed |
 | 68 physical-width widened loads | this step | native/non-native widened-load ISel 2/2 | lib 1049/1049; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 230.028 s; full compile 226.570 s; execute 102.671 s | redundant `load.i64; mov.w32` removed; frames -40/-40 bytes; allocator perturbation leaves aggregate emitted code +355 bytes, so no speed gain claimed |
 | 69 physically available state-load reuse | this step | post-RA state-load reuse 5/5 | lib 1054/1054; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent/candidate SIR dumps byte-identical | parent/candidate trace 349.666 / 364.103 s; full compile 346.444 s; execute 100.155 s | repeated CSSA recipe loads reuse exact surviving physical values; emitted code -29,960 bytes; frames unchanged; no speed gain claimed |
+| 70 physically available private stack reloads | this step | post-RA direct-load availability 6/6 | lib 1055/1055; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, diff, and clean source checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 69/candidate SIR dumps byte-identical | full compile 342.395 s; execute 96.556 s | repeated surviving stack-home values reuse one physical load; emitted code -5,429 bytes; frames unchanged; one sample is not a speed claim |
 
 ## Related design records
 

@@ -6208,7 +6208,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
                 &mut lowered,
                 &assignment,
             ),
@@ -6275,7 +6275,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
                 &mut lowered,
                 &assignment,
             ),
@@ -6330,7 +6330,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
                 &mut lowered,
                 &assignment,
             ),
