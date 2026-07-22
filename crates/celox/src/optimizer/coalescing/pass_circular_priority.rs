@@ -118,6 +118,22 @@ struct LastPayloadScanPlan {
     payloads: Vec<PayloadField>,
 }
 
+#[derive(Clone, Debug)]
+struct SparseBitmapLoopPlan {
+    preheader: BlockId,
+    header: BlockId,
+    exit: BlockId,
+    lanes: usize,
+    count_position: usize,
+    index_position: usize,
+    entry_arguments: Vec<RegisterId>,
+    backedge_arguments: Vec<RegisterId>,
+    exit_arguments: Vec<RegisterId>,
+    bypass_arguments: Vec<RegisterId>,
+    common_predicate: RegisterId,
+    predicate: PackedExpression,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ArrayShape {
     element_width: usize,
@@ -204,9 +220,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        if options.four_state
-            || eu.blocks.len() < 6
-            || self.bit_array_elements.is_empty() && self.array_shapes.is_empty()
+        if options.four_state || self.bit_array_elements.is_empty() && self.array_shapes.is_empty()
         {
             return;
         }
@@ -219,6 +233,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
         let mut plans = Vec::new();
         let mut linear_plans = Vec::new();
         let mut payload_plans = Vec::new();
+        let mut sparse_plans = Vec::new();
 
         // Only innermost natural loops are candidates. This keeps discovery
         // linear in the instructions owned by disjoint loop regions rather
@@ -275,9 +290,25 @@ impl ExecutionUnitPass for CircularPriorityPass {
             ) {
                 payload_plans.push(plan);
             }
+            if let Some(plan) = recognize_sparse_bitmap_loop(
+                eu,
+                &cfg,
+                cfg.block_ids[natural_loop.header],
+                &loop_blocks,
+                &definitions,
+                &mut constant_cache,
+                &self.bit_array_elements,
+                &self.array_shapes,
+            ) {
+                sparse_plans.push(plan);
+            }
         }
 
-        if plans.is_empty() && linear_plans.is_empty() && payload_plans.is_empty() {
+        if plans.is_empty()
+            && linear_plans.is_empty()
+            && payload_plans.is_empty()
+            && sparse_plans.is_empty()
+        {
             return;
         }
         plans.sort_unstable_by_key(|plan| plan.preheader);
@@ -317,9 +348,14 @@ impl ExecutionUnitPass for CircularPriorityPass {
             occupied.extend(plan.loop_blocks.iter().copied());
             true
         });
+        sparse_plans.sort_unstable_by_key(|plan| plan.preheader);
+        sparse_plans.retain(|plan| occupied.insert(plan.header));
         prepare_escaping_definitions(eu, &cfg, &definitions, &mut plans);
-        if (plans.is_empty() && linear_plans.is_empty() && payload_plans.is_empty())
-            || !ids_available(eu, &plans, &linear_plans, &payload_plans)
+        if (plans.is_empty()
+            && linear_plans.is_empty()
+            && payload_plans.is_empty()
+            && sparse_plans.is_empty())
+            || !ids_available(eu, &plans, &linear_plans, &payload_plans, &sparse_plans)
         {
             return;
         }
@@ -334,6 +370,9 @@ impl ExecutionUnitPass for CircularPriorityPass {
         }
         for plan in payload_plans {
             apply_last_payload_scan(eu, plan, &mut next_register, &mut next_block);
+        }
+        for plan in sparse_plans {
+            apply_sparse_bitmap_loop(eu, plan, &mut next_register);
         }
         remove_dead_definitions(eu);
     }
@@ -896,6 +935,192 @@ fn recognize_last_payload_scan(
         lanes,
         predicate,
         payloads,
+    })
+}
+
+fn conjunction_nodes(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, Definition>,
+    root: RegisterId,
+) -> HashSet<RegisterId> {
+    let mut result = HashSet::default();
+    let mut stack = vec![root];
+    while let Some(value) = stack.pop() {
+        if !result.insert(value) {
+            continue;
+        }
+        match instruction(eu, definitions, value) {
+            Some(SIRInstruction::Unary(
+                _,
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Or,
+                source,
+            )) if eu.register_map.get(source).map(RegisterType::width) == Some(1) => {
+                stack.push(*source);
+            }
+            Some(SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd | BinaryOp::And, rhs)) => {
+                stack.extend([*lhs, *rhs]);
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recognize_sparse_bitmap_loop(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    header: BlockId,
+    loop_blocks: &HashSet<BlockId>,
+    definitions: &HashMap<RegisterId, Definition>,
+    constant_cache: &mut HashMap<RegisterId, Option<bool>>,
+    bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
+) -> Option<SparseBitmapLoopPlan> {
+    if loop_blocks.len() != 1 || !loop_is_pure(eu, loop_blocks) {
+        return None;
+    }
+    let header_block = &eu.blocks[&header];
+    let header_index = cfg.block_index(header)?;
+    let outside = cfg.predecessors[header_index]
+        .iter()
+        .map(|&index| cfg.block_ids[index])
+        .filter(|block| *block != header)
+        .collect::<Vec<_>>();
+    let [preheader] = outside.as_slice() else {
+        return None;
+    };
+    let preheader = *preheader;
+    let SIRTerminator::Jump(target, entry_arguments) = &eu.blocks[&preheader].terminator else {
+        return None;
+    };
+    if *target != header || entry_arguments.len() != header_block.params.len() {
+        return None;
+    }
+    let (condition, true_target, false_target) = branch_targets(&header_block.terminator)?;
+    let (exit, loop_when_true) = if true_target == header && false_target != header {
+        (false_target, true)
+    } else if false_target == header && true_target != header {
+        (true_target, false)
+    } else {
+        return None;
+    };
+    let backedge_arguments = edge_arguments(&header_block.terminator, header)?;
+    let exit_arguments = edge_arguments(&header_block.terminator, exit)?;
+    if backedge_arguments.len() != header_block.params.len()
+        || exit_arguments.len() != eu.blocks[&exit].params.len()
+    {
+        return None;
+    }
+    let (count_position, lanes) = match_count_recurrence(
+        eu,
+        definitions,
+        header_block,
+        entry_arguments,
+        backedge_arguments,
+        condition,
+        loop_when_true,
+    )?;
+    if !(16..=64).contains(&lanes) || !lanes.is_power_of_two() {
+        return None;
+    }
+    let index_position = match_index_recurrence(
+        eu,
+        definitions,
+        header_block,
+        entry_arguments,
+        backedge_arguments,
+        count_position,
+    )?;
+    let index = header_block.params[index_position];
+
+    let mut update_conditions = Vec::new();
+    let mut bypass_arguments = exit_arguments.to_vec();
+    for position in 0..header_block.params.len() {
+        if position == count_position || position == index_position {
+            continue;
+        }
+        let current = header_block.params[position];
+        let update = backedge_arguments[position];
+        let SIRInstruction::Mux(_, update_condition, on_true, on_false) =
+            instruction(eu, definitions, update)?
+        else {
+            return None;
+        };
+        if *on_false != current
+            || immediate(eu, definitions, *on_true) != Some(1)
+            || eu.register_map.get(&current).map(RegisterType::width) != Some(1)
+        {
+            return None;
+        }
+        update_conditions.push(*update_condition);
+        let exit_position = exit_arguments
+            .iter()
+            .position(|&argument| argument == update)?;
+        bypass_arguments[exit_position] = entry_arguments[position];
+    }
+    if update_conditions.is_empty()
+        || bypass_arguments
+            .iter()
+            .zip(exit_arguments)
+            .any(|(&bypass, &normal)| bypass == normal)
+    {
+        return None;
+    }
+
+    let mut common = conjunction_nodes(eu, definitions, update_conditions[0]);
+    for &update_condition in &update_conditions[1..] {
+        let nodes = conjunction_nodes(eu, definitions, update_condition);
+        common.retain(|node| nodes.contains(node));
+    }
+    let mut best = None;
+    for candidate in common {
+        if !loop_blocks.contains(&definitions.get(&candidate)?.block()) {
+            continue;
+        }
+        let Some(predicate) = build_packed_expression(
+            eu,
+            cfg,
+            definitions,
+            constant_cache,
+            loop_blocks,
+            preheader,
+            index,
+            candidate,
+            false,
+            lanes,
+            bit_array_elements,
+            array_shapes,
+        ) else {
+            continue;
+        };
+        if predicate.dynamic_loads == 0 {
+            continue;
+        }
+        let score = (predicate.dynamic_loads, predicate.value_ops);
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_predicate): &(RegisterId, PackedExpression)| {
+                score > (best_predicate.dynamic_loads, best_predicate.value_ops)
+            })
+        {
+            best = Some((candidate, predicate));
+        }
+    }
+    let (common_predicate, predicate) = best?;
+    Some(SparseBitmapLoopPlan {
+        preheader,
+        header,
+        exit,
+        lanes,
+        count_position,
+        index_position,
+        entry_arguments: entry_arguments.to_vec(),
+        backedge_arguments: backedge_arguments.to_vec(),
+        exit_arguments: exit_arguments.to_vec(),
+        bypass_arguments,
+        common_predicate,
+        predicate,
     })
 }
 
@@ -2185,6 +2410,7 @@ fn ids_available(
     plans: &[CircularPriorityPlan],
     linear_plans: &[LinearBitmapScanPlan],
     payload_plans: &[LastPayloadScanPlan],
+    sparse_plans: &[SparseBitmapLoopPlan],
 ) -> bool {
     // A packed node normally emits one register. Prefix and Broadcast may emit
     // three, and materializing a constant root/inversion needs at most two
@@ -2220,6 +2446,15 @@ fn ids_available(
                     .checked_add(expression_registers(&plan.predicate, plan.lanes)?)?
                     .checked_add(plan.payloads.len())?
                     .checked_add(5)
+            })
+        })
+        .and_then(|total| {
+            sparse_plans.iter().try_fold(total, |total, plan| {
+                total
+                    .checked_add(expression_registers(&plan.predicate, plan.lanes)?)?
+                    // CTZ may need one extra zero-extension register when the
+                    // original loop index is wider than its result.
+                    .checked_add(10)
             })
         });
     let required_blocks = plans
@@ -2639,6 +2874,173 @@ fn apply_linear_bitmap_scan(
     for block in plan.loop_blocks {
         eu.blocks.remove(&block);
     }
+}
+
+fn replace_sparse_loop_use(
+    instruction: &mut SIRInstruction<RegionedAbsoluteAddr>,
+    old: RegisterId,
+    new: RegisterId,
+) {
+    let replace = |value: &mut RegisterId| {
+        if *value == old {
+            *value = new;
+        }
+    };
+    let replace_offset = |offset: &mut SIROffset| match offset {
+        SIROffset::Static(_) => {}
+        SIROffset::Dynamic(value) => replace(value),
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            replace(index);
+            if let Some(value) = dynamic_bit_offset {
+                replace(value);
+            }
+        }
+    };
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            replace(lhs);
+            replace(rhs);
+        }
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            replace(source);
+        }
+        SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
+            replace_offset(offset);
+        }
+        SIRInstruction::Store(_, offset, _, source, _, _) => {
+            replace_offset(offset);
+            replace(source);
+        }
+        SIRInstruction::Concat(_, arguments)
+        | SIRInstruction::RuntimeEvent {
+            args: arguments, ..
+        }
+        | SIRInstruction::CombCaptureEvent {
+            args: arguments, ..
+        } => arguments.iter_mut().for_each(replace),
+        SIRInstruction::Mux(_, condition, true_value, false_value) => {
+            replace(condition);
+            replace(true_value);
+            replace(false_value);
+        }
+        SIRInstruction::CombCaptureEnableIfChanged {
+            old: lhs, new: rhs, ..
+        } => {
+            replace(lhs);
+            replace(rhs);
+        }
+    }
+}
+
+fn apply_sparse_bitmap_loop(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: SparseBitmapLoopPlan,
+    next_register: &mut usize,
+) {
+    let emitter = ExpressionEmitter {
+        eu,
+        next_register,
+        width: plan.lanes,
+        instructions: Vec::new(),
+        zero: None,
+        ones: None,
+    };
+    let (mask, predicate_instructions) = emitter.emit(&plan.predicate);
+    let nonempty = fresh_register(eu, next_register, unsigned_type(1));
+    let index_type = eu.register_map[&eu.blocks[&plan.header].params[plan.index_position]].clone();
+    let index_width = index_type.width();
+    let zero_index = fresh_register(eu, next_register, index_type.clone());
+    let mut entry_arguments = plan.entry_arguments.clone();
+    entry_arguments[plan.count_position] = mask;
+    entry_arguments[plan.index_position] = zero_index;
+    let preheader = eu.blocks.get_mut(&plan.preheader).unwrap();
+    preheader.instructions.extend(predicate_instructions);
+    preheader.instructions.extend([
+        SIRInstruction::Unary(nonempty, UnaryOp::Or, mask),
+        SIRInstruction::Imm(zero_index, SIRValue::new(0u8)),
+    ]);
+    preheader.terminator = SIRTerminator::Branch {
+        cond: nonempty,
+        true_block: (plan.header, entry_arguments),
+        false_block: (plan.exit, plan.bypass_arguments.clone()),
+    };
+
+    let header_params = eu.blocks[&plan.header].params.clone();
+    let remaining = header_params[plan.count_position];
+    let old_index = header_params[plan.index_position];
+    eu.register_map.insert(remaining, unsigned_type(plan.lanes));
+    let trailing_width = UnaryOp::CountTrailingZeros.result_width(plan.lanes);
+    let index_wide = fresh_register(eu, next_register, unsigned_type(trailing_width));
+    let index = fresh_register(eu, next_register, index_type);
+    let index_padding = (index_width > trailing_width).then(|| {
+        fresh_register(
+            eu,
+            next_register,
+            unsigned_type(index_width - trailing_width),
+        )
+    });
+    let known_true = fresh_register(eu, next_register, unsigned_type(1));
+    let one = fresh_register(eu, next_register, unsigned_type(plan.lanes));
+    let remaining_minus_one = fresh_register(eu, next_register, unsigned_type(plan.lanes));
+    let next_remaining = fresh_register(eu, next_register, unsigned_type(plan.lanes));
+    let more = fresh_register(eu, next_register, unsigned_type(1));
+
+    let mut old_instructions =
+        std::mem::take(&mut eu.blocks.get_mut(&plan.header).unwrap().instructions);
+    for instruction in &mut old_instructions {
+        replace_sparse_loop_use(instruction, old_index, index);
+        replace_sparse_loop_use(instruction, plan.common_predicate, known_true);
+    }
+    let header = eu.blocks.get_mut(&plan.header).unwrap();
+    header.instructions.push(SIRInstruction::Unary(
+        index_wide,
+        UnaryOp::CountTrailingZeros,
+        remaining,
+    ));
+    if let Some(padding) = index_padding {
+        header
+            .instructions
+            .push(SIRInstruction::Imm(padding, SIRValue::new(0u8)));
+        header
+            .instructions
+            .push(SIRInstruction::Concat(index, vec![padding, index_wide]));
+    } else if index_width == trailing_width {
+        header
+            .instructions
+            .push(SIRInstruction::Unary(index, UnaryOp::Ident, index_wide));
+    } else {
+        header
+            .instructions
+            .push(SIRInstruction::Slice(index, index_wide, 0, index_width));
+    }
+    header
+        .instructions
+        .push(SIRInstruction::Imm(known_true, SIRValue::new(1u8)));
+    header.instructions.append(&mut old_instructions);
+    header.instructions.extend([
+        SIRInstruction::Imm(one, SIRValue::new(1u8)),
+        SIRInstruction::Binary(remaining_minus_one, remaining, BinaryOp::Sub, one),
+        SIRInstruction::Binary(
+            next_remaining,
+            remaining,
+            BinaryOp::And,
+            remaining_minus_one,
+        ),
+        SIRInstruction::Unary(more, UnaryOp::Or, next_remaining),
+    ]);
+    let mut backedge = plan.backedge_arguments;
+    backedge[plan.count_position] = next_remaining;
+    backedge[plan.index_position] = zero_index;
+    header.terminator = SIRTerminator::Branch {
+        cond: more,
+        true_block: (plan.header, backedge),
+        false_block: (plan.exit, plan.exit_arguments),
+    };
 }
 
 fn apply_last_payload_scan(
@@ -3583,6 +3985,219 @@ mod tests {
                 .map(|block| (block.id, block))
                 .collect(),
             register_map: builder.types,
+        }
+    }
+
+    fn sparse_bitmap_loop_fixture() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        const SPARSE_LANES: usize = 16;
+        let mut builder = Builder::new();
+        let enable0 = builder.bit(1);
+        let enable1 = builder.bit(1);
+        let enable2 = builder.bit(1);
+        let bound0 = builder.bit(4);
+        let bound1 = builder.bit(4);
+        let bound2 = builder.bit(4);
+        let mut preheader_instructions = Vec::new();
+        let trip = builder.imm(&mut preheader_instructions, 5, SPARSE_LANES as u64);
+        let initial_index = builder.imm(&mut preheader_instructions, 4, 0);
+        let initial_result = builder.imm(&mut preheader_instructions, 1, 0);
+        let one_count = builder.imm(&mut preheader_instructions, 5, 1);
+        let one_index = builder.imm(&mut preheader_instructions, 4, 1);
+        let one_result = builder.imm(&mut preheader_instructions, 1, 1);
+        let zero_count = builder.imm(&mut preheader_instructions, 5, 0);
+        let preheader = BasicBlock {
+            id: BlockId(0),
+            params: vec![enable0, enable1, enable2, bound0, bound1, bound2],
+            instructions: preheader_instructions,
+            terminator: SIRTerminator::Jump(
+                BlockId(1),
+                vec![
+                    trip,
+                    initial_index,
+                    initial_result,
+                    initial_result,
+                    initial_result,
+                ],
+            ),
+        };
+
+        let remaining = builder.bit(5);
+        let index = builder.bit(4);
+        let result0 = builder.bit(1);
+        let result1 = builder.bit(1);
+        let result2 = builder.bit(1);
+        let mut instructions = Vec::new();
+        let mut loaded = Vec::new();
+        for raw in 0..4 {
+            let lane = builder.bit(1);
+            instructions.push(SIRInstruction::Load(
+                lane,
+                address(raw),
+                SIROffset::Element {
+                    index,
+                    element_width: 1,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                1,
+            ));
+            loaded.push(lane);
+        }
+        let common01 = builder.binary(
+            &mut instructions,
+            1,
+            loaded[0],
+            BinaryOp::LogicAnd,
+            loaded[1],
+        );
+        let common012 = builder.binary(
+            &mut instructions,
+            1,
+            common01,
+            BinaryOp::LogicAnd,
+            loaded[2],
+        );
+        let not3 = builder.bit(1);
+        instructions.push(SIRInstruction::Unary(not3, UnaryOp::LogicNot, loaded[3]));
+        let common = builder.binary(&mut instructions, 1, common012, BinaryOp::LogicAnd, not3);
+        let mut next_results = Vec::new();
+        for (enable, bound, current) in [
+            (enable0, bound0, result0),
+            (enable1, bound1, result1),
+            (enable2, bound2, result2),
+        ] {
+            let enabled = builder.binary(&mut instructions, 1, common, BinaryOp::LogicAnd, enable);
+            let in_range = builder.binary(&mut instructions, 1, index, BinaryOp::LtU, bound);
+            let condition =
+                builder.binary(&mut instructions, 1, enabled, BinaryOp::LogicAnd, in_range);
+            let next = builder.bit(1);
+            instructions.push(SIRInstruction::Mux(next, condition, one_result, current));
+            next_results.push(next);
+        }
+        let next_remaining =
+            builder.binary(&mut instructions, 5, remaining, BinaryOp::Sub, one_count);
+        let continues = builder.binary(
+            &mut instructions,
+            1,
+            next_remaining,
+            BinaryOp::Ne,
+            zero_count,
+        );
+        let next_index = builder.binary(&mut instructions, 4, index, BinaryOp::Add, one_index);
+        let header = BasicBlock {
+            id: BlockId(1),
+            params: vec![remaining, index, result0, result1, result2],
+            instructions,
+            terminator: SIRTerminator::Branch {
+                cond: continues,
+                true_block: (
+                    BlockId(1),
+                    vec![
+                        next_remaining,
+                        next_index,
+                        next_results[0],
+                        next_results[1],
+                        next_results[2],
+                    ],
+                ),
+                false_block: (
+                    BlockId(2),
+                    vec![next_results[0], next_results[1], next_results[2]],
+                ),
+            },
+        };
+
+        let output0 = builder.bit(1);
+        let output1 = builder.bit(1);
+        let output2 = builder.bit(1);
+        let exit = BasicBlock {
+            id: BlockId(2),
+            params: vec![output0, output1, output2],
+            instructions: [output0, output1, output2]
+                .into_iter()
+                .enumerate()
+                .map(|(index, output)| {
+                    SIRInstruction::Store(
+                        address(4 + index as u32),
+                        SIROffset::Static(0),
+                        1,
+                        output,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+            terminator: SIRTerminator::Return,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [preheader, header, exit]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: builder.types,
+        }
+    }
+
+    #[test]
+    fn iterates_only_set_bits_of_a_shared_loop_predicate() {
+        const SPARSE_LANES: usize = 16;
+        let mut unit = sparse_bitmap_loop_fixture();
+        unit.verify_result().unwrap();
+        let original = unit.clone();
+        let pass = CircularPriorityPass {
+            bit_array_elements: (0..4)
+                .map(|raw| (address(raw).absolute_addr(), SPARSE_LANES))
+                .collect(),
+            array_shapes: HashMap::default(),
+        };
+        pass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+
+        let header = &unit.blocks[&BlockId(1)];
+        assert!(header.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Unary(_, UnaryOp::CountTrailingZeros, _)
+            )
+        }));
+        assert!(!header.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Load(_, _, SIROffset::Element { .. }, 1)
+            )
+        }));
+
+        let mut masks = vec![0, 1, 0x00ff, 0x0f0f, 0x5555, 0xaaaa, 0x8000, 0xffff];
+        for lane in 0..SPARSE_LANES {
+            masks.push(1u64 << lane);
+            masks.push((1u64 << (lane + 1)) - 1);
+        }
+        masks.sort_unstable();
+        masks.dedup();
+        for mask in masks {
+            for enables in 0..8u64 {
+                let inputs = &[
+                    enables & 1,
+                    (enables >> 1) & 1,
+                    (enables >> 2) & 1,
+                    3,
+                    8,
+                    15,
+                ];
+                let memory = &[
+                    (address(0), mask),
+                    (address(1), 0xffff),
+                    (address(2), 0xffff),
+                    (address(3), 0),
+                ];
+                let outputs = &[address(4), address(5), address(6)];
+                assert_eq!(
+                    execute_with(&unit, inputs, memory, outputs),
+                    execute_with(&original, inputs, memory, outputs),
+                    "mask={mask:#06x} enables={enables:#x}"
+                );
+            }
         }
     }
 
