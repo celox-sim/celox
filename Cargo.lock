@@ -429,7 +429,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-case",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
  "veryl-analyzer",
  "veryl-metadata",
@@ -619,7 +619,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1240,7 +1240,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1495,7 +1495,7 @@ checksum = "77be37fdc968866fa4f0cee73e42185e6d4699a761a51a54e6ebc9a3d73ed537"
 dependencies = [
  "lz4_flex",
  "miniz_oxide",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2557,7 +2557,7 @@ dependencies = [
  "syntree",
  "syntree_layout",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "ts-rs",
  "ume",
 ]
@@ -2586,7 +2586,7 @@ dependencies = [
  "serde_json",
  "syntree",
  "syntree_layout",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2971,7 +2971,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3459,7 +3459,7 @@ checksum = "24d027955f5f14d526450b6a11ef5aa962761e924dcd092298dd0d1466570565"
 dependencies = [
  "anyhow",
  "syntree",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "xml_writer",
 ]
 
@@ -3567,11 +3567,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl 2.0.19",
 ]
 
 [[package]]
@@ -3587,13 +3587,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -3697,7 +3697,7 @@ version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "ts-rs-macros",
 ]
 
@@ -3861,7 +3861,7 @@ dependencies = [
  "strnum_bitwidth",
  "strum",
  "strum_macros",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
  "vcd",
  "veryl-metadata",
@@ -3896,7 +3896,7 @@ dependencies = [
  "serde",
  "serde_regex",
  "spdx",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
  "url",
  "uuid",
@@ -3923,7 +3923,7 @@ dependencies = [
  "regex",
  "scnr2",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3937,7 +3937,7 @@ dependencies = [
  "log",
  "miette",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "walkdir",
 ]
 
@@ -3968,7 +3968,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
  "vcd",
  "veryl-analyzer",
@@ -3986,7 +3986,7 @@ dependencies = [
  "miette",
  "relative-path",
  "sourcemap",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3998,7 +3998,7 @@ dependencies = [
  "merkle_hash",
  "miette",
  "rust-embed",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "veryl-path",
 ]
 
@@ -4325,7 +4325,7 @@ dependencies = [
  "pulley-interpreter",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "wasmparser 0.252.0",
  "wasmtime-environ",
  "wasmtime-internal-core 47.0.1",
