@@ -3103,31 +3103,44 @@ fn expand_factored_snapshot_inputs(
                 predecessor,
                 access,
             } => {
-                let SnapshotAccess::Phi(phi_block) = access else {
+                let Some(factoring) = factorings.get(&predecessor) else {
                     expanded.push((predecessor, access));
                     continue;
                 };
-                let Some(factoring) = factorings.get(&phi_block) else {
-                    expanded.push((predecessor, access));
-                    continue;
+                if factoring.successor != parent || !active.insert(predecessor) {
+                    return None;
+                }
+                frames.push(SnapshotInputFrame::Exit(predecessor));
+                let inputs = match access {
+                    SnapshotAccess::Phi(phi_block) if phi_block == predecessor => {
+                        let phi = actual_phis.get(&phi_block)?;
+                        if phi
+                            .inputs
+                            .iter()
+                            .map(|&(input_predecessor, _)| input_predecessor)
+                            .ne(factoring.predecessors.iter().copied())
+                        {
+                            return None;
+                        }
+                        phi.inputs.to_vec()
+                    }
+                    SnapshotAccess::Phi(_) => return None,
+                    // MemorySSA folds a phi whose incoming clobbers are all
+                    // equal. The validated write-free factoring still proves
+                    // that the shared edge block represents every recorded
+                    // predecessor; expand the carried access over those
+                    // original edges instead of requiring a synthetic phi to
+                    // survive canonicalization.
+                    access => factoring
+                        .predecessors
+                        .iter()
+                        .copied()
+                        .map(|predecessor| (predecessor, access))
+                        .collect(),
                 };
-                if phi_block != predecessor || factoring.successor != parent {
-                    return None;
-                }
-                let phi = actual_phis.get(&phi_block)?;
-                if phi
-                    .inputs
-                    .iter()
-                    .map(|&(input_predecessor, _)| input_predecessor)
-                    .ne(factoring.predecessors.iter().copied())
-                    || !active.insert(phi_block)
-                {
-                    return None;
-                }
-                frames.push(SnapshotInputFrame::Exit(phi_block));
-                frames.extend(phi.inputs.iter().rev().map(|&(predecessor, access)| {
+                frames.extend(inputs.iter().rev().map(|&(predecessor, access)| {
                     SnapshotInputFrame::Enter {
-                        parent: phi_block,
+                        parent: factoring.block,
                         predecessor,
                         access,
                     }
@@ -5161,6 +5174,34 @@ mod tests {
         assert!(stable_memory_snapshot_matches(
             &expected,
             &actual,
+            &inserted_writes,
+            &factorings,
+        ));
+
+        let folded_expected = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![SnapshotPhi {
+                block: BlockId(10),
+                inputs: vec![
+                    (BlockId(1), write(1)),
+                    (BlockId(2), write(1)),
+                    (BlockId(3), write(3)),
+                ]
+                .into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+        };
+        let folded_actual = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![SnapshotPhi {
+                block: BlockId(10),
+                inputs: vec![(BlockId(3), write(3)), (BlockId(20), write(1))].into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+        };
+        assert!(stable_memory_snapshot_matches(
+            &folded_expected,
+            &folded_actual,
             &inserted_writes,
             &factorings,
         ));
