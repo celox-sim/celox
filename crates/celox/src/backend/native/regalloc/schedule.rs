@@ -590,6 +590,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::LoadConstantTableAddr { .. }
         | MInst::Load { .. }
         | MInst::LoadIndexed { .. }
+        | MInst::PackedLaneEq { .. }
         | MInst::Store { .. }
         | MInst::StoreIndexed { .. }
         | MInst::OrStoreIndexed { .. }

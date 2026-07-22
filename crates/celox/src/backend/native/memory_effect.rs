@@ -236,6 +236,10 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
+        MInst::PackedLaneEq { alias_range, .. } => alias_range
+            .and_then(|range| checked_range(BaseReg::SimState, range.offset(), range.byte_len()))
+            .map(|range| MemoryEffects::static_ranges(&[range]))
+            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
         MInst::OrStoreIndexed {
             base, alias_range, ..
         } => alias_range

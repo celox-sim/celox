@@ -650,6 +650,22 @@ pub enum MInst {
         /// `None` means the complete direct-addressed base may be observed.
         alias_range: Option<MemoryAliasRange>,
     },
+    /// Compare one scalar against an element-strided array field and return
+    /// one equality bit per lane in the low bits of `dst`.
+    ///
+    /// The physical element slots are 1, 2, or 4 bytes wide. Keeping this as
+    /// one memory-reading MIR operation lets the emitter use packed SIMD
+    /// comparisons without first rebuilding the logical packed array.
+    PackedLaneEq {
+        dst: VReg,
+        value: VReg,
+        offset: i32,
+        lane_count: u8,
+        element_stride: u8,
+        bit_offset: u8,
+        field_width: u8,
+        alias_range: Option<MemoryAliasRange>,
+    },
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
         base: BaseReg,
@@ -959,6 +975,19 @@ impl fmt::Display for MInst {
                 size,
                 ..
             } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
+            MInst::PackedLaneEq {
+                dst,
+                value,
+                offset,
+                lane_count,
+                element_stride,
+                bit_offset,
+                field_width,
+                ..
+            } => write!(
+                f,
+                "{dst} = packed_lane_eq [sim + {offset}], {value}, lanes={lane_count}, stride={element_stride}, field={bit_offset}:{field_width}"
+            ),
             MInst::StoreIndexed {
                 base,
                 offset,
@@ -1219,6 +1248,7 @@ impl MInst {
             | MInst::Load { dst, .. }
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
+            | MInst::PackedLaneEq { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Add32 { dst, .. }
@@ -1301,6 +1331,7 @@ impl MInst {
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
+            MInst::PackedLaneEq { value, .. } => Uses::one(*value),
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 Uses::two(*index, *src)
             }
@@ -1417,6 +1448,11 @@ impl MInst {
             MInst::LoadIndexed { index, .. } => {
                 if *index == old {
                     *index = new;
+                }
+            }
+            MInst::PackedLaneEq { value, .. } => {
+                if *value == old {
+                    *value = new;
                 }
             }
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {

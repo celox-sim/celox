@@ -376,6 +376,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::Load { .. } => "load",
         MInst::LoadPtr { .. } => "load_ptr",
         MInst::LoadIndexed { .. } => "load_indexed",
+        MInst::PackedLaneEq { .. } => "packed_lane_eq",
         MInst::LoadPtrIndexed { .. } => "load_ptr_indexed",
         MInst::Add { .. } => "add.w64",
         MInst::Add32 { .. } => "add.w32",

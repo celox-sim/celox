@@ -2501,6 +2501,110 @@ fn emit_inst(
             }
         }
 
+        MInst::PackedLaneEq {
+            dst,
+            value,
+            offset,
+            lane_count,
+            element_stride,
+            bit_offset,
+            field_width,
+            ..
+        } => {
+            let d64 = preg_to_reg64(resolve(assignment, *dst));
+            let d32 = preg_to_reg32(resolve(assignment, *dst));
+            let scalar = preg_to_reg32(resolve(assignment, *value));
+            let stride = usize::from(*element_stride);
+            debug_assert!(matches!(stride, 1 | 2 | 4));
+            debug_assert_eq!(usize::from(*lane_count) * stride % 16, 0);
+
+            // XMM registers are outside the GPR allocator. The pseudo is one
+            // indivisible emission unit, so these temporaries cannot overlap
+            // another generated operation.
+            asm.movd(xmm1, scalar)?;
+            match stride {
+                1 => {
+                    asm.punpcklbw(xmm1, xmm1)?;
+                    asm.punpcklwd(xmm1, xmm1)?;
+                    asm.pshufd(xmm1, xmm1, 0)?;
+                }
+                2 => {
+                    asm.pshuflw(xmm1, xmm1, 0)?;
+                    asm.pshufd(xmm1, xmm1, 0)?;
+                }
+                4 => asm.pshufd(xmm1, xmm1, 0)?,
+                _ => unreachable!(),
+            }
+            let storage_width = stride * 8;
+            let needs_mask = usize::from(*field_width) != storage_width;
+            if needs_mask {
+                let mask = if *field_width == 32 {
+                    u32::MAX
+                } else {
+                    (1u32 << *field_width) - 1
+                };
+                asm.mov(d32, mask)?;
+                asm.movd(xmm4, d32)?;
+                match stride {
+                    1 => {
+                        asm.punpcklbw(xmm4, xmm4)?;
+                        asm.punpcklwd(xmm4, xmm4)?;
+                        asm.pshufd(xmm4, xmm4, 0)?;
+                    }
+                    2 => {
+                        asm.pshuflw(xmm4, xmm4, 0)?;
+                        asm.pshufd(xmm4, xmm4, 0)?;
+                    }
+                    4 => asm.pshufd(xmm4, xmm4, 0)?,
+                    _ => unreachable!(),
+                }
+            }
+            asm.pxor(xmm2, xmm2)?;
+            let lanes_per_chunk = 16 / stride;
+            for lane_base in (0..usize::from(*lane_count)).step_by(lanes_per_chunk) {
+                let chunk_offset = offset
+                    .checked_add((lane_base * stride) as i32)
+                    .expect("packed lane compare offset must fit i32");
+                asm.movdqu(
+                    xmm0,
+                    xmmword_ptr(mem_operand(BaseReg::SimState, chunk_offset)),
+                )?;
+                if *bit_offset != 0 {
+                    match stride {
+                        2 => asm.psrlw(xmm0, u32::from(*bit_offset))?,
+                        4 => asm.psrld(xmm0, u32::from(*bit_offset))?,
+                        _ => unreachable!("byte-lane shifts are rejected by ISel"),
+                    }
+                }
+                if needs_mask {
+                    asm.pand(xmm0, xmm4)?;
+                }
+                match stride {
+                    1 => {
+                        asm.pcmpeqb(xmm0, xmm1)?;
+                        asm.pmovmskb(d32, xmm0)?;
+                    }
+                    2 => {
+                        asm.pcmpeqw(xmm0, xmm1)?;
+                        asm.packsswb(xmm0, xmm0)?;
+                        asm.pmovmskb(d32, xmm0)?;
+                        asm.and(d32, 0xff)?;
+                    }
+                    4 => {
+                        asm.pcmpeqd(xmm0, xmm1)?;
+                        asm.movmskps(d32, xmm0)?;
+                    }
+                    _ => unreachable!(),
+                }
+                if lane_base != 0 {
+                    asm.shl(d64, lane_base as u32)?;
+                }
+                asm.movd(xmm3, d32)?;
+                asm.por(xmm2, xmm3)?;
+            }
+            asm.movq(d64, xmm2)?;
+        }
+
         MInst::LoadPtrIndexed {
             dst,
             ptr,
@@ -4068,7 +4172,9 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 },
                 MInst::LoadPtr { .. } => load_ptr += 1,
                 MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => store_ptr += 1,
-                MInst::LoadIndexed { .. } | MInst::LoadPtrIndexed { .. } => indexed_load += 1,
+                MInst::LoadIndexed { .. }
+                | MInst::LoadPtrIndexed { .. }
+                | MInst::PackedLaneEq { .. } => indexed_load += 1,
                 MInst::StoreIndexed { .. }
                 | MInst::OrStoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
@@ -5603,6 +5709,76 @@ mod shift_encoding_tests {
                 u64::from_le_bytes(state[shl_offset..shl_offset + 8].try_into().unwrap());
             assert_eq!(actual_shr, value >> imm, "shr immediate {imm}");
             assert_eq!(actual_shl, value << imm, "shl immediate {imm}");
+        }
+    }
+
+    #[test]
+    fn packed_lane_eq_executes_for_byte_word_and_dword_slots() {
+        const LANES: usize = 32;
+        const SCALAR_OFFSET: usize = 128;
+        const RESULT_OFFSET: usize = 136;
+        const TARGET: u32 = 5;
+
+        for (stride, bit_offset, field_width) in [(1usize, 0usize, 5usize), (2, 3, 7), (4, 9, 9)] {
+            let mut vregs = VRegAllocator::new();
+            let scalar = vregs.alloc();
+            let result = vregs.alloc();
+            let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: scalar,
+                base: BaseReg::SimState,
+                offset: SCALAR_OFFSET as i32,
+                size: OpSize::S32,
+            });
+            block.push(MInst::PackedLaneEq {
+                dst: result,
+                value: scalar,
+                offset: 0,
+                lane_count: LANES as u8,
+                element_stride: stride as u8,
+                bit_offset: bit_offset as u8,
+                field_width: field_width as u8,
+                alias_range: MemoryAliasRange::new(0, LANES * stride),
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: RESULT_OFFSET as i32,
+                src: result,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+
+            mir_legalize::legalize(&mut func);
+            mir_opt::optimize(&mut func);
+            let allocation = regalloc::run_regalloc(&mut func).unwrap();
+            let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = [0u8; 144];
+            let mut expected = 0u64;
+            for lane in 0..LANES {
+                let matches = lane % 3 == 1 || lane == 31;
+                let field = if matches {
+                    TARGET
+                } else {
+                    (lane as u32 + 7) & ((1 << field_width) - 1)
+                };
+                let slot = (field << bit_offset) | (u32::MAX << (bit_offset + field_width));
+                state[lane * stride..(lane + 1) * stride]
+                    .copy_from_slice(&slot.to_le_bytes()[..stride]);
+                if matches || field == TARGET {
+                    expected |= 1u64 << lane;
+                }
+            }
+            state[SCALAR_OFFSET..SCALAR_OFFSET + 4].copy_from_slice(&TARGET.to_le_bytes());
+
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[RESULT_OFFSET..RESULT_OFFSET + 8].try_into().unwrap()),
+                expected,
+                "stride={stride} bit_offset={bit_offset} field_width={field_width}"
+            );
         }
     }
 }

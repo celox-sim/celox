@@ -37,6 +37,15 @@ enum PackedNode {
     Broadcast(RegisterId),
     /// Lanes whose zero-based index is smaller than the scalar bound.
     Prefix(RegisterId),
+    /// Compare every logical element field with one loop-invariant scalar and
+    /// return one compact predicate bit per lane.
+    LaneEq {
+        address: RegionedAbsoluteAddr,
+        element_width: usize,
+        bit_offset: usize,
+        field_width: usize,
+        value: RegisterId,
+    },
     Not(usize),
     And(usize, usize),
     Or(usize, usize),
@@ -84,14 +93,47 @@ struct LinearBitmapScanPlan {
     predicate: PackedExpression,
 }
 
+#[derive(Clone, Debug)]
+struct PayloadField {
+    exit_position: usize,
+    address: RegionedAbsoluteAddr,
+    element_width: usize,
+    bit_offset: usize,
+    width: usize,
+    value_type: RegisterType,
+    no_match: RegisterId,
+}
+
+#[derive(Clone, Debug)]
+struct LastPayloadScanPlan {
+    preheader: BlockId,
+    loop_blocks: Vec<BlockId>,
+    exit: BlockId,
+    exit_arguments: Vec<RegisterId>,
+    exit_found_position: usize,
+    found_type: RegisterType,
+    no_match_found: RegisterId,
+    lanes: usize,
+    predicate: PackedExpression,
+    payloads: Vec<PayloadField>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ArrayShape {
+    element_width: usize,
+    element_count: usize,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct CircularPriorityPass {
     bit_array_elements: HashMap<AbsoluteAddr, usize>,
+    array_shapes: HashMap<AbsoluteAddr, ArrayShape>,
 }
 
 impl CircularPriorityPass {
     pub(super) fn for_program(program: &Program) -> Self {
         let mut bit_array_elements = HashMap::default();
+        let mut array_shapes = HashMap::default();
         for (&instance_id, &module_id) in &program.instance_module {
             for info in program.module_variables[&module_id].values() {
                 let element_count = if info.array_dims.is_empty() {
@@ -105,6 +147,22 @@ impl CircularPriorityPass {
                         continue;
                     };
                     if info.width != element_count {
+                        let Some(element_width) = info.width.checked_div(element_count) else {
+                            continue;
+                        };
+                        if element_width == 0 || element_width * element_count != info.width {
+                            continue;
+                        }
+                        array_shapes.insert(
+                            AbsoluteAddr {
+                                instance_id,
+                                var_id: info.id,
+                            },
+                            ArrayShape {
+                                element_width,
+                                element_count,
+                            },
+                        );
                         continue;
                     }
                     element_count
@@ -119,9 +177,24 @@ impl CircularPriorityPass {
                     },
                     element_count,
                 );
+                if !info.array_dims.is_empty() {
+                    array_shapes.insert(
+                        AbsoluteAddr {
+                            instance_id,
+                            var_id: info.id,
+                        },
+                        ArrayShape {
+                            element_width: 1,
+                            element_count,
+                        },
+                    );
+                }
             }
         }
-        Self { bit_array_elements }
+        Self {
+            bit_array_elements,
+            array_shapes,
+        }
     }
 }
 
@@ -131,7 +204,10 @@ impl ExecutionUnitPass for CircularPriorityPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        if options.four_state || eu.blocks.len() < 6 || self.bit_array_elements.is_empty() {
+        if options.four_state
+            || eu.blocks.len() < 6
+            || self.bit_array_elements.is_empty() && self.array_shapes.is_empty()
+        {
             return;
         }
         let Ok(cfg) = SirCfg::analyze(eu) else {
@@ -142,6 +218,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
         let mut constant_cache = HashMap::default();
         let mut plans = Vec::new();
         let mut linear_plans = Vec::new();
+        let mut payload_plans = Vec::new();
 
         // Only innermost natural loops are candidates. This keeps discovery
         // linear in the instructions owned by disjoint loop regions rather
@@ -168,6 +245,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
                 &definitions,
                 &mut constant_cache,
                 &self.bit_array_elements,
+                &self.array_shapes,
             ) {
                 plans.push(plan);
             }
@@ -180,12 +258,26 @@ impl ExecutionUnitPass for CircularPriorityPass {
                 &use_blocks,
                 &mut constant_cache,
                 &self.bit_array_elements,
+                &self.array_shapes,
             ) {
                 linear_plans.push(plan);
             }
+            if let Some(plan) = recognize_last_payload_scan(
+                eu,
+                &cfg,
+                cfg.block_ids[natural_loop.header],
+                &loop_blocks,
+                &definitions,
+                &use_blocks,
+                &mut constant_cache,
+                &self.bit_array_elements,
+                &self.array_shapes,
+            ) {
+                payload_plans.push(plan);
+            }
         }
 
-        if plans.is_empty() && linear_plans.is_empty() {
+        if plans.is_empty() && linear_plans.is_empty() && payload_plans.is_empty() {
             return;
         }
         plans.sort_unstable_by_key(|plan| plan.preheader);
@@ -213,9 +305,21 @@ impl ExecutionUnitPass for CircularPriorityPass {
             occupied.extend(plan.loop_blocks.iter().copied());
             true
         });
+        payload_plans.sort_unstable_by_key(|plan| plan.preheader);
+        payload_plans.retain(|plan| {
+            if plan
+                .loop_blocks
+                .iter()
+                .any(|block| occupied.contains(block))
+            {
+                return false;
+            }
+            occupied.extend(plan.loop_blocks.iter().copied());
+            true
+        });
         prepare_escaping_definitions(eu, &cfg, &definitions, &mut plans);
-        if (plans.is_empty() && linear_plans.is_empty())
-            || !ids_available(eu, &plans, &linear_plans)
+        if (plans.is_empty() && linear_plans.is_empty() && payload_plans.is_empty())
+            || !ids_available(eu, &plans, &linear_plans, &payload_plans)
         {
             return;
         }
@@ -227,6 +331,9 @@ impl ExecutionUnitPass for CircularPriorityPass {
         }
         for plan in linear_plans {
             apply_linear_bitmap_scan(eu, plan, &mut next_register);
+        }
+        for plan in payload_plans {
+            apply_last_payload_scan(eu, plan, &mut next_register, &mut next_block);
         }
         remove_dead_definitions(eu);
     }
@@ -340,6 +447,7 @@ fn recognize_linear_bitmap_scan(
     use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
     constant_cache: &mut HashMap<RegisterId, Option<bool>>,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
 ) -> Option<LinearBitmapScanPlan> {
     if loop_blocks.len() != 4 || !loop_is_pure(eu, loop_blocks) {
         return None;
@@ -538,6 +646,7 @@ fn recognize_linear_bitmap_scan(
         false,
         lanes,
         bit_array_elements,
+        array_shapes,
     )?;
     if predicate.dynamic_loads == 0 {
         return None;
@@ -571,6 +680,222 @@ fn recognize_linear_bitmap_scan(
         no_match_best: entry_arguments[best_position],
         no_match_found: entry_arguments[found_position],
         predicate,
+    })
+}
+
+/// Recognize an ascending fixed-trip search which retains the payload from
+/// every matching lane.  Since each match overwrites the previous payload,
+/// the final state is exactly the payload of the highest set predicate bit.
+#[allow(clippy::too_many_arguments)]
+fn recognize_last_payload_scan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    header: BlockId,
+    loop_blocks: &HashSet<BlockId>,
+    definitions: &HashMap<RegisterId, Definition>,
+    use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
+    constant_cache: &mut HashMap<RegisterId, Option<bool>>,
+    bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
+) -> Option<LastPayloadScanPlan> {
+    if loop_blocks.len() != 4 || !loop_is_pure(eu, loop_blocks) {
+        return None;
+    }
+    if loop_blocks.iter().any(|block| {
+        eu.blocks[block]
+            .params
+            .iter()
+            .copied()
+            .chain(eu.blocks[block].instructions.iter().filter_map(def_reg))
+            .any(|value| {
+                use_blocks
+                    .get(&value)
+                    .is_some_and(|users| users.iter().any(|user| !loop_blocks.contains(user)))
+            })
+    }) {
+        return None;
+    }
+    let header_index = cfg.block_index(header)?;
+    let outside_predecessors = cfg.predecessors[header_index]
+        .iter()
+        .map(|&block| cfg.block_ids[block])
+        .filter(|block| !loop_blocks.contains(block))
+        .collect::<Vec<_>>();
+    let [preheader] = outside_predecessors.as_slice() else {
+        return None;
+    };
+    let preheader = *preheader;
+    let header_block = &eu.blocks[&header];
+    let SIRTerminator::Jump(target, entry_arguments) = &eu.blocks[&preheader].terminator else {
+        return None;
+    };
+    if *target != header || entry_arguments.len() != header_block.params.len() {
+        return None;
+    }
+    let (predicate_register, selected_arm, carry_arm) = branch_targets(&header_block.terminator)?;
+    let latch = common_jump_target(eu, selected_arm)?;
+    if common_jump_target(eu, carry_arm)? != latch || !loop_blocks.contains(&latch) {
+        return None;
+    }
+    let selected_arguments = edge_arguments(&eu.blocks[&selected_arm].terminator, latch)?;
+    let carry_arguments = edge_arguments(&eu.blocks[&carry_arm].terminator, latch)?;
+    let latch_block = &eu.blocks[&latch];
+    if selected_arguments.len() != latch_block.params.len()
+        || carry_arguments.len() != latch_block.params.len()
+        || latch_block.params.is_empty()
+    {
+        return None;
+    }
+    let (latch_condition, latch_true, latch_false) = branch_targets(&latch_block.terminator)?;
+    let (exit, loop_when_true) = if latch_true == header && !loop_blocks.contains(&latch_false) {
+        (latch_false, true)
+    } else if latch_false == header && !loop_blocks.contains(&latch_true) {
+        (latch_true, false)
+    } else {
+        return None;
+    };
+    let backedge_arguments = edge_arguments(&latch_block.terminator, header)?;
+    let exit_arguments = edge_arguments(&latch_block.terminator, exit)?;
+    if backedge_arguments.len() != header_block.params.len()
+        || exit_arguments.len() != eu.blocks[&exit].params.len()
+    {
+        return None;
+    }
+    let (trip_position, lanes) = match_count_recurrence(
+        eu,
+        definitions,
+        header_block,
+        entry_arguments,
+        backedge_arguments,
+        latch_condition,
+        loop_when_true,
+    )?;
+    if lanes < 4 {
+        return None;
+    }
+    let index_position = match_index_recurrence(
+        eu,
+        definitions,
+        header_block,
+        entry_arguments,
+        backedge_arguments,
+        trip_position,
+    )?;
+    let index = header_block.params[index_position];
+
+    let found_position = (0..header_block.params.len()).find(|&position| {
+        if position == trip_position || position == index_position {
+            return false;
+        }
+        let current = header_block.params[position];
+        matches!(
+            instruction(eu, definitions, backedge_arguments[position]),
+            Some(SIRInstruction::Mux(_, condition, on_true, on_false))
+                if *condition == predicate_register
+                    && immediate(eu, definitions, *on_true) == Some(1)
+                    && *on_false == current
+                    && immediate(eu, definitions, entry_arguments[position]) == Some(0)
+        )
+    })?;
+    let found_update = backedge_arguments[found_position];
+    let exit_found_position = exit_arguments
+        .iter()
+        .position(|&argument| argument == found_update)?;
+
+    let mut mapped_positions = HashSet::default();
+    mapped_positions.extend([trip_position, index_position, found_position]);
+    let mut used_exit_positions = HashSet::default();
+    used_exit_positions.insert(exit_found_position);
+    let mut payloads = Vec::with_capacity(latch_block.params.len());
+    for (merge_position, &merge_parameter) in latch_block.params.iter().enumerate() {
+        let header_position = (0..header_block.params.len()).find(|&position| {
+            !mapped_positions.contains(&position)
+                && backedge_arguments[position] == merge_parameter
+                && carry_arguments[merge_position] == header_block.params[position]
+        })?;
+        let selected = selected_arguments[merge_position];
+        let SIRInstruction::Load(
+            _,
+            address,
+            SIROffset::Element {
+                index: load_index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset: None,
+            },
+            width,
+        ) = instruction(eu, definitions, selected)?
+        else {
+            return None;
+        };
+        let shape = array_shapes.get(&address.absolute_addr())?;
+        if *load_index != index
+            || shape.element_width != *element_width
+            || shape.element_count < lanes
+            || *width == 0
+            || bit_offset.checked_add(*width)? > *element_width
+        {
+            return None;
+        }
+        let exit_position = exit_arguments
+            .iter()
+            .position(|&argument| argument == merge_parameter)?;
+        if !used_exit_positions.insert(exit_position) {
+            return None;
+        }
+        let value_type = eu.register_map.get(&selected)?.clone();
+        if eu.register_map.get(&header_block.params[header_position]) != Some(&value_type)
+            || eu.register_map.get(&eu.blocks[&exit].params[exit_position]) != Some(&value_type)
+        {
+            return None;
+        }
+        mapped_positions.insert(header_position);
+        payloads.push(PayloadField {
+            exit_position,
+            address: *address,
+            element_width: *element_width,
+            bit_offset: *bit_offset,
+            width: *width,
+            value_type,
+            no_match: entry_arguments[header_position],
+        });
+    }
+    if mapped_positions.len() != header_block.params.len() {
+        return None;
+    }
+
+    let predicate = build_packed_expression(
+        eu,
+        cfg,
+        definitions,
+        constant_cache,
+        loop_blocks,
+        preheader,
+        index,
+        predicate_register,
+        false,
+        lanes,
+        bit_array_elements,
+        array_shapes,
+    )?;
+    if predicate.dynamic_loads == 0
+        || eu.register_map[&header_block.params[found_position]].width() != 1
+    {
+        return None;
+    }
+    let mut loop_blocks = loop_blocks.iter().copied().collect::<Vec<_>>();
+    loop_blocks.sort_unstable();
+    Some(LastPayloadScanPlan {
+        preheader,
+        loop_blocks,
+        exit,
+        exit_arguments: exit_arguments.to_vec(),
+        exit_found_position,
+        found_type: eu.register_map[&header_block.params[found_position]].clone(),
+        no_match_found: entry_arguments[found_position],
+        lanes,
+        predicate,
+        payloads,
     })
 }
 
@@ -621,6 +946,7 @@ fn recognize_loop(
     definitions: &HashMap<RegisterId, Definition>,
     constant_cache: &mut HashMap<RegisterId, Option<bool>>,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
 ) -> Option<CircularPriorityPlan> {
     if loop_blocks.len() != 5 {
         return None;
@@ -724,6 +1050,7 @@ fn recognize_loop(
             backedge_arguments,
             exit_arguments,
             bit_array_elements,
+            array_shapes,
         ) else {
             continue;
         };
@@ -826,6 +1153,7 @@ fn recognize_orientation(
     backedge_arguments: &[RegisterId],
     exit_arguments: &[RegisterId],
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
 ) -> Option<CircularPriorityPlan> {
     if !loop_blocks.contains(&candidate)
         || !loop_blocks.contains(&skip)
@@ -981,6 +1309,7 @@ fn recognize_orientation(
             invert_predicate,
             lanes,
             bit_array_elements,
+            array_shapes,
         ) else {
             continue;
         };
@@ -1378,6 +1707,7 @@ fn build_packed_expression(
     invert: bool,
     lanes: usize,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
 ) -> Option<PackedExpression> {
     let root = strip_boolean_identity(eu, definitions, root);
     let mut nodes = Vec::new();
@@ -1453,6 +1783,35 @@ fn build_packed_expression(
                     stack.push((*rhs, false));
                     stack.push((*lhs, false));
                 }
+                SIRInstruction::Binary(_, lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs)
+                    if match_lane_eq(
+                        eu,
+                        cfg,
+                        definitions,
+                        loop_blocks,
+                        preheader,
+                        index,
+                        lanes,
+                        array_shapes,
+                        *lhs,
+                        *rhs,
+                    )
+                    .is_some() =>
+                {
+                    let node = match_lane_eq(
+                        eu,
+                        cfg,
+                        definitions,
+                        loop_blocks,
+                        preheader,
+                        index,
+                        lanes,
+                        array_shapes,
+                        *lhs,
+                        *rhs,
+                    )?;
+                    values.insert(register, intern_node(&mut nodes, &mut interned, node));
+                }
                 SIRInstruction::Binary(_, lhs, BinaryOp::Eq, rhs)
                     if immediate(eu, definitions, *rhs) == Some(1) =>
                 {
@@ -1517,7 +1876,7 @@ fn build_packed_expression(
     let root = *values.get(&root)?;
     let dynamic_loads = nodes
         .iter()
-        .filter(|node| matches!(node, PackedNode::Load(_)))
+        .filter(|node| matches!(node, PackedNode::Load(_) | PackedNode::LaneEq { .. }))
         .count();
     let value_ops = nodes
         .iter()
@@ -1526,6 +1885,7 @@ fn build_packed_expression(
                 node,
                 PackedNode::Broadcast(_)
                     | PackedNode::Prefix(_)
+                    | PackedNode::LaneEq { .. }
                     | PackedNode::Not(_)
                     | PackedNode::And(..)
                     | PackedNode::Or(..)
@@ -1539,6 +1899,71 @@ fn build_packed_expression(
         dynamic_loads,
         value_ops,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_lane_eq(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, Definition>,
+    loop_blocks: &HashSet<BlockId>,
+    preheader: BlockId,
+    index: RegisterId,
+    lanes: usize,
+    array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
+    lhs: RegisterId,
+    rhs: RegisterId,
+) -> Option<PackedNode> {
+    for (loaded, value) in [(lhs, rhs), (rhs, lhs)] {
+        let SIRInstruction::Load(
+            _,
+            address,
+            SIROffset::Element {
+                index: load_index,
+                element_width,
+                bit_offset,
+                dynamic_bit_offset,
+            },
+            field_width,
+        ) = instruction(eu, definitions, loaded)?
+        else {
+            continue;
+        };
+        let dynamic_bit_offset = if let Some(offset) = dynamic_bit_offset {
+            immediate(eu, definitions, *offset)?
+        } else {
+            0
+        };
+        let dynamic_bit_offset = usize::try_from(dynamic_bit_offset).ok()?;
+        let bit_offset = bit_offset.checked_add(dynamic_bit_offset)?;
+        if *load_index != index
+            || *field_width == 0
+            || bit_offset.checked_add(*field_width)? > *element_width
+            || eu.register_map.get(&value).map(RegisterType::width) != Some(*field_width)
+        {
+            continue;
+        }
+        let shape = array_shapes.get(&address.absolute_addr())?;
+        if shape.element_width != *element_width || shape.element_count < lanes {
+            continue;
+        }
+        let value_definition = definitions.get(&value).copied()?;
+        if loop_blocks.contains(&value_definition.block())
+            || !cfg.dominates(value_definition.block(), preheader)
+        {
+            continue;
+        }
+        element_width.checked_mul(lanes)?;
+        field_width.checked_mul(lanes)?;
+        return Some(PackedNode::LaneEq {
+            address: *address,
+            element_width: *element_width,
+            bit_offset,
+            field_width: *field_width,
+            value,
+        });
+    }
+    None
 }
 
 fn is_lane_bit_offset(offset: &SIROffset, index: RegisterId) -> bool {
@@ -1759,28 +2184,48 @@ fn ids_available(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     plans: &[CircularPriorityPlan],
     linear_plans: &[LinearBitmapScanPlan],
+    payload_plans: &[LastPayloadScanPlan],
 ) -> bool {
     // A packed node normally emits one register. Prefix and Broadcast may emit
     // three, and materializing a constant root/inversion needs at most two
     // more. Keep this bound independent of the expression shape so ID-space
     // exhaustion is rejected before mutating the EU.
-    let expression_registers =
-        |expression: &PackedExpression| expression.nodes.len().checked_mul(3)?.checked_add(2);
+    let expression_registers = |expression: &PackedExpression, lanes: usize| {
+        expression.nodes.iter().try_fold(2usize, |total, node| {
+            let registers = if matches!(node, PackedNode::LaneEq { .. }) {
+                lanes.checked_mul(2)?.checked_add(1)?
+            } else {
+                3
+            };
+            total.checked_add(registers)
+        })
+    };
     let required_registers = plans
         .iter()
         .try_fold(0usize, |total, plan| {
             total
-                .checked_add(expression_registers(&plan.predicate)?)?
+                .checked_add(expression_registers(&plan.predicate, plan.lanes)?)?
                 .checked_add(9)
         })
         .and_then(|total| {
             linear_plans.iter().try_fold(total, |total, plan| {
                 total
-                    .checked_add(expression_registers(&plan.predicate)?)?
+                    .checked_add(expression_registers(&plan.predicate, plan.lanes)?)?
                     .checked_add(8)
             })
+        })
+        .and_then(|total| {
+            payload_plans.iter().try_fold(total, |total, plan| {
+                total
+                    .checked_add(expression_registers(&plan.predicate, plan.lanes)?)?
+                    .checked_add(plan.payloads.len())?
+                    .checked_add(5)
+            })
         });
-    let required_blocks = plans.len().checked_mul(2);
+    let required_blocks = plans
+        .len()
+        .checked_add(payload_plans.len())
+        .and_then(|count| count.checked_mul(2));
     let (Some(required_registers), Some(required_blocks)) = (required_registers, required_blocks)
     else {
         return false;
@@ -1864,6 +2309,38 @@ impl ExpressionEmitter<'_> {
         }
     }
 
+    fn emit_lane_eq(
+        &mut self,
+        address: RegionedAbsoluteAddr,
+        element_width: usize,
+        bit_offset: usize,
+        field_width: usize,
+        value: RegisterId,
+    ) -> RegisterId {
+        let mut predicates = Vec::with_capacity(self.width);
+        for lane in (0..self.width).rev() {
+            let loaded = fresh_register(self.eu, self.next_register, unsigned_type(field_width));
+            self.instructions.push(SIRInstruction::Load(
+                loaded,
+                address,
+                SIROffset::Static(lane * element_width + bit_offset),
+                field_width,
+            ));
+            let predicate = fresh_register(self.eu, self.next_register, unsigned_type(1));
+            self.instructions.push(SIRInstruction::Binary(
+                predicate,
+                loaded,
+                BinaryOp::Eq,
+                value,
+            ));
+            predicates.push(predicate);
+        }
+        let compact = fresh_register(self.eu, self.next_register, unsigned_type(self.width));
+        self.instructions
+            .push(SIRInstruction::Concat(compact, predicates));
+        compact
+    }
+
     fn emit(
         mut self,
         expression: &PackedExpression,
@@ -1916,6 +2393,19 @@ impl ExpressionEmitter<'_> {
                     ));
                     EmittedValue::Register(prefix)
                 }
+                PackedNode::LaneEq {
+                    address,
+                    element_width,
+                    bit_offset,
+                    field_width,
+                    value,
+                } => EmittedValue::Register(self.emit_lane_eq(
+                    address,
+                    element_width,
+                    bit_offset,
+                    field_width,
+                    value,
+                )),
                 PackedNode::Not(source) => match values[source] {
                     EmittedValue::Constant(value) => EmittedValue::Constant(!value),
                     source => {
@@ -2151,6 +2641,89 @@ fn apply_linear_bitmap_scan(
     }
 }
 
+fn apply_last_payload_scan(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: LastPayloadScanPlan,
+    next_register: &mut usize,
+    next_block: &mut usize,
+) {
+    let selected_block = fresh_block(next_block);
+    let empty_block = fresh_block(next_block);
+    let emitter = ExpressionEmitter {
+        eu,
+        next_register,
+        width: plan.lanes,
+        instructions: Vec::new(),
+        zero: None,
+        ones: None,
+    };
+    let (mask, predicate_instructions) = emitter.emit(&plan.predicate);
+    let nonempty = fresh_register(eu, next_register, unsigned_type(1));
+    let preheader = eu.blocks.get_mut(&plan.preheader).unwrap();
+    preheader.instructions.extend(predicate_instructions);
+    preheader
+        .instructions
+        .push(SIRInstruction::Unary(nonempty, UnaryOp::Or, mask));
+    preheader.terminator = SIRTerminator::Branch {
+        cond: nonempty,
+        true_block: (selected_block, Vec::new()),
+        false_block: (empty_block, Vec::new()),
+    };
+
+    let count_width = UnaryOp::CountLeadingZeros.result_width(plan.lanes);
+    let leading_zeros = fresh_register(eu, next_register, unsigned_type(count_width));
+    let last_lane = fresh_register(eu, next_register, unsigned_type(count_width));
+    let last_lane_number = fresh_register(eu, next_register, unsigned_type(count_width));
+    let found = fresh_register(eu, next_register, plan.found_type.clone());
+    let mut selected_instructions = vec![
+        SIRInstruction::Unary(leading_zeros, UnaryOp::CountLeadingZeros, mask),
+        SIRInstruction::Imm(last_lane, SIRValue::new(plan.lanes - 1)),
+        SIRInstruction::Binary(last_lane_number, last_lane, BinaryOp::Sub, leading_zeros),
+        SIRInstruction::Imm(found, SIRValue::new(1u8)),
+    ];
+    let mut selected_arguments = plan.exit_arguments.clone();
+    selected_arguments[plan.exit_found_position] = found;
+    for payload in &plan.payloads {
+        let value = fresh_register(eu, next_register, payload.value_type.clone());
+        selected_instructions.push(SIRInstruction::Load(
+            value,
+            payload.address,
+            SIROffset::Element {
+                index: last_lane_number,
+                element_width: payload.element_width,
+                bit_offset: payload.bit_offset,
+                dynamic_bit_offset: None,
+            },
+            payload.width,
+        ));
+        selected_arguments[payload.exit_position] = value;
+    }
+    let selected = BasicBlock {
+        id: selected_block,
+        params: Vec::new(),
+        instructions: selected_instructions,
+        terminator: SIRTerminator::Jump(plan.exit, selected_arguments),
+    };
+
+    let mut empty_arguments = plan.exit_arguments;
+    empty_arguments[plan.exit_found_position] = plan.no_match_found;
+    for payload in &plan.payloads {
+        empty_arguments[payload.exit_position] = payload.no_match;
+    }
+    let empty = BasicBlock {
+        id: empty_block,
+        params: Vec::new(),
+        instructions: Vec::new(),
+        terminator: SIRTerminator::Jump(plan.exit, empty_arguments),
+    };
+
+    for block in plan.loop_blocks {
+        eu.blocks.remove(&block);
+    }
+    eu.blocks.insert(selected_block, selected);
+    eu.blocks.insert(empty_block, empty);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2172,6 +2745,7 @@ mod tests {
             bit_array_elements: (0..3)
                 .map(|raw| (address(raw).absolute_addr(), LANES))
                 .collect(),
+            array_shapes: HashMap::default(),
         }
     }
 
@@ -2512,8 +3086,10 @@ mod tests {
                             BinaryOp::Sub => lhs.wrapping_sub(rhs),
                             BinaryOp::And | BinaryOp::LogicAnd => lhs & rhs,
                             BinaryOp::Or | BinaryOp::LogicOr => lhs | rhs,
+                            BinaryOp::Xor => lhs ^ rhs,
                             BinaryOp::Shl => lhs.checked_shl(rhs as u32).unwrap_or(0),
                             BinaryOp::Shr => lhs >> rhs,
+                            BinaryOp::Eq | BinaryOp::EqWildcard => u64::from(lhs == rhs),
                             BinaryOp::Ne => u64::from(lhs != rhs),
                             BinaryOp::LtU => u64::from(lhs < rhs),
                             other => panic!("unsupported binary operation {other:?}"),
@@ -2522,6 +3098,7 @@ mod tests {
                         registers.insert(*destination, value & ((1u64 << width) - 1));
                     }
                     SIRInstruction::Unary(destination, operation, source) => {
+                        let source_width = eu.register_map[source].width() as u32;
                         let source = registers[source];
                         let value = match operation {
                             UnaryOp::ToTwoState | UnaryOp::Ident => source,
@@ -2530,6 +3107,13 @@ mod tests {
                             UnaryOp::Or => u64::from(source != 0),
                             UnaryOp::PopCount => source.count_ones() as u64,
                             UnaryOp::CountTrailingZeros => source.trailing_zeros() as u64,
+                            UnaryOp::CountLeadingZeros => {
+                                if source == 0 {
+                                    u64::from(source_width)
+                                } else {
+                                    u64::from(source.leading_zeros() - (64 - source_width))
+                                }
+                            }
                             other => panic!("unsupported unary operation {other:?}"),
                         };
                         let width = eu.register_map[destination].width();
@@ -2539,7 +3123,18 @@ mod tests {
                         let offset = match offset {
                             SIROffset::Static(offset) => *offset,
                             SIROffset::Dynamic(index) => registers[index] as usize,
-                            SIROffset::Element { index, .. } => registers[index] as usize,
+                            SIROffset::Element {
+                                index,
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                            } => {
+                                registers[index] as usize * element_width
+                                    + bit_offset
+                                    + dynamic_bit_offset
+                                        .map(|dynamic| registers[&dynamic] as usize)
+                                        .unwrap_or(0)
+                            }
                         };
                         let value = memory.get(address).copied().unwrap_or(0) >> offset;
                         registers.insert(*destination, value & ((1u64 << width) - 1));
@@ -2855,6 +3450,195 @@ mod tests {
         }
     }
 
+    fn last_payload_scan_fixture() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut builder = Builder::new();
+        let query = builder.bit(3);
+        let mut preheader_instructions = Vec::new();
+        let trip = builder.imm(&mut preheader_instructions, 3, LANES as u64);
+        let initial_index = builder.imm(&mut preheader_instructions, 2, 0);
+        let initial_found = builder.imm(&mut preheader_instructions, 1, 0);
+        let initial_payload = builder.imm(&mut preheader_instructions, 5, 0x1b);
+        let one3 = builder.imm(&mut preheader_instructions, 3, 1);
+        let one2 = builder.imm(&mut preheader_instructions, 2, 1);
+        let one1 = builder.imm(&mut preheader_instructions, 1, 1);
+        let zero3 = builder.imm(&mut preheader_instructions, 3, 0);
+        let preheader = BasicBlock {
+            id: BlockId(0),
+            params: vec![query],
+            instructions: preheader_instructions,
+            terminator: SIRTerminator::Jump(
+                BlockId(1),
+                vec![trip, initial_index, initial_found, initial_payload],
+            ),
+        };
+
+        let remaining = builder.bit(3);
+        let index = builder.bit(2);
+        let found = builder.bit(1);
+        let payload = builder.bit(5);
+        let lane = builder.bit(3);
+        let predicate = builder.bit(1);
+        let next_found = builder.bit(1);
+        let header = BasicBlock {
+            id: BlockId(1),
+            params: vec![remaining, index, found, payload],
+            instructions: vec![
+                SIRInstruction::Load(
+                    lane,
+                    address(0),
+                    SIROffset::Element {
+                        index,
+                        element_width: 3,
+                        bit_offset: 0,
+                        dynamic_bit_offset: None,
+                    },
+                    3,
+                ),
+                SIRInstruction::Binary(predicate, lane, BinaryOp::Eq, query),
+                SIRInstruction::Mux(next_found, predicate, one1, found),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: predicate,
+                true_block: (BlockId(2), Vec::new()),
+                false_block: (BlockId(3), Vec::new()),
+            },
+        };
+        let selected_payload = builder.bit(5);
+        let selected = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Load(
+                selected_payload,
+                address(1),
+                SIROffset::Element {
+                    index,
+                    element_width: 5,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                5,
+            )],
+            terminator: SIRTerminator::Jump(BlockId(4), vec![selected_payload]),
+        };
+        let carry = BasicBlock {
+            id: BlockId(3),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(4), vec![payload]),
+        };
+        let merged_payload = builder.bit(5);
+        let mut latch_instructions = Vec::new();
+        let next_remaining =
+            builder.binary(&mut latch_instructions, 3, remaining, BinaryOp::Sub, one3);
+        let keep_looping = builder.binary(
+            &mut latch_instructions,
+            1,
+            next_remaining,
+            BinaryOp::Ne,
+            zero3,
+        );
+        let next_index = builder.binary(&mut latch_instructions, 2, index, BinaryOp::Add, one2);
+        let latch = BasicBlock {
+            id: BlockId(4),
+            params: vec![merged_payload],
+            instructions: latch_instructions,
+            terminator: SIRTerminator::Branch {
+                cond: keep_looping,
+                true_block: (
+                    BlockId(1),
+                    vec![next_remaining, next_index, next_found, merged_payload],
+                ),
+                false_block: (BlockId(5), vec![next_found, merged_payload]),
+            },
+        };
+        let result_found = builder.bit(1);
+        let result_payload = builder.bit(5);
+        let exit = BasicBlock {
+            id: BlockId(5),
+            params: vec![result_found, result_payload],
+            instructions: vec![
+                SIRInstruction::Store(
+                    address(2),
+                    SIROffset::Static(0),
+                    1,
+                    result_found,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Store(
+                    address(3),
+                    SIROffset::Static(0),
+                    5,
+                    result_payload,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [preheader, header, selected, carry, latch, exit]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: builder.types,
+        }
+    }
+
+    #[test]
+    fn recovers_last_matching_lane_payload_from_multibit_array() {
+        let mut unit = last_payload_scan_fixture();
+        unit.verify_result().unwrap();
+        let original = unit.clone();
+        let pass = CircularPriorityPass {
+            bit_array_elements: HashMap::default(),
+            array_shapes: [
+                (
+                    address(0).absolute_addr(),
+                    ArrayShape {
+                        element_width: 3,
+                        element_count: LANES,
+                    },
+                ),
+                (
+                    address(1).absolute_addr(),
+                    ArrayShape {
+                        element_width: 5,
+                        element_count: LANES,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        pass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+        assert_eq!(unit.blocks.len(), 4);
+        assert!(unit.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Unary(_, UnaryOp::CountLeadingZeros, _)
+                )
+            })
+        }));
+
+        for query in 0..8 {
+            for lanes in 0..1u64 << (3 * LANES) {
+                for payloads in [0, 0x12345, 0xfffff] {
+                    let memory = &[(address(0), lanes), (address(1), payloads)];
+                    let outputs = &[address(2), address(3)];
+                    assert_eq!(
+                        execute_with(&unit, &[query], memory, outputs),
+                        execute_with(&original, &[query], memory, outputs),
+                        "query={query} lanes={lanes:#x} payloads={payloads:#x}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn recovers_linear_bitmap_count_and_first_match() {
         let mut unit = linear_scan_fixture();
@@ -2867,6 +3651,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            array_shapes: HashMap::default(),
         };
         pass.run(&mut unit, &PassOptions::default());
         unit.verify_result().unwrap();
