@@ -6399,6 +6399,103 @@ spill placement; exact Linux semantics, pre-allocation identity, rollback, a
 large frame/code reduction, and a repeated generated-code speedup are
 verified**.
 
+### Step 73: Recover path-sensitive priority regions
+
+The remaining floating-point result logic contained three independently
+lowered copies of one priority decision.  One copy also visited the priority
+conditions in the reverse order, so normal-path alignment, normalization, and
+rounding were computed before the exceptional-result tests.  Ordinary
+dominator-LCA sinking could not move that DAG: later result and flag regions
+used the same values, and the merge phis made every incoming operand appear
+live.
+
+The retained SIR transforms recover coupled output Mux chains as one ordered
+priority CFG, sink pure SSA definitions to their common use dominator, and
+repair conditional availability across repeated predicate regions.  Rooted
+dead-store elimination is now followed by dead-phi pruning and removal of
+pure, acyclic SESE control regions which carry neither a value nor an effect.
+Finally, edge-specific phi liveness compares the control facts at each use
+with the facts known on each incoming edge.  An operand which cannot reach any
+use is replaced by a typed zero, allowing ordinary SSA DCE and code motion to
+move its producer into the remaining live leaf.
+
+The analysis does not enumerate paths.  CFG construction and predecessor
+visits are `O(B + E)`; use/fact checks are linear in the represented SSA uses
+and dominating branch facts.  It stores CFG, use, and fact tables linear in
+the SIR unit.  In particular, incoming-edge discovery uses the CFG predecessor
+lists rather than scanning every block for every merge.
+
+In the retained Heliodor SIR, the third dead `r7403` decision disappears and
+the `r7527` normalization DAG moves below the first five exceptional-result
+exits.  Their `r7590/r7744/r7726` merge operands become zero on the early-exit
+edges.  Focused guarded-region and BranchifyMux tests pass, as do all-target
+strict Clippy and formatting.  The complete package suite reaches three
+pre-existing four-state numeric-cast failures shared by native, Cranelift, and
+Wasm; no changed-path test fails.  A non-LTO full run reaches
+`reboot: Power down` and exactly `cy=9ae070 x3=aa pass=1`, with 84.048 s compile
+and 77.441 s generated execution versus the adjacent retained sample near
+79.36 s.
+
+Status: **complete in `c50cd1e3`; priority placement and exact semantics are
+verified, but the roughly two-second execution reduction does not close the
+dominant gap**.
+
+### Step 74: Compress edge-known predicate phis into one outcome selector
+
+Post-Step-73 MIR exposes the next structural defect at the floating-point
+merge.  One result phi is accompanied by nine mutually exclusive boolean
+phis which encode the priority leaf that reached the merge.  Register
+allocation materializes those booleans as nine parallel stack-home stores on
+each predecessor (`sp+1152` through `sp+1224`) and reloads them after the
+join.  Most incoming values are zero.  This traffic repays part of the work
+saved by control-dependent evaluation and is an IR representation problem,
+not merely a color-choice problem.
+
+The next transform will recognize a merge group only when every candidate is
+a one-bit two-state parameter and every incoming value is exactly known from
+an immediate or an incoming-edge branch fact.  It will:
+
+1. assign one compact leaf tag to each incoming edge;
+2. replace the boolean parameter group with one outcome-selector parameter;
+3. reconstruct each demanded predicate next to its actual use as a selector
+   equality or inequality; and
+4. run ordinary DCE, CFG cleanup, and use-dominator sinking afterward.
+
+This is edge-known phi compression, not tail duplication.  Observable blocks
+and effects remain shared, loops and four-state parameters are rejected, and
+no arbitrary block/count cutoff is used.  Candidate discovery is linear in
+CFG predecessors plus candidate phi operands.  Reconstruction is linear in
+the rewritten use sites and does not build a path product or an interference
+graph.
+
+Acceptance is staged: a focused multi-exit priority regression must first
+prove exact edge tags, local predicate reconstruction, and removal of the old
+parameters; all existing SIR CFG and native tests then run; the complete MIR
+must show one selector rather than the nine stack-home rows; finally a
+trace-free non-LTO Linux run must reach the exact architectural marker before
+any runtime claim or commit.
+
+The retained implementation compresses all profitable, non-overlapping merge
+plans from one CFG/use snapshot.  It does not rebuild CFG analysis after each
+merge or scan every block once per parameter.  On Heliodor, four of the
+edge-known history parameters at the inspected FP merge become one selector;
+the remaining parameters have genuinely dynamic incoming values and are not
+forced into the encoding.  The allocator's parallel stack rows at that merge
+fall from nine to three.  `eval_comb` frame size falls from `0x11d0` to
+`0x1160`, the fused frame from `0x11e0` to `0x1170`, and emitted code shrinks
+by roughly 3.3--3.6 KiB in those bodies.
+
+The focused selector regression passes and two complete non-LTO runs after
+the initial implementation and linear-time refactor both reach
+`reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`.  Compile/execution
+times were 84.179/76.763 s and 84.341/77.841 s.  Against Step 73's 77.441 s
+sample this does not establish a generated-code speedup: the repaired FP merge
+is only one local region, and use-site selector comparisons repay part of its
+copy reduction.
+
+Status: **structurally complete; exact semantics and concrete phi/frame/code
+reductions verified, aggregate runtime effect unconfirmed**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6527,6 +6624,8 @@ verified**.
 | 70 physically available private stack reloads | this step | post-RA direct-load availability 6/6 | lib 1055/1055; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, diff, and clean source checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 69/candidate SIR dumps byte-identical | full compile 342.395 s; execute 96.556 s | repeated surviving stack-home values reuse one physical load; emitted code -5,429 bytes; frames unchanged; one sample is not a speed claim |
 | 71 block-local terminal reload regions | this step | regalloc 313/313 | lib 1056/1056; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 70/candidate SIR dumps byte-identical | trace 354.506 s; full compile 355.529 s; execute 93.636 s | one reload live range serves same-block uses before bounded fallback; emitted code -33,407 bytes; execute sample -3.0%, compile +3.8% |
 | 72 final loop-phi component coloring | this step | regalloc 315/315 | lib 1058/1058; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 71/candidate SIR and pre-RA MIR are byte-identical | trace 98.843 s; compile 75.299 / 74.672 s; execute 84.421 / 85.412 s | crossed loop components recolor in one rollback-safe matching; frames 5672/0/88/232/5704→4344/0/88/216/4368; emitted code -133,623 bytes; execute mean -9.3% |
+| 73 path-sensitive priority recovery | `c50cd1e3` | guarded-region 30/30; BranchifyMux 51/51 | all-target strict Clippy and format; package suite reaches pre-existing all-backend four-state cast failures | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.048 s; execute 77.441 s | dead priority CFG removed; normal FP DAG moves below five early exits; runtime -2.4% versus adjacent retained sample |
+| 74 edge-known phi outcome selector | this step | selector compression 1/1 plus retained priority tests | check, strict Clippy, format, and exact native gate | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.179 / 84.341 s; execute 76.763 / 77.841 s | one selector replaces four path-history phis; inspected stack rows 9→3 and frames -112 B; aggregate runtime effect unconfirmed |
 
 ## Related design records
 

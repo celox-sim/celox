@@ -31,6 +31,7 @@ mod pass_masked_array_any;
 mod pass_optimize_blocks;
 mod pass_packed_scatter_store;
 mod pass_partial_forward;
+mod pass_phi_outcome_compression;
 mod pass_reschedule;
 mod pass_sparse_case_dispatch;
 mod pass_split_coalesced_stores;
@@ -175,6 +176,7 @@ use pass_masked_array_any::MaskedArrayAnyPass;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_packed_scatter_store::PackedScatterStorePass;
 use pass_partial_forward::PartialForwardPass;
+use pass_phi_outcome_compression::PhiOutcomeCompressionPass;
 use pass_reschedule::ReschedulePass;
 use pass_sparse_case_dispatch::SparseCaseDispatchPass;
 use pass_split_coalesced_stores::SplitCoalescedStoresPass;
@@ -818,6 +820,7 @@ fn optimize_with_options(
         // control-dependent placement after that CFG exists.
         for eu in &mut program.eval_comb {
             pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
+            pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, eu, &options);
         }
     }
     // Late CFG-producing passes can expose a new equality spine.  Rebuild
