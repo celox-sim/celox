@@ -455,6 +455,86 @@ fn is_zero_mask_imm(
     })
 }
 
+/// Run program-wide and final-boundary combinational transforms.
+///
+/// These passes intentionally run after the main per-EU pipeline: several of
+/// them depend on address aliases or CFG shapes produced by earlier passes.
+/// Keeping the ordering in one named stage makes those dependencies explicit.
+fn optimize_late_comb(
+    program: &mut Program,
+    opt: &crate::optimizer::OptimizeOptions,
+    options: &PassOptions,
+) {
+    let on = |pass: SirPass| opt.is_enabled(pass);
+
+    // Identity Store bypass: share storage when B is unread; otherwise lower
+    // a profitable exact copy directly from A's storage.
+    if on(SirPass::IdentityStoreBypass) {
+        let identity_aliases = pass_identity_store_bypass::optimize_program_identity_stores(
+            program,
+            options.four_state,
+        );
+        if !identity_aliases.is_empty() {
+            program.address_aliases.extend(identity_aliases);
+        }
+    }
+
+    // Identity-store bypass can make an entire expression DAG dead.
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        let packed_scatter_store = PackedScatterStorePass::for_program(program);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, options);
+        }
+    }
+    if on(SirPass::IndexedStoreRecovery) {
+        let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, options);
+        }
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, options);
+        }
+    }
+
+    // Recover control dependence created by the program-wide transforms, then
+    // repair value placement and correlated merge state on that final CFG.
+    if on(SirPass::BranchifyMux) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, options);
+        }
+        for eu in &mut program.eval_comb {
+            pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
+            pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, eu, options);
+        }
+    }
+
+    // Final canonicalization must precede native lowering, which fixes live
+    // ranges and spill slots.
+    if on(SirPass::Gvn) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&GvnPass, eu, options);
+        }
+    }
+    if on(SirPass::ControlFlowSimplify) {
+        for eu in &mut program.eval_comb {
+            pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, options);
+        }
+    }
+}
+
 fn optimize_with_options(
     program: &mut Program,
     max_inflight_loads: usize,
@@ -761,82 +841,7 @@ fn optimize_with_options(
         eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
     }
 
-    // Identity Store bypass: share storage when B is unread; otherwise lower
-    // a profitable exact copy directly from A's storage.
-    if on(SirPass::IdentityStoreBypass) {
-        let identity_aliases = pass_identity_store_bypass::optimize_program_identity_stores(
-            program,
-            options.four_state,
-        );
-        if !identity_aliases.is_empty() {
-            // Store alias candidates in program for memory layout validation
-            program.address_aliases.extend(identity_aliases);
-        }
-    }
-
-    // Identity-store bypass runs after the main comb pipeline and can make an
-    // entire expression DAG dead.  Sweep those definitions before estimating
-    // or lowering native code; otherwise removed local-variable stores leave
-    // their unrolled loop recurrences in every simulation tick.
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, &options);
-        }
-    }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        let packed_scatter_store = PackedScatterStorePass::for_program(program);
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, &options);
-        }
-    }
-    if on(SirPass::IndexedStoreRecovery) {
-        let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, &options);
-        }
-    }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, &options);
-        }
-    }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, &options);
-        }
-    }
-    // The preceding comb passes can expose new pure arm regions (notably after
-    // priority recovery and sparse dispatch). Re-run the same verified local
-    // CFG transform at the final SIR boundary so those regions do not fall
-    // through to branchless native selects merely because they were created by
-    // a later pass. BranchifyMux is monotone: it only removes profitable Mux
-    // definitions and its worklist terminates on the finite input EU.
-    if on(SirPass::BranchifyMux) {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, &options);
-        }
-        // BranchifyMux materializes the final priority CFG.  Values which
-        // previously belonged to one branchless Mux DAG only acquire a useful
-        // control-dependent placement after that CFG exists.
-        for eu in &mut program.eval_comb {
-            pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
-            pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, eu, &options);
-        }
-    }
-    // Late CFG-producing passes can expose a new equality spine.  Rebuild
-    // structural load identities and thread it at the final SIR boundary,
-    // before native lowering fixes register live ranges and spill slots.
-    if on(SirPass::Gvn) {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&GvnPass, eu, &options);
-        }
-    }
-    if on(SirPass::ControlFlowSimplify) {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
-        }
-    }
+    optimize_late_comb(program, opt, &options);
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
         dump_mux_chain_stats(&program.eval_comb);
     }
