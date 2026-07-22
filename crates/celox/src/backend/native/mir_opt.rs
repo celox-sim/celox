@@ -494,6 +494,7 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
 pub fn post_regalloc_cleanup(func: &mut MFunction) {
     simplify_equal_value_selects(func);
     dead_code_eliminate_preserving_phis(func);
+    simplify_cfg(func);
 }
 
 /// Reuse an exact direct load while its assigned physical register still
@@ -8699,6 +8700,49 @@ mod tests {
                 size: OpSize::S64,
             }
         )));
+    }
+
+    #[test]
+    fn post_regalloc_cleanup_threads_empty_edge_blocks() {
+        let mut func = make_func(Vec::new(), 1);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut true_edge = MBlock::new(BlockId(1));
+        true_edge.push(MInst::Jump { target: BlockId(3) });
+
+        let mut false_edge = MBlock::new(BlockId(2));
+        false_edge.push(MInst::Jump { target: BlockId(4) });
+
+        let mut true_target = MBlock::new(BlockId(3));
+        true_target.push(MInst::Return);
+
+        let mut false_target = MBlock::new(BlockId(4));
+        false_target.push(MInst::Return);
+
+        func.blocks = vec![entry, true_edge, false_edge, true_target, false_target];
+
+        post_regalloc_cleanup(&mut func);
+
+        assert_eq!(func.verify_result(), Ok(()));
+        assert!(matches!(
+            func.blocks[0].insts.last(),
+            Some(MInst::Branch {
+                true_bb: BlockId(3),
+                false_bb: BlockId(4),
+                ..
+            })
+        ));
+        assert!(!func.blocks.iter().any(|block| block.id == BlockId(1)));
+        assert!(!func.blocks.iter().any(|block| block.id == BlockId(2)));
     }
 
     #[test]
