@@ -8,6 +8,7 @@
 //! to the blocks which actually use it.
 
 use super::pass_manager::ExecutionUnitPass;
+use super::sir_analysis::{collect_uses, predicate_facts};
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
@@ -63,7 +64,7 @@ fn find_compressions(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<Compressio
     };
     let facts = predicate_facts(eu, &cfg);
     let constants = exact_boolean_constants(eu);
-    let use_blocks = collect_use_blocks(eu);
+    let uses = collect_uses(eu);
     let mut merge_ids = cfg.block_ids.clone();
     merge_ids.sort_unstable();
     let mut plans = Vec::new();
@@ -119,7 +120,14 @@ fn find_compressions(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<Compressio
             if !exact || true_edges.is_empty() || true_edges.len() == incoming.len() {
                 continue;
             }
-            let parameter_uses = use_blocks.get(&parameter).cloned().unwrap_or_default();
+            let mut parameter_uses = uses
+                .get(&parameter)
+                .into_iter()
+                .flatten()
+                .map(|site| site.block())
+                .collect::<Vec<_>>();
+            parameter_uses.sort_unstable();
+            parameter_uses.dedup();
             if parameter_uses.is_empty() {
                 continue;
             }
@@ -353,113 +361,6 @@ fn exact_boolean_constants(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<
         }
     }
     result
-}
-
-fn predicate_facts(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &SirCfg,
-) -> Vec<Vec<(RegisterId, bool)>> {
-    let mut facts = vec![Vec::new(); cfg.block_ids.len()];
-    for block in 1..cfg.block_ids.len() {
-        let Some(parent) = cfg.dominators.idom[block] else {
-            continue;
-        };
-        facts[block] = facts[parent].clone();
-        let SIRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } = &eu.blocks[&cfg.block_ids[parent]].terminator
-        else {
-            continue;
-        };
-        let true_index = cfg.block_index(true_block.0).unwrap();
-        let false_index = cfg.block_index(false_block.0).unwrap();
-        let fact = if cfg.dominators.dominates(true_index, block) {
-            Some((*cond, true))
-        } else if cfg.dominators.dominates(false_index, block) {
-            Some((*cond, false))
-        } else {
-            None
-        };
-        if let Some(fact) = fact
-            && !facts[block].contains(&fact)
-        {
-            facts[block].push(fact);
-        }
-    }
-    facts
-}
-
-fn collect_use_blocks(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, Vec<BlockId>> {
-    let mut result = HashMap::<RegisterId, Vec<BlockId>>::default();
-    for block in eu.blocks.values() {
-        let mut operands = Vec::new();
-        for instruction in &block.instructions {
-            push_instruction_uses(instruction, &mut operands);
-        }
-        push_terminator_uses(&block.terminator, &mut operands);
-        operands.sort_unstable();
-        operands.dedup();
-        for operand in operands {
-            result.entry(operand).or_default().push(block.id);
-        }
-    }
-    for blocks in result.values_mut() {
-        blocks.sort_unstable();
-    }
-    result
-}
-
-fn push_instruction_uses(
-    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
-    operands: &mut Vec<RegisterId>,
-) {
-    match instruction {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => operands.extend([*lhs, *rhs]),
-        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
-            operands.push(*source);
-        }
-        SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
-            operands.extend(offset.dynamic_registers().into_iter().flatten());
-        }
-        SIRInstruction::Store(_, offset, _, source, _, _) => {
-            operands.extend(offset.dynamic_registers().into_iter().flatten());
-            operands.push(*source);
-        }
-        SIRInstruction::Concat(_, arguments)
-        | SIRInstruction::RuntimeEvent {
-            args: arguments, ..
-        }
-        | SIRInstruction::CombCaptureEvent {
-            args: arguments, ..
-        } => operands.extend(arguments.iter().copied()),
-        SIRInstruction::Mux(_, condition, true_value, false_value) => {
-            operands.extend([*condition, *true_value, *false_value]);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            operands.extend([*old, *new]);
-        }
-    }
-}
-
-fn push_terminator_uses(terminator: &SIRTerminator, operands: &mut Vec<RegisterId>) {
-    match terminator {
-        SIRTerminator::Jump(_, arguments) => operands.extend(arguments.iter().copied()),
-        SIRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } => {
-            operands.push(*cond);
-            operands.extend(true_block.1.iter().copied());
-            operands.extend(false_block.1.iter().copied());
-        }
-        SIRTerminator::Return | SIRTerminator::Error(_) => {}
-    }
 }
 
 fn replace_instruction_use(

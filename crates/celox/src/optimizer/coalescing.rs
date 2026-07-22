@@ -42,6 +42,7 @@ mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod placement_analysis;
 mod shared;
+mod sir_analysis;
 mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
