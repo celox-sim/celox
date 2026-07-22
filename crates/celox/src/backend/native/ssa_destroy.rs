@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use super::mir::{BlockId, MFunction, VReg};
-use super::regalloc::assignment::{AssignmentMap, EdgeLocation, PhysReg};
+use super::mir::{BlockId, MFunction, MInst, VReg};
+use super::regalloc::assignment::{AssignmentMap, EdgeLocation, PhysReg, clobbers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ParallelCopyDestination {
@@ -183,6 +183,7 @@ impl SsaDestructionPlan {
         assignment: &AssignmentMap,
     ) -> Result<Self, SsaDestructionError> {
         let predecessors = cfg_predecessors(func)?;
+        let exit_values = exit_register_values(func, assignment);
         let mut edges = BTreeMap::<(BlockId, BlockId), EdgeCopyPlan>::new();
 
         for successor in &func.blocks {
@@ -216,6 +217,7 @@ impl SsaDestructionPlan {
                         )?,
                         source: source_location(
                             assignment,
+                            exit_values.get(&predecessor),
                             predecessor,
                             successor.id,
                             phi.dst,
@@ -261,6 +263,7 @@ impl SsaDestructionPlan {
         spill_frame_size: u32,
     ) -> Result<(), SsaDestructionError> {
         let predecessors = cfg_predecessors(func)?;
+        let exit_values = exit_register_values(func, assignment);
         let mut expected_edges = BTreeSet::<(BlockId, BlockId)>::new();
 
         for successor in &func.blocks {
@@ -372,8 +375,14 @@ impl SsaDestructionPlan {
                     };
                     let expected_destination =
                         destination_location(assignment, predecessor, successor.id, phi.dst)?;
-                    let expected_source =
-                        source_location(assignment, predecessor, successor.id, phi.dst, source)?;
+                    let expected_source = source_location(
+                        assignment,
+                        exit_values.get(&predecessor),
+                        predecessor,
+                        successor.id,
+                        phi.dst,
+                        source,
+                    )?;
                     if row.source_value != source
                         || row.destination != expected_destination
                         || row.source != expected_source
@@ -527,6 +536,7 @@ fn destination_location(
 
 fn source_location(
     assignment: &AssignmentMap,
+    exit_values: Option<&BTreeMap<PhysReg, VReg>>,
     predecessor: BlockId,
     successor: BlockId,
     destination: VReg,
@@ -535,6 +545,17 @@ fn source_location(
     if let Some(location) =
         assignment.resolved_phi_source_location(predecessor, successor, destination, source)
     {
+        if let EdgeLocation::Register(source_register) = location
+            && let Some(destination_register) = assignment.get(destination)
+            && exit_values
+                .and_then(|values| values.get(&source_register))
+                .is_some_and(|source_value| {
+                    exit_values.and_then(|values| values.get(&destination_register))
+                        == Some(source_value)
+                })
+        {
+            return Ok(ParallelCopySource::Register(destination_register));
+        }
         return Ok(match location {
             EdgeLocation::Register(register) => ParallelCopySource::Register(register),
             EdgeLocation::Stack(slot) => ParallelCopySource::Stack(slot),
@@ -547,6 +568,50 @@ fn source_location(
     )
     .edge(predecessor, successor)
     .values(destination, Some(source)))
+}
+
+/// Track exact register-value aliases at each predecessor exit.
+///
+/// Register allocation gives every SSA value one canonical register, but an
+/// explicit copy leaves the same value available in both its source and
+/// destination registers until either register is overwritten. Phi lowering
+/// may use either occurrence. Retaining this small physical state prevents a
+/// parallel-copy cycle from exchanging registers which already contain equal
+/// values. The scan is linear in MIR size and stores at most one VReg token per
+/// physical register and block.
+fn exit_register_values(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+) -> BTreeMap<BlockId, BTreeMap<PhysReg, VReg>> {
+    let mut result = BTreeMap::new();
+    for block in &func.blocks {
+        let mut values = BTreeMap::<PhysReg, VReg>::new();
+        for inst in &block.insts {
+            for used in inst.uses() {
+                if let Some(register) = assignment.get(used) {
+                    values.entry(register).or_insert(used);
+                }
+            }
+
+            let copied_value = match inst {
+                MInst::Mov { src, .. } => assignment
+                    .get(*src)
+                    .and_then(|register| values.get(&register).copied())
+                    .or(Some(*src)),
+                _ => None,
+            };
+            for &register in clobbers(inst) {
+                values.remove(&register);
+            }
+            if let Some(definition) = inst.def()
+                && let Some(register) = assignment.get(definition)
+            {
+                values.insert(register, copied_value.unwrap_or(definition));
+            }
+        }
+        result.insert(block.id, values);
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1133,6 +1198,54 @@ mod tests {
                 .unwrap()
                 .has_effective_copies()
         );
+    }
+
+    #[test]
+    fn trailing_copy_alias_eliminates_a_false_register_cycle() {
+        let mut vregs = VRegAllocator::new();
+        let original = vregs.alloc();
+        let copied = vregs.alloc();
+        let first_destination = vregs.alloc();
+        let second_destination = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: original,
+            value: 7,
+        });
+        predecessor.push(MInst::Mov {
+            dst: copied,
+            src: original,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        function.push_block(predecessor);
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis.push(PhiNode {
+            dst: first_destination,
+            sources: vec![(BlockId(0), copied)],
+        });
+        successor.phis.push(PhiNode {
+            dst: second_destination,
+            sources: vec![(BlockId(0), original)],
+        });
+        successor.push(MInst::Return);
+        function.push_block(successor);
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(original, PhysReg::RAX);
+        assignment.set(copied, PhysReg::RDX);
+        assignment.set(first_destination, PhysReg::RAX);
+        assignment.set(second_destination, PhysReg::RDX);
+
+        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        plan.verify(&function, &assignment, 0).unwrap();
+        let edge = plan.edge(BlockId(0), BlockId(1)).unwrap();
+
+        assert!(edge.operations.is_empty());
+        assert_eq!(edge.work.effective_copies, 0);
+        assert_eq!(edge.work.register_swaps, 0);
     }
 
     #[test]
