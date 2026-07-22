@@ -99,6 +99,88 @@ struct SamePredicatePlan {
     net_benefit_scaled: u128,
 }
 
+#[derive(Clone, Copy)]
+enum ConditionalArm {
+    Value(RegisterId),
+    Zero,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalSource {
+    dst: RegisterId,
+    condition: RegisterId,
+    true_arm: ConditionalArm,
+    false_arm: ConditionalArm,
+}
+
+impl ConditionalSource {
+    fn selected(self, true_arm: bool) -> ConditionalArm {
+        if true_arm {
+            self.true_arm
+        } else {
+            self.false_arm
+        }
+    }
+}
+
+fn conditional_source_conditions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> Vec<RegisterId> {
+    match *inst {
+        SIRInstruction::Mux(_, condition, _, _) => vec![condition],
+        SIRInstruction::Binary(dst, lhs, BinaryOp::And | BinaryOp::LogicAnd, rhs)
+            if eu.register_map.get(&dst).map(RegisterType::width) == Some(1)
+                && eu.register_map.get(&lhs).map(RegisterType::width) == Some(1)
+                && eu.register_map.get(&rhs).map(RegisterType::width) == Some(1) =>
+        {
+            if lhs == rhs {
+                vec![lhs]
+            } else {
+                vec![lhs, rhs]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn conditional_source(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    condition: RegisterId,
+) -> Option<ConditionalSource> {
+    match *inst {
+        SIRInstruction::Mux(dst, actual, true_value, false_value) if actual == condition => {
+            Some(ConditionalSource {
+                dst,
+                condition,
+                true_arm: ConditionalArm::Value(true_value),
+                false_arm: ConditionalArm::Value(false_value),
+            })
+        }
+        SIRInstruction::Binary(dst, lhs, BinaryOp::And | BinaryOp::LogicAnd, rhs)
+            if eu.register_map.get(&dst).map(RegisterType::width) == Some(1)
+                && eu.register_map.get(&lhs).map(RegisterType::width) == Some(1)
+                && eu.register_map.get(&rhs).map(RegisterType::width) == Some(1) =>
+        {
+            let payload = if lhs == condition {
+                rhs
+            } else if rhs == condition {
+                lhs
+            } else {
+                return None;
+            };
+            Some(ConditionalSource {
+                dst,
+                condition,
+                true_arm: ConditionalArm::Value(payload),
+                false_arm: ConditionalArm::Zero,
+            })
+        }
+        _ => None,
+    }
+}
+
 impl ExecutionUnitPass for GuardedRegionSinkingPass {
     fn name(&self) -> &'static str {
         "guarded_region_sinking"
@@ -463,6 +545,9 @@ fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             .checked_add(plan.false_owned.len())?
             .checked_add(plan.true_cofactor.len())?
             .checked_add(plan.false_cofactor.len())?
+            // One false-edge zero is shared by every implicit gated-And in a
+            // region. Explicit-Mux-only regions leave this reservation unused.
+            .checked_add(1)?
             .checked_add(2)
     });
     let Some(additional_registers) = additional_registers else {
@@ -541,7 +626,7 @@ fn best_same_predicate_plan(
 
         let mut groups = BTreeMap::<RegisterId, Vec<usize>>::new();
         for index in segment_start..segment_end {
-            if let SIRInstruction::Mux(_, condition, _, _) = block.instructions[index] {
+            for condition in conditional_source_conditions(eu, &block.instructions[index]) {
                 groups.entry(condition).or_default().push(index);
             }
         }
@@ -638,13 +723,31 @@ fn plan_same_predicate_region(
         return None;
     }
 
-    // Specialize the forward slice separately on each edge. At a group Mux,
-    // follow only that edge's selected operand. This both removes dead source
-    // Muxes and avoids cloning a nested unselected cofactor chain.
-    let (true_muxes, true_cofactor) =
-        specialize_region_needed(&live_outs, true, &muxes, &cofactor, &local_defs, block);
-    let (false_muxes, false_cofactor) =
-        specialize_region_needed(&live_outs, false, &muxes, &cofactor, &local_defs, block);
+    // Specialize the forward slice separately on each edge. Besides explicit
+    // Muxes, a one-bit `condition & payload` is an implicit
+    // `Mux(condition, payload, 0)` in two-state mode. Recognizing it here
+    // recovers the control dependence without first materializing another
+    // select instruction.
+    let (true_muxes, true_cofactor) = specialize_region_needed(
+        eu,
+        condition,
+        &live_outs,
+        true,
+        &muxes,
+        &cofactor,
+        &local_defs,
+        block,
+    );
+    let (false_muxes, false_cofactor) = specialize_region_needed(
+        eu,
+        condition,
+        &live_outs,
+        false,
+        &muxes,
+        &cofactor,
+        &local_defs,
+        block,
+    );
     muxes = true_muxes
         .union(&false_muxes)
         .copied()
@@ -660,19 +763,19 @@ fn plan_same_predicate_region(
     let mut true_roots = Vec::with_capacity(true_muxes.len());
     let mut false_roots = Vec::with_capacity(false_muxes.len());
     for &index in &muxes {
-        let SIRInstruction::Mux(_, mux_condition, true_value, false_value) =
-            block.instructions[index]
-        else {
-            return None;
-        };
-        if mux_condition != condition {
+        let source = conditional_source(eu, &block.instructions[index], condition)?;
+        if source.condition != condition {
             return None;
         }
         if true_muxes.contains(&index) {
-            true_roots.push(true_value);
+            if let ConditionalArm::Value(value) = source.true_arm {
+                true_roots.push(value);
+            }
         }
         if false_muxes.contains(&index) {
-            false_roots.push(false_value);
+            if let ConditionalArm::Value(value) = source.false_arm {
+                false_roots.push(value);
+            }
         }
     }
     let true_reachable = collect_region_reachable_defs(
@@ -710,8 +813,26 @@ fn plan_same_predicate_region(
         .copied()
         .filter(|index| !removed_forward.contains(index))
         .collect::<HashSet<_>>();
-    close_region_arm(&mut true_owned, true, block_id, block, &true_muxes, uses);
-    close_region_arm(&mut false_owned, false, block_id, block, &false_muxes, uses);
+    close_region_arm(
+        eu,
+        condition,
+        &mut true_owned,
+        true,
+        block_id,
+        block,
+        &true_muxes,
+        uses,
+    );
+    close_region_arm(
+        eu,
+        condition,
+        &mut false_owned,
+        false,
+        block_id,
+        block,
+        &false_muxes,
+        uses,
+    );
     if !true_owned.is_disjoint(&false_owned) {
         return None;
     }
@@ -732,8 +853,8 @@ fn plan_same_predicate_region(
         live_outs,
         net_benefit_scaled: 0,
     };
-    if !same_predicate_arm_is_closed(block, &plan, true)
-        || !same_predicate_arm_is_closed(block, &plan, false)
+    if !same_predicate_arm_is_closed(eu, block, &plan, true)
+        || !same_predicate_arm_is_closed(eu, block, &plan, false)
     {
         return None;
     }
@@ -773,6 +894,8 @@ fn collect_region_reachable_defs(
 }
 
 fn specialize_region_needed(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    condition: RegisterId,
     live_outs: &[RegisterId],
     true_arm: bool,
     source_muxes: &HashSet<usize>,
@@ -793,11 +916,12 @@ fn specialize_region_needed(
         };
         if source_muxes.contains(&index) {
             needed_muxes.insert(index);
-            let SIRInstruction::Mux(_, _, true_value, false_value) = block.instructions[index]
-            else {
+            let Some(source) = conditional_source(eu, &block.instructions[index], condition) else {
                 continue;
             };
-            work.push(if true_arm { true_value } else { false_value });
+            if let ConditionalArm::Value(value) = source.selected(true_arm) {
+                work.push(value);
+            }
         } else if cofactor.contains(&index) && needed_cofactor.insert(index) {
             work.extend(instruction_uses(&block.instructions[index]));
         }
@@ -806,6 +930,8 @@ fn specialize_region_needed(
 }
 
 fn close_region_arm(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    condition: RegisterId,
     owned: &mut HashSet<usize>,
     true_arm: bool,
     block_id: BlockId,
@@ -835,13 +961,15 @@ fn close_region_arm(
                             if !source_muxes.contains(&use_index) {
                                 return true;
                             }
-                            match block.instructions[use_index] {
-                                SIRInstruction::Mux(_, condition, true_value, false_value) => {
-                                    condition == dst
-                                        || (if true_arm { true_value } else { false_value }) != dst
-                                }
-                                _ => true,
-                            }
+                            let Some(source) = conditional_source(
+                                eu,
+                                &block.instructions[use_index],
+                                condition,
+                            ) else {
+                                return true;
+                            };
+                            source.condition == dst
+                                || !matches!(source.selected(true_arm), ConditionalArm::Value(value) if value == dst)
                         }
                         _ => true,
                     })
@@ -857,6 +985,7 @@ fn close_region_arm(
 }
 
 fn same_predicate_arm_is_closed(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block: &BasicBlock<RegionedAbsoluteAddr>,
     plan: &SamePredicatePlan,
     true_arm: bool,
@@ -897,17 +1026,16 @@ fn same_predicate_arm_is_closed(
                 mapped.insert(dst);
             }
         } else if arm_muxes.contains(&index) {
-            let SIRInstruction::Mux(_, _, true_value, false_value) = block.instructions[index]
+            let Some(source) = conditional_source(eu, &block.instructions[index], plan.condition)
             else {
                 return false;
             };
-            let selected = if true_arm { true_value } else { false_value };
-            if removed.contains(&selected) && !mapped.contains(&selected) {
-                return false;
+            if let ConditionalArm::Value(selected) = source.selected(true_arm) {
+                if removed.contains(&selected) && !mapped.contains(&selected) {
+                    return false;
+                }
             }
-            if let Some(dst) = def_reg(&block.instructions[index]) {
-                mapped.insert(dst);
-            }
+            mapped.insert(source.dst);
         }
     }
     plan.live_outs.iter().all(|value| mapped.contains(value))
@@ -1117,6 +1245,7 @@ fn build_same_predicate_arm(
     };
     let mut instructions = Vec::new();
     let mut replacements = HashMap::<RegisterId, RegisterId>::default();
+    let mut zero = None;
     for index in plan.segment_start..plan.segment_end {
         let inst = &original.instructions[index];
         if owned.contains(&index) || arm_cofactor.contains(&index) {
@@ -1131,14 +1260,20 @@ fn build_same_predicate_arm(
             );
             replacements.insert(old_dst, new_dst);
         } else if arm_muxes.contains(&index) {
-            let SIRInstruction::Mux(dst, _, true_value, false_value) = *inst else {
-                unreachable!("same-predicate source must remain a Mux")
+            let source = conditional_source(eu, inst, plan.condition)
+                .expect("same-predicate source must remain conditional");
+            let selected = match source.selected(true_arm) {
+                ConditionalArm::Value(value) => replacements.get(&value).copied().unwrap_or(value),
+                ConditionalArm::Zero => *zero.get_or_insert_with(|| {
+                    *reg_counter += 1;
+                    let value = RegisterId(*reg_counter);
+                    eu.register_map
+                        .insert(value, eu.register_map[&source.dst].clone());
+                    instructions.push(SIRInstruction::Imm(value, SIRValue::new(0u8)));
+                    value
+                }),
             };
-            let selected = if true_arm { true_value } else { false_value };
-            replacements.insert(
-                dst,
-                replacements.get(&selected).copied().unwrap_or(selected),
-            );
+            replacements.insert(source.dst, selected);
         }
     }
     let arguments = plan
@@ -1938,6 +2073,81 @@ mod tests {
         }
     }
 
+    fn repeated_gated_and_unit() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        register_map.insert(RegisterId(1), bit(8));
+        register_map.insert(RegisterId(2), bit(8));
+        for reg in 3..=12 {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        for reg in 13..=17 {
+            register_map.insert(RegisterId(reg), bit(1));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![
+                SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(3), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(5), RegisterId(4), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(6), RegisterId(5), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(7), RegisterId(6), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Binary(RegisterId(13), RegisterId(7), BinaryOp::Eq, RegisterId(2)),
+                SIRInstruction::Binary(
+                    RegisterId(14),
+                    RegisterId(0),
+                    BinaryOp::LogicAnd,
+                    RegisterId(13),
+                ),
+                SIRInstruction::Binary(RegisterId(8), RegisterId(2), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(9), RegisterId(8), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(10), RegisterId(9), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(
+                    RegisterId(11),
+                    RegisterId(10),
+                    BinaryOp::Mul,
+                    RegisterId(2),
+                ),
+                SIRInstruction::Binary(
+                    RegisterId(12),
+                    RegisterId(11),
+                    BinaryOp::Mul,
+                    RegisterId(2),
+                ),
+                SIRInstruction::Binary(RegisterId(15), RegisterId(12), BinaryOp::Eq, RegisterId(1)),
+                SIRInstruction::Binary(
+                    RegisterId(16),
+                    RegisterId(15),
+                    BinaryOp::And,
+                    RegisterId(0),
+                ),
+                SIRInstruction::Binary(
+                    RegisterId(17),
+                    RegisterId(14),
+                    BinaryOp::LogicOr,
+                    RegisterId(16),
+                ),
+                SIRInstruction::Store(
+                    address(41),
+                    SIROffset::Static(0),
+                    1,
+                    RegisterId(17),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            SIRTerminator::Return,
+        );
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct ExecutionTrace {
         stores: Vec<(RegionedAbsoluteAddr, usize, usize, u64)>,
@@ -1974,6 +2184,7 @@ mod tests {
                         let value = match op {
                             BinaryOp::Add => lhs.wrapping_add(rhs),
                             BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                            BinaryOp::Eq => u64::from(lhs == rhs),
                             BinaryOp::Or | BinaryOp::LogicOr => lhs | rhs,
                             BinaryOp::And | BinaryOp::LogicAnd => lhs & rhs,
                             other => panic!("unsupported test binary op {other:?}"),
@@ -2194,6 +2405,63 @@ mod tests {
             eu.register_map.contains_key(&RegisterId(11)),
             "the merge parameter keeps its original register type"
         );
+    }
+
+    #[test]
+    fn one_branch_skips_repeated_gated_and_payloads_and_merges_one_bit() {
+        let mut eu = repeated_gated_and_unit();
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [0, 1, 3, 7, 11, 255] {
+                assert_eq!(
+                    execute(&before, condition, input),
+                    execute(&eu, condition, input),
+                );
+            }
+        }
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &eu.blocks[&BlockId(0)].terminator
+        else {
+            panic!("the repeated gate must form one shared branch");
+        };
+        assert!(eu.blocks[&BlockId(0)].instructions.is_empty());
+        assert!(
+            eu.blocks[&true_block.0]
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::Mul, _)))
+        );
+        assert!(
+            eu.blocks[&true_block.0].instructions.iter().all(|inst| {
+                !matches!(inst, SIRInstruction::Binary(_, _, BinaryOp::LogicAnd, _))
+            })
+        );
+        assert!(eu.blocks[&false_block.0].instructions.iter().all(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Imm(_, _) | SIRInstruction::Binary(_, _, BinaryOp::LogicOr, _)
+            )
+        }));
+        let merge = match &eu.blocks[&true_block.0].terminator {
+            SIRTerminator::Jump(merge, args) => {
+                assert_eq!(args.len(), 1);
+                *merge
+            }
+            other => panic!("unexpected true-edge terminator: {other:?}"),
+        };
+        assert_eq!(eu.blocks[&merge].params, vec![RegisterId(17)]);
+        assert!(matches!(
+            eu.blocks[&merge].instructions.as_slice(),
+            [SIRInstruction::Store(_, _, 1, RegisterId(17), _, _)]
+        ));
     }
 
     #[test]
