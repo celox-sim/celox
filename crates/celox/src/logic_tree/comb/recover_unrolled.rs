@@ -696,13 +696,26 @@ fn parameterize_affine_folded_value(
     }
 
     let expression_comptime = template_comptime.clone();
-    let mut expression = Expression::Term(Box::new(Factor::Variable(
+    let loop_value = Expression::Term(Box::new(Factor::Variable(
         candidate.iterations[0].loop_var,
         VarIndex::default(),
         VarSelect::default(),
         expression_comptime.clone(),
     )));
-    if slope != BigInt::from(1u8) {
+    if slope == -BigInt::one() {
+        let offset = Expression::Term(Box::new(Factor::create_value(
+            Value::new_biguint(signed_to_bits(intercept, width)?, width, signed),
+            template_comptime.token,
+        )));
+        return Some(Expression::Binary(
+            Box::new(offset),
+            Op::Sub,
+            Box::new(loop_value),
+            Box::new(expression_comptime),
+        ));
+    }
+    let mut expression = loop_value;
+    if slope != BigInt::one() {
         let factor = Expression::Term(Box::new(Factor::create_value(
             Value::new_biguint(signed_to_bits(slope, width)?, width, signed),
             template_comptime.token,
@@ -1595,10 +1608,10 @@ fn prove_group(
     }
 
     let mut first_template = chunks[0].to_vec();
-    if !parameterize_folded_loop_values(module, &mut first_template, &chunks, &candidate.unrolled)?
-    {
-        return None;
-    }
+    // A fixed-trip recurrence need not read its induction variable.  The
+    // per-iteration and whole-fold proofs below establish the body and final
+    // result exactly; only parameterization failure is a rejection.
+    parameterize_folded_loop_values(module, &mut first_template, &chunks, &candidate.unrolled)?;
     let mut scratch = SLTNodeArena::new();
     let mut actual_outputs_by_iteration = Vec::with_capacity(iterations.len());
     let mut proof_bits = ProofBitCanonicalizer::default();
@@ -3983,6 +3996,38 @@ mod tests {
         }
     "#;
 
+    const DESCENDING_SELECT_LOOP: &str = r#"
+        module Top (
+            bits : input  logic<4>,
+            value: output logic<4>,
+        ) {
+            var state: logic<4>;
+            always_comb {
+                state = 4'd0;
+                for i in 0..4 {
+                    state[3 - i] = bits[i];
+                }
+                value = state;
+            }
+        }
+    "#;
+
+    const INDUCTION_INDEPENDENT_RECURRENCE: &str = r#"
+        module Top (
+            seed : input  logic<8>,
+            value: output logic<8>,
+        ) {
+            var state: logic<8>;
+            always_comb {
+                state = seed;
+                for _i in 0..8 {
+                    state = {state[6:0], state[7] ^ state[5]};
+                }
+                value = state;
+            }
+        }
+    "#;
+
     const PMP_STYLE_PRIORITY_LOOP: &str = r#"
         module Top (
             i_pmpcfg : input  logic<64> [2] ,
@@ -4057,6 +4102,55 @@ mod tests {
                 SLTNode::Slice { expr, .. } if *expr == group_id
             ));
         }
+    }
+
+    #[test]
+    fn recovers_descending_dynamic_destination_select() {
+        let (module, provenance) = analyze(DESCENDING_SELECT_LOOP);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let (loop_var, states) = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup {
+                    loop_var, states, ..
+                } => Some((*loop_var, states)),
+                _ => None,
+            })
+            .expect("descending destination select must retain the recovered loop");
+        assert_eq!(states.len(), 1);
+
+        let mut visited = HashSet::default();
+        let mut inputs = HashSet::default();
+        assert!(collect_template_inputs(
+            states[0].update,
+            &arena,
+            &mut visited,
+            &mut inputs,
+        ));
+        assert!(inputs.contains(&loop_var));
+    }
+
+    #[test]
+    fn recovers_fixed_recurrence_without_induction_reads() {
+        let (module, provenance) = analyze(INDUCTION_INDEPENDENT_RECURRENCE);
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let (states, trip_count) = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup {
+                    states, trip_count, ..
+                } => Some((states, *trip_count)),
+                _ => None,
+            })
+            .expect("an induction-independent recurrence must retain its fixed loop");
+        assert_eq!(trip_count, 8);
+        assert_eq!(states.len(), 1);
     }
 
     #[test]
