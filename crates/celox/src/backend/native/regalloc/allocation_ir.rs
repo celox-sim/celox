@@ -4926,6 +4926,7 @@ mod tests {
     use crate::backend::native::mir::{
         BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
+    use crate::backend::native::regalloc::assignment::AssignmentMap;
 
     fn function(value_count: u32, blocks: Vec<MBlock>) -> MFunction {
         let mut values = VRegAllocator::new();
@@ -6165,5 +6166,179 @@ mod tests {
             ] if *dst == reload && *src == reload
         ));
         lowered.verify_result().unwrap();
+    }
+
+    fn insert_test_state_reload(
+        allocation_ir: &mut AllocationIr,
+        site: UseSite,
+        home: PackedStateHome,
+    ) -> VReg {
+        allocation_ir
+            .insert_before_use(
+                site,
+                SyntheticOperation::StateReload { home },
+                Uses::none(),
+                true,
+            )
+            .unwrap()
+            .definition
+            .unwrap()
+    }
+
+    #[test]
+    fn repeated_state_recipe_load_reuses_a_physically_available_value() {
+        let mut function = straight_line();
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let use_site = intervals.intervals[0].as_ref().unwrap().uses[0];
+        let home = packed_home(0, 24, OpSize::S64);
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let first = insert_test_state_reload(&mut allocation_ir, use_site, home);
+        let second = insert_test_state_reload(&mut allocation_ir, use_site, home);
+        allocation_ir.publish_instruction_transaction().unwrap();
+        let mut lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RSI);
+        assignment.set(VReg(1), PhysReg::RDI);
+        assignment.set(first, PhysReg::RAX);
+        assignment.set(second, PhysReg::RDX);
+
+        assert_eq!(
+            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+                &mut lowered,
+                &assignment,
+            ),
+            1
+        );
+        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Load {
+                dst,
+                base: BaseReg::SimState,
+                offset: 24,
+                size: OpSize::S64,
+            } if *dst == first
+        )));
+        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Mov { dst, src } if *dst == second && *src == first
+        )));
+        let analysis = super::super::analysis::analyze_for_assignment(&lowered, &assignment);
+        super::super::verify::verify(&lowered, &analysis, &assignment).unwrap();
+    }
+
+    #[test]
+    fn overlapping_state_write_blocks_state_recipe_reuse() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 24,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(2),
+            src: VReg(0),
+        });
+        block.push(MInst::Return);
+        let mut function = function(3, vec![block]);
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let uses = &intervals.intervals[0].as_ref().unwrap().uses;
+        let home = packed_home(0, 24, OpSize::S64);
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let first = insert_test_state_reload(&mut allocation_ir, uses[0], home);
+        let second = insert_test_state_reload(&mut allocation_ir, *uses.last().unwrap(), home);
+        allocation_ir.publish_instruction_transaction().unwrap();
+        let mut lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RSI);
+        assignment.set(VReg(1), PhysReg::RDI);
+        assignment.set(VReg(2), PhysReg::R8);
+        assignment.set(first, PhysReg::RAX);
+        assignment.set(second, PhysReg::RDX);
+
+        assert_eq!(
+            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+                &mut lowered,
+                &assignment,
+            ),
+            0
+        );
+        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Load { dst, .. } if *dst == second
+        )));
+    }
+
+    #[test]
+    fn physical_register_redefinition_blocks_state_recipe_reuse() {
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(1),
+            src: VReg(0),
+        });
+        block.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 9,
+        });
+        block.push(MInst::Mov {
+            dst: VReg(3),
+            src: VReg(0),
+        });
+        block.push(MInst::Return);
+        let mut function = function(4, vec![block]);
+        let cfg = normalize(&mut function);
+        let graph = super::super::home_graph::build(&function, &cfg).unwrap();
+        let mut allocation_ir = AllocationIr::from_mir(&function).unwrap();
+        let intervals = allocation_ir.analyze(&cfg).unwrap();
+        let uses = &intervals.intervals[0].as_ref().unwrap().uses;
+        let home = packed_home(0, 24, OpSize::S64);
+
+        allocation_ir.begin_instruction_transaction().unwrap();
+        let first = insert_test_state_reload(&mut allocation_ir, uses[0], home);
+        let second = insert_test_state_reload(&mut allocation_ir, *uses.last().unwrap(), home);
+        allocation_ir.publish_instruction_transaction().unwrap();
+        let mut lowered = allocation_ir.materialize(&function, &graph, &[]).unwrap();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::RSI);
+        assignment.set(VReg(1), PhysReg::RDI);
+        assignment.set(VReg(2), PhysReg::RAX);
+        assignment.set(VReg(3), PhysReg::R8);
+        assignment.set(first, PhysReg::RAX);
+        assignment.set(second, PhysReg::RDX);
+
+        assert_eq!(
+            crate::backend::native::mir_opt::post_regalloc_state_load_cse(
+                &mut lowered,
+                &assignment,
+            ),
+            0
+        );
+        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Load { dst, .. } if *dst == second
+        )));
     }
 }

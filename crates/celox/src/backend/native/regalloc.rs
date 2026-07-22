@@ -177,7 +177,7 @@ impl fmt::Display for RegallocError {
 
 impl std::error::Error for RegallocError {}
 
-fn verify_assignment(
+pub(crate) fn verify_assignment(
     func: &MFunction,
     assignment: &assignment::AssignmentMap,
 ) -> Result<(), RegallocError> {

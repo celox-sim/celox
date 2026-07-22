@@ -6137,6 +6137,60 @@ and truncating copy; the resulting allocation perturbation reinforces that
 stable phi affinity and coalescing, rather than more local peepholes, are the
 next code-quality problem**.
 
+### Step 69: Reuse physically available state loads after allocation
+
+Complete post-allocation MIR inspection exposed a larger consequence of CSSA
+phi isolation than the remaining parallel-copy cycles.  Several interfering
+phi rows correctly owned distinct edge snapshots, but those snapshots carried
+the same exact packed-state reconstruction recipe.  The interval allocator
+materialized every snapshot independently even when the first load's physical
+register still held the value.  One concrete generated sequence therefore
+read the same byte seven times before seven conditional selects.
+
+Allocation lowering now performs exact, block-local value availability over
+the completed physical assignment.  A direct `SimState` load is reused only
+while an assigned physical register still contains a load of the same offset
+and machine width.  Any definition or target clobber kills that register;
+overlapping or unknown state writes kill the corresponding memory value; and
+availability never crosses a block boundary.  When the destination register
+already contains the value it is preferred, otherwise copies fan out from the
+earliest surviving load instead of forming a serial copy chain.  The same
+bounded pass runs after the final post-RA copy-folding peephole because that
+peephole can recreate independent loads.  The exact assignment is verified
+again after the late rewrite and the frozen SSA-destruction plan is still
+verified immediately before emission.  The pass uses at most the 14
+allocatable registers per block: `O(instructions * 14)` time and `O(14)`
+additional space, with no new RTL ordering rule or global live-range growth.
+
+The accepted parent trace is
+`target/heliodor/analysis/step113-e7c2449d-baseline`; the candidate is
+`target/heliodor/analysis/step112-state-load-cse-final`.  Their complete
+pre-optimized, post-optimized, and native-optimized SIR files are byte-identical
+with hashes `51b1befa...`, `7c19aec1...`, and `fe40b3d4...`.  The complete MIR
+falls from 52,037,515 to 51,848,787 bytes and from 1,877,983 to 1,874,850
+lines.  Spill frames remain 5,656 and 5,704 bytes.  Emitted `eval_comb`-class
+code falls by 14,518 bytes and the fused body by 15,321 bytes; the five emitted
+bodies shrink by 29,960 bytes in total.  In the inspected byte-load sequence,
+seven `movzx` instructions from `[r15+206C4A3h]` become one load followed by
+uses of the surviving register; a later load in a distinct value interval
+remains.
+
+Five focused regressions cover exact reuse, overlapping-state invalidation,
+physical-register redefinition, post-RA copy-fold ordering, and destination
+register preference.  The library suite passes 1,054/1,054, native testbench
+60 passed with one ignored, counter 9 passed with three ignored, and package
+and workspace checks, package all-target strict Clippy, formatting, diff, and
+clean Heliodor source checks pass.  The trace-free non-LTO interval-allocator
+run compiled in 346.444 s, reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`, and executed in 100.155 s.  This establishes exact
+semantics and a roughly 30 KiB machine-code reduction; the single execution
+sample does not establish a throughput improvement.
+
+Status: **CSSA snapshots retain distinct SSA ownership without independently
+reloading an identical physically available state value; exact invalidation,
+assignment, and Linux semantics are verified, while broader phi coalescing and
+spill placement remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6261,6 +6315,7 @@ next code-quality problem**.
 | 66 trivial-value closure and dead-phi DCE | this step | MIR optimization 73/73 | lib 1045/1045; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.768 s; full compile 228.244 s; execute 102.749 s | full MIR -970,944 bytes; eval/fused frames -488/-464 bytes; one execution sample does not establish a speed gain |
 | 67 adjacent allocator-home forwarding | this step | stack/state forwarding 2/2 | lib 1047/1047; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; check and format pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 227.839 s; full compile 226.362 s; execute 106.059 s | adjacent stack/state reloads removed; eval/fused code -753/-803 bytes; no speed gain claimed |
 | 68 physical-width widened loads | this step | native/non-native widened-load ISel 2/2 | lib 1049/1049; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 230.028 s; full compile 226.570 s; execute 102.671 s | redundant `load.i64; mov.w32` removed; frames -40/-40 bytes; allocator perturbation leaves aggregate emitted code +355 bytes, so no speed gain claimed |
+| 69 physically available state-load reuse | this step | post-RA state-load reuse 5/5 | lib 1054/1054; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent/candidate SIR dumps byte-identical | parent/candidate trace 349.666 / 364.103 s; full compile 346.444 s; execute 100.155 s | repeated CSSA recipe loads reuse exact surviving physical values; emitted code -29,960 bytes; frames unchanged; no speed gain claimed |
 
 ## Related design records
 
