@@ -686,6 +686,13 @@ fn optimize_with_options(
     if on(SirPass::HoistCommonBranchLoads) {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
     }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        // Recover coupled observable outputs while their shared producer DAG
+        // is still intact.  BranchifyMux may otherwise split an inner value
+        // diamond first and hide the common result/flags control region behind
+        // block parameters.
+        comb_passes.add_pass(GuardedRegionSinkingPass);
+    }
     if on(SirPass::BranchifyMux) {
         comb_passes.add_pass(BranchifyMuxPass);
     }
