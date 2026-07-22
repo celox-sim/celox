@@ -265,56 +265,785 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             .into_iter()
             .filter_map(|block_id| plan_block(eu, block_id, &cfg, &uses))
             .collect::<Vec<_>>();
-        if plans.is_empty() {
-            return;
-        }
-        // Reserve the complete block-id range before mutating the EU.  An ID
-        // overflow therefore leaves the input byte-for-byte unchanged.
-        let Some(additional_blocks) = plans.len().checked_mul(2) else {
-            return;
-        };
-        let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
-        let Some(first_new_block) = max_block.checked_add(1) else {
-            return;
-        };
-        let Some(last_new_block) = max_block.checked_add(additional_blocks) else {
-            return;
-        };
-        if last_new_block > u32::MAX as usize {
-            return;
-        }
-        if std::env::var_os("CELOX_PASS_TIMING").is_some() {
-            let moved = plans.iter().map(|plan| plan.moved.len()).sum::<usize>();
-            let stores = plans
-                .iter()
-                .map(|plan| plan.distributed.len())
-                .sum::<usize>();
-            eprintln!(
-                "[guarded-region-sinking] regions={} moved_instructions={moved} distributed_stores={stores}",
-                plans.len(),
-            );
+        if !plans.is_empty() {
+            // Reserve the complete block-id range before mutating the EU.  An ID
+            // overflow therefore leaves the input byte-for-byte unchanged.
+            let Some(additional_blocks) = plans.len().checked_mul(2) else {
+                return;
+            };
+            let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
+            let Some(first_new_block) = max_block.checked_add(1) else {
+                return;
+            };
+            let Some(last_new_block) = max_block.checked_add(additional_blocks) else {
+                return;
+            };
+            if last_new_block > u32::MAX as usize {
+                return;
+            }
+            if std::env::var_os("CELOX_PASS_TIMING").is_some() {
+                let moved = plans.iter().map(|plan| plan.moved.len()).sum::<usize>();
+                let stores = plans
+                    .iter()
+                    .map(|plan| plan.distributed.len())
+                    .sum::<usize>();
+                eprintln!(
+                    "[guarded-region-sinking] regions={} moved_instructions={moved} distributed_stores={stores}",
+                    plans.len(),
+                );
+            }
+
+            let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+            for (ordinal, plan) in plans.into_iter().enumerate() {
+                let true_id = BlockId(first_new_block + ordinal * 2);
+                let false_id = BlockId(first_new_block + ordinal * 2 + 1);
+                apply_plan(eu, plan, true_id, false_id, &mut reg_counter);
+            }
+
+            // Edge sinking can separate two outputs selected by the same RTL
+            // priority chain: one Store lives in the new edge block while another
+            // is fed by a merge block parameter.  Put prefix phi Stores on their
+            // incoming edges, then perform ordinary single-predecessor block
+            // merging.  This reconstructs a same-block effect region without
+            // guessing instruction order or duplicating any pure computation.
+            if distribute_prefix_phi_stores(eu) {
+                merge_single_predecessor_jump_blocks(eu);
+                form_coupled_store_regions(eu);
+                sink_deferred_value_regions(eu);
+            }
         }
 
-        let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
-        for (ordinal, plan) in plans.into_iter().enumerate() {
-            let true_id = BlockId(first_new_block + ordinal * 2);
-            let false_id = BlockId(first_new_block + ordinal * 2 + 1);
-            apply_plan(eu, plan, true_id, false_id, &mut reg_counter);
-        }
-
-        // Edge sinking can separate two outputs selected by the same RTL
-        // priority chain: one Store lives in the new edge block while another
-        // is fed by a merge block parameter.  Put prefix phi Stores on their
-        // incoming edges, then perform ordinary single-predecessor block
-        // merging.  This reconstructs a same-block effect region without
-        // guessing instruction order or duplicating any pure computation.
-        if distribute_prefix_phi_stores(eu) {
-            merge_single_predecessor_jump_blocks(eu);
-            form_coupled_store_regions(eu);
-            sink_deferred_value_regions(eu);
-        }
+        // Place pure values at the nearest common dominator of their uses.
+        // Priority recovery often leaves the normal arithmetic in the branch
+        // head even though every use is in the final normal leaf.  This is
+        // ordinary SSA code sinking on the existing CFG: it adds no branch and
+        // moves neither memory reads nor observable effects.
+        sink_pure_values_to_use_dominators(eu);
 
         debug_assert_eq!(eu.verify_result(), Ok(()));
+    }
+}
+
+/// Sink pure SSA definitions to the nearest common dominator of all uses.
+///
+/// Definitions are considered in reverse instruction order, so a producer can
+/// follow a consumer which was itself sunk out of the source block.  The
+/// destination must remain in an acyclic region: sinking a loop-invariant
+/// value into a loop would trade one evaluation for one per iteration.
+fn sink_pure_values_to_use_dominators(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let Ok(cfg) = SirCfg::analyze(eu) else {
+        return;
+    };
+    let uses = collect_uses(eu);
+    let mut placements = HashMap::<(BlockId, usize), BlockId>::default();
+
+    for &source_id in &cfg.block_ids {
+        let source = &eu.blocks[&source_id];
+        for (index, instruction) in source.instructions.iter().enumerate().rev() {
+            if !instruction_is_movable(instruction) {
+                continue;
+            }
+            let Some(definition) = def_reg(instruction) else {
+                continue;
+            };
+            let Some(definition_uses) = uses.get(&definition).filter(|uses| !uses.is_empty())
+            else {
+                continue;
+            };
+
+            let mut destination = None;
+            for site in definition_uses {
+                let use_block = match *site {
+                    UseSite::Instruction {
+                        block,
+                        index: use_index,
+                    } if block == source_id => placements
+                        .get(&(source_id, use_index))
+                        .copied()
+                        .unwrap_or(source_id),
+                    _ => site.block(),
+                };
+                let Some(use_index) = cfg.block_index(use_block) else {
+                    destination = None;
+                    break;
+                };
+                destination = Some(match destination {
+                    None => use_index,
+                    Some(current) => cfg.dominators.lca(current, use_index).unwrap_or(0),
+                });
+            }
+
+            let Some(destination) = destination.map(|index| cfg.block_ids[index]) else {
+                continue;
+            };
+            let destination_index = cfg.block_index(destination).unwrap();
+            if destination != source_id
+                && cfg.dominates(source_id, destination)
+                && !cfg.sccs[cfg.scc_for_block[destination_index]].cyclic
+            {
+                placements.insert((source_id, index), destination);
+            }
+        }
+    }
+
+    if placements.is_empty() {
+        return;
+    }
+
+    // Source blocks are in RPO, hence definitions from an outer dominator are
+    // prepended before definitions from an inner dominator when both arrive at
+    // the same destination.
+    let mut incoming = HashMap::<BlockId, Vec<SIRInstruction<RegionedAbsoluteAddr>>>::default();
+    for &source_id in &cfg.block_ids {
+        let source = eu.blocks.get_mut(&source_id).unwrap();
+        let mut retained = Vec::with_capacity(source.instructions.len());
+        for (index, instruction) in std::mem::take(&mut source.instructions)
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(&destination) = placements.get(&(source_id, index)) {
+                incoming.entry(destination).or_default().push(instruction);
+            } else {
+                retained.push(instruction);
+            }
+        }
+        source.instructions = retained;
+    }
+    for (destination, mut instructions) in incoming {
+        let block = eu.blocks.get_mut(&destination).unwrap();
+        instructions.append(&mut block.instructions);
+        block.instructions = instructions;
+    }
+}
+
+pub(super) fn sink_pure_values_with_predicate_repair(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    sink_pure_values_to_use_dominators(eu);
+    loop {
+        let pruned = prune_control_dead_phi_operands(eu);
+        let repaired = repair_predicated_live_outs(eu);
+        if !pruned && !repaired {
+            break;
+        }
+        sink_pure_values_to_use_dominators(eu);
+    }
+}
+
+#[derive(Clone)]
+struct PredicatedLiveOutPlan {
+    value: RegisterId,
+    source: BlockId,
+    candidate: BlockId,
+    merge: BlockId,
+    facts: Vec<(RegisterId, bool)>,
+}
+
+/// Repair SSA for a value which is available under the same predicate facts
+/// in two separate priority regions.  A plain dominator LCA places such a
+/// value before both regions.  Passing it through the first region's merge
+/// makes its conditional availability explicit, after which ordinary sinking
+/// can place the complete producer DAG below the shared guards.
+fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let Ok(cfg) = SirCfg::analyze(eu) else {
+        return false;
+    };
+    let uses = collect_uses(eu);
+    let facts = predicate_facts(eu, &cfg);
+    let mut definitions = HashMap::default();
+    for &block_id in &cfg.block_ids {
+        for instruction in &eu.blocks[&block_id].instructions {
+            if instruction_is_movable(instruction)
+                && let Some(value) = def_reg(instruction)
+            {
+                definitions.insert(value, block_id);
+            }
+        }
+    }
+
+    let mut plans = Vec::new();
+    let mut claimed = HashSet::default();
+    for (&value, &source) in &definitions {
+        let Some(value_uses) = uses.get(&value).filter(|uses| uses.len() >= 2) else {
+            continue;
+        };
+        let mut use_blocks = value_uses
+            .iter()
+            .map(|site| site.block())
+            .collect::<Vec<_>>();
+        use_blocks.sort_unstable();
+        use_blocks.dedup();
+        if use_blocks.len() < 2 {
+            continue;
+        }
+        let mut common_facts = facts[cfg.block_index(use_blocks[0]).unwrap()].clone();
+        common_facts.retain(|fact| {
+            use_blocks
+                .iter()
+                .skip(1)
+                .all(|block| facts[cfg.block_index(*block).unwrap()].contains(fact))
+        });
+        if common_facts.is_empty() {
+            continue;
+        }
+
+        let mut candidates = HashSet::default();
+        for &use_block in &use_blocks {
+            let mut block = cfg.block_index(use_block).unwrap();
+            while cfg.block_ids[block] != source {
+                candidates.insert(block);
+                let Some(parent) = cfg.dominators.idom[block] else {
+                    break;
+                };
+                block = parent;
+            }
+        }
+        let mut best = None;
+        for candidate_index in candidates {
+            let candidate = cfg.block_ids[candidate_index];
+            let candidate_facts = &facts[candidate_index];
+            if candidate_facts.is_empty()
+                || candidate_facts
+                    .iter()
+                    .any(|fact| !common_facts.contains(fact) || fact.0 == value)
+                || !cfg.dominates(source, candidate)
+                || cfg.sccs[cfg.scc_for_block[candidate_index]].cyclic
+            {
+                continue;
+            }
+            let dominated_uses = use_blocks
+                .iter()
+                .filter(|&&block| cfg.dominates(candidate, block))
+                .count();
+            if dominated_uses == 0 || dominated_uses == use_blocks.len() {
+                continue;
+            }
+            let Some(merge_index) = cfg.postdominators.immediate_postdominator(candidate_index)
+            else {
+                continue;
+            };
+            let merge = cfg.block_ids[merge_index];
+            if cfg.dominates(candidate, merge)
+                || cfg.sccs[cfg.scc_for_block[merge_index]].cyclic
+                || use_blocks.iter().any(|&block| {
+                    !cfg.dominates(candidate, block)
+                        && (!cfg.dominates(merge, block)
+                            || candidate_facts
+                                .iter()
+                                .any(|fact| !facts[cfg.block_index(block).unwrap()].contains(fact)))
+                })
+                || !merge_accepts_phi(&cfg, eu, merge)
+            {
+                continue;
+            }
+            let score = (
+                candidate_facts.len(),
+                dominator_depth(&cfg, candidate_index),
+            );
+            if best.as_ref().is_none_or(
+                |(best_score, _, _): &((usize, usize), BlockId, BlockId)| score > *best_score,
+            ) {
+                best = Some((score, candidate, merge));
+            }
+        }
+        let Some((_, candidate, merge)) = best else {
+            continue;
+        };
+        if claimed.insert(value) {
+            plans.push(PredicatedLiveOutPlan {
+                value,
+                source,
+                candidate,
+                merge,
+                facts: facts[cfg.block_index(candidate).unwrap()].clone(),
+            });
+        }
+    }
+    if plans.is_empty() {
+        return false;
+    }
+    plans.sort_unstable_by_key(|plan| (plan.merge.0, plan.value.0));
+
+    let mut next_register = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let Some(_) = plans
+        .len()
+        .checked_mul(2)
+        .and_then(|additional| next_register.checked_add(additional))
+    else {
+        return false;
+    };
+    for plan in plans {
+        let dummy_id = next_register + 1;
+        let phi_id = dummy_id + 1;
+        next_register = phi_id;
+        let Some(ty) = eu.register_map.get(&plan.value).cloned() else {
+            continue;
+        };
+        let dummy = RegisterId(dummy_id);
+        let phi = RegisterId(phi_id);
+        eu.register_map.insert(dummy, ty.clone());
+        eu.register_map.insert(phi, ty);
+        eu.blocks
+            .get_mut(&plan.source)
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::Imm(dummy, SIRValue::new(0u8)));
+
+        for &block_id in &cfg.block_ids {
+            if cfg.dominates(plan.merge, block_id)
+                && !cfg.dominates(plan.candidate, block_id)
+                && plan
+                    .facts
+                    .iter()
+                    .all(|fact| facts[cfg.block_index(block_id).unwrap()].contains(fact))
+            {
+                let block = eu.blocks.get_mut(&block_id).unwrap();
+                for instruction in &mut block.instructions {
+                    replace_register_uses_in_instruction(instruction, plan.value, phi);
+                }
+                replace_register_uses_in_terminator(&mut block.terminator, plan.value, phi);
+            }
+        }
+
+        let merge_index = cfg.block_index(plan.merge).unwrap();
+        for &predecessor_index in &cfg.predecessors[merge_index] {
+            let predecessor = cfg.block_ids[predecessor_index];
+            let argument = if cfg.dominates(plan.candidate, predecessor) {
+                plan.value
+            } else {
+                dummy
+            };
+            append_edge_argument(
+                &mut eu.blocks.get_mut(&predecessor).unwrap().terminator,
+                plan.merge,
+                argument,
+            );
+        }
+        eu.blocks.get_mut(&plan.merge).unwrap().params.push(phi);
+    }
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    true
+}
+
+fn predicate_facts(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+) -> Vec<Vec<(RegisterId, bool)>> {
+    let mut facts = vec![Vec::new(); cfg.block_ids.len()];
+    for block in 1..cfg.block_ids.len() {
+        let Some(parent) = cfg.dominators.idom[block] else {
+            continue;
+        };
+        facts[block] = facts[parent].clone();
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &eu.blocks[&cfg.block_ids[parent]].terminator
+        else {
+            continue;
+        };
+        let true_index = cfg.block_index(true_block.0).unwrap();
+        let false_index = cfg.block_index(false_block.0).unwrap();
+        let fact = if cfg.dominators.dominates(true_index, block) {
+            Some((*cond, true))
+        } else if cfg.dominators.dominates(false_index, block) {
+            Some((*cond, false))
+        } else {
+            None
+        };
+        if let Some(fact) = fact
+            && !facts[block].contains(&fact)
+        {
+            facts[block].push(fact);
+        }
+    }
+    facts
+}
+
+fn dominator_depth(cfg: &SirCfg, mut block: usize) -> usize {
+    let mut depth = 0;
+    while let Some(parent) = cfg.dominators.idom[block] {
+        depth += 1;
+        block = parent;
+    }
+    depth
+}
+
+fn merge_accepts_phi(
+    cfg: &SirCfg,
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    merge: BlockId,
+) -> bool {
+    let Some(merge_index) = cfg.block_index(merge) else {
+        return false;
+    };
+    cfg.predecessors[merge_index].iter().all(|&predecessor| {
+        let predecessor = cfg.block_ids[predecessor];
+        match &eu.blocks[&predecessor].terminator {
+            SIRTerminator::Jump(target, _) => *target == merge,
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => true_block.0 == merge || false_block.0 == merge,
+            SIRTerminator::Return | SIRTerminator::Error(_) => false,
+        }
+    })
+}
+
+fn append_edge_argument(terminator: &mut SIRTerminator, target: BlockId, argument: RegisterId) {
+    match terminator {
+        SIRTerminator::Jump(actual, arguments) if *actual == target => arguments.push(argument),
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => {
+            if true_block.0 == target {
+                true_block.1.push(argument);
+            }
+            if false_block.0 == target {
+                false_block.1.push(argument);
+            }
+        }
+        _ => unreachable!("validated merge predecessor must target the merge"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IncomingEdgeKind {
+    Jump,
+    True,
+    False,
+}
+
+#[derive(Clone)]
+struct IncomingPhiEdge {
+    predecessor: BlockId,
+    kind: IncomingEdgeKind,
+    arguments: Vec<RegisterId>,
+    facts: Vec<(RegisterId, bool)>,
+}
+
+/// Remove phi operands which cannot reach any use of that phi result.
+///
+/// Priority regions commonly merge both their selected result and the
+/// predicates needed by a later priority region.  On an early-exit edge the
+/// later payload is unobservable, but ordinary SSA liveness still keeps its
+/// producer alive.  The branch facts on the consuming side and the facts on
+/// each incoming edge are sufficient to prove those operands dead without
+/// enumerating paths.
+fn prune_control_dead_phi_operands(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let Ok(cfg) = SirCfg::analyze(eu) else {
+        return false;
+    };
+    let uses = collect_uses(eu);
+    let block_facts = predicate_facts(eu, &cfg);
+    let mut constants = HashMap::<RegisterId, bool>::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            if let SIRInstruction::Imm(dst, value) = instruction
+                && value.mask.to_u64_digits().is_empty()
+            {
+                constants.insert(*dst, !value.payload.to_u64_digits().is_empty());
+            }
+        }
+    }
+
+    let mut replacements = Vec::<(BlockId, IncomingEdgeKind, usize, RegisterId)>::new();
+    let mut replacement_params = HashSet::<RegisterId>::default();
+    for &merge_id in &cfg.block_ids {
+        let merge = &eu.blocks[&merge_id];
+        if merge.params.is_empty() {
+            continue;
+        }
+        let mut incoming = Vec::new();
+        let merge_index = cfg.block_index(merge_id).unwrap();
+        for &predecessor_index in &cfg.predecessors[merge_index] {
+            let predecessor_id = cfg.block_ids[predecessor_index];
+            let predecessor = &eu.blocks[&predecessor_id];
+            match &predecessor.terminator {
+                SIRTerminator::Jump(target, arguments) if *target == merge_id => {
+                    incoming.push(IncomingPhiEdge {
+                        predecessor: predecessor_id,
+                        kind: IncomingEdgeKind::Jump,
+                        arguments: arguments.clone(),
+                        facts: block_facts[predecessor_index].clone(),
+                    });
+                }
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => {
+                    if true_block.0 == merge_id {
+                        let mut facts = block_facts[predecessor_index].clone();
+                        facts.push((*cond, true));
+                        incoming.push(IncomingPhiEdge {
+                            predecessor: predecessor_id,
+                            kind: IncomingEdgeKind::True,
+                            arguments: true_block.1.clone(),
+                            facts,
+                        });
+                    }
+                    if false_block.0 == merge_id {
+                        let mut facts = block_facts[predecessor_index].clone();
+                        facts.push((*cond, false));
+                        incoming.push(IncomingPhiEdge {
+                            predecessor: predecessor_id,
+                            kind: IncomingEdgeKind::False,
+                            arguments: false_block.1.clone(),
+                            facts,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if incoming.len() < 2
+            || incoming
+                .iter()
+                .any(|edge| edge.arguments.len() != merge.params.len())
+        {
+            continue;
+        }
+        let parameter_indices = merge
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, &parameter)| (parameter, index))
+            .collect::<HashMap<_, _>>();
+
+        for edge in incoming {
+            let known_on_edge = |register: RegisterId| {
+                edge.facts
+                    .iter()
+                    .rev()
+                    .find_map(|&(condition, value)| (condition == register).then_some(value))
+                    .or_else(|| constants.get(&register).copied())
+            };
+            for (parameter_index, &parameter) in merge.params.iter().enumerate() {
+                if constants.contains_key(&edge.arguments[parameter_index]) {
+                    continue;
+                }
+                let Some(parameter_uses) = uses.get(&parameter) else {
+                    continue;
+                };
+                let all_uses_unreachable = parameter_uses.iter().all(|site| {
+                    let use_block = site.block();
+                    if use_block == merge_id || !cfg.dominates(merge_id, use_block) {
+                        return false;
+                    }
+                    block_facts[cfg.block_index(use_block).unwrap()].iter().any(
+                        |&(condition, required)| {
+                            let Some(&condition_index) = parameter_indices.get(&condition) else {
+                                return false;
+                            };
+                            known_on_edge(edge.arguments[condition_index])
+                                .is_some_and(|actual| actual != required)
+                        },
+                    )
+                });
+                if all_uses_unreachable {
+                    replacements.push((edge.predecessor, edge.kind, parameter_index, parameter));
+                    replacement_params.insert(parameter);
+                }
+            }
+        }
+    }
+    if replacements.is_empty() {
+        return false;
+    }
+
+    let mut next_register = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let Some(last_register) = next_register.checked_add(replacement_params.len()) else {
+        return false;
+    };
+    let entry = cfg.block_ids[0];
+    let mut zero_for_param = HashMap::default();
+    let mut params = replacement_params.into_iter().collect::<Vec<_>>();
+    params.sort_unstable();
+    for parameter in params {
+        next_register += 1;
+        let zero = RegisterId(next_register);
+        eu.register_map
+            .insert(zero, eu.register_map[&parameter].clone());
+        eu.blocks
+            .get_mut(&entry)
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        zero_for_param.insert(parameter, zero);
+    }
+    debug_assert_eq!(next_register, last_register);
+
+    for (predecessor, kind, parameter_index, parameter) in replacements {
+        let zero = zero_for_param[&parameter];
+        match (
+            &mut eu.blocks.get_mut(&predecessor).unwrap().terminator,
+            kind,
+        ) {
+            (SIRTerminator::Jump(_, arguments), IncomingEdgeKind::Jump) => {
+                arguments[parameter_index] = zero;
+            }
+            (SIRTerminator::Branch { true_block, .. }, IncomingEdgeKind::True) => {
+                true_block.1[parameter_index] = zero;
+            }
+            (SIRTerminator::Branch { false_block, .. }, IncomingEdgeKind::False) => {
+                false_block.1[parameter_index] = zero;
+            }
+            _ => unreachable!(),
+        }
+    }
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    true
+}
+
+/// Remove control dependence which has no remaining value or effect after
+/// rooted dead-store elimination. This is the CFG half of ADCE: first prune
+/// dead phi parameters, then bypass pure SESE regions whose merge carries no
+/// live value.
+pub(super) fn eliminate_dead_control_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    loop {
+        prune_dead_block_parameters(eu);
+        super::pass_vectorize_concat::remove_dead_definitions(eu);
+        let Ok(cfg) = SirCfg::analyze(eu) else {
+            return;
+        };
+        let uses = collect_uses(eu);
+        let mut eliminated = None;
+        for &head_id in &cfg.block_ids {
+            let SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } = &eu.blocks[&head_id].terminator
+            else {
+                continue;
+            };
+            let Some(merge_id) = cfg.common_postdominator(true_block.0, false_block.0) else {
+                continue;
+            };
+            if merge_id == head_id || !eu.blocks[&merge_id].params.is_empty() {
+                continue;
+            }
+            let mut region = HashSet::default();
+            let mut work = vec![true_block.0, false_block.0];
+            let mut valid = true;
+            while let Some(block_id) = work.pop() {
+                if block_id == merge_id || !region.insert(block_id) {
+                    continue;
+                }
+                let index = cfg.block_index(block_id).unwrap();
+                let block = &eu.blocks[&block_id];
+                if cfg.sccs[cfg.scc_for_block[index]].cyclic
+                    || block.instructions.iter().any(instruction_has_effect)
+                {
+                    valid = false;
+                    break;
+                }
+                match &block.terminator {
+                    SIRTerminator::Jump(target, arguments) => {
+                        if *target == merge_id && !arguments.is_empty() {
+                            valid = false;
+                            break;
+                        }
+                        work.push(*target);
+                    }
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => {
+                        work.push(true_block.0);
+                        work.push(false_block.0);
+                    }
+                    SIRTerminator::Return | SIRTerminator::Error(_) => {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if !valid || region.is_empty() {
+                continue;
+            }
+            for &block_id in &region {
+                let index = cfg.block_index(block_id).unwrap();
+                if cfg.predecessors[index].iter().any(|&predecessor| {
+                    let predecessor = cfg.block_ids[predecessor];
+                    predecessor != head_id && !region.contains(&predecessor)
+                }) || eu.blocks[&block_id].instructions.iter().any(|instruction| {
+                    def_reg(instruction).is_some_and(|definition| {
+                        uses.get(&definition)
+                            .into_iter()
+                            .flatten()
+                            .any(|site| !region.contains(&site.block()))
+                    })
+                }) {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                eliminated = Some((head_id, merge_id, region));
+                break;
+            }
+        }
+        let Some((head, merge, region)) = eliminated else {
+            break;
+        };
+        eu.blocks.get_mut(&head).unwrap().terminator = SIRTerminator::Jump(merge, Vec::new());
+        for block in region {
+            eu.blocks.remove(&block);
+        }
+    }
+    prune_dead_block_parameters(eu);
+    super::pass_vectorize_concat::remove_dead_definitions(eu);
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+}
+
+fn prune_dead_block_parameters(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    loop {
+        let uses = collect_uses(eu);
+        let mut dead = BTreeMap::<BlockId, Vec<usize>>::new();
+        for block in eu.blocks.values() {
+            for (index, parameter) in block.params.iter().enumerate() {
+                if !uses.contains_key(parameter) {
+                    dead.entry(block.id).or_default().push(index);
+                }
+            }
+        }
+        if dead.is_empty() {
+            break;
+        }
+        for (block, indices) in dead {
+            for index in indices.into_iter().rev() {
+                eu.blocks.get_mut(&block).unwrap().params.remove(index);
+                for predecessor in eu.blocks.values_mut() {
+                    remove_edge_argument(&mut predecessor.terminator, block, index);
+                }
+            }
+        }
+    }
+}
+
+fn remove_edge_argument(terminator: &mut SIRTerminator, target: BlockId, index: usize) {
+    match terminator {
+        SIRTerminator::Jump(actual, arguments) if *actual == target => {
+            arguments.remove(index);
+        }
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => {
+            if true_block.0 == target {
+                true_block.1.remove(index);
+            }
+            if false_block.0 == target {
+                false_block.1.remove(index);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -5122,6 +5851,392 @@ mod tests {
         GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
 
         assert_unchanged(&before, &eu);
+    }
+
+    #[test]
+    fn sinks_normal_arithmetic_to_the_final_priority_leaf() {
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        register_map.insert(RegisterId(1), bit(1));
+        for reg in 2..=5 {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![
+                SIRInstruction::Binary(RegisterId(3), RegisterId(2), BinaryOp::Mul, RegisterId(2)),
+                SIRInstruction::Binary(RegisterId(4), RegisterId(3), BinaryOp::Add, RegisterId(2)),
+                SIRInstruction::Imm(RegisterId(5), SIRValue::new(0u8)),
+            ],
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            Vec::new(),
+            vec![SIRInstruction::Store(
+                address(70),
+                SIROffset::Static(0),
+                8,
+                RegisterId(5),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Jump(BlockId(5), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(3), Vec::new()),
+                false_block: (BlockId(4), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            3,
+            Vec::new(),
+            vec![SIRInstruction::Store(
+                address(70),
+                SIROffset::Static(0),
+                8,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Jump(BlockId(5), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            4,
+            Vec::new(),
+            vec![SIRInstruction::Store(
+                address(70),
+                SIROffset::Static(0),
+                8,
+                RegisterId(4),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Jump(BlockId(5), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            5,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+
+        GuardedRegionSinkingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(def_reg(instruction), Some(RegisterId(3) | RegisterId(4)))
+                })
+        );
+        assert!(
+            eu.blocks[&BlockId(4)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(instruction, SIRInstruction::Binary(RegisterId(3), ..))
+                })
+        );
+        assert!(
+            eu.blocks[&BlockId(4)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(instruction, SIRInstruction::Binary(RegisterId(4), ..))
+                })
+        );
+        assert!(
+            eu.blocks[&BlockId(1)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Imm(RegisterId(5), ..)))
+        );
+    }
+
+    #[test]
+    fn repairs_conditional_availability_across_repeated_priority_regions() {
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        for reg in 1..=3 {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1)],
+            vec![
+                SIRInstruction::Binary(RegisterId(2), RegisterId(1), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Imm(RegisterId(3), SIRValue::new(0u8)),
+            ],
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        for (id, source) in [(1, RegisterId(3)), (2, RegisterId(2))] {
+            insert_block(
+                &mut blocks,
+                id,
+                Vec::new(),
+                vec![SIRInstruction::Store(
+                    address(80),
+                    SIROffset::Static(0),
+                    8,
+                    source,
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Jump(BlockId(3), Vec::new()),
+            );
+        }
+        insert_block(
+            &mut blocks,
+            3,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(4), Vec::new()),
+                false_block: (BlockId(5), Vec::new()),
+            },
+        );
+        for (id, source) in [(4, RegisterId(3)), (5, RegisterId(2))] {
+            insert_block(
+                &mut blocks,
+                id,
+                Vec::new(),
+                vec![SIRInstruction::Store(
+                    address(81),
+                    SIROffset::Static(0),
+                    8,
+                    source,
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Jump(BlockId(6), Vec::new()),
+            );
+        }
+        insert_block(
+            &mut blocks,
+            6,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+
+        sink_pure_values_with_predicate_repair(&mut eu);
+
+        eu.verify_result().unwrap();
+        assert_eq!(execute(&before, 0, 7), execute(&eu, 0, 7));
+        assert_eq!(execute(&before, 1, 7), execute(&eu, 1, 7));
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(RegisterId(2), ..)
+                ))
+        );
+        assert!(
+            eu.blocks[&BlockId(2)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(RegisterId(2), ..)
+                ))
+        );
+        assert_eq!(eu.blocks[&BlockId(3)].params.len(), 2);
+        assert!(matches!(
+            eu.blocks[&BlockId(5)].instructions.last(),
+            Some(SIRInstruction::Store(_, _, 8, source, _, _)) if *source != RegisterId(2)
+        ));
+    }
+
+    #[test]
+    fn prunes_priority_phi_payloads_on_early_exit_edges() {
+        let mut register_map = HashMap::default();
+        for reg in [0, 1, 4, 5] {
+            register_map.insert(RegisterId(reg), bit(1));
+        }
+        for reg in [2, 3, 6] {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![SIRInstruction::Binary(
+                RegisterId(3),
+                RegisterId(2),
+                BinaryOp::Mul,
+                RegisterId(2),
+            )],
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(
+                BlockId(5),
+                vec![RegisterId(0), RegisterId(1), RegisterId(3)],
+            ),
+        );
+        insert_block(
+            &mut blocks,
+            2,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                true_block: (BlockId(3), Vec::new()),
+                false_block: (BlockId(4), Vec::new()),
+            },
+        );
+        for id in [3, 4] {
+            insert_block(
+                &mut blocks,
+                id,
+                Vec::new(),
+                Vec::new(),
+                SIRTerminator::Jump(
+                    BlockId(5),
+                    vec![RegisterId(0), RegisterId(1), RegisterId(3)],
+                ),
+            );
+        }
+        insert_block(
+            &mut blocks,
+            5,
+            vec![RegisterId(4), RegisterId(5), RegisterId(6)],
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(4),
+                true_block: (BlockId(6), Vec::new()),
+                false_block: (BlockId(7), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            6,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(9), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            7,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Branch {
+                cond: RegisterId(5),
+                true_block: (BlockId(8), Vec::new()),
+                false_block: (BlockId(10), Vec::new()),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            8,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Jump(BlockId(9), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            10,
+            Vec::new(),
+            vec![SIRInstruction::Store(
+                address(82),
+                SIROffset::Static(0),
+                8,
+                RegisterId(6),
+                Vec::new(),
+                Vec::new(),
+            )],
+            SIRTerminator::Jump(BlockId(9), Vec::new()),
+        );
+        insert_block(
+            &mut blocks,
+            9,
+            Vec::new(),
+            Vec::new(),
+            SIRTerminator::Return,
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+
+        sink_pure_values_with_predicate_repair(&mut eu);
+
+        eu.verify_result().unwrap();
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| def_reg(instruction) == Some(RegisterId(3)))
+        );
+        assert!(
+            eu.blocks[&BlockId(4)]
+                .instructions
+                .iter()
+                .any(|instruction| def_reg(instruction) == Some(RegisterId(3)))
+        );
+        for early_exit in [BlockId(1), BlockId(3)] {
+            let SIRTerminator::Jump(_, arguments) = &eu.blocks[&early_exit].terminator else {
+                unreachable!()
+            };
+            assert_ne!(arguments[2], RegisterId(3));
+        }
+        let SIRTerminator::Jump(_, arguments) = &eu.blocks[&BlockId(4)].terminator else {
+            unreachable!()
+        };
+        assert_eq!(arguments[2], RegisterId(3));
     }
 
     #[test]

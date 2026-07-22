@@ -127,7 +127,18 @@ pub(crate) fn optimize_rooted_comb_memory(
     enable_tail_split: bool,
 ) {
     pass_dead_store_elimination::eliminate_dead_stores(program, externally_live);
+    let options = PassOptions {
+        four_state,
+        ..PassOptions::default()
+    };
     for eu in &mut program.eval_comb {
+        pass_vectorize_concat::remove_dead_definitions(eu);
+        pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
+        pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
+        pass_vectorize_concat::remove_dead_definitions(eu);
+        pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
+        pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
+        pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
         pass_vectorize_concat::remove_dead_definitions(eu);
     }
 
@@ -801,6 +812,12 @@ fn optimize_with_options(
     if on(SirPass::BranchifyMux) {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, &options);
+        }
+        // BranchifyMux materializes the final priority CFG.  Values which
+        // previously belonged to one branchless Mux DAG only acquire a useful
+        // control-dependent placement after that CFG exists.
+        for eu in &mut program.eval_comb {
+            pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
         }
     }
     // Late CFG-producing passes can expose a new equality spine.  Rebuild

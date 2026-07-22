@@ -193,6 +193,19 @@ struct CoupledStateUpdatePlan {
 }
 
 #[derive(Clone)]
+struct CoupledPriorityLevel {
+    cond: RegisterId,
+    muxes: Vec<PriorityChainMux>,
+}
+
+#[derive(Clone)]
+struct CoupledPriorityChainPlan {
+    block_id: BlockId,
+    first_mux_idx: usize,
+    levels: Vec<CoupledPriorityLevel>,
+}
+
+#[derive(Clone)]
 struct CoupledShortCircuit {
     guard: RegisterId,
     delayed: RegisterId,
@@ -312,6 +325,7 @@ impl ExecutionUnitPass for BranchifyMuxPass {
         // one branch carrying a state tuple. Process each resulting merge as
         // a worklist item so a sequence is recovered in source order without
         // repeatedly rescanning the whole execution unit.
+        applied += branchify_coupled_priority_chains(eu, &mut next_block_id, &mut reg_counter);
         applied += branchify_coupled_state_updates(eu, &mut next_block_id, &mut reg_counter);
         let mut use_counts = count_uses(eu);
         let mut def_blocks = instruction_def_blocks(eu);
@@ -1070,6 +1084,275 @@ fn branchify_coupled_state_updates(
     }
 
     applied
+}
+
+fn branchify_coupled_priority_chains(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let mut applied = 0;
+    while let Some(plan) = find_coupled_priority_chain(eu) {
+        apply_coupled_priority_chain(eu, plan, next_block_id, reg_counter);
+        applied += 1;
+    }
+    applied
+}
+
+fn find_coupled_priority_chain(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Option<CoupledPriorityChainPlan> {
+    let use_locations = register_use_locations(eu);
+    let mut best = None;
+    for &block_id in eu.blocks.keys() {
+        let block = &eu.blocks[&block_id];
+        let muxes = block
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(mux_idx, instruction)| {
+                let SIRInstruction::Mux(dst, cond, true_val, false_val) = instruction else {
+                    return None;
+                };
+                Some(PriorityChainMux {
+                    mux_idx,
+                    dst: *dst,
+                    cond: *cond,
+                    true_val: *true_val,
+                    false_val: *false_val,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut groups = HashMap::<RegisterId, Vec<PriorityChainMux>>::default();
+        for mux in &muxes {
+            groups.entry(mux.cond).or_default().push(mux.clone());
+        }
+        for group in groups.values_mut() {
+            group.sort_unstable_by_key(|mux| mux.mux_idx);
+        }
+
+        for inner in groups.values().filter(|group| group.len() >= 2) {
+            let mut levels = vec![CoupledPriorityLevel {
+                cond: inner[0].cond,
+                muxes: inner.clone(),
+            }];
+            loop {
+                let current = levels.last().unwrap();
+                let current_outputs = current.muxes.iter().map(|mux| mux.dst).collect::<Vec<_>>();
+                let mut successors = groups
+                    .iter()
+                    .filter(|(cond, _)| **cond != current.cond)
+                    .filter_map(|(&cond, group)| {
+                        let mapped = current_outputs
+                            .iter()
+                            .map(|output| {
+                                group.iter().find(|mux| mux.false_val == *output).cloned()
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        mapped
+                            .iter()
+                            .zip(&current.muxes)
+                            .all(|(next, previous)| next.mux_idx > previous.mux_idx)
+                            .then_some(CoupledPriorityLevel {
+                                cond,
+                                muxes: mapped,
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                successors.sort_unstable_by_key(|level| {
+                    level
+                        .muxes
+                        .iter()
+                        .map(|mux| mux.mux_idx)
+                        .min()
+                        .unwrap_or(usize::MAX)
+                });
+                let Some(next) = successors.into_iter().next() else {
+                    break;
+                };
+                if next
+                    .muxes
+                    .iter()
+                    .zip(&current.muxes)
+                    .any(|(next, previous)| {
+                        use_locations.get(&previous.dst).is_none_or(|uses| {
+                            uses.len() != 1
+                                || uses[0].block != block_id
+                                || uses[0].instruction != Some(next.mux_idx)
+                        })
+                    })
+                {
+                    break;
+                }
+                levels.push(next);
+            }
+            if levels.len() < 2 {
+                continue;
+            }
+
+            let chain_outputs = levels
+                .iter()
+                .flat_map(|level| level.muxes.iter().map(|mux| mux.dst))
+                .collect::<HashSet<_>>();
+            let first_mux_idx = levels
+                .iter()
+                .flat_map(|level| level.muxes.iter().map(|mux| mux.mux_idx))
+                .min()?;
+            let roots = levels
+                .iter()
+                .flat_map(|level| {
+                    std::iter::once(level.cond).chain(level.muxes.iter().map(|mux| mux.true_val))
+                })
+                .chain(levels[0].muxes.iter().map(|mux| mux.false_val));
+            let def_pos = block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| def_reg(instruction).map(|reg| (reg, index)))
+                .collect::<HashMap<_, _>>();
+            if roots.into_iter().any(|root| {
+                chain_outputs.contains(&root)
+                    || def_pos
+                        .get(&root)
+                        .is_some_and(|&index| index >= first_mux_idx)
+            }) {
+                continue;
+            }
+            let candidate = CoupledPriorityChainPlan {
+                block_id,
+                first_mux_idx,
+                levels,
+            };
+            if best
+                .as_ref()
+                .is_none_or(|current: &CoupledPriorityChainPlan| {
+                    candidate.levels.len() > current.levels.len()
+                        || candidate.levels.len() == current.levels.len()
+                            && (candidate.block_id, candidate.first_mux_idx)
+                                < (current.block_id, current.first_mux_idx)
+                })
+            {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
+}
+
+fn apply_coupled_priority_chain(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: CoupledPriorityChainPlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) {
+    let depth = plan.levels.len();
+    let base = *next_block_id;
+    let decision_ids = (0..depth)
+        .map(|level| {
+            if level + 1 == depth {
+                plan.block_id
+            } else {
+                BlockId(base + level)
+            }
+        })
+        .collect::<Vec<_>>();
+    let leaf_base = base + depth - 1;
+    let leaf_ids = (0..=depth)
+        .map(|leaf| BlockId(leaf_base + leaf))
+        .collect::<Vec<_>>();
+    let merge_id = BlockId(leaf_base + depth + 1);
+    *next_block_id = merge_id.0 + 1;
+
+    let original = eu.blocks.remove(&plan.block_id).unwrap();
+    let removed = plan
+        .levels
+        .iter()
+        .flat_map(|level| level.muxes.iter().map(|mux| mux.mux_idx))
+        .collect::<HashSet<_>>();
+    let head = original.instructions[..plan.first_mux_idx].to_vec();
+    let continuation = original
+        .instructions
+        .into_iter()
+        .enumerate()
+        .skip(plan.first_mux_idx)
+        .filter_map(|(index, instruction)| (!removed.contains(&index)).then_some(instruction))
+        .collect::<Vec<_>>();
+
+    for level in (0..depth).rev() {
+        let mut instructions = if level + 1 == depth {
+            head.clone()
+        } else {
+            Vec::new()
+        };
+        let cond = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut instructions,
+            plan.levels[level].cond,
+            reg_counter,
+        );
+        eu.blocks.insert(
+            decision_ids[level],
+            BasicBlock {
+                id: decision_ids[level],
+                params: if level + 1 == depth {
+                    original.params.clone()
+                } else {
+                    Vec::new()
+                },
+                instructions,
+                terminator: SIRTerminator::Branch {
+                    cond,
+                    true_block: (leaf_ids[level + 1], Vec::new()),
+                    false_block: if level == 0 {
+                        (leaf_ids[0], Vec::new())
+                    } else {
+                        (decision_ids[level - 1], Vec::new())
+                    },
+                },
+            },
+        );
+    }
+    for (leaf, &leaf_id) in leaf_ids.iter().enumerate() {
+        let values = if leaf == 0 {
+            plan.levels[0]
+                .muxes
+                .iter()
+                .map(|mux| mux.false_val)
+                .collect()
+        } else {
+            plan.levels[leaf - 1]
+                .muxes
+                .iter()
+                .map(|mux| mux.true_val)
+                .collect()
+        };
+        eu.blocks.insert(
+            leaf_id,
+            BasicBlock {
+                id: leaf_id,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(merge_id, values),
+            },
+        );
+    }
+    eu.blocks.insert(
+        merge_id,
+        BasicBlock {
+            id: merge_id,
+            params: plan
+                .levels
+                .last()
+                .unwrap()
+                .muxes
+                .iter()
+                .map(|mux| mux.dst)
+                .collect(),
+            instructions: continuation,
+            terminator: original.terminator,
+        },
+    );
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn find_coupled_state_update_in_block(
@@ -7694,6 +7977,49 @@ mod tests {
         ] {
             assert!(eu.blocks.values().any(|block| block.params == outputs));
         }
+    }
+
+    #[test]
+    fn branchifies_a_coupled_priority_chain_outermost_first() {
+        let mut eu = cfg_unit(
+            10,
+            &[0, 1],
+            vec![BasicBlock {
+                id: BlockId(0),
+                params: (0..=5).map(RegisterId).collect(),
+                instructions: vec![
+                    SIRInstruction::Mux(RegisterId(6), RegisterId(0), RegisterId(4), RegisterId(2)),
+                    SIRInstruction::Mux(RegisterId(7), RegisterId(1), RegisterId(4), RegisterId(6)),
+                    store(0, 7),
+                    SIRInstruction::Mux(RegisterId(8), RegisterId(0), RegisterId(5), RegisterId(3)),
+                    SIRInstruction::Mux(RegisterId(9), RegisterId(1), RegisterId(5), RegisterId(8)),
+                    store(1, 9),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+        );
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                ..
+            }
+        ));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert!(
+            eu.blocks
+                .values()
+                .any(|block| block.params == [RegisterId(7), RegisterId(9)])
+        );
     }
 
     #[test]
