@@ -5,17 +5,7 @@
 //! colors chordal SSA live ranges without an explicit interference graph.
 
 #[allow(dead_code)]
-mod allocation_constraints;
-#[allow(dead_code)]
-mod allocation_expand;
-#[allow(dead_code)]
 mod allocation_ir;
-#[allow(dead_code)]
-mod allocation_lower;
-#[allow(dead_code)]
-mod allocation_reallocate;
-#[allow(dead_code)]
-mod allocation_split;
 mod analysis;
 pub mod assignment;
 mod cfg;
@@ -23,27 +13,21 @@ mod color;
 mod constraints;
 #[allow(dead_code)]
 mod cssa;
-mod greedy;
 #[allow(dead_code)]
 mod home_graph;
 #[allow(dead_code)]
 mod home_verify;
 #[allow(dead_code)]
-mod interval_allocator;
-#[allow(dead_code)]
 mod interval_union;
 mod legalize;
 #[allow(dead_code)]
 mod live_interval;
-#[allow(dead_code)]
-mod live_range_edit;
 mod next_use;
 mod pressure;
 mod reconstruct;
 mod reload;
 mod schedule;
 mod spill_plan;
-mod spiller;
 #[cfg(test)]
 mod spilling;
 mod ssa;
@@ -70,10 +54,8 @@ pub const NUM_REGS: usize = 14;
 
 /// Enable allocator-internal exhaustive consistency checks.
 ///
-/// Publication always performs an independent whole-function rebuild in
-/// `allocation_lower`; this switch is for additional checks at intermediate
-/// split-session boundaries.  Repeating those whole-session proofs after
-/// every symbolic split is intentionally kept out of optimized compilation.
+/// Repeating whole-session proofs after every incremental liveness edit is
+/// intentionally kept out of optimized compilation.
 pub(super) fn exhaustive_verification_enabled() -> bool {
     cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some()
 }
@@ -90,31 +72,6 @@ pub struct RegallocResult {
 #[derive(Default)]
 pub(crate) struct RegallocTrace {
     pub mir_after_scheduling: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegallocImplementation {
-    Ssa,
-    /// Build and verify the replacement, then publish the established
-    /// production allocator's result from the same scheduled/CSSA input.
-    IntervalDiagnostic,
-    /// Publish the replacement allocator's atomically lowered result.
-    Interval,
-}
-
-impl RegallocImplementation {
-    fn parse(requested: &str) -> Option<Self> {
-        match requested {
-            "auto" | "ssa" => Some(Self::Ssa),
-            "interval-diagnostic" => Some(Self::IntervalDiagnostic),
-            "interval" => Some(Self::Interval),
-            _ => None,
-        }
-    }
-
-    fn runs_interval(self) -> bool {
-        matches!(self, Self::IntervalDiagnostic | Self::Interval)
-    }
 }
 
 /// Structured failure from a verified register-allocation phase.
@@ -249,80 +206,6 @@ fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
     )
 }
 
-fn home_graph_error(phase: &'static str, error: home_graph::HomeGraphError) -> RegallocError {
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        error.instruction,
-        error.values,
-        error.message,
-    )
-}
-
-fn allocation_expand_error(
-    phase: &'static str,
-    error: allocation_expand::AllocationExpandError,
-) -> RegallocError {
-    let identity = match (error.root, error.use_id) {
-        (Some(root), Some(use_id)) => format!(" root={root:?} use={use_id:?}"),
-        (Some(root), None) => format!(" root={root:?}"),
-        (None, Some(use_id)) => format!(" use={use_id:?}"),
-        (None, None) => String::new(),
-    };
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        None,
-        Vec::new(),
-        format!("{}{identity}", error.message),
-    )
-}
-
-fn allocation_split_error(
-    phase: &'static str,
-    error: allocation_split::AllocationSplitError,
-) -> RegallocError {
-    let root = error
-        .root
-        .map(|root| format!(" root={root:?}"))
-        .unwrap_or_default();
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        None,
-        error.value.into_iter().collect(),
-        format!("{}{root}", error.message),
-    )
-}
-
-fn allocation_lower_error(
-    phase: &'static str,
-    error: allocation_lower::AllocationLowerError,
-) -> RegallocError {
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        error.instruction,
-        error.values,
-        error.message,
-    )
-}
-
-fn allocation_perm_error(phase: &'static str, error: legalize::PermError) -> RegallocError {
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        error.instruction,
-        error.values,
-        error.message,
-    )
-}
-
 fn ssa_destruction_error(
     phase: &'static str,
     error: super::ssa_destroy::SsaDestructionError,
@@ -368,24 +251,10 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     label: &str,
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
-    let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
-    let Some(implementation) = RegallocImplementation::parse(&requested) else {
-        return Err(RegallocError::new(
-            "configuration",
-            "CONFIG.IMPLEMENTATION",
-            None,
-            None,
-            Vec::new(),
-            format!(
-                "unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto, ssa, interval-diagnostic, or interval"
-            ),
-        ));
-    };
-
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label, trace, implementation)?;
+    let allocation = run_regalloc_in_place(&mut working, label, trace)?;
     *func = working;
     Ok(allocation)
 }
@@ -394,7 +263,6 @@ fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
     trace: Option<&mut RegallocTrace>,
-    implementation: RegallocImplementation,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -508,121 +376,6 @@ fn run_regalloc_in_place(
             "[regalloc-timing] label={label} cssa_verify elapsed={:?}",
             start.elapsed()
         );
-    }
-    if implementation.runs_interval() {
-        let interval_start = timing.then(crate::timing::now);
-        let constraint_perm_start = timing.then(crate::timing::now);
-        let mut interval_func = func.clone();
-        legalize::materialize_allocation_fixed_use_fragments(&mut interval_func).map_err(
-            |error| allocation_perm_error("interval fixed-use fragment construction", error),
-        )?;
-        let interval_cfg = &normalized_cfg;
-        if let Some(start) = constraint_perm_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_constraint_fragments elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        let home_start = timing.then(crate::timing::now);
-        let homes = home_graph::build(&interval_func, interval_cfg)
-            .map_err(|error| home_graph_error("interval HomeGraph construction", error))?;
-        if let Some(start) = home_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_home_graph elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        let seed_start = timing.then(crate::timing::now);
-        let mut expanded =
-            allocation_expand::expand_unallocated(&interval_func, interval_cfg, &homes).map_err(
-                |error| allocation_expand_error("interval unallocated SSA construction", error),
-            )?;
-        if let Some(start) = seed_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_unallocated_seed elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        let reallocation_start = timing.then(crate::timing::now);
-        let allocation = allocation_split::allocate_with_splitting(
-            &mut expanded,
-            &homes,
-            interval_cfg,
-            assignment::ALLOCATABLE_REGS,
-        )
-        .map_err(|error| allocation_split_error("interval joint reallocation", error))?;
-        if let Some(start) = reallocation_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_joint_reallocation elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        let lowering_start = timing.then(crate::timing::now);
-        let lowered = allocation_lower::lower(
-            &interval_func,
-            interval_cfg,
-            &homes,
-            &expanded,
-            &allocation,
-            assignment::ALLOCATABLE_REGS,
-        )
-        .map_err(|error| allocation_lower_error("interval atomic MIR lowering", error))?;
-        if let Some(start) = lowering_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_atomic_lowering elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        if let Some(start) = interval_start {
-            eprintln!(
-                "[regalloc-timing] label={label} interval_diagnostic elapsed={:?}",
-                start.elapsed()
-            );
-        }
-        if implementation == RegallocImplementation::Interval {
-            let allocation_lower::LoweredAllocation {
-                function,
-                assignment,
-                spill_frame_size,
-                ssa_destruction,
-                ..
-            } = lowered;
-            *func = function;
-            let verify_start = timing.then(crate::timing::now);
-            verify_assignment(func, &assignment)?;
-            ssa_destruction
-                .verify(func, &assignment, spill_frame_size)
-                .map_err(|error| {
-                    ssa_destruction_error("interval SSA destruction verification", error)
-                })?;
-            if let Some(start) = verify_start {
-                eprintln!(
-                    "[regalloc-timing] label={label} interval_publish_verify elapsed={:?}",
-                    start.elapsed()
-                );
-            }
-            if let Some(before) = &before_stats {
-                let stats_start = timing.then(crate::timing::now);
-                log_regalloc_stats(label, func, before, spill_frame_size);
-                if let Some(start) = stats_start {
-                    eprintln!(
-                        "[regalloc-timing] label={label} log_stats elapsed={:?}",
-                        start.elapsed()
-                    );
-                }
-            }
-            if let Some(start) = total_start {
-                eprintln!(
-                    "[regalloc-timing] label={label} implementation=interval total elapsed={:?}",
-                    start.elapsed()
-                );
-            }
-            return Ok(RegallocResult {
-                assignment,
-                spill_frame_size,
-                ssa_destruction,
-            });
-        }
     }
     let constraint_start = timing.then(crate::timing::now);
     let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)

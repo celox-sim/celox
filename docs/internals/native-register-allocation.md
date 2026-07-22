@@ -178,11 +178,11 @@ longer the blocker exposed by the earlier differential updater; integrated SSA
 fragment allocation and spill placement remain open, and peak memory has not
 yet been requalified.
 
-### Replacement allocator architecture
+### Rejected replacement allocator experiment
 
-The production interval allocator is being replaced with the architecture of
-LLVM's greedy register allocator.  This is a structural constraint, not a list
-of heuristics to graft onto the existing joint solver.  The reference
+The removed interval allocator experiment followed the architecture of LLVM's
+greedy register allocator. The following section records that experiment's
+design constraints; it does not describe selectable or production code. The reference
 implementation is LLVM's
 [`RegAllocBase`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/CodeGen/RegAllocBase.cpp),
 [`RAGreedy`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/CodeGen/RegAllocGreedy.cpp),
@@ -1088,11 +1088,10 @@ contains:
 - explicit, independently verified SSA-destruction plans plus a final
   MIR/assignment/frame proof immediately before x86 encoding.
 
-`auto` and `ssa` both use this allocator. `interval-diagnostic` builds and
-verifies the complete replacement result but deliberately discards it;
-`interval` publishes the atomically lowered replacement result. `unified` is
-deliberately rejected by `CELOX_REGALLOC_IMPL`, and a failure never selects
-another implementation.
+This is the sole allocator. The removed `CELOX_REGALLOC_IMPL` selector and its
+`interval`, `interval-diagnostic`, and `unified` values no longer exist; `auto`
+and `ssa` were aliases for this same production path and no longer need to be
+selected explicitly.
 
 The previously rejected iterative splitter expanded Heliodor `eval_comb` from
 roughly 146,000 MIR instructions through 480,000, 1.1 million, 2.3 million, 4.7
