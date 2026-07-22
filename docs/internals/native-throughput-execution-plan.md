@@ -6325,6 +6325,80 @@ semantics and a substantial code-size reduction are verified, while compile
 latency, spill-frame growth, global phi coalescing, and complete region-cost
 selection remain open**.
 
+### Step 72: Transactional final coloring of loop-phi components
+
+The complete Step 71 assignment exposed two loop-carried logical values whose
+colors crossed twice in one no-change iteration.  The header values `v767` and
+`v768` occupied `r9` and `r8`, while the inner join values `v783` and `v784`
+occupied `r8` and `r9`.  SSA destruction therefore emitted `xchg r9,r8` on the
+no-change arm and `xchg r8,r9` again on the loop backedge.  The two exchanges
+cancel dynamically, but neither pairwise recolor can run while the other
+logical value still occupies both candidate colors.
+
+An initial trial published each CSSA backedge source/destination relation as an
+ordinary allocator affinity.  It removed the local pair, but changed greedy
+occupancy before spilling.  In an unrelated hot loop it created an additional
+allocator phi and stack round trips, grew the `eval_comb` and fused frames to
+5,688 and 5,712 bytes, and regressed the full run to 358.311 s compile and
+96.313 s execute.  That trial is rejected and none of its early-affinity path
+remains.
+
+The retained implementation records the verified natural-loop relation
+separately from normal copy/phi affinities.  Only after every split, spill,
+reload, and ordinary greedy assignment is complete does it find the active
+ordinary-affinity connected components named by those descriptors.  For each
+loop header it:
+
+1. rejects a component if any two member intervals interfere, any member is
+   inactive, or the CSSA source/snapshot/destination path no longer exists;
+2. removes all eligible components from the exact interval-union matrix at
+   once;
+3. computes each component's common allowed and externally free registers;
+4. solves a maximum-retained-live-length, distinct-register matching for all
+   components at that header; and
+5. publishes the complete matching or restores every original matrix
+   membership without changing the assignment vector.
+
+With `K <= 16` target registers and `G <= K` eligible components at one header,
+matching takes `O(G * K * 2^K)` time and `O(G * 2^K)` parent bytes.  Component
+discovery is linear in reached ordinary-affinity edges and uses one temporary
+four-byte mark per allocation VReg.  It neither duplicates CFG state nor builds
+an all-pairs interference graph.  The regression fixture deliberately crosses
+two components so either one alone has no common color; it proves both exact
+rollback and successful simultaneous exchange.
+
+The complete retained trace is
+`target/heliodor/analysis/step117-final-loop-phi-bundles`.  Pre-optimized,
+post-optimized, and native-optimized SIR remain byte-identical to Step 71 with
+hashes `51b1befa...`, `7c19aec1...`, and `fe40b3d4...`.  More importantly, the
+concatenated pre-register-allocation MIR sections are also byte-identical with
+hash `cffb7a19...`; the spill/split plan has not moved.  The final assignment
+puts `v767/v783` and their snapshots in `r8`, and `v768/v784` and their
+snapshots in `rsi`.  The no-change arm and loop backedge no longer exchange
+them; one exchange remains only on the state-changing arm.
+
+Post-allocation copy and reload cleanup then reduces complete MIR from
+51,230,860 to 49,446,692 bytes and from 1,853,193 to 1,791,280 lines.  Spill
+frames change from `5672/0/88/232/5704` to `4344/0/88/216/4368` bytes for the
+five native bodies.  Their emitted endpoints shrink by 133,623 bytes in total:
+`eval_comb` by 46,459, `apply_ff` by 367, `eval_apply_ff` by 6,712,
+`eval_only_ff` by 19,778, and the fused body by 60,307 bytes.
+
+Focused regalloc tests pass 315/315, including atomic crossed-color exchange
+and failed-matching rollback.  The library suite passes 1,058/1,058, native
+testbench 60 passed with one ignored, counter 9 passed with three ignored, and
+workspace all-target check, package all-target strict Clippy, formatting, and
+diff checks pass.  The complete trace took 98.843 s.  Two trace-free non-LTO
+runs both reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`; compile intervals were 75.299 s and 74.672 s, while
+generated-code execution took 84.421 s and 85.412 s.  Their 84.917 s execution
+mean is 9.3% below the adjacent retained Step 71 sample of 93.636 s.
+
+Status: **loop-carried copy/phi components are recolored atomically only after
+spill placement; exact Linux semantics, pre-allocation identity, rollback, a
+large frame/code reduction, and a repeated generated-code speedup are
+verified**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6452,6 +6526,7 @@ selection remain open**.
 | 69 physically available state-load reuse | this step | post-RA state-load reuse 5/5 | lib 1054/1054; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent/candidate SIR dumps byte-identical | parent/candidate trace 349.666 / 364.103 s; full compile 346.444 s; execute 100.155 s | repeated CSSA recipe loads reuse exact surviving physical values; emitted code -29,960 bytes; frames unchanged; no speed gain claimed |
 | 70 physically available private stack reloads | this step | post-RA direct-load availability 6/6 | lib 1055/1055; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, diff, and clean source checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 69/candidate SIR dumps byte-identical | full compile 342.395 s; execute 96.556 s | repeated surviving stack-home values reuse one physical load; emitted code -5,429 bytes; frames unchanged; one sample is not a speed claim |
 | 71 block-local terminal reload regions | this step | regalloc 313/313 | lib 1056/1056; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 70/candidate SIR dumps byte-identical | trace 354.506 s; full compile 355.529 s; execute 93.636 s | one reload live range serves same-block uses before bounded fallback; emitted code -33,407 bytes; execute sample -3.0%, compile +3.8% |
+| 72 final loop-phi component coloring | this step | regalloc 315/315 | lib 1058/1058; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 71/candidate SIR and pre-RA MIR are byte-identical | trace 98.843 s; compile 75.299 / 74.672 s; execute 84.421 / 85.412 s | crossed loop components recolor in one rollback-safe matching; frames 5672/0/88/232/5704→4344/0/88/216/4368; emitted code -133,623 bytes; execute mean -9.3% |
 
 ## Related design records
 

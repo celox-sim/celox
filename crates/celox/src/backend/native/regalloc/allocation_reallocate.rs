@@ -23,6 +23,7 @@ use super::allocation_expand::{
 };
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
+use super::cssa::LoopBackedgeSnapshotAffinity;
 use super::greedy::{GreedyLiveRanges, LiveRangeStage};
 use super::home_graph::{BundleUseId, HomeGraph, LiveBundleId};
 use super::interval_allocator::{IntervalAllocationError, RootHomePlan};
@@ -76,6 +77,10 @@ pub(super) struct JointAllocationProblem {
     /// incident edges; scanning the whole edge list for every candidate color
     /// makes allocation quadratic on large RTL dataflow graphs.
     affinity_index: AffinityIndex,
+    /// Loop-header phi webs which must be recolored as one transaction after
+    /// spill placement. Publishing these as ordinary greedy affinities changes
+    /// register pressure and therefore the spill plan.
+    loop_backedge_affinities: Vec<LoopBackedgeSnapshotAffinity>,
     fixed_reservations: Vec<FixedRegisterReservation>,
     /// Stable liveness entry/exit coordinates indexed by normalized CFG row.
     /// Split insertion never needs the per-instruction slot vectors here.
@@ -98,6 +103,31 @@ struct AffinityNeighbor {
 struct AffinityIndex {
     offsets: Vec<usize>,
     neighbors: Vec<AffinityNeighbor>,
+}
+
+#[derive(Debug, Clone)]
+struct LoopAffinityMember {
+    id: AllocationBundleId,
+    value: VReg,
+    range: SparseRange,
+    original_register: PhysReg,
+    live_length: u64,
+    allowed_registers: RegisterMask,
+}
+
+#[derive(Debug, Clone)]
+struct LoopAffinityGroup {
+    members: Vec<LoopAffinityMember>,
+    range: SparseRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchingScore {
+    retained_length: u64,
+    /// Four bits per selected target-register index. For equal retained
+    /// length, the numerically smaller path is the deterministic target-order
+    /// tie break.
+    target_order: u64,
 }
 
 impl AffinityIndex {
@@ -1254,6 +1284,7 @@ impl JointAllocationProblem {
             target_registers: registers.to_vec(),
             affinities,
             affinity_index,
+            loop_backedge_affinities: expanded.loop_backedge_affinities.clone(),
             fixed_reservations: constraints.fixed_reservations.clone(),
             block_boundaries,
         })
@@ -1383,6 +1414,303 @@ impl JointAllocationProblem {
                 .then_some(u64::from(neighbor.weight))
             })
             .sum()
+    }
+
+    /// Recolor every copy/phi congruence component carried by one loop header
+    /// as a single post-allocation transaction.
+    ///
+    /// Ordinary pairwise affinity cannot exchange two loop-carried values:
+    /// while either component remains assigned, its alternating colors block
+    /// every common color for the other. All eligible components are therefore
+    /// removed together and solved by a bounded matching over target registers.
+    /// This runs only after every spill and reload decision, so it cannot alter
+    /// live-range splitting or stack placement. For K target registers the
+    /// matching costs O(G * K * 2^K) time. Temporary storage is O(V) for one
+    /// dense four-byte component mark per allocation value plus O(G * 2^K)
+    /// bytes of parent state, where G <= K; component discovery is linear in
+    /// the reached affinity subgraph.
+    fn coalesce_loop_backedge_bundles(
+        &self,
+        matrix: &mut LiveIntervalMatrix,
+        ranges: &[Option<SparseRange>],
+        assignments: &mut [Option<PhysReg>],
+    ) -> Result<(), JointAllocationError> {
+        if self.loop_backedge_affinities.is_empty() {
+            return Ok(());
+        }
+
+        let mut component_marks = vec![u32::MAX; self.value_count as usize];
+        let mut components = Vec::<Vec<VReg>>::new();
+        let mut components_by_header = BTreeMap::<BlockId, BTreeSet<usize>>::new();
+        for affinity in &self.loop_backedge_affinities {
+            let Some(component) = self.discover_affinity_component(
+                affinity.source,
+                &mut component_marks,
+                &mut components,
+            )?
+            else {
+                continue;
+            };
+            let component_mark = u32::try_from(component).map_err(|_| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.LOOP_COMPONENT_COUNT",
+                    Some(affinity.header),
+                    Some(affinity.source),
+                    "loop affinity component count exceeds u32",
+                )
+            })?;
+            if component_mark == u32::MAX {
+                return Err(JointAllocationError::new(
+                    "JOINT_ALLOC.LOOP_COMPONENT_COUNT",
+                    Some(affinity.header),
+                    Some(affinity.source),
+                    "loop affinity component identity exhausts the reserved mark",
+                ));
+            }
+            if [affinity.snapshot, affinity.destination]
+                .into_iter()
+                .any(|value| {
+                    self.value(value).is_none()
+                        || component_marks.get(value.0 as usize).copied() != Some(component_mark)
+                })
+            {
+                // Splitting may retire one endpoint or the ordinary affinity
+                // path which justified this input-CSSA descriptor. It is then
+                // no longer a final-coloring constraint.
+                continue;
+            }
+            components_by_header
+                .entry(affinity.header)
+                .or_default()
+                .insert(component);
+        }
+
+        for (header, component_ids) in components_by_header {
+            let mut groups = Vec::with_capacity(component_ids.len());
+            for component in component_ids {
+                let mut members = Vec::with_capacity(components[component].len());
+                let mut segments = Vec::new();
+                for &member in &components[component] {
+                    let value = self.value(member).ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.LOOP_COMPONENT_VALUE",
+                            Some(header),
+                            Some(member),
+                            "active affinity component contains no allocation value",
+                        )
+                    })?;
+                    let range = ranges
+                        .get(member.0 as usize)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .ok_or_else(|| {
+                            JointAllocationError::new(
+                                "JOINT_ALLOC.LOOP_COMPONENT_RANGE",
+                                Some(header),
+                                Some(member),
+                                "active loop-affinity member has no sparse range",
+                            )
+                        })?;
+                    let original_register = assignments
+                        .get(member.0 as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.LOOP_COMPONENT_ASSIGNMENT",
+                            Some(header),
+                            Some(member),
+                            "active loop-affinity member has no physical assignment",
+                        )
+                    })?;
+                    if matrix.register(value.id) != Some(original_register) {
+                        return Err(JointAllocationError::new(
+                            "JOINT_ALLOC.LOOP_COMPONENT_MATRIX",
+                            Some(header),
+                            Some(member),
+                            "assignment vector and interval matrix disagree for a loop-affinity member",
+                        ));
+                    }
+                    segments.extend_from_slice(range.as_slice());
+                    members.push(LoopAffinityMember {
+                        id: value.id,
+                        value: member,
+                        range,
+                        original_register,
+                        live_length: value.live_length,
+                        allowed_registers: value.allowed_registers,
+                    });
+                }
+                segments
+                    .sort_unstable_by_key(|segment| (segment.block, segment.start, segment.end));
+                if segments.windows(2).any(|pair| pair[0].overlaps(pair[1])) {
+                    // A connected affinity web is not necessarily a legal
+                    // coalescing class. Preserve its existing colors when any
+                    // two members are simultaneously live.
+                    continue;
+                }
+                let range = matrix
+                    .make_range(segments)
+                    .map_err(JointAllocationError::union)?;
+                groups.push(LoopAffinityGroup { members, range });
+            }
+
+            if groups.is_empty()
+                || groups.len() > self.target_registers.len()
+                || groups.iter().all(|group| {
+                    group
+                        .members
+                        .windows(2)
+                        .all(|pair| pair[0].original_register == pair[1].original_register)
+                })
+            {
+                continue;
+            }
+
+            let mut transaction_error = None;
+            'unassign: for group in &groups {
+                for member in &group.members {
+                    if let Err(error) =
+                        matrix.unassign_validated(member.id, member.range.validated())
+                    {
+                        transaction_error = Some(JointAllocationError::union(error));
+                        break 'unassign;
+                    }
+                }
+            }
+            if let Some(error) = transaction_error {
+                restore_loop_affinity_groups(matrix, &groups)?;
+                return Err(error);
+            }
+
+            let mut candidate_scores = vec![vec![None; self.target_registers.len()]; groups.len()];
+            for (group_index, group) in groups.iter().enumerate() {
+                for (register_index, &register) in self.target_registers.iter().enumerate() {
+                    if group
+                        .members
+                        .iter()
+                        .any(|member| !member.allowed_registers.contains(register))
+                    {
+                        continue;
+                    }
+                    match matrix.interferes_validated(register, group.range.validated()) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            restore_loop_affinity_groups(matrix, &groups)?;
+                            return Err(JointAllocationError::union(error));
+                        }
+                    }
+                    candidate_scores[group_index][register_index] = Some(
+                        group
+                            .members
+                            .iter()
+                            .filter(|member| member.original_register == register)
+                            .fold(0_u64, |length, member| {
+                                length.saturating_add(member.live_length)
+                            }),
+                    );
+                }
+            }
+
+            let Some(register_indices) =
+                maximum_weight_distinct_register_matching(&candidate_scores)
+            else {
+                restore_loop_affinity_groups(matrix, &groups)?;
+                continue;
+            };
+
+            let mut publish_error = None;
+            'publish: for (group, &register_index) in groups.iter().zip(&register_indices) {
+                let register = self.target_registers[register_index];
+                for member in &group.members {
+                    if let Err(error) =
+                        matrix.assign_validated(member.id, register, member.range.validated())
+                    {
+                        publish_error = Some(JointAllocationError::union(error));
+                        break 'publish;
+                    }
+                }
+            }
+            if let Some(error) = publish_error {
+                restore_loop_affinity_groups(matrix, &groups)?;
+                return Err(error);
+            }
+            for (group, &register_index) in groups.iter().zip(&register_indices) {
+                let register = self.target_registers[register_index];
+                for member in &group.members {
+                    assignments[member.value.0 as usize] = Some(register);
+                }
+            }
+        }
+        matrix.verify().map_err(JointAllocationError::union)
+    }
+
+    fn discover_affinity_component(
+        &self,
+        seed: VReg,
+        marks: &mut [u32],
+        components: &mut Vec<Vec<VReg>>,
+    ) -> Result<Option<usize>, JointAllocationError> {
+        let Some(mark) = marks.get(seed.0 as usize).copied() else {
+            return Ok(None);
+        };
+        if mark != u32::MAX {
+            return Ok(Some(mark as usize));
+        }
+        if self.value(seed).is_none() {
+            return Ok(None);
+        }
+        let component = components.len();
+        let component_mark = u32::try_from(component).map_err(|_| {
+            JointAllocationError::new(
+                "JOINT_ALLOC.LOOP_COMPONENT_COUNT",
+                None,
+                Some(seed),
+                "loop affinity component count exceeds u32",
+            )
+        })?;
+        if component_mark == u32::MAX {
+            return Err(JointAllocationError::new(
+                "JOINT_ALLOC.LOOP_COMPONENT_COUNT",
+                None,
+                Some(seed),
+                "loop affinity component identity exhausts the reserved mark",
+            ));
+        }
+        marks[seed.0 as usize] = component_mark;
+        let mut queue = VecDeque::from([seed]);
+        let mut members = Vec::new();
+        while let Some(value) = queue.pop_front() {
+            members.push(value);
+            for neighbor in self.affinity_index.neighbors(value) {
+                if self.value(neighbor.value).is_none() {
+                    continue;
+                }
+                let Some(mark) = marks.get_mut(neighbor.value.0 as usize) else {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.LOOP_COMPONENT_RANGE",
+                        None,
+                        Some(neighbor.value),
+                        "affinity neighbor is outside the stable VReg domain",
+                    ));
+                };
+                if *mark == u32::MAX {
+                    *mark = component_mark;
+                    queue.push_back(neighbor.value);
+                } else if *mark != component_mark {
+                    return Err(JointAllocationError::new(
+                        "JOINT_ALLOC.LOOP_COMPONENT_PARTITION",
+                        None,
+                        Some(neighbor.value),
+                        "one active affinity component was assigned two identities",
+                    ));
+                }
+            }
+        }
+        members.sort_unstable();
+        components.push(members);
+        Ok(Some(component))
     }
 
     /// Conservative post-color coalescing. Every attempted recolor removes
@@ -3233,6 +3561,9 @@ impl GreedyAllocator {
         } = &mut self.matrix;
         self.intervals
             .problem
+            .coalesce_loop_backedge_bundles(unions, ranges, assignments)?;
+        self.intervals
+            .problem
             .coalesce_affinities(unions, ranges, assignments)?;
         let result = JointAllocation {
             assignments: self.matrix.assignments.clone(),
@@ -3243,6 +3574,118 @@ impl GreedyAllocator {
         }
         Ok(JointAllocationOutcome::Complete(result))
     }
+}
+
+fn restore_loop_affinity_groups(
+    matrix: &mut LiveIntervalMatrix,
+    groups: &[LoopAffinityGroup],
+) -> Result<(), JointAllocationError> {
+    // Remove either the surviving original colors or a partially published
+    // matching, then reconstruct the complete known-good pre-transaction
+    // assignment. No large interval matrix is cloned for rollback.
+    for group in groups {
+        for member in &group.members {
+            if matrix.register(member.id).is_some() {
+                matrix
+                    .unassign_validated(member.id, member.range.validated())
+                    .map_err(JointAllocationError::union)?;
+            }
+        }
+    }
+    for group in groups {
+        for member in &group.members {
+            matrix
+                .assign_validated(
+                    member.id,
+                    member.original_register,
+                    member.range.validated(),
+                )
+                .map_err(JointAllocationError::union)?;
+        }
+    }
+    Ok(())
+}
+
+fn maximum_weight_distinct_register_matching(
+    candidate_scores: &[Vec<Option<u64>>],
+) -> Option<Vec<usize>> {
+    if candidate_scores.is_empty() {
+        return Some(Vec::new());
+    }
+    let register_count = candidate_scores.first()?.len();
+    if register_count == 0
+        || register_count > 16
+        || candidate_scores.len() > register_count
+        || candidate_scores
+            .iter()
+            .any(|candidates| candidates.len() != register_count)
+    {
+        return None;
+    }
+    let state_count = 1_usize.checked_shl(register_count as u32)?;
+    let mut previous = vec![None::<MatchingScore>; state_count];
+    previous[0] = Some(MatchingScore {
+        retained_length: 0,
+        target_order: 0,
+    });
+    let mut parents = Vec::with_capacity(candidate_scores.len());
+    for candidates in candidate_scores {
+        let mut next = vec![None::<MatchingScore>; state_count];
+        let mut parent = vec![u8::MAX; state_count];
+        for (mask, state) in previous.iter().copied().enumerate() {
+            let Some(state) = state else {
+                continue;
+            };
+            for (register, retained_length) in candidates.iter().copied().enumerate() {
+                let Some(retained_length) = retained_length else {
+                    continue;
+                };
+                let bit = 1_usize << register;
+                if mask & bit != 0 {
+                    continue;
+                }
+                let next_mask = mask | bit;
+                let candidate = MatchingScore {
+                    retained_length: state.retained_length.saturating_add(retained_length),
+                    target_order: (state.target_order << 4) | register as u64,
+                };
+                let replace = next[next_mask].is_none_or(|current| {
+                    candidate.retained_length > current.retained_length
+                        || (candidate.retained_length == current.retained_length
+                            && candidate.target_order < current.target_order)
+                });
+                if replace {
+                    next[next_mask] = Some(candidate);
+                    parent[next_mask] = register as u8;
+                }
+            }
+        }
+        if next.iter().all(Option::is_none) {
+            return None;
+        }
+        parents.push(parent);
+        previous = next;
+    }
+
+    let (mut mask, _) = previous
+        .into_iter()
+        .enumerate()
+        .filter_map(|(mask, score)| score.map(|score| (mask, score)))
+        .max_by(|(_, left), (_, right)| {
+            left.retained_length
+                .cmp(&right.retained_length)
+                .then_with(|| right.target_order.cmp(&left.target_order))
+        })?;
+    let mut matching = vec![0; candidate_scores.len()];
+    for group in (0..candidate_scores.len()).rev() {
+        let register = *parents.get(group)?.get(mask)?;
+        if register == u8::MAX {
+            return None;
+        }
+        matching[group] = register as usize;
+        mask ^= 1_usize << register;
+    }
+    Some(matching)
 }
 
 fn same_allocation_geometry(left: &AllocationValue, right: &AllocationValue) -> bool {
@@ -3711,6 +4154,7 @@ mod tests {
             target_registers: registers.to_vec(),
             affinities: Vec::new(),
             affinity_index: AffinityIndex::build(value_count, &[]).unwrap(),
+            loop_backedge_affinities: Vec::new(),
             fixed_reservations: Vec::new(),
             block_boundaries: intervals
                 .block_slots
@@ -3771,6 +4215,119 @@ mod tests {
             problem.incident_affinity_score(VReg(0), VReg(1), Some(PhysReg::RDX), &assignments,),
             10
         );
+    }
+
+    #[test]
+    fn loop_phi_components_exchange_crossed_colors_atomically() {
+        let mut instructions = Vec::new();
+        for stage in 0..4_u32 {
+            let left = VReg(stage);
+            let right = VReg(stage + 4);
+            instructions.push(MInst::LoadImm {
+                dst: left,
+                value: u64::from(stage),
+            });
+            instructions.push(MInst::LoadImm {
+                dst: right,
+                value: u64::from(stage + 4),
+            });
+            instructions.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: i32::try_from(stage * 16).unwrap(),
+                src: left,
+                size: OpSize::S64,
+            });
+            instructions.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: i32::try_from(stage * 16 + 8).unwrap(),
+                src: right,
+                size: OpSize::S64,
+            });
+        }
+        instructions.push(MInst::Return);
+        let mut function = function(8, instructions);
+        let (cfg, _) = model(&mut function);
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut problem = fixed_problem(&function, &cfg, &registers);
+        problem.affinities = [
+            (VReg(0), VReg(1)),
+            (VReg(1), VReg(2)),
+            (VReg(2), VReg(3)),
+            (VReg(4), VReg(5)),
+            (VReg(5), VReg(6)),
+            (VReg(6), VReg(7)),
+        ]
+        .into_iter()
+        .map(|(left, right)| WeightedAffinity {
+            left,
+            right,
+            weight: 1,
+        })
+        .collect();
+        problem.affinity_index =
+            AffinityIndex::build(problem.value_count, &problem.affinities).unwrap();
+        let left_loop = LoopBackedgeSnapshotAffinity {
+            header: BlockId(0),
+            source: VReg(0),
+            snapshot: VReg(1),
+            destination: VReg(2),
+        };
+        let right_loop = LoopBackedgeSnapshotAffinity {
+            header: BlockId(0),
+            source: VReg(4),
+            snapshot: VReg(5),
+            destination: VReg(6),
+        };
+
+        let mut matrix = LiveIntervalMatrix::new(&cfg, &registers).unwrap();
+        let mut ranges = vec![None; problem.value_count as usize];
+        let mut assignments = vec![None; problem.value_count as usize];
+        for value in &problem.values {
+            let stage = value.value.0 % 4;
+            let register = if (value.value.0 < 4) == (stage < 2) {
+                PhysReg::RAX
+            } else {
+                PhysReg::RDX
+            };
+            let range = matrix.make_range(value.interval.segments.clone()).unwrap();
+            matrix
+                .assign_validated(value.id, register, range.validated())
+                .unwrap();
+            ranges[value.value.0 as usize] = Some(range);
+            assignments[value.value.0 as usize] = Some(register);
+        }
+        matrix.verify().unwrap();
+
+        // With only one component in the transaction, the opposite crossed
+        // component blocks both colors. The failed matching must be a no-op.
+        problem.loop_backedge_affinities = vec![left_loop];
+        let original = assignments.clone();
+        problem
+            .coalesce_loop_backedge_bundles(&mut matrix, &ranges, &mut assignments)
+            .unwrap();
+        assert_eq!(assignments, original);
+        for value in &problem.values {
+            assert_eq!(matrix.register(value.id), original[value.value.0 as usize]);
+        }
+        matrix.verify().unwrap();
+
+        // Removing both components together exposes one complete matching.
+        problem.loop_backedge_affinities = vec![left_loop, right_loop];
+        problem
+            .coalesce_loop_backedge_bundles(&mut matrix, &ranges, &mut assignments)
+            .unwrap();
+        let left_register = assignments[0].unwrap();
+        let right_register = assignments[4].unwrap();
+        assert_ne!(left_register, right_register);
+        assert!((0..4).all(|value| assignments[value] == Some(left_register)));
+        assert!((4..8).all(|value| assignments[value] == Some(right_register)));
+        for value in &problem.values {
+            assert_eq!(
+                matrix.register(value.id),
+                assignments[value.value.0 as usize]
+            );
+        }
+        matrix.verify().unwrap();
     }
 
     #[test]

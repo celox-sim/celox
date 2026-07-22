@@ -34,6 +34,73 @@ pub(super) struct CssaInfo {
     nontrivial_members: HashMap<CssaClass, Vec<VReg>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct LoopBackedgeSnapshotAffinity {
+    pub header: BlockId,
+    pub source: VReg,
+    pub snapshot: VReg,
+    pub destination: VReg,
+}
+
+/// Return the phi affinities hidden behind CSSA snapshot copies on repeated
+/// natural-loop edges.
+///
+/// CSSA isolates an interfering phi source as
+/// `snapshot = mov source; result = phi(snapshot)`.  The immediate copy and
+/// phi edges are sufficient at an ordinary one-shot join.  At a loop header,
+/// however, `result` is allocated before the backedge snapshot, so the header
+/// color cannot reach `source` through those two later definitions.  The
+/// source and result remain ordinary independently checked live intervals;
+/// this function exposes only the missing soft affinity between them.
+pub(super) fn loop_backedge_snapshot_affinities(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+) -> Vec<LoopBackedgeSnapshotAffinity> {
+    let mut exact_copy_source = vec![None; func.vregs.count() as usize];
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MInst::Mov { dst, src } = inst else {
+                continue;
+            };
+            if let Some(slot) = exact_copy_source.get_mut(dst.0 as usize) {
+                *slot = Some(*src);
+            }
+        }
+    }
+
+    let mut affinities = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        let natural_loop = cfg
+            .loop_for_header
+            .get(&block_index)
+            .and_then(|&loop_index| cfg.loops.get(loop_index));
+        for phi in &block.phis {
+            for &(predecessor, snapshot) in &phi.sources {
+                let repeated = natural_loop.is_some_and(|natural_loop| {
+                    cfg.block_index
+                        .get(&predecessor)
+                        .is_some_and(|predecessor| natural_loop.blocks.contains(predecessor))
+                });
+                if repeated
+                    && let Some(source) = exact_copy_source
+                        .get(snapshot.0 as usize)
+                        .copied()
+                        .flatten()
+                    && source != phi.dst
+                {
+                    affinities.push(LoopBackedgeSnapshotAffinity {
+                        header: block.id,
+                        source,
+                        snapshot,
+                        destination: phi.dst,
+                    });
+                }
+            }
+        }
+    }
+    affinities
+}
+
 impl CssaInfo {
     /// Build the semantic phi-congruence partition for an existing function.
     ///

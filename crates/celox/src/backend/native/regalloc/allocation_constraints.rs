@@ -1412,6 +1412,76 @@ mod tests {
     }
 
     #[test]
+    fn loop_snapshot_descriptor_does_not_enter_greedy_affinities() {
+        let mut values = VRegAllocator::new();
+        let initial = values.alloc();
+        let condition = values.alloc();
+        let intermediate = values.alloc();
+        let snapshot = values.alloc();
+        let merged = values.alloc();
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 5]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 0,
+        });
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+
+        let mut header = MBlock::new(BlockId(1));
+        header.phis.push(crate::backend::native::mir::PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(0), initial), (BlockId(2), snapshot)],
+        });
+        header.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+
+        let mut backedge = MBlock::new(BlockId(2));
+        backedge.push(MInst::LoadImm {
+            dst: intermediate,
+            value: 4,
+        });
+        backedge.push(MInst::Mov {
+            dst: snapshot,
+            src: intermediate,
+        });
+        backedge.push(MInst::Jump { target: BlockId(1) });
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: merged,
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        function.blocks = vec![entry, header, backedge, exit];
+
+        let (_function, cfg, graph, expanded) = expanded(function);
+        assert!(expanded.loop_backedge_affinities.iter().any(|affinity| {
+            affinity.header == BlockId(1)
+                && affinity.source == intermediate
+                && affinity.snapshot == snapshot
+                && affinity.destination == merged
+        }));
+        let model =
+            AllocationConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap();
+        assert!(model.affinities.iter().all(|affinity| {
+            (affinity.left, affinity.right) != (intermediate.min(merged), intermediate.max(merged))
+        }));
+        let incremental =
+            IncrementalConstraintModel::build(&expanded, &cfg, &graph, ALLOCATABLE_REGS).unwrap();
+        assert_eq!(incremental.model().affinities, model.affinities);
+    }
+
+    #[test]
     fn incremental_constraints_match_a_full_rebuild_after_local_slot_shift() {
         let mut values = VRegAllocator::new();
         let lhs = values.alloc();

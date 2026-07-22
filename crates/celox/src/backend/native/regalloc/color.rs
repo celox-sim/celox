@@ -546,53 +546,16 @@ fn forbid(
 }
 
 fn phi_preferences(func: &MFunction, cfg: &NormalizedCfg) -> HashMap<VReg, Vec<VReg>> {
-    // CSSA isolates an interfering phi source with an exact snapshot copy:
-    //
-    //     snapshot = mov source
-    //     result   = phi(... snapshot ...)
-    //
-    // The snapshot is colored after `source`.  At a loop header `result` is
-    // colored before either of them, so retaining only the two immediate
-    // affinities prevents the header color from ever reaching `source`.
-    // Contract that artificial copy node for preference purposes only on an
-    // internal edge of the natural loop whose header owns the phi. Ordinary
-    // one-shot joins keep their existing choices. This is a soft affinity
-    // only: ordinary liveness and forbidden-color checks still reject
-    // coalescing whenever `source` and `result` interfere.
-    let mut exact_copy_source = vec![None; func.vregs.count() as usize];
+    let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
     for block in &func.blocks {
-        for inst in &block.insts {
-            let MInst::Mov { dst, src } = inst else {
-                continue;
-            };
-            if let Some(slot) = exact_copy_source.get_mut(dst.0 as usize) {
-                *slot = Some(*src);
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                add_preference(&mut preferences, phi.dst, source);
             }
         }
     }
-
-    let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        let natural_loop = cfg
-            .loop_for_header
-            .get(&block_index)
-            .and_then(|&loop_index| cfg.loops.get(loop_index));
-        for phi in &block.phis {
-            for &(predecessor, source) in &phi.sources {
-                add_preference(&mut preferences, phi.dst, source);
-                let is_repeated_loop_edge = natural_loop.is_some_and(|natural_loop| {
-                    cfg.block_index
-                        .get(&predecessor)
-                        .is_some_and(|predecessor| natural_loop.blocks.contains(predecessor))
-                });
-                if is_repeated_loop_edge
-                    && let Some(original) =
-                        exact_copy_source.get(source.0 as usize).copied().flatten()
-                {
-                    add_preference(&mut preferences, phi.dst, original);
-                }
-            }
-        }
+    for affinity in super::cssa::loop_backedge_snapshot_affinities(func, cfg) {
+        add_preference(&mut preferences, affinity.source, affinity.destination);
     }
     preferences
 }

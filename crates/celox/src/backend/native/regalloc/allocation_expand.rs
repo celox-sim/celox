@@ -177,6 +177,10 @@ pub(super) struct ExpandedAllocationProblem {
     pub intervals: LiveIntervals,
     pub incremental_liveness: IncrementalLiveness,
     pub shift_encoding: VariableShiftEncoding,
+    /// Loop snapshot descriptors derived once from the verified input CFG.
+    /// They remain separate from greedy affinity facts, and stay stable while
+    /// split-created values enter and leave allocation.
+    pub loop_backedge_affinities: Vec<super::cssa::LoopBackedgeSnapshotAffinity>,
     pub roots: Vec<ExpandedRoot>,
     pub machine_edge_uses: Vec<ExpandedMachineEdgeUse>,
     pub register_regions: Vec<ExpandedRegisterRegion>,
@@ -728,6 +732,7 @@ fn finish_expansion(
         intervals,
         incremental_liveness,
         shift_encoding: func.target_features.variable_shift_encoding(),
+        loop_backedge_affinities: super::cssa::loop_backedge_snapshot_affinities(func, cfg),
         roots,
         machine_edge_uses: Vec::new(),
         register_regions,
