@@ -966,6 +966,10 @@ impl<'a> ISelContext<'a> {
         self.full_static_access_size(addr, bit_offset, width_bits)
     }
 
+    fn access_size_has_padding(size: OpSize, width_bits: usize) -> bool {
+        size.bytes() as usize * 8 != width_bits
+    }
+
     /// A whole dynamically indexed array element occupies one independently
     /// padded native scalar slot. Accessing that slot directly is legal when
     /// the offset contains no additional bit displacement.
@@ -3432,7 +3436,19 @@ fn emit_single_chunk_sparse_insert(
     let value_mask = mask_for_width(width);
     match offset {
         SIROffset::Static(bit_offset) => {
-            ctx.emit_bfi(block, result, base, value, *bit_offset as u8, value_mask);
+            let (byte_offset, intra_byte) = ctx
+                .layout
+                .map_static_bit_offset(&addr.absolute_addr(), *bit_offset);
+            let physical_bit_offset = byte_offset * 8 + intra_byte;
+            debug_assert!(physical_bit_offset + width <= 64);
+            ctx.emit_bfi(
+                block,
+                result,
+                base,
+                value,
+                physical_bit_offset as u8,
+                value_mask,
+            );
         }
         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
             let offset = memory_offset_vreg(ctx, block, addr, offset);
@@ -5134,7 +5150,10 @@ fn lower_instruction(
                     if offset_low_zero_bits >= 3 {
                         let load_size = full_element_size
                             .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
-                        let raw = if full_element_size.is_some() {
+                        let padded_full_element = full_element_size.is_some_and(|size| {
+                            ISelContext::access_size_has_padding(size, *width_bits)
+                        });
+                        let raw = if full_element_size.is_some() && !padded_full_element {
                             vreg
                         } else {
                             ctx.alloc_vreg(SpillDesc::transient())
@@ -5147,7 +5166,9 @@ fn lower_instruction(
                             size: load_size,
                             alias_range: value_alias_range,
                         });
-                        if full_element_size.is_some() {
+                        if padded_full_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        } else if full_element_size.is_some() {
                             ctx.known_bits.insert(vreg, *width_bits);
                         } else if *width_bits < 64 {
                             ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
@@ -5281,7 +5302,10 @@ fn lower_instruction(
                             let load_size = full_element_size
                                 .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
                             let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            let raw = if full_element_size.is_some() {
+                            let padded_full_element = full_element_size.is_some_and(|size| {
+                                ISelContext::access_size_has_padding(size, *width_bits)
+                            });
+                            let raw = if full_element_size.is_some() && !padded_full_element {
                                 mvreg
                             } else {
                                 ctx.alloc_vreg(SpillDesc::transient())
@@ -5294,7 +5318,9 @@ fn lower_instruction(
                                 size: load_size,
                                 alias_range: mask_alias_range,
                             });
-                            if full_element_size.is_some() {
+                            if padded_full_element {
+                                ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
+                            } else if full_element_size.is_some() {
                                 ctx.known_bits.insert(mvreg, *width_bits);
                             } else if *width_bits < 64 {
                                 ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
@@ -12703,6 +12729,8 @@ mod tests {
         let index = RegisterId(0);
         let value = RegisterId(1);
         let loaded = RegisterId(2);
+        let expected = RegisterId(3);
+        let matches = RegisterId(4);
         let element_offset = SIROffset::Element {
             index,
             element_width: 12,
@@ -12718,24 +12746,19 @@ mod tests {
                     params: vec![],
                     instructions: vec![
                         SIRInstruction::Imm(index, SIRValue::new(1u8)),
-                        SIRInstruction::Imm(value, SIRValue::new(0xabcu16)),
-                        SIRInstruction::Store(
-                            array,
-                            element_offset.clone(),
-                            12,
-                            value,
-                            vec![],
-                            vec![],
-                        ),
-                        SIRInstruction::Load(loaded, array, element_offset, 12),
+                        SIRInstruction::Load(loaded, array, element_offset.clone(), 12),
+                        SIRInstruction::Imm(expected, SIRValue::new(0x123u16)),
+                        SIRInstruction::Binary(matches, loaded, BinaryOp::Eq, expected),
                         SIRInstruction::Store(
                             output,
                             SIROffset::Static(0),
-                            12,
-                            loaded,
+                            1,
+                            matches,
                             vec![],
                             vec![],
                         ),
+                        SIRInstruction::Imm(value, SIRValue::new(0xabcu16)),
+                        SIRInstruction::Store(array, element_offset, 12, value, vec![], vec![]),
                     ],
                     terminator: SIRTerminator::Return,
                 },
@@ -12752,6 +12775,14 @@ mod tests {
                 ),
                 (value, RegisterType::Logic { width: 12 }),
                 (loaded, RegisterType::Logic { width: 12 }),
+                (expected, RegisterType::Logic { width: 12 }),
+                (
+                    matches,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
             ]
             .into_iter()
             .collect(),
@@ -12761,7 +12792,7 @@ mod tests {
         let mut layout = empty_layout();
         layout.mode = MemoryLayoutMode::ElementStrided;
         layout.offsets = [(array_abs, 0), (output_abs, 8)].into_iter().collect();
-        layout.widths = [(array_abs, 24), (output_abs, 12)].into_iter().collect();
+        layout.widths = [(array_abs, 24), (output_abs, 1)].into_iter().collect();
         layout.is_4states = [(array_abs, false), (output_abs, false)]
             .into_iter()
             .collect();
@@ -12844,7 +12875,7 @@ mod tests {
         state[2..4].copy_from_slice(&0xf123u16.to_le_bytes());
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(u16::from_le_bytes(state[2..4].try_into().unwrap()), 0x0abc);
-        assert_eq!(u16::from_le_bytes(state[8..10].try_into().unwrap()), 0x0abc);
+        assert_eq!(state[8] & 1, 1);
     }
 
     #[test]
@@ -12863,8 +12894,7 @@ mod tests {
         let sparse =
             RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
-        let index = RegisterId(0);
-        let value = RegisterId(1);
+        let value = RegisterId(0);
         let unit = ExecutionUnit {
             entry_block_id: SirBlockId(0),
             blocks: [(
@@ -12873,16 +12903,10 @@ mod tests {
                     id: SirBlockId(0),
                     params: vec![],
                     instructions: vec![
-                        SIRInstruction::Imm(index, SIRValue::new(2u8)),
                         SIRInstruction::Imm(value, SIRValue::new(1u8)),
                         SIRInstruction::Store(
                             sparse,
-                            SIROffset::Element {
-                                index,
-                                element_width: 1,
-                                bit_offset: 0,
-                                dynamic_bit_offset: None,
-                            },
+                            SIROffset::Static(1),
                             1,
                             value,
                             vec![],
@@ -12895,22 +12919,13 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            register_map: [
-                (
-                    index,
-                    RegisterType::Bit {
-                        width: 2,
-                        signed: false,
-                    },
-                ),
-                (
-                    value,
-                    RegisterType::Bit {
-                        width: 1,
-                        signed: false,
-                    },
-                ),
-            ]
+            register_map: [(
+                value,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
             .into_iter()
             .collect(),
         };
@@ -12926,8 +12941,8 @@ mod tests {
             crate::backend::memory_layout::UnpackedArrayLayout {
                 element_width: 1,
                 element_count: 4,
-                element_stride: 8,
-                plane_size: 32,
+                element_stride: 1,
+                plane_size: 4,
             },
         );
         layout.total_size = SPARSE;
@@ -12938,7 +12953,7 @@ mod tests {
             absolute,
             crate::backend::memory_layout::SparseWorkingLayout {
                 active_index: 0,
-                chunk_count: 4,
+                chunk_count: 1,
                 dirty_words_offset: DIRTY,
                 dirty_word_count: 1,
                 summary_words_offset: SUMMARY,
@@ -12983,22 +12998,17 @@ mod tests {
         .unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
 
-        let old = 0xa6b5_c4d3_e2f1_8070u64;
         let mut state = vec![0u8; STATE_SIZE];
         state[STABLE] = 1;
-        state[STABLE + 24] = 1;
-        state[STABLE + 16..STABLE + 24].copy_from_slice(&old.to_le_bytes());
-        state[SPARSE + 16..SPARSE + 24].copy_from_slice(&u64::MAX.to_le_bytes());
+        state[STABLE + 3] = 1;
+        state[SPARSE..SPARSE + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         // Only bit 0 of each padded slot belongs to the RTL value. Padding is
         // backend-owned and may be canonicalized by a whole-element store.
-        assert_eq!(
-            u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()) & 1,
-            1
-        );
+        assert_eq!(state[STABLE + 2] & 1, 0);
         assert_eq!(state[STABLE] & 1, 1);
-        assert_eq!(state[STABLE + 8] & 1, 0);
-        assert_eq!(state[STABLE + 24] & 1, 1);
+        assert_eq!(state[STABLE + 1] & 1, 1);
+        assert_eq!(state[STABLE + 3] & 1, 1);
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
         assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);

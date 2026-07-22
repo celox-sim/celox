@@ -54,7 +54,7 @@ pub use pass_tail_call_split::TailCallChunk;
 fn preserve_native_element_boundaries(
     array: &crate::backend::memory_layout::UnpackedArrayLayout,
 ) -> bool {
-    (9..=64).contains(&array.element_width)
+    (1..=64).contains(&array.element_width)
         && array.element_stride * 8 != array.element_width
         && array.plane_size <= 256
 }
