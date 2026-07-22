@@ -6245,6 +6245,86 @@ Status: **unchanged private stack homes are no longer reread while an exact
 physical value survives; Linux semantics and bounded invalidation are
 verified, and avoidable allocator-created register destruction remains open**.
 
+### Step 71: Allocate block-local reload regions before one-use fallback
+
+The complete Step 70 MIR showed that the remaining `[sp + 72]` pair was not
+primarily a late-load-availability problem.  Before allocation, one value
+`v50537` fed a nearby add and subtract in the same block.  The terminal spiller
+nevertheless created a distinct reload VReg for every use:
+
+```text
+v187911 = load.i64 [sp + 72]
+v50666 = add.w32 v219, v187911
+...
+v187912 = load.i64 [sp + 72]
+v50667 = sub.w32 v219, v187912
+```
+
+The resulting x86 read the same home twice with `add r9d,[rsp+48h]` and
+`sub r11d,[rsp+48h]`.  No color choice could share those reloads because the
+spiller had already represented them as unrelated one-use SSA definitions.
+
+Terminal spilling now partitions semantic instruction uses by basic block and
+orders each group by its stable instruction slot.  The first use dominates the
+later uses in that block, so a multi-use group first becomes one ordinary
+`RegisterRegion` whose reload is inserted at the first use.  That region goes
+back through the same greedy queue, constraints, interference matrix, and
+coloring as every other machine interval; the spiller does not invent or pin a
+physical register.  Phi-edge uses remain singleton materializations.  If the
+spilled source is already one register region whose complete use set is that
+single block-local group, its uses become singleton materializations instead
+of recreating the same topology.  This permits at most one topology-reducing
+local retry.  Partitioning costs `O(U log U)` time in the worst case and `O(U)`
+additional memory for a terminal spill with `U` uses; it does not duplicate the
+CFG or construct an all-pairs interference graph.
+
+The actual-scale run also exposed a terminal def-to-root-home-store range whose
+semantic use set was empty.  Re-spilling that point-to-store transition cannot
+shorten it.  The spiller now retires only its stale semantic-region ownership,
+after which the unchanged exact machine interval re-enters the allocator as a
+`Fixed` range.  A dead definition with no machine use is classified the same
+way.  Both cases still require a physical destination for their defining
+instruction and neither removes an observable store.
+
+The complete candidate trace is
+`target/heliodor/analysis/step115-block-local-reload-regions`.  All three SIR
+dumps are byte-identical to Step 70, with hashes `51b1befa...`, `7c19aec1...`,
+and `fe40b3d4...`.  In the inspected block, post-allocation MIR now contains
+one reload:
+
+```text
+v184543 = load.i64 [sp + 72]
+v50666 = add.w32 v219, v184543
+...
+v50667 = sub.w32 v219, v184543
+```
+
+The emitted sequence correspondingly contains one `mov rax,[rsp+48h]` followed
+by `add r9d,eax` and `sub r11d,eax`.  Complete MIR falls from 51,822,976 to
+51,230,860 bytes and from 1,874,559 to 1,853,193 lines.  The five emitted bodies
+shrink by 33,407 bytes in total: `eval_comb` by 15,301 bytes, the fused body by
+17,072 bytes, `eval_only_ff` by 1,022 bytes, and `eval_apply_ff` by 12 bytes;
+`apply_ff` is unchanged.  This is not a uniform spill-frame improvement:
+`eval_comb` grows from 5,656 to 5,672 bytes and `eval_only_ff` from 224 to 232
+bytes, while the other three frames remain 0, 88, and 5,704 bytes.
+
+Focused regalloc tests pass 313/313, including one-block grouping, bounded
+fallback, store-only ownership retirement, and dead-result classification.
+The library suite passes 1,056/1,056, native testbench 60 passed with one
+ignored, counter 9 passed with three ignored, and workspace all-target check,
+package all-target strict Clippy, formatting, and diff checks pass.  The
+complete trace took 354.506 s.  The trace-free non-LTO interval-allocator run
+compiled in 355.529 s, reached `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`, and executed in 93.636 s.  Relative to Step 70's
+single adjacent run, execution is 2.920 s faster while compilation is 13.134 s
+slower; one execution sample is not a stable throughput claim.
+
+Status: **terminal spilling exposes a conventional block-local reload live
+range to ordinary allocation before bounded one-use fallback; exact Linux
+semantics and a substantial code-size reduction are verified, while compile
+latency, spill-frame growth, global phi coalescing, and complete region-cost
+selection remain open**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6371,6 +6451,7 @@ verified, and avoidable allocator-created register destruction remains open**.
 | 68 physical-width widened loads | this step | native/non-native widened-load ISel 2/2 | lib 1049/1049; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, package strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR dumps byte-identical | trace 230.028 s; full compile 226.570 s; execute 102.671 s | redundant `load.i64; mov.w32` removed; frames -40/-40 bytes; allocator perturbation leaves aggregate emitted code +355 bytes, so no speed gain claimed |
 | 69 physically available state-load reuse | this step | post-RA state-load reuse 5/5 | lib 1054/1054; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; parent/candidate SIR dumps byte-identical | parent/candidate trace 349.666 / 364.103 s; full compile 346.444 s; execute 100.155 s | repeated CSSA recipe loads reuse exact surviving physical values; emitted code -29,960 bytes; frames unchanged; no speed gain claimed |
 | 70 physically available private stack reloads | this step | post-RA direct-load availability 6/6 | lib 1055/1055; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, diff, and clean source checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 69/candidate SIR dumps byte-identical | full compile 342.395 s; execute 96.556 s | repeated surviving stack-home values reuse one physical load; emitted code -5,429 bytes; frames unchanged; one sample is not a speed claim |
+| 71 block-local terminal reload regions | this step | regalloc 313/313 | lib 1056/1056; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | opt-in interval allocator passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 70/candidate SIR dumps byte-identical | trace 354.506 s; full compile 355.529 s; execute 93.636 s | one reload live range serves same-block uses before bounded fallback; emitted code -33,407 bytes; execute sample -3.0%, compile +3.8% |
 
 ## Related design records
 

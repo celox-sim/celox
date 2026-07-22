@@ -1173,33 +1173,42 @@ impl JointAllocationProblem {
                         "register region does not own its exact semantic uses in the machine live interval",
                     ));
                 }
-                let home_plan = home_plans.get(region.root.0 as usize).ok_or_else(|| {
-                    JointAllocationError::new(
-                        "JOINT_ALLOC.HOME_COST_ROOT",
-                        Some(interval.definition.block()),
-                        Some(value),
-                        "register region has no physical-allocation home-cost row",
-                    )
-                })?;
-                let spill_cost = if region.uses.is_empty() {
-                    machine_transition_spill_cost(interval)
+                if interval.uses.is_empty() {
+                    // A live definition with no machine use still needs a
+                    // destination register for its instruction, but spilling
+                    // that dead result cannot shorten its point range. A
+                    // stale semantic-region owner must therefore be terminal,
+                    // just like any other explicit machine transition.
+                    (AllocationValueClass::Fixed, None, None)
                 } else {
-                    home_plan
-                        .spill_cost(
-                            &region.uses,
-                            stack_roots.contains(&region.root),
-                            deferred_state_roots.contains(&region.root),
+                    let home_plan = home_plans.get(region.root.0 as usize).ok_or_else(|| {
+                        JointAllocationError::new(
+                            "JOINT_ALLOC.HOME_COST_ROOT",
+                            Some(interval.definition.block()),
+                            Some(value),
+                            "register region has no physical-allocation home-cost row",
                         )
-                        .map_err(JointAllocationError::home)?
-                };
-                (
-                    AllocationValueClass::Region {
-                        root: region.root,
-                        uses: region.uses,
-                    },
-                    Some(spill_cost),
-                    region.preferred_register,
-                )
+                    })?;
+                    let spill_cost = if region.uses.is_empty() {
+                        machine_transition_spill_cost(interval)
+                    } else {
+                        home_plan
+                            .spill_cost(
+                                &region.uses,
+                                stack_roots.contains(&region.root),
+                                deferred_state_roots.contains(&region.root),
+                            )
+                            .map_err(JointAllocationError::home)?
+                    };
+                    (
+                        AllocationValueClass::Region {
+                            root: region.root,
+                            uses: region.uses,
+                        },
+                        Some(spill_cost),
+                        region.preferred_register,
+                    )
+                }
             } else {
                 (AllocationValueClass::Fixed, None, None)
             };
@@ -3351,37 +3360,41 @@ fn session_allocation_value(
                 ));
             }
         }
-        let home_plan = home_plans.get(owner.root.0 as usize).ok_or_else(|| {
-            JointAllocationError::new(
-                "JOINT_ALLOC.SESSION_HOME_COST_ROOT",
-                Some(interval.definition.block()),
-                Some(value),
-                "changed register region has no function-lifetime home-cost row",
-            )
-        })?;
-        let stack_exists = expanded
-            .stack_homes
-            .iter()
-            .any(|home| home.root == owner.root && home.kind == ExpandedStackHomeKind::Root);
-        let deferred_state_exists = expanded
-            .state_homes
-            .iter()
-            .any(|home| home.root == owner.root);
-        let spill_cost = if owner.uses.is_empty() {
-            machine_transition_spill_cost(interval)
+        if interval.uses.is_empty() {
+            (AllocationValueClass::Fixed, None, None)
         } else {
-            home_plan
-                .spill_cost(&owner.uses, stack_exists, deferred_state_exists)
-                .map_err(JointAllocationError::home)?
-        };
-        (
-            AllocationValueClass::Region {
-                root: owner.root,
-                uses: owner.uses.clone(),
-            },
-            Some(spill_cost),
-            owner.preferred_register,
-        )
+            let home_plan = home_plans.get(owner.root.0 as usize).ok_or_else(|| {
+                JointAllocationError::new(
+                    "JOINT_ALLOC.SESSION_HOME_COST_ROOT",
+                    Some(interval.definition.block()),
+                    Some(value),
+                    "changed register region has no function-lifetime home-cost row",
+                )
+            })?;
+            let stack_exists = expanded
+                .stack_homes
+                .iter()
+                .any(|home| home.root == owner.root && home.kind == ExpandedStackHomeKind::Root);
+            let deferred_state_exists = expanded
+                .state_homes
+                .iter()
+                .any(|home| home.root == owner.root);
+            let spill_cost = if owner.uses.is_empty() {
+                machine_transition_spill_cost(interval)
+            } else {
+                home_plan
+                    .spill_cost(&owner.uses, stack_exists, deferred_state_exists)
+                    .map_err(JointAllocationError::home)?
+            };
+            (
+                AllocationValueClass::Region {
+                    root: owner.root,
+                    uses: owner.uses.clone(),
+                },
+                Some(spill_cost),
+                owner.preferred_register,
+            )
+        }
     } else {
         (AllocationValueClass::Fixed, None, None)
     };
@@ -3636,7 +3649,9 @@ mod tests {
         BaseReg, MBlock, MFunction, MInst, OpSize, SpillDesc, VRegAllocator,
     };
 
-    use super::super::allocation_expand::{expand, expand_unallocated};
+    use super::super::allocation_expand::{
+        ExpandedRegisterRegion, RegisterRegionId, expand, expand_unallocated,
+    };
     use super::super::home_graph::{self, HomeGraph};
     use super::super::interval_allocator::allocate_roots;
     use super::super::live_interval;
@@ -4047,6 +4062,31 @@ mod tests {
                 }
             }
         }
+
+        // Model a split-created semantic owner whose users were all moved
+        // away while its defining machine instruction remains. The point
+        // range still needs a physical destination, but spilling its unused
+        // result cannot reduce pressure and must not enter the Spill stage.
+        let unused_root = expanded
+            .roots
+            .iter()
+            .find(|root| root.origin == VReg(2))
+            .unwrap()
+            .id;
+        let region = RegisterRegionId(expanded.next_register_region);
+        expanded.next_register_region += 1;
+        expanded
+            .region_rows
+            .insert(region, expanded.register_regions.len());
+        expanded.region_by_value.insert(VReg(2), region);
+        expanded.register_regions.push(ExpandedRegisterRegion {
+            id: region,
+            root: unused_root,
+            value: VReg(2),
+            preferred_register: Some(PhysReg::RAX),
+            entry_use: None,
+            entry: ExpandedRegisterEntry::Original,
+        });
 
         let problem = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert_eq!(

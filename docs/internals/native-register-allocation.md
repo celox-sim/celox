@@ -259,10 +259,15 @@ A separate function-lifetime `Spiller` owns `RootHomePlan` and all concrete
 home edits.  It is called only when an exact interval reaches `Spill`.  A
 logical-root representative may use the HDL-specific home recipes; a split
 transition whose uses include synthetic copies or phis is spilled as one exact
-machine interval with a private stack definition and one-use reload products.
-Stable order gaps permit those reloads immediately before older synthetic
-instructions.  The old `DeferredRound`, symbolic fragment reservations, hard
-child colors, and immediate partial-home split are no longer in production.
+machine interval with a private stack definition.  Instruction uses are
+partitioned by basic block and a multi-use partition first forms one ordinary
+reload-to-last-use register region when that reduces semantic-region
+topology; phi-edge uses remain one-use reload products.  A source which is
+already exactly that one block-local register region becomes one-use products
+instead, so the local retry cannot become a reload/re-spill loop.  Stable order
+gaps permit those reloads immediately before older synthetic instructions.
+The old `DeferredRound`, symbolic fragment reservations, hard child colors,
+and immediate partial-home split are no longer in production.
 
 Step 30g removes the last production `JointAllocationSession` wrapper.  The
 base `GreedyAllocator` now coordinates two explicit owners:

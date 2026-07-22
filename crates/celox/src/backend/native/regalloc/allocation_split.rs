@@ -1350,8 +1350,11 @@ fn insert_register_representative(
 }
 
 /// Rewrite one interval only after both split stages have failed to produce a
-/// shorter register range.  The spiller owns the concrete home choices and
-/// returns only short transition ranges to the allocation session.
+/// shorter register range.  The spiller owns the concrete home choices. Uses
+/// in one basic block first return as one local reload region; if that exact
+/// region reaches `Spill` again, its uses become terminal one-use transitions.
+/// Thus nearby uses get the ordinary allocator's coloring opportunity without
+/// allowing an unbounded reload/re-spill cycle.
 fn apply_spill(
     expanded: &mut ExpandedAllocationProblem,
     graph: &HomeGraph,
@@ -1387,7 +1390,9 @@ fn apply_spill(
             "spill request and current live interval own different root uses",
         ));
     }
-    if requires_machine_interval_spill(expanded, request, &value.interval)? {
+    let requires_machine_spill =
+        requires_machine_interval_spill(expanded, request, &value.interval)?;
+    if requires_machine_spill {
         let interval = value.interval.clone();
         expanded
             .ir
@@ -1419,13 +1424,32 @@ fn apply_spill(
         });
     }
     if request.uses.is_empty() {
-        return Err(AllocationSplitError::new(
-            "ALLOCATION_SPILL.EMPTY_MACHINE_INTERVAL",
-            Some(value.interval.definition.block()),
-            Some(request.value),
-            Some(request.root),
-            "an empty semantic region did not contain a machine transition use",
-        ));
+        // Every remaining machine use is the already-selected logical home
+        // store proved by `requires_machine_interval_spill`. Spilling this
+        // def-to-store range again cannot shorten it; retire only its
+        // splittable semantic ownership so the unchanged exact interval
+        // re-enters allocation as a terminal Fixed range.
+        let region = expanded
+            .region_by_value
+            .get(&request.value)
+            .copied()
+            .ok_or_else(|| {
+                AllocationSplitError::new(
+                    "ALLOCATION_SPILL.EMPTY_REGION_METADATA",
+                    Some(value.interval.definition.block()),
+                    Some(request.value),
+                    Some(request.root),
+                    "store-only semantic region has no register-region metadata to retire",
+                )
+            })?;
+        prune_replaced_register_region(expanded, request.root, request.value, Some(region))?;
+        return Ok(AppliedSplit {
+            root: request.root,
+            constraint_blocks: BTreeSet::new(),
+            changed_values: vec![request.value],
+            range_changed_values: Vec::new(),
+            live_lengths: Vec::new(),
+        });
     }
     let candidate = RegionSplitCandidate {
         value: request.value,
@@ -1435,17 +1459,7 @@ fn apply_spill(
     };
     let root_row = expanded_root(expanded, request.root)?;
     let source = region_source(expanded, root_row, &candidate, value)?;
-    let entries = request
-        .uses
-        .iter()
-        .copied()
-        .map(|entry| SpillEntry {
-            entry,
-            uses: vec![entry],
-            kind: SpillEntryKind::Materialized,
-            preferred_register: None,
-        })
-        .collect::<Vec<_>>();
+    let entries = terminal_spill_entries(root_row, &request.uses, source)?;
     let spill = spiller
         .plan(expanded, request.root, request.value, &entries)
         .map_err(AllocationSplitError::spill)?;
@@ -1506,6 +1520,89 @@ fn apply_spill(
         range_changed_values: liveness.range_changed_values,
         live_lengths: liveness.live_lengths,
     })
+}
+
+/// Form conventional block-local reload live ranges at the terminal spill
+/// boundary.
+///
+/// An instruction use dominates every later instruction use in the same
+/// basic block, so one materialization at the first use can define the exact
+/// spilled SSA value for the complete local group. Phi-edge locations remain
+/// singletons. A region already created at that same first-use boundary is
+/// not recreated: all of its uses become one-use materializations on the
+/// second spill attempt. Consequently this adds at most one retry and keeps
+/// total inserted/replaced use metadata linear in the spilled use count.
+fn terminal_spill_entries(
+    root: &super::allocation_expand::ExpandedRoot,
+    uses: &[BundleUseId],
+    source: RegionSource,
+) -> Result<Vec<SpillEntry>, AllocationSplitError> {
+    let mut local = BTreeMap::<BlockId, Vec<(SlotIndex, BundleUseId)>>::new();
+    let mut entries = Vec::new();
+    for &use_id in uses {
+        let use_ = root.uses.get(use_id.0 as usize).ok_or_else(|| {
+            AllocationSplitError::new(
+                "ALLOCATION_SPILL.USE_RANGE",
+                None,
+                Some(root.origin),
+                Some(root.id),
+                format!("terminal spill use {use_id:?} is outside its root"),
+            )
+        })?;
+        match use_.site {
+            UseSite::Instruction { block, slot, .. } => {
+                local.entry(block).or_default().push((slot, use_id));
+            }
+            UseSite::PhiEdge { .. } => entries.push(SpillEntry {
+                entry: use_id,
+                uses: vec![use_id],
+                kind: SpillEntryKind::Materialized,
+                preferred_register: None,
+            }),
+        }
+    }
+
+    for (_, mut group) in local {
+        group.sort_unstable();
+        let group = group
+            .into_iter()
+            .map(|(_, use_id)| use_id)
+            .collect::<Vec<_>>();
+        let entry = group[0];
+        let repeats_same_region = source.region.is_some() && group.len() == uses.len();
+        if group.len() > 1 && !repeats_same_region {
+            entries.push(SpillEntry {
+                entry,
+                uses: group,
+                kind: SpillEntryKind::RegisterRegion,
+                preferred_register: None,
+            });
+        } else {
+            entries.extend(group.into_iter().map(|entry| SpillEntry {
+                entry,
+                uses: vec![entry],
+                kind: SpillEntryKind::Materialized,
+                preferred_register: None,
+            }));
+        }
+    }
+    entries.sort_unstable_by_key(|entry| entry.entry);
+
+    let mut covered = entries
+        .iter()
+        .flat_map(|entry| entry.uses.iter().copied())
+        .collect::<Vec<_>>();
+    covered.sort_unstable();
+    if covered != uses {
+        return Err(AllocationSplitError::new(
+            "ALLOCATION_SPILL.LOCAL_REGION_COVERAGE",
+            None,
+            Some(root.origin),
+            Some(root.id),
+            "block-local spill regions do not partition the requested uses exactly once",
+        ));
+    }
+    Ok(entries)
 }
 
 /// A HomeGraph spill recipe owns only the immutable RTL-use subset. Once
@@ -3050,7 +3147,11 @@ mod tests {
         BaseReg, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
 
-    use super::super::allocation_expand::{expand, expand_unallocated};
+    use super::super::allocation_expand::{
+        ExpandedStackDefinition, ExpandedStackHome, ExpandedStackHomeKind, expand,
+        expand_unallocated,
+    };
+    use super::super::allocation_ir::{StackHomeId, SyntheticOperation};
     use super::super::home_graph;
     use super::super::interval_allocator::allocate_roots;
 
@@ -4428,7 +4529,7 @@ mod tests {
     }
 
     #[test]
-    fn spill_stage_materializes_every_use_and_removes_the_register_interval() {
+    fn spill_stage_retries_one_block_as_a_local_region_then_materializes_each_use() {
         let instructions = vec![
             MInst::Load {
                 dst: VReg(0),
@@ -4471,8 +4572,45 @@ mod tests {
         .unwrap();
 
         let root = root_for(&expanded, VReg(0));
+        let local = root.uses[0].value;
+        assert_ne!(local, VReg(0));
         assert!(root.uses.iter().all(|use_| {
-            use_.value != VReg(0)
+            use_.value == local && matches!(use_.source, ExpandedUseSource::RegisterRegion { .. })
+        }));
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert!(!matches!(
+            rebuilt.value(VReg(0)).map(|value| &value.class),
+            Some(AllocationValueClass::Region { .. })
+        ));
+        let local_value = rebuilt.value(local).unwrap();
+        let AllocationValueClass::Region {
+            root: local_root,
+            uses: local_uses,
+        } = &local_value.class
+        else {
+            panic!("same-block terminal uses should first form one local reload region");
+        };
+        assert_eq!(*local_root, request.root);
+        assert_eq!(local_uses, &request.uses);
+
+        let retry = RegionSpillRequest {
+            value: local,
+            root: *local_root,
+            uses: local_uses.clone(),
+        };
+        apply_spill(
+            &mut expanded,
+            &graph,
+            &rebuilt,
+            &retry,
+            &cfg,
+            &context.spiller,
+        )
+        .unwrap();
+
+        let root = root_for(&expanded, VReg(0));
+        assert!(root.uses.iter().all(|use_| {
+            use_.value != local
                 && matches!(
                     use_.source,
                     ExpandedUseSource::Materialized(_) | ExpandedUseSource::Edge(_)
@@ -4480,12 +4618,96 @@ mod tests {
         }));
         let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
         assert!(!matches!(
-            rebuilt.value(VReg(0)).map(|value| &value.class),
+            rebuilt.value(local).map(|value| &value.class),
             Some(AllocationValueClass::Region { .. })
         ));
-        assert!(rebuilt.values.iter().all(|value| {
-            matches!(value.class, AllocationValueClass::Fixed)
-                || !matches!(value.class, AllocationValueClass::Region { root: value_root, .. } if value_root == request.root)
-        }));
+    }
+
+    #[test]
+    fn spill_stage_retires_a_store_only_semantic_region_as_fixed() {
+        let instructions = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::StackFrame,
+                offset: 128,
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        let registers = [PhysReg::RAX, PhysReg::RDX];
+        let mut function = function(1, instructions);
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        let graph = home_graph::build(&function, &cfg).unwrap();
+        let mut expanded = expand_unallocated(&function, &cfg, &graph).unwrap();
+        let root = root_for(&expanded, VReg(0)).id;
+        assert!(root_for(&expanded, VReg(0)).uses.is_empty());
+
+        let home = StackHomeId(0);
+        let definition = expanded.intervals.intervals[0].as_ref().unwrap().definition;
+        expanded.ir.begin_instruction_transaction().unwrap();
+        let store = expanded
+            .ir
+            .insert_after_definition(
+                definition,
+                SyntheticOperation::StackStore { home },
+                crate::backend::native::mir::Uses::one(VReg(0)),
+                false,
+            )
+            .unwrap()
+            .instruction;
+        expanded.stack_homes.push(ExpandedStackHome {
+            id: home,
+            root,
+            definition: ExpandedStackDefinition::Store {
+                instruction: store,
+                value: VReg(0),
+            },
+            kind: ExpandedStackHomeKind::Root,
+        });
+        let changed = BTreeSet::from([BlockId(0)]);
+        allocation_expand::refresh(&mut expanded, &cfg, &changed).unwrap();
+
+        let region = RegisterRegionId(expanded.next_register_region);
+        expanded.next_register_region += 1;
+        expanded
+            .region_rows
+            .insert(region, expanded.register_regions.len());
+        expanded.region_by_value.insert(VReg(0), region);
+        expanded.register_regions.push(ExpandedRegisterRegion {
+            id: region,
+            root,
+            value: VReg(0),
+            preferred_register: None,
+            entry_use: None,
+            entry: ExpandedRegisterEntry::Original,
+        });
+
+        let joint = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        let value = joint.value(VReg(0)).unwrap();
+        assert!(matches!(
+            value.class,
+            AllocationValueClass::Region { ref uses, .. } if uses.is_empty()
+        ));
+        assert_eq!(
+            value.interval.uses.len(),
+            1,
+            "the root-home store remains live"
+        );
+        let request = RegionSpillRequest {
+            value: VReg(0),
+            root,
+            uses: Vec::new(),
+        };
+        let spiller = Spiller::build(&graph).unwrap();
+        let applied = apply_spill(&mut expanded, &graph, &joint, &request, &cfg, &spiller).unwrap();
+
+        assert_eq!(applied.changed_values, [VReg(0)]);
+        assert!(applied.range_changed_values.is_empty());
+        assert!(expanded.register_regions.is_empty());
+        let rebuilt = JointAllocationProblem::build(&expanded, &cfg, &graph, &registers).unwrap();
+        assert!(matches!(
+            rebuilt.value(VReg(0)).map(|value| &value.class),
+            Some(AllocationValueClass::Fixed)
+        ));
     }
 }
