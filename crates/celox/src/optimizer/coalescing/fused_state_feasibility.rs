@@ -1292,6 +1292,303 @@ pub(crate) fn analyze(
     Ok(report)
 }
 
+pub(super) fn dirty_exit_dead_comb_stores(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    ff_entry: BlockId,
+) -> Result<BTreeSet<(BlockId, usize)>, FeasibilityError> {
+    let cfg = SirCfg::analyze(eu).map_err(FeasibilityError::Cfg)?;
+    let phases = StatePhaseMap::fused(eu, &cfg, ff_entry).map_err(FeasibilityError::Phase)?;
+    let ff_blocks = phases.ff_blocks().expect("fused phases expose FF blocks");
+    let mut object_events = BTreeMap::<
+        RegionedAbsoluteAddr,
+        Vec<(usize, Event<RegionedAbsoluteAddr, ProgramPoint, Usage>)>,
+    >::new();
+    let mut definitions = BTreeMap::<ProgramPoint, MemoryDefinition>::new();
+    let mut loads = BTreeMap::<RegionedAbsoluteAddr, Vec<(ProgramPoint, Option<BitRange>)>>::new();
+    let mut accesses = Vec::<(BitRange, bool)>::new();
+    let mut conservative_objects = BTreeSet::<RegionedAbsoluteAddr>::new();
+    let mut candidates = BTreeSet::<ProgramPoint>::new();
+    let mut candidates_by_object = BTreeMap::<RegionedAbsoluteAddr, Vec<ProgramPoint>>::new();
+
+    for (block, &block_id) in cfg.block_ids.iter().enumerate() {
+        for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
+            let point = ProgramPoint {
+                block: block_id,
+                instruction,
+            };
+            match inst {
+                SIRInstruction::Load(_, address, offset, width)
+                    if address.region == STABLE_REGION =>
+                {
+                    let range = match offset {
+                        SIROffset::Static(start) => BitRange::new(*address, *start, *width),
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                            conservative_objects.insert(*address);
+                            None
+                        }
+                    };
+                    if let Some(range) = range {
+                        accesses.push((range, false));
+                    }
+                    loads.entry(*address).or_default().push((point, range));
+                    object_events.entry(*address).or_default().push((
+                        block,
+                        Event::Use {
+                            variable: *address,
+                            usage: Usage::Load(point),
+                        },
+                    ));
+                }
+                SIRInstruction::Store(address, offset, width, _, triggers, captures)
+                    if address.region == STABLE_REGION =>
+                {
+                    let kind = match offset {
+                        SIROffset::Static(start) => {
+                            if let Some(range) = BitRange::new(*address, *start, *width) {
+                                accesses.push((range, true));
+                                DefinitionKind::Exact(range)
+                            } else {
+                                conservative_objects.insert(*address);
+                                DefinitionKind::UnknownObject(*address)
+                            }
+                        }
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                            conservative_objects.insert(*address);
+                            DefinitionKind::UnknownObject(*address)
+                        }
+                    };
+                    let definition = MemoryDefinition {
+                        point,
+                        kind,
+                        in_ff_suffix: ff_blocks.contains(&block_id),
+                        effectful: !triggers.is_empty() || !captures.is_empty(),
+                    };
+                    definitions.insert(point, definition);
+                    if !definition.in_ff_suffix
+                        && !definition.effectful
+                        && matches!(kind, DefinitionKind::Exact(_))
+                    {
+                        candidates.insert(point);
+                        candidates_by_object
+                            .entry(*address)
+                            .or_default()
+                            .push(point);
+                    }
+                    let events = object_events.entry(*address).or_default();
+                    events.push((
+                        block,
+                        Event::Use {
+                            variable: *address,
+                            usage: Usage::DefinitionInput(point),
+                        },
+                    ));
+                    events.push((
+                        block,
+                        Event::Definition {
+                            variable: *address,
+                            definition: point,
+                        },
+                    ));
+                }
+                SIRInstruction::Commit(source, destination, offset, width, triggers) => {
+                    if source.region == STABLE_REGION {
+                        let range = match offset {
+                            SIROffset::Static(start) => BitRange::new(*source, *start, *width),
+                            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                                conservative_objects.insert(*source);
+                                None
+                            }
+                        };
+                        if let Some(range) = range {
+                            accesses.push((range, false));
+                        }
+                        loads.entry(*source).or_default().push((point, range));
+                        object_events.entry(*source).or_default().push((
+                            block,
+                            Event::Use {
+                                variable: *source,
+                                usage: Usage::Load(point),
+                            },
+                        ));
+                    }
+                    if destination.region == STABLE_REGION {
+                        let kind = match offset {
+                            SIROffset::Static(start) => BitRange::new(*destination, *start, *width)
+                                .map_or_else(
+                                    || {
+                                        conservative_objects.insert(*destination);
+                                        DefinitionKind::UnknownObject(*destination)
+                                    },
+                                    |range| {
+                                        accesses.push((range, true));
+                                        DefinitionKind::Exact(range)
+                                    },
+                                ),
+                            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+                                conservative_objects.insert(*destination);
+                                DefinitionKind::UnknownObject(*destination)
+                            }
+                        };
+                        let definition = MemoryDefinition {
+                            point,
+                            kind,
+                            in_ff_suffix: ff_blocks.contains(&block_id),
+                            effectful: !triggers.is_empty(),
+                        };
+                        definitions.insert(point, definition);
+                        let events = object_events.entry(*destination).or_default();
+                        events.push((
+                            block,
+                            Event::Use {
+                                variable: *destination,
+                                usage: Usage::DefinitionInput(point),
+                            },
+                        ));
+                        events.push((
+                            block,
+                            Event::Definition {
+                                variable: *destination,
+                                definition: point,
+                            },
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let endpoints = range_endpoints(&accesses);
+    let exit_blocks = cfg
+        .block_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(block, block_id)| {
+            matches!(
+                eu.blocks[block_id].terminator,
+                SIRTerminator::Return | SIRTerminator::Error(_)
+            )
+            .then_some((block, *block_id))
+        })
+        .collect::<Vec<_>>();
+    let mut required = BTreeSet::<ProgramPoint>::new();
+    let mut definitions_by_object = BTreeMap::<RegionedAbsoluteAddr, Vec<MemoryDefinition>>::new();
+    for definition in definitions.values().copied() {
+        definitions_by_object
+            .entry(definition_object(definition))
+            .or_default()
+            .push(definition);
+    }
+
+    for (object, sparse_events) in object_events {
+        let object_candidates = candidates_by_object.remove(&object).unwrap_or_default();
+        if object_candidates.is_empty() {
+            continue;
+        }
+        if conservative_objects.contains(&object) {
+            required.extend(object_candidates);
+            continue;
+        }
+        let Some(points) = endpoints.get(&object) else {
+            required.extend(object_candidates);
+            continue;
+        };
+        let full_range = BitRange {
+            object,
+            start: points[0],
+            end: *points.last().unwrap(),
+        };
+        let object_definitions = definitions_by_object
+            .get(&object)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let has_ff_publication = object_definitions
+            .iter()
+            .any(|definition| definition.in_ff_suffix);
+        let definition_points = sparse_events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                Event::Definition { definition, .. } => Some(*definition),
+                Event::Use { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut events = vec![
+            Vec::<Event<RegionedAbsoluteAddr, ProgramPoint, Usage>>::new();
+            cfg.block_ids.len()
+        ];
+        for (block, event) in sparse_events {
+            events[block].push(event);
+        }
+        if has_ff_publication {
+            for &(block, block_id) in &exit_blocks {
+                events[block].push(Event::Use {
+                    variable: object,
+                    usage: Usage::Exit(block_id),
+                });
+            }
+        }
+        let state_ssa = ssa::build(&cfg, &events).map_err(FeasibilityError::StateSsa)?;
+        let definition_inputs = definition_points
+            .into_iter()
+            .map(|point| {
+                state_ssa
+                    .uses
+                    .get(&Usage::DefinitionInput(point))
+                    .copied()
+                    .map(|version| (point, version))
+                    .ok_or(FeasibilityError::InvalidMemoryGraph(
+                        "definition has no incoming dirty-exit object version",
+                    ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut resolver =
+            DemandResolver::new(&state_ssa, &endpoints, &definitions, &definition_inputs);
+
+        for (point, range) in loads.remove(&object).unwrap_or_default() {
+            let version = state_ssa.uses.get(&Usage::Load(point)).copied().ok_or(
+                FeasibilityError::InvalidMemoryGraph(
+                    "dirty-exit root load has no reaching object version",
+                ),
+            )?;
+            let pieces = resolver.resolve(DemandKey {
+                version,
+                range: range.unwrap_or(full_range),
+            })?;
+            collect_required_sources(&pieces, &resolver.stats.phi_sources, &mut required)?;
+        }
+        for definition in object_definitions
+            .iter()
+            .filter(|definition| definition.effectful)
+        {
+            required.insert(definition.point);
+            if let DefinitionKind::Exact(range) = definition.kind {
+                let version = definition_inputs[&definition.point];
+                let pieces = resolver.resolve(DemandKey { version, range })?;
+                collect_required_sources(&pieces, &resolver.stats.phi_sources, &mut required)?;
+            }
+        }
+        if has_ff_publication {
+            for &(_, block_id) in &exit_blocks {
+                let version = state_ssa.uses.get(&Usage::Exit(block_id)).copied().ok_or(
+                    FeasibilityError::InvalidMemoryGraph(
+                        "dirty-exit publication has no exit object version",
+                    ),
+                )?;
+                let pieces = resolver.resolve(DemandKey {
+                    version,
+                    range: full_range,
+                })?;
+                collect_required_sources(&pieces, &resolver.stats.phi_sources, &mut required)?;
+            }
+        }
+    }
+
+    Ok(candidates
+        .difference(&required)
+        .map(|point| (point.block, point.instruction))
+        .collect())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FrontierQuery {
     register: RegisterId,

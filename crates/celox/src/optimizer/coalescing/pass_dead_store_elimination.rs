@@ -1,24 +1,5 @@
+use crate::HashSet;
 use crate::ir::*;
-use crate::{HashMap, HashSet};
-
-use super::state_ssa::StatePhaseMap;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StaticBitRange {
-    start: usize,
-    end: usize,
-}
-
-impl StaticBitRange {
-    fn new(start: usize, width: usize) -> Option<Self> {
-        let end = start.checked_add(width)?;
-        (start < end).then_some(Self { start, end })
-    }
-
-    fn overlaps(self, other: Self) -> bool {
-        self.start < other.end && other.start < self.end
-    }
-}
 
 /// Remove stores from `eval_comb` whose target addresses are not live.
 ///
@@ -133,130 +114,18 @@ pub(crate) fn eliminate_unread_fused_comb_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     ff_entry: BlockId,
 ) -> Result<usize, String> {
-    let cfg = crate::ir::cfg::SirCfg::analyze(eu).map_err(|error| error.to_string())?;
-    let phases = StatePhaseMap::fused(eu, &cfg, ff_entry).map_err(|error| error.to_string())?;
-    let ff_blocks = phases
-        .ff_blocks()
-        .expect("a fused phase map always classifies FF blocks");
-
-    let mut reads = HashMap::<RegionedAbsoluteAddr, Vec<StaticBitRange>>::default();
-    let mut unknown_objects = HashSet::<RegionedAbsoluteAddr>::default();
-    for block in eu.blocks.values() {
-        for instruction in &block.instructions {
-            match instruction {
-                SIRInstruction::Load(_, address, offset, width)
-                    if address.region == STABLE_REGION =>
-                {
-                    record_fused_read(*address, offset, *width, &mut reads, &mut unknown_objects);
-                }
-                SIRInstruction::Commit(source, _, offset, width, _)
-                    if source.region == STABLE_REGION =>
-                {
-                    record_fused_read(*source, offset, *width, &mut reads, &mut unknown_objects);
-                }
-                SIRInstruction::Store(address, offset, width, _, triggers, captures)
-                    if address.region == STABLE_REGION
-                        && (!triggers.is_empty() || !captures.is_empty()) =>
-                {
-                    // Trigger/capture publication compares or otherwise
-                    // observes the previous value of its written range.
-                    record_fused_read(*address, offset, *width, &mut reads, &mut unknown_objects);
-                }
-                SIRInstruction::Store(
-                    address,
-                    SIROffset::Dynamic(_) | SIROffset::Element { .. },
-                    _,
-                    _,
-                    _,
-                    _,
-                ) if address.region == STABLE_REGION => {
-                    unknown_objects.insert(*address);
-                }
-                _ => {}
-            }
-        }
-    }
-    for ranges in reads.values_mut() {
-        normalize_read_ranges(ranges);
-    }
-
-    let mut removed = 0usize;
+    let dead = super::fused_state_feasibility::dirty_exit_dead_comb_stores(eu, ff_entry)
+        .map_err(|error| error.to_string())?;
+    let removed = dead.len();
     for (&block_id, block) in &mut eu.blocks {
-        if ff_blocks.contains(&block_id) {
-            continue;
-        }
-        block.instructions.retain(|instruction| {
-            let SIRInstruction::Store(
-                address,
-                SIROffset::Static(start),
-                width,
-                _,
-                triggers,
-                captures,
-            ) = instruction
-            else {
-                return true;
-            };
-            if address.region != STABLE_REGION
-                || !triggers.is_empty()
-                || !captures.is_empty()
-                || unknown_objects.contains(address)
-            {
-                return true;
-            }
-            let Some(stored) = StaticBitRange::new(*start, *width) else {
-                return true;
-            };
-            let observed = reads
-                .get(address)
-                .is_some_and(|ranges| contains_overlapping_range(ranges, stored));
-            removed += usize::from(!observed);
-            observed
+        let mut instruction = 0usize;
+        block.instructions.retain(|_| {
+            let keep = !dead.contains(&(block_id, instruction));
+            instruction += 1;
+            keep
         });
     }
     Ok(removed)
-}
-
-fn record_fused_read(
-    address: RegionedAbsoluteAddr,
-    offset: &SIROffset,
-    width: usize,
-    reads: &mut HashMap<RegionedAbsoluteAddr, Vec<StaticBitRange>>,
-    unknown_objects: &mut HashSet<RegionedAbsoluteAddr>,
-) {
-    match offset {
-        SIROffset::Static(start) => {
-            if let Some(range) = StaticBitRange::new(*start, width) {
-                reads.entry(address).or_default().push(range);
-            } else {
-                unknown_objects.insert(address);
-            }
-        }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
-            unknown_objects.insert(address);
-        }
-    }
-}
-
-fn normalize_read_ranges(ranges: &mut Vec<StaticBitRange>) {
-    ranges.sort_unstable_by_key(|range| (range.start, range.end));
-    let mut write = 0usize;
-    for read in 0..ranges.len() {
-        if write != 0 && ranges[write - 1].end >= ranges[read].start {
-            ranges[write - 1].end = ranges[write - 1].end.max(ranges[read].end);
-        } else {
-            ranges[write] = ranges[read];
-            write += 1;
-        }
-    }
-    ranges.truncate(write);
-}
-
-fn contains_overlapping_range(ranges: &[StaticBitRange], stored: StaticBitRange) -> bool {
-    let candidate = ranges.partition_point(|range| range.end <= stored.start);
-    ranges
-        .get(candidate)
-        .is_some_and(|range| stored.overlaps(*range))
 }
 
 #[cfg(test)]
@@ -378,22 +247,51 @@ mod tests {
     }
 
     #[test]
-    fn normalized_read_ranges_answer_overlap_at_exact_boundaries() {
-        let mut ranges = vec![
-            StaticBitRange { start: 16, end: 24 },
-            StaticBitRange { start: 0, end: 8 },
-            StaticBitRange { start: 7, end: 17 },
-        ];
-        normalize_read_ranges(&mut ranges);
+    fn fused_dse_uses_reaching_versions_not_any_read_of_the_range() {
+        let mut eu = fused_unit(
+            vec![
+                store(0, 0, 8, 0),
+                SIRInstruction::Load(RegisterId(1), address(0), SIROffset::Static(0), 8),
+                store(0, 0, 8, 2),
+            ],
+            Vec::new(),
+        );
 
-        assert_eq!(ranges, vec![StaticBitRange { start: 0, end: 24 }]);
-        assert!(contains_overlapping_range(
-            &ranges,
-            StaticBitRange { start: 23, end: 25 }
-        ));
-        assert!(!contains_overlapping_range(
-            &ranges,
-            StaticBitRange { start: 24, end: 32 }
-        ));
+        assert_eq!(
+            eliminate_unread_fused_comb_stores(&mut eu, BlockId(1)).unwrap(),
+            1
+        );
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            vec![
+                store(0, 0, 8, 0),
+                SIRInstruction::Load(RegisterId(1), address(0), SIROffset::Static(0), 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn fused_dse_keeps_prior_range_needed_by_effectful_store() {
+        let mut effectful = store(0, 0, 8, 1);
+        let SIRInstruction::Store(_, _, _, _, _, captures) = &mut effectful else {
+            unreachable!();
+        };
+        captures.push(9);
+        let mut eu = fused_unit(vec![store(0, 0, 8, 0), effectful], Vec::new());
+
+        assert_eq!(
+            eliminate_unread_fused_comb_stores(&mut eu, BlockId(1)).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn fused_dse_keeps_comb_range_which_survives_a_partial_ff_publication() {
+        let mut eu = fused_unit(vec![store(0, 0, 8, 0)], vec![store(0, 8, 8, 1)]);
+
+        assert_eq!(
+            eliminate_unread_fused_comb_stores(&mut eu, BlockId(1)).unwrap(),
+            0
+        );
     }
 }

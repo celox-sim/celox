@@ -914,8 +914,8 @@ observability contract, not from forwarding more FF reloads. The only caller,
 in the fused clone is not an exit root merely because the standalone
 combinational function publishes the same signal.
 
-The initial production subset removes a comb-prefix Store only when all of the
-following hold:
+The first production subset removed a comb-prefix Store only when all of the
+following held:
 
 - it is a static two-state STABLE Store outside the FF suffix;
 - its trigger and capture sets are empty;
@@ -923,13 +923,11 @@ following hold:
   function reads an overlapping bit range; and
 - the same object has no dynamic Load or Store.
 
-FF-suffix Stores remain persistent-state publications. This is intentionally
-more conservative than full range MemorySSA DSE: even a Load which occurs only
-before the Store keeps it live. Static read ranges are sorted and merged once
-per object, then queried by binary search, giving `O(I + R log R + S log R)`
-time and `O(R)` range storage rather than a Store-by-read quadratic scan.
-It nevertheless removes 321 fused SIR Stores
-and their now-dead producer cones. The complete function changes:
+FF-suffix Stores remain persistent-state publications. That subset was
+intentionally more conservative than full range MemorySSA DSE: even a Load
+which occurred only before the Store kept it live. It nevertheless removed 321
+fused SIR Stores and their now-dead producer cones. The complete function
+changed:
 
 | Stage | Before dirty-exit DSE | With dirty-exit DSE | Delta |
 |---|---:|---:|---:|
@@ -946,11 +944,35 @@ seconds. The structural reduction is established. The timing mean is lower
 than the preceding 64--67 second profile runs, but the overlap remains too
 large to attribute the complete difference to this pass.
 
+The production pass now replaces that whole-function read test with the same
+sparse object MemorySSA and range resolver used by the feasibility analysis.
+Its roots are exact reaching versions for Loads and Commit sources, incoming
+versions observed by trigger/capture Stores, and complete exit versions only
+for objects with an FF-suffix publication. Dynamic accesses conservatively
+retain every candidate Store on their object. Per-object candidate and
+definition indices avoid rescanning all Stores for every object.
+
+This removes another 24 SIR Stores whose overlapping reads observe an earlier
+version. Relative to the first subset:
+
+| Stage | Any-read subset | MemorySSA liveness | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 94,305 | 94,201 | -104 |
+| pressure-scheduled MIR | 101,267 | 101,169 | -98 |
+| post-RA MIR | 220,726 | 220,551 | -175 |
+| x86 instructions | 149,327 | 149,218 | -109 |
+
+The MemorySSA version passes five focused range/version/effect/publication
+tests, all 493 native-backend tests, native testbench 60/60, FF 200/200,
+dynamic NBA 33/33, and cross-block NBA 11/11. The rebuilt complete Linux
+workload reaches `cy=9ae070 x3=aa pass=1` with 72.373 seconds of code generation
+and 64.031 seconds of generated execution.
+
 This is a conservative Milestone 3 subset and does not authorize the failed
-Milestone 1 FF materialization plan. The next extension should replace the
-whole-function “any overlapping read” rule with range MemorySSA liveness, so a
-comb Store can also die when every overlapping read precedes it or observes a
-different reaching version.
+Milestone 1 FF materialization plan. Its small incremental reduction also
+shows that ordering-insensitive liveness was not the main remaining source of
+packed RMW work; the retained hot Stores feed real later versions and require
+Store/load elimination or use-local promotion rather than more exit DSE.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
