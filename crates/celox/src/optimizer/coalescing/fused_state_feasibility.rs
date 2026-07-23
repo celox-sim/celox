@@ -12,9 +12,9 @@ use celox_analysis::ssa::{self, Event, SparseSsa, Version};
 
 use super::fused_state_plan::{
     self, DefinitionFact, DemandFact, DemandPlan, FailurePredicates, FragmentFact, KeepReason,
-    PlanSummary, ProgramPoint, PublicationFact, StateRange,
+    MaterializationLeaf, PlanSummary, ProgramPoint, PublicationFact, StateRange,
 };
-use super::placement_analysis::{PlacementAnalysis, PlacementAnalysisError, ValueOrigin};
+use super::placement_analysis::{PlacementAnalysis, PlacementAnalysisError, ValueId, ValueOrigin};
 use super::state_ssa::StatePhaseMap;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
@@ -66,6 +66,7 @@ type ObjectVersion = Version<RegionedAbsoluteAddr, ProgramPoint>;
 enum Usage {
     DefinitionInput(ProgramPoint),
     Load(ProgramPoint),
+    Frontier(usize),
     Exit(BlockId),
 }
 
@@ -612,6 +613,13 @@ pub(crate) struct OriginCounts {
 }
 
 #[derive(Debug, Default)]
+struct PlanChoiceCounts {
+    direct: usize,
+    rematerialize: usize,
+    keep_packed: usize,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct FeasibilityReport {
     pub blocks: usize,
     pub instructions: usize,
@@ -651,6 +659,7 @@ pub(crate) struct FeasibilityReport {
     plan: PlanSummary,
     range_decisions: Vec<RangeDecision>,
     block_origins: BTreeMap<BlockId, OriginCounts>,
+    plan_block_choices: BTreeMap<BlockId, PlanChoiceCounts>,
 }
 
 impl fmt::Display for FeasibilityReport {
@@ -675,6 +684,7 @@ impl fmt::Display for FeasibilityReport {
              rss_after_temporary_drop_kib={} \
              plan_versions={} plan_sites={} plan_clusters={} \
              plan_stage_next_ff_sites={} plan_commit_ff_state_dependencies={} \
+             plan_commit_ff_state_barriers={} \
              plan_block_contracts={} plan_verified_uses={} \
              plan_invalidated_store_deletions={} plan_verifier_passed={} \
              plan_direct_forward={} plan_rematerialize={} \
@@ -690,6 +700,13 @@ impl fmt::Display for FeasibilityReport {
              plan_predicted_removed_masks={} plan_predicted_removed_merges={} \
              plan_predicted_added_rematerialization_instructions={} \
              plan_predicted_extended_cross_block_live_ranges={} \
+             plan_predicted_relocated_closed_cones={} \
+             plan_materialization_leaves={} \
+             plan_maximum_materialization_leaves_per_cluster={} \
+             plan_rss_after_model_build_kib={} \
+             plan_rss_after_base_verification_kib={} \
+             plan_rss_after_deletion_audit_kib={} \
+             plan_rss_after_summary_kib={} \
              origin_address={} origin_memory={} \
              origin_extract={} origin_insert={} origin_mask={} origin_mux={} \
              origin_other={}",
@@ -732,6 +749,7 @@ impl fmt::Display for FeasibilityReport {
             self.plan.clusters,
             self.plan.stage_next_ff_sites,
             self.plan.commit_ff_state_dependencies,
+            self.plan.commit_ff_state_barriers,
             self.plan.block_contracts,
             self.plan.verified_uses,
             self.plan.invalidated_store_deletions,
@@ -755,6 +773,13 @@ impl fmt::Display for FeasibilityReport {
             self.plan.predicted_removed_merges,
             self.plan.predicted_added_rematerialization_instructions,
             self.plan.predicted_extended_cross_block_live_ranges,
+            self.plan.predicted_relocated_closed_cones,
+            self.plan.materialization_leaves,
+            self.plan.maximum_materialization_leaves_per_cluster,
+            self.plan.rss_after_model_build_kib,
+            self.plan.rss_after_base_verification_kib,
+            self.plan.rss_after_deletion_audit_kib,
+            self.plan.rss_after_summary_kib,
             self.origins.packed_address_calculation,
             self.origins.memory_traffic,
             self.origins.range_extraction,
@@ -811,6 +836,12 @@ impl FeasibilityReport {
                     origins.mask_generation,
                     origins.mux_lowering,
                     origins.unrelated_arithmetic,
+                )
+            }))
+            .chain(self.plan_block_choices.iter().map(|(block, choices)| {
+                format!(
+                    "kind=plan-block block=b{} direct={} rematerialize={} keep_packed={}",
+                    block.0, choices.direct, choices.rematerialize, choices.keep_packed,
                 )
             }))
     }
@@ -1144,6 +1175,7 @@ pub(crate) fn analyze(
                     producer_shared_uses: 0,
                     keep_reason: Some(KeepReason::UnsupportedRecipe),
                     failure_predicates: FailurePredicates::default(),
+                    materialization_leaves: Vec::new(),
                 });
             }
         }
@@ -1195,14 +1227,29 @@ pub(crate) fn analyze(
                 .unwrap_or(0),
         );
     }
-    report.rss_after_state_ssa_kib =
-        resident_memory_kib().map_or(0, |(resident, _)| resident);
+    report.rss_after_state_ssa_kib = resident_memory_kib().map_or(0, |(resident, _)| resident);
     report.candidate_backing_stores = candidate_stores.len();
     report.candidate_removable_stores = candidate_stores.difference(&required_stores).count();
-    classify_demand_plans(eu, &mut plan_demands, &plan_definitions)
-        .map_err(FeasibilityError::Placement)?;
-    report.rss_after_planning_kib =
-        resident_memory_kib().map_or(0, |(resident, _)| resident);
+    classify_demand_plans(
+        eu,
+        &cfg,
+        &mut plan_demands,
+        &plan_definitions,
+        &definitions,
+        &endpoints,
+    )?;
+    for demand in &plan_demands {
+        let choices = report
+            .plan_block_choices
+            .entry(demand.load.block)
+            .or_default();
+        match demand.plan {
+            DemandPlan::DirectForward => choices.direct += 1,
+            DemandPlan::Rematerialize => choices.rematerialize += 1,
+            DemandPlan::KeepPackedReload => choices.keep_packed += 1,
+        }
+    }
+    report.rss_after_planning_kib = resident_memory_kib().map_or(0, |(resident, _)| resident);
     let candidate_plan_definitions = candidate_stores
         .iter()
         .filter_map(|point| {
@@ -1213,13 +1260,13 @@ pub(crate) fn analyze(
         })
         .collect::<BTreeMap<_, _>>();
     report.plan = fused_state_plan::build_and_verify(
+        &cfg,
         &candidate_plan_definitions,
         &plan_demands,
         &publications,
     )
     .map_err(FeasibilityError::Plan)?;
-    report.rss_after_verification_kib =
-        resident_memory_kib().map_or(0, |(resident, _)| resident);
+    report.rss_after_verification_kib = resident_memory_kib().map_or(0, |(resident, _)| resident);
     (report.origins, report.block_origins) =
         classify_candidate_origins(eu, &candidate_loads, &candidate_stores, &store_sources);
     report.candidate_extract_merge_instructions =
@@ -1241,27 +1288,51 @@ pub(crate) fn analyze(
     Ok(report)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FrontierQuery {
+    register: RegisterId,
+    original: ProgramPoint,
+    target: ProgramPoint,
+    range: BitRange,
+}
+
+#[derive(Debug)]
+struct FrontierCandidate {
+    demand: usize,
+    backing_store: ProgramPoint,
+    instructions: Vec<ValueId>,
+    query_ids: Vec<usize>,
+    has_local_frontier: bool,
+}
+
 fn classify_demand_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
     demands: &mut [DemandFact],
-    definitions: &BTreeMap<ProgramPoint, DefinitionFact>,
-) -> Result<(), PlacementAnalysisError> {
-    let placement = PlacementAnalysis::analyze_pure_values(eu)?;
-    for demand in demands {
+    plan_definitions: &BTreeMap<ProgramPoint, DefinitionFact>,
+    memory_definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
+    endpoints: &BTreeMap<RegionedAbsoluteAddr, Vec<usize>>,
+) -> Result<(), FeasibilityError> {
+    let placement =
+        PlacementAnalysis::analyze_pure_values(eu).map_err(FeasibilityError::Placement)?;
+    let mut queries = Vec::<FrontierQuery>::new();
+    let mut candidates = Vec::<FrontierCandidate>::new();
+    for (demand_index, demand) in demands.iter_mut().enumerate() {
         demand.failure_predicates = FailurePredicates::default();
+        demand.materialization_leaves.clear();
         let reaching = demand
             .fragments
             .iter()
             .flat_map(|fragment| fragment.reaching_definitions.iter().copied())
             .collect::<BTreeSet<_>>();
         if reaching.len() != 1 {
-            demand.keep_reason = Some(KeepReason::MultipleReachingDefinitions);
+            demand.keep_reason = Some(KeepReason::UnsupportedMemoryPhi);
             demand
                 .failure_predicates
-                .insert(FailurePredicates::MULTIPLE_REACHING_DEFINITIONS);
+                .insert(FailurePredicates::UNSUPPORTED_MEMORY_PHI);
             continue;
         }
-        let definition = definitions[reaching.first().unwrap()];
+        let definition = plan_definitions[reaching.first().unwrap()];
         let Some(root) = placement.value_for_register(definition.source) else {
             demand.keep_reason = Some(KeepReason::UnsupportedRecipe);
             demand
@@ -1277,7 +1348,7 @@ fn classify_demand_plans(
                 .insert(FailurePredicates::NO_LEGAL_PLACEMENT);
             continue;
         };
-        let Some(cone) = placement.rematerialization_cone(root, demand.load.block) else {
+        let Some(cone) = placement.materialization_frontier_cone(root, demand.load.block) else {
             demand.keep_reason = Some(KeepReason::ProducerNotPure);
             demand
                 .failure_predicates
@@ -1289,8 +1360,9 @@ fn classify_demand_plans(
             .loop_depth(origin)
             .zip(placement.loop_depth(demand.load.block))
             .map_or(0, |(producer, consumer)| producer.abs_diff(consumer));
-        demand.rematerialization_cone_instructions = cone.len();
+        demand.rematerialization_cone_instructions = cone.instructions.len();
         demand.producer_shared_uses = cone
+            .instructions
             .iter()
             .map(|value| {
                 placement
@@ -1317,24 +1389,145 @@ fn classify_demand_plans(
                 .insert(FailurePredicates::DIRECT_LIVE_RANGE_LONG);
         }
 
-        if demand.producer_shared_uses == 0 {
+        let mut query_ids = Vec::new();
+        let mut has_local_frontier = false;
+        let mut unsupported = false;
+        for value in cone.frontier {
+            let occurrence = placement.value(value).unwrap();
+            if occurrence
+                .uses
+                .iter()
+                .any(|usage| usage.execution_block() == demand.load.block)
+            {
+                has_local_frontier = true;
+                demand
+                    .materialization_leaves
+                    .push(MaterializationLeaf::DominatingSsa {
+                        register: occurrence.register,
+                        definition_block: occurrence.origin.block(),
+                        insertion_point: demand.load,
+                    });
+                continue;
+            }
+            let ValueOrigin::Instruction { block, index } = occurrence.origin else {
+                unsupported = true;
+                break;
+            };
+            let SIRInstruction::Load(_, object, SIROffset::Static(start), width) =
+                &eu.blocks[&block].instructions[index]
+            else {
+                unsupported = true;
+                break;
+            };
+            if object.region != STABLE_REGION {
+                unsupported = true;
+                break;
+            }
+            let Some(range) = BitRange::new(*object, *start, *width) else {
+                unsupported = true;
+                break;
+            };
+            let id = queries.len();
+            queries.push(FrontierQuery {
+                register: occurrence.register,
+                original: ProgramPoint {
+                    block,
+                    instruction: index,
+                },
+                target: demand.load,
+                range,
+            });
+            query_ids.push(id);
+        }
+        if unsupported {
+            demand.materialization_leaves.clear();
+            demand.keep_reason = Some(KeepReason::UnsupportedRecipe);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::UNSUPPORTED_RECIPE);
+            continue;
+        }
+        candidates.push(FrontierCandidate {
+            demand: demand_index,
+            backing_store: definition.point,
+            instructions: cone.instructions,
+            query_ids,
+            has_local_frontier,
+        });
+    }
+
+    let stable_queries =
+        verify_frontier_versions(eu, cfg, memory_definitions, endpoints, &queries)?;
+    for candidate in candidates {
+        let demand = &mut demands[candidate.demand];
+        if candidate
+            .query_ids
+            .iter()
+            .any(|query| !stable_queries[*query])
+        {
+            demand.materialization_leaves.clear();
+            demand.keep_reason = Some(KeepReason::UnstableMemoryVersion);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::UNSTABLE_MEMORY_VERSION);
+            continue;
+        }
+        for &query_id in &candidate.query_ids {
+            let query = queries[query_id];
+            let frontier_value = placement
+                .value_for_register(query.register)
+                .and_then(|value| placement.value(value))
+                .ok_or(FeasibilityError::InvalidMemoryGraph(
+                    "frontier register lost its value occurrence",
+                ))?;
+            demand.producer_shared_uses += frontier_value.uses.len().saturating_sub(1);
+            demand
+                .materialization_leaves
+                .push(MaterializationLeaf::ReadPersistentState {
+                    register: query.register,
+                    original_load: query.original,
+                    insertion_point: query.target,
+                    range: query.range.into(),
+                    phase_version: query_id,
+                });
+        }
+        if demand.producer_shared_uses != 0 {
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::SHARED_PRODUCER);
+        }
+        if demand.producer_shared_uses == 0
+            && !candidate.has_local_frontier
+            && cfg.dominates(candidate.backing_store.block, demand.load.block)
+        {
             demand.plan = DemandPlan::DirectForward;
             demand.keep_reason = None;
             continue;
         }
-        let rematerialization_cost = cone
+        let rematerialization_cost = candidate
+            .instructions
             .iter()
             .map(|value| match placement.value(*value).unwrap().origin {
-                ValueOrigin::Instruction { block, index } => {
-                    super::cost_model::estimate_clif_cost(
-                        &eu.blocks[&block].instructions[index],
-                        &eu.register_map,
-                        false,
-                    )
-                }
+                ValueOrigin::Instruction { block, index } => super::cost_model::estimate_clif_cost(
+                    &eu.blocks[&block].instructions[index],
+                    &eu.register_map,
+                    false,
+                ),
                 ValueOrigin::Parameter { .. } => usize::MAX,
             })
             .try_fold(0usize, |sum, cost| sum.checked_add(cost))
+            .and_then(|cost| {
+                candidate.query_ids.iter().try_fold(cost, |sum, query| {
+                    let query = queries[*query];
+                    let instruction =
+                        &eu.blocks[&query.original.block].instructions[query.original.instruction];
+                    sum.checked_add(super::cost_model::estimate_clif_cost(
+                        instruction,
+                        &eu.register_map,
+                        false,
+                    ))
+                })
+            })
             .unwrap_or(usize::MAX);
         let packed_reload_cost = super::cost_model::estimate_clif_cost(
             &eu.blocks[&demand.load.block].instructions[demand.load.instruction],
@@ -1345,6 +1538,7 @@ fn classify_demand_plans(
             demand.plan = DemandPlan::Rematerialize;
             demand.keep_reason = None;
         } else {
+            demand.materialization_leaves.clear();
             demand.keep_reason = Some(KeepReason::RematerializationMoreExpensive);
             demand
                 .failure_predicates
@@ -1352,6 +1546,191 @@ fn classify_demand_plans(
         }
     }
     Ok(())
+}
+
+fn verify_frontier_versions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
+    endpoints: &BTreeMap<RegionedAbsoluteAddr, Vec<usize>>,
+    queries: &[FrontierQuery],
+) -> Result<Vec<bool>, FeasibilityError> {
+    let mut result = vec![false; queries.len()];
+    if queries.is_empty() {
+        return Ok(result);
+    }
+    let queried_objects = queries
+        .iter()
+        .map(|query| query.range.object)
+        .collect::<BTreeSet<_>>();
+    let mut synthetic = BTreeMap::<(BlockId, usize), Vec<usize>>::new();
+    for (id, query) in queries.iter().enumerate() {
+        synthetic
+            .entry((query.target.block, query.target.instruction))
+            .or_default()
+            .push(id);
+    }
+    let mut events_by_object = queried_objects
+        .iter()
+        .copied()
+        .map(|object| {
+            (
+                object,
+                Vec::<(usize, Event<RegionedAbsoluteAddr, ProgramPoint, Usage>)>::new(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (block, &block_id) in cfg.block_ids.iter().enumerate() {
+        for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
+            if let Some(ids) = synthetic.get(&(block_id, instruction)) {
+                for &id in ids {
+                    let object = queries[id].range.object;
+                    events_by_object.get_mut(&object).unwrap().push((
+                        block,
+                        Event::Use {
+                            variable: object,
+                            usage: Usage::Frontier(id),
+                        },
+                    ));
+                }
+            }
+            let point = ProgramPoint {
+                block: block_id,
+                instruction,
+            };
+            match inst {
+                SIRInstruction::Load(_, object, _, _)
+                    if queried_objects.contains(object) && object.region == STABLE_REGION =>
+                {
+                    events_by_object.get_mut(object).unwrap().push((
+                        block,
+                        Event::Use {
+                            variable: *object,
+                            usage: Usage::Load(point),
+                        },
+                    ));
+                }
+                SIRInstruction::Store(object, _, _, _, _, _)
+                    if queried_objects.contains(object) && object.region == STABLE_REGION =>
+                {
+                    let events = events_by_object.get_mut(object).unwrap();
+                    events.push((
+                        block,
+                        Event::Use {
+                            variable: *object,
+                            usage: Usage::DefinitionInput(point),
+                        },
+                    ));
+                    events.push((
+                        block,
+                        Event::Definition {
+                            variable: *object,
+                            definition: point,
+                        },
+                    ));
+                }
+                SIRInstruction::Commit(_, destination, _, _, _)
+                    if queried_objects.contains(destination)
+                        && destination.region == STABLE_REGION =>
+                {
+                    let events = events_by_object.get_mut(destination).unwrap();
+                    events.push((
+                        block,
+                        Event::Use {
+                            variable: *destination,
+                            usage: Usage::DefinitionInput(point),
+                        },
+                    ));
+                    events.push((
+                        block,
+                        Event::Definition {
+                            variable: *destination,
+                            definition: point,
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut queries_by_object = BTreeMap::<RegionedAbsoluteAddr, Vec<usize>>::new();
+    for (id, query) in queries.iter().enumerate() {
+        queries_by_object
+            .entry(query.range.object)
+            .or_default()
+            .push(id);
+    }
+    for (object, object_queries) in queries_by_object {
+        let sparse_events = events_by_object.remove(&object).unwrap();
+        let definition_points = sparse_events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                Event::Definition { definition, .. } => Some(*definition),
+                Event::Use { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut events = vec![
+            Vec::<Event<RegionedAbsoluteAddr, ProgramPoint, Usage>>::new();
+            cfg.block_ids.len()
+        ];
+        for (block, event) in sparse_events {
+            events[block].push(event);
+        }
+        let state_ssa = ssa::build(cfg, &events).map_err(FeasibilityError::StateSsa)?;
+        let definition_inputs = definition_points
+            .into_iter()
+            .map(|point| {
+                state_ssa
+                    .uses
+                    .get(&Usage::DefinitionInput(point))
+                    .copied()
+                    .map(|version| (point, version))
+                    .ok_or(FeasibilityError::InvalidMemoryGraph(
+                        "frontier definition has no incoming object version",
+                    ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut resolver =
+            DemandResolver::new(&state_ssa, endpoints, definitions, &definition_inputs);
+        for id in object_queries {
+            let query = queries[id];
+            let original = state_ssa
+                .uses
+                .get(&Usage::Load(query.original))
+                .copied()
+                .ok_or(FeasibilityError::InvalidMemoryGraph(
+                    "frontier load has no reaching object version",
+                ))?;
+            let target = state_ssa.uses.get(&Usage::Frontier(id)).copied().ok_or(
+                FeasibilityError::InvalidMemoryGraph(
+                    "frontier target has no reaching object version",
+                ),
+            )?;
+            let original = resolver.resolve(DemandKey {
+                version: original,
+                range: query.range,
+            })?;
+            let target = resolver.resolve(DemandKey {
+                version: target,
+                range: query.range,
+            })?;
+            verify_resolved_pieces(
+                query.range,
+                &original,
+                definitions,
+                &resolver.stats.phi_sources,
+            )?;
+            verify_resolved_pieces(
+                query.range,
+                &target,
+                definitions,
+                &resolver.stats.phi_sources,
+            )?;
+            result[id] = original == target;
+        }
+    }
+    Ok(result)
 }
 
 fn classify_candidate_source(
@@ -1536,7 +1915,7 @@ fn classify_object_coverage(report: &mut FeasibilityReport) {
     }
 }
 
-fn resident_memory_kib() -> Option<(usize, usize)> {
+pub(super) fn resident_memory_kib() -> Option<(usize, usize)> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let value = |name: &str| {
         status.lines().find_map(|line| {
@@ -1700,6 +2079,14 @@ mod tests {
         }
     }
 
+    fn address_var(region: u32, var: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region,
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(var),
+        }
+    }
+
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {
             width,
@@ -1822,6 +2209,112 @@ mod tests {
         assert_eq!(report.candidate_backing_stores, 1);
         assert_eq!(report.candidate_removable_stores, 1);
         assert!(report.verifier_passed);
+    }
+
+    #[test]
+    fn directly_places_a_closed_cone_with_a_phase_stable_frontier_load() {
+        let output = address_var(STABLE_REGION, 0);
+        let input = address_var(STABLE_REGION, 1);
+        let comb = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    output,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let ff = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Load(
+                RegisterId(1),
+                output,
+                SIROffset::Static(0),
+                8,
+            )],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), comb), (BlockId(1), ff)].into_iter().collect(),
+            register_map: [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))]
+                .into_iter()
+                .collect(),
+        };
+
+        let report = analyze(&eu, BlockId(1)).unwrap();
+        assert_eq!(report.plan.direct_forward, 1);
+        assert_eq!(report.plan.rematerialize, 0);
+        assert_eq!(report.plan.keep_packed_reload, 0);
+    }
+
+    #[test]
+    fn rejects_a_frontier_load_when_its_phase_version_changes() {
+        let output = address_var(STABLE_REGION, 0);
+        let input = address_var(STABLE_REGION, 1);
+        let comb = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    output,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(7u64)),
+                SIRInstruction::Store(
+                    input,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let ff = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Load(
+                RegisterId(2),
+                output,
+                SIROffset::Static(0),
+                8,
+            )],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), comb), (BlockId(1), ff)].into_iter().collect(),
+            register_map: [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, BlockId(1)).unwrap();
+        assert_eq!(report.plan.rematerialize, 0);
+        assert_eq!(report.plan.keep_packed_reload, 1);
+        assert_eq!(
+            report.plan.keep_reason_histogram[KeepReason::UnstableMemoryVersion as usize],
+            1
+        );
     }
 
     #[test]

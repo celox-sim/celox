@@ -1,10 +1,10 @@
 # Fused state SSA and code placement
 
-> **Status:** Milestone 0 is complete. Its measured coverage passes the stop
-> conditions, so the analysis-only Milestone 1 model is authorized. This
-> document does not authorize a production switch. Each code-generating
-> milestone has an independent semantic, generated-code, and Linux execution
-> gate.
+> **Status:** Milestone 0 is complete. Milestone 1 has an analysis-only
+> executable materialization-frontier model, but its profile-weighted
+> profitability gate has not passed yet. This document does not authorize a
+> production switch. Each code-generating milestone has an independent
+> semantic, generated-code, and Linux execution gate.
 
 ## Objective
 
@@ -93,6 +93,8 @@ This design introduces no `EventSSA` IR.
 - **MaterializationSite** is an actual register, preserved state Store,
   compiler-private scratch slot, or rematerialized expression which can supply
   a StateVersion to a use.
+- **MaterializationLeaf** is an executable, phase-correct source at one use
+  cluster. Merely proving that a StateVersion exists is not a leaf.
 - **Promoted range** is a StateSSA version represented by ordinary SIR SSA
   values at selected uses.
 - **Materialization** is an explicit load, store, or rematerialized expression
@@ -171,6 +173,14 @@ its combinational prefix and FF suffix.
 evaluation phase. `CommitFFState` publishes every staged value and must remain
 after all FF RHS evaluation. The root builder and effect model must distinguish
 the two; a generic Store opcode is insufficient.
+
+A stage has an explicit placement window. Its earliest point is after its
+value, guard, and StateSSA dependencies; its latest point is before the fixed
+commit barrier. Dependencies preserve overlapping/partial-write priority,
+branch guards, old-state versus staging aliases, trigger/capture/runtime
+observations, and the final range StateSSA edge. `CommitFFState` is one fixed
+phase barrier which atomically publishes each FF range's final StateVersion.
+Normal FF reads cannot observe staging storage before that barrier.
 
 The root builder must also verify that no runtime callback, capture, trigger,
 cascade boundary, or phase bypass observes the candidate state range.
@@ -300,6 +310,22 @@ Use clusters are formed from exact ordinary and phi-edge uses using CFG
 dominance, loop membership, and block proximity. Clustering does not create
 one mandatory VReg spanning the clusters.
 
+Every rematerialization frontier leaf is exactly one of:
+
+```text
+Constant(value)
+DominatingSSA(value_id, insertion_point)
+ReloadPreservedHome(site_id, state_version_id)
+ReadPersistentState(object, range, phase_version)
+ControlMerge(recipe)
+```
+
+`DominatingSSA` must dominate the insertion point. A preserved-home reload
+names the exact Store site and StateVersion, and that version must reach the
+reload point. A persistent-state read names the FF/input snapshot phase.
+`ControlMerge` reproduces branch priority and control dependence. No recipe
+may contain an effectful operation or an unhandled loop-carried cycle.
+
 The explicit plan has this shape:
 
 ```text
@@ -328,6 +354,19 @@ explicit compiler-added Store whose reaching definition is independently
 verified. `Rematerialize` names a pure executable recipe, not merely a logical
 StateVersion.
 
+The initial `KeepPackedReload` form is itself concrete:
+
+```text
+KeepPackedReload {
+    original_load_site
+    preserved_store_sites
+    state_versions
+    extract_merge_recipe
+}
+```
+
+Store invalidation follows these identities and versions, not just an address.
+
 The materialization planner runs before global placement. It chooses an
 initial plan from:
 
@@ -352,6 +391,12 @@ the failed carry edge. The finite set of cluster edges and source choices
 therefore proves termination without an iteration cap. A later profitability
 pass may start a new plan, but correctness never depends on finding an optimal
 fixed point.
+
+The initial source-action order is
+`DirectForward -> Rematerialize -> KeepPackedReload`, with the direct-to-packed
+edge also allowed. Cluster repair only refines the partition of the finite
+original use-site set and never rejoins split clusters. The lexicographic rank
+`(unsplit use pairs, direct plans, rematerialize plans)` strictly decreases.
 
 ## Global code placement
 
@@ -394,6 +439,10 @@ clusters; otherwise each later cluster receives an explicit rematerialization
 or reload source. GCM alone is never used to justify a long cross-cluster live
 range.
 
+Cluster-local rematerializations retain distinct stable identities. GVN/CSE
+may not merge them across clusters unless a new `DirectForward` boundary
+contract is constructed and verified.
+
 Code motion must not speculate:
 
 - trapping or target-constrained machine operations;
@@ -425,6 +474,12 @@ reload-at-entry values
 store-before-exit values
 per-register-class budgets
 ```
+
+Milestone 1 can establish only a boundary-feasible `DirectForward`. Its
+contract records traversed CFG edges, register class, mandatory live-in/out
+contributions, producer/use identities, and the legal placement interval.
+Milestone 4 scheduling must revalidate block-internal temporaries; failure
+monotonically repairs the cluster to rematerialization or packed reload.
 
 The scheduler may reduce local pressure within that contract. It cannot repair
 an infeasible cross-block carry or silently choose a new home.
@@ -662,13 +717,13 @@ pass:
 | `Rematerialize` | 36 |
 | `KeepPackedReload` | 2,449 |
 
-The exclusive fallback reasons were 112 multiple reaching definitions, 2,319
-producer cones containing a non-pure frontier, and 18 cases where
+The exclusive fallback reasons were 112 unsupported MemoryPhi/control-merge
+recipes, 2,319 producer cones containing a non-pure frontier, and 18 cases where
 rematerialization was estimated to cost more than the packed reload. The
 non-exclusive predicate order is:
 
 ```text
-multiple-definitions, unsupported-recipe, non-pure-producer,
+unsupported-memory-phi, unsupported-recipe, non-pure-producer,
 no-legal-placement, cone-over-16-instructions, shared-producer,
 cross-block-direct-range, rematerialization-more-expensive
 ```
@@ -678,6 +733,39 @@ complete producer cone to be pure is the dominant rejection. The next
 analysis slice must introduce an explicit materialization frontier and prove
 the version available at each frontier leaf; it must not weaken purity by
 assumption.
+
+The subsequent executable-frontier analysis stops a producer walk only at a
+target-local dominating SSA value or at a static persistent-state Load whose
+exact range StateVersion is independently proved equal at the original and
+target points. It produced:
+
+| Frontier plan | FF range demands |
+|---|---:|
+| boundary-feasible `DirectForward` (closed-cone relocation) | 228 |
+| partial `Rematerialize` | 255 |
+| `KeepPackedReload` | 2,002 |
+
+Thus 483 of 2,485 candidate packed reloads (19.4%), or 13.2% of all 3,666 FF
+demands, have an executable non-packed source. These are static counts, not a
+speedup claim. The remaining exclusive fallback reasons are 112 unsupported
+MemoryPhi/control merges, 794 unsupported frontier recipes, 263 genuinely
+non-pure producers, 130 unstable range versions, and 703 cases estimated more
+expensive than the packed reload.
+
+On the same 103,336-instruction workload, this frontier run took 2.79 seconds.
+RSS increased from 7,707,216 to 7,844,664 KiB (137,448 KiB, about 134 MiB).
+The model build, base verification, reverse Store-dependency audit, and summary
+all remained at 7,838,136 KiB in that run. Two accidental nonsparse costs were
+removed before accepting this result:
+
+- Store invalidation no longer re-verifies the complete model once per Store;
+  it constructs one reverse dependency index and audits each named Store by
+  identity.
+- per-value cone queries no longer allocate the complete dominator path merely
+  to test one target placement.
+
+The profile-weighted share of removed packed Load/extract work remains the
+Milestone 1 profitability gate. Static demand coverage alone does not pass it.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,

@@ -158,6 +158,15 @@ pub(super) struct PlacementBounds {
     pub legal_blocks: Vec<BlockId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MaterializationFrontierCone {
+    /// Values which must be moved or cloned, in operand-before-user order.
+    pub instructions: Vec<ValueId>,
+    /// Leaves supplied independently at the target instead of recursively
+    /// reproducing their defining cones.
+    pub frontier: Vec<ValueId>,
+}
+
 #[derive(Debug)]
 pub(super) enum PlacementAnalysisError {
     InvalidSir,
@@ -283,9 +292,7 @@ impl PlacementAnalysis {
                         if include_state_and_effects {
                             state
                                 .get(&address.region)
-                                .and_then(|state| {
-                                    state.read_version(block_id, index, *destination)
-                                })
+                                .and_then(|state| state.read_version(block_id, index, *destination))
                                 .map(|(slot, version)| {
                                     ValueSafety::StateRead(StateToken {
                                         fragment: state[&address.region].slots[slot].fragment,
@@ -356,11 +363,7 @@ impl PlacementAnalysis {
     /// Return the complete executable producer cone when every value can be
     /// placed at `target` without changing its state version or execution
     /// frequency. The result is postorder and therefore directly cloneable.
-    pub fn rematerialization_cone(
-        &self,
-        root: ValueId,
-        target: BlockId,
-    ) -> Option<Vec<ValueId>> {
+    pub fn rematerialization_cone(&self, root: ValueId, target: BlockId) -> Option<Vec<ValueId>> {
         let mut visited = BTreeSet::new();
         let mut active = BTreeSet::new();
         let mut output = Vec::new();
@@ -376,9 +379,7 @@ impl PlacementAnalysis {
             }
             let occurrence = self.value(value)?;
             if matches!(occurrence.safety, ValueSafety::Pinned(_))
-                || self
-                    .sink_bounds_for_use_blocks(value, [target])
-                    .is_none_or(|bounds| bounds.latest != target)
+                || !self.can_sink_to_block(value, target)
                 || !active.insert(value)
             {
                 return None;
@@ -390,6 +391,81 @@ impl PlacementAnalysis {
             }
         }
         Some(output)
+    }
+
+    /// Form a use-local cone while stopping at values already used in the
+    /// target block and at pinned/state-read leaves. The caller must
+    /// independently prove a concrete source for every returned frontier
+    /// value before this becomes an executable rematerialization recipe.
+    pub fn materialization_frontier_cone(
+        &self,
+        root: ValueId,
+        target: BlockId,
+    ) -> Option<MaterializationFrontierCone> {
+        let mut visited = BTreeSet::new();
+        let mut active = BTreeSet::new();
+        let mut instructions = Vec::new();
+        let mut frontier = Vec::new();
+        let mut work = vec![(root, false)];
+        while let Some((value, exiting)) = work.pop() {
+            if exiting {
+                active.remove(&value);
+                instructions.push(value);
+                continue;
+            }
+            if visited.contains(&value) {
+                continue;
+            }
+            let occurrence = self.value(value)?;
+            if value != root
+                && occurrence
+                    .uses
+                    .iter()
+                    .any(|usage| usage.execution_block() == target)
+            {
+                visited.insert(value);
+                frontier.push(value);
+                continue;
+            }
+            match occurrence.safety {
+                ValueSafety::Pure => {
+                    if !self.can_sink_to_block(value, target) || !active.insert(value) {
+                        return None;
+                    }
+                    visited.insert(value);
+                    work.push((value, true));
+                    for operand in occurrence.operands.iter().rev().copied() {
+                        work.push((operand, false));
+                    }
+                }
+                ValueSafety::StateRead(_) | ValueSafety::Pinned(_) => {
+                    visited.insert(value);
+                    frontier.push(value);
+                }
+            }
+        }
+        Some(MaterializationFrontierCone {
+            instructions,
+            frontier,
+        })
+    }
+
+    /// Check one concrete placement without constructing the full
+    /// ScheduleEarly/ScheduleLate path. Cone discovery calls this for every
+    /// visited value, so allocating that path here would make a sparse query
+    /// retain memory proportional to all repeatedly explored paths.
+    pub fn can_sink_to_block(&self, value: ValueId, target: BlockId) -> bool {
+        let Some(occurrence) = self.value(value) else {
+            return false;
+        };
+        let Some(origin) = self.cfg.block_index(occurrence.origin.block()) else {
+            return false;
+        };
+        let Some(target) = self.cfg.block_index(target) else {
+            return false;
+        };
+        self.cfg.dominators.dominates(origin, target)
+            && self.execution_safe_at_block(occurrence, origin, target)
     }
 
     pub fn loop_depth(&self, block: BlockId) -> Option<usize> {

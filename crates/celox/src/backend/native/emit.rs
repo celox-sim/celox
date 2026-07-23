@@ -4155,6 +4155,9 @@ fn emit_chained_eu_groups(
         );
         if feasibility_mode != "summary" {
             for detail in report.detail_lines() {
+                if feasibility_mode == "profile" && !detail.starts_with("kind=plan-block ") {
+                    continue;
+                }
                 eprintln!("[fused-state-ssa-feasibility-range] label={label} {detail}");
             }
         }

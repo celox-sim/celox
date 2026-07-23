@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::ir::cfg::SirCfg;
 use crate::ir::{BlockId, RegionedAbsoluteAddr, RegisterId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -47,6 +48,7 @@ pub(super) struct DemandFact {
     pub producer_shared_uses: usize,
     pub keep_reason: Option<KeepReason>,
     pub failure_predicates: FailurePredicates,
+    pub materialization_leaves: Vec<MaterializationLeaf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,10 +60,11 @@ pub(super) enum DemandPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum KeepReason {
-    MultipleReachingDefinitions,
+    UnsupportedMemoryPhi,
     UnsupportedRecipe,
     ProducerNotPure,
     NoLegalPlacement,
+    UnstableMemoryVersion,
     RematerializationMoreExpensive,
 }
 
@@ -69,7 +72,7 @@ pub(super) enum KeepReason {
 pub(super) struct FailurePredicates(u16);
 
 impl FailurePredicates {
-    pub const MULTIPLE_REACHING_DEFINITIONS: usize = 0;
+    pub const UNSUPPORTED_MEMORY_PHI: usize = 0;
     pub const UNSUPPORTED_RECIPE: usize = 1;
     pub const PRODUCER_NOT_PURE: usize = 2;
     pub const NO_LEGAL_PLACEMENT: usize = 3;
@@ -77,7 +80,8 @@ impl FailurePredicates {
     pub const SHARED_PRODUCER: usize = 5;
     pub const DIRECT_LIVE_RANGE_LONG: usize = 6;
     pub const REMATERIALIZATION_MORE_EXPENSIVE: usize = 7;
-    pub const COUNT: usize = 8;
+    pub const UNSTABLE_MEMORY_VERSION: usize = 8;
+    pub const COUNT: usize = 9;
 
     pub fn insert(&mut self, predicate: usize) {
         self.0 |= 1 << predicate;
@@ -103,6 +107,37 @@ pub(super) struct MaterializationSiteId(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct UseClusterId(usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MaterializationLeaf {
+    #[expect(dead_code, reason = "constants remain explicit in the initial cone")]
+    Constant { register: RegisterId },
+    DominatingSsa {
+        register: RegisterId,
+        definition_block: BlockId,
+        insertion_point: ProgramPoint,
+    },
+    #[expect(
+        dead_code,
+        reason = "preserved-home frontier is added after initial analysis"
+    )]
+    ReloadPreservedHome {
+        site: MaterializationSiteId,
+        version: StateVersionId,
+    },
+    ReadPersistentState {
+        register: RegisterId,
+        original_load: ProgramPoint,
+        insertion_point: ProgramPoint,
+        range: StateRange,
+        phase_version: usize,
+    },
+    #[expect(
+        dead_code,
+        reason = "control-pure regions are a later coverage extension"
+    )]
+    ControlMerge { inputs: Vec<StateVersionId> },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DefiningRecipe {
@@ -132,19 +167,23 @@ enum MaterializationSite {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceAction {
     DirectForward,
     Rematerialize,
-    KeepPackedReload(MaterializationSiteId),
+    KeepPackedReload {
+        site: MaterializationSiteId,
+        original_load: ProgramPoint,
+        extract_range: StateRange,
+    },
 }
 
 impl SourceAction {
-    fn repair_rank(self) -> u8 {
+    fn repair_rank(&self) -> u8 {
         match self {
             Self::DirectForward => 0,
             Self::Rematerialize => 1,
-            Self::KeepPackedReload(_) => 2,
+            Self::KeepPackedReload { .. } => 2,
         }
     }
 }
@@ -152,7 +191,10 @@ impl SourceAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitAction {
     Dead,
-    #[expect(dead_code, reason = "Milestone 1 defines the complete cluster contract")]
+    #[expect(
+        dead_code,
+        reason = "Milestone 1 defines the complete cluster contract"
+    )]
     CarryToCluster(UseClusterId),
 }
 
@@ -162,19 +204,21 @@ struct UseClusterPlan {
     load: ProgramPoint,
     versions: Vec<StateVersionId>,
     source: SourceAction,
+    materialization_leaves: Vec<MaterializationLeaf>,
     exit: ExitAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FfPhaseEffect {
     StageNextFf {
         point: ProgramPoint,
         range: StateRange,
         source: RegisterId,
+        earliest: ProgramPoint,
+        latest_before: ProgramPoint,
     },
     CommitFfState {
-        point: ProgramPoint,
-        range: StateRange,
+        publications: Vec<(ProgramPoint, StateRange)>,
     },
 }
 
@@ -194,6 +238,13 @@ struct MaterializationModel {
     clusters: Vec<UseClusterPlan>,
     effects: Vec<FfPhaseEffect>,
     contracts: BTreeMap<BlockId, BlockBoundaryContract>,
+    store_dependents: BTreeMap<ProgramPoint, BTreeSet<StoreDependent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StoreDependent {
+    Version(StateVersionId),
+    Site(MaterializationSiteId),
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +254,7 @@ pub(super) struct PlanSummary {
     pub clusters: usize,
     pub stage_next_ff_sites: usize,
     pub commit_ff_state_dependencies: usize,
+    pub commit_ff_state_barriers: usize,
     pub block_contracts: usize,
     pub verified_uses: usize,
     pub invalidated_store_deletions: usize,
@@ -217,7 +269,7 @@ pub(super) struct PlanSummary {
     pub block_distance_histogram: [usize; 7],
     pub cone_size_histogram: [usize; 7],
     pub version_demand_histogram: [usize; 6],
-    pub keep_reason_histogram: [usize; 5],
+    pub keep_reason_histogram: [usize; 6],
     pub failure_predicate_histogram: [usize; FailurePredicates::COUNT],
     pub predicted_removed_loads: usize,
     pub predicted_removed_shifts: usize,
@@ -225,6 +277,13 @@ pub(super) struct PlanSummary {
     pub predicted_removed_merges: usize,
     pub predicted_added_rematerialization_instructions: usize,
     pub predicted_extended_cross_block_live_ranges: usize,
+    pub predicted_relocated_closed_cones: usize,
+    pub materialization_leaves: usize,
+    pub maximum_materialization_leaves_per_cluster: usize,
+    pub rss_after_model_build_kib: usize,
+    pub rss_after_base_verification_kib: usize,
+    pub rss_after_deletion_audit_kib: usize,
+    pub rss_after_summary_kib: usize,
     pub verifier_passed: bool,
 }
 
@@ -238,6 +297,7 @@ pub(super) enum PlanError {
     RangeMismatch(ProgramPoint),
     PreservedStoreDeleted(ProgramPoint),
     ImplicitHome(UseClusterId),
+    InvalidPhaseEffect(ProgramPoint),
     RepairCycle,
 }
 
@@ -250,33 +310,34 @@ impl fmt::Display for PlanError {
 impl std::error::Error for PlanError {}
 
 pub(super) fn build_and_verify(
+    cfg: &SirCfg,
     definitions: &BTreeMap<ProgramPoint, DefinitionFact>,
     demands: &[DemandFact],
     publications: &[PublicationFact],
 ) -> Result<PlanSummary, PlanError> {
     verify_repair_relation()?;
     let model = build_model(definitions, demands, publications)?;
-    verify_model(&model, &BTreeSet::new())?;
+    let rss_after_model_build_kib =
+        super::fused_state_feasibility::resident_memory_kib().map_or(0, |value| value.0);
+    let publication_set = collect_publications(&model);
+    verify_model(cfg, &model, &publication_set)?;
+    let rss_after_base_verification_kib =
+        super::fused_state_feasibility::resident_memory_kib().map_or(0, |value| value.0);
 
     let named_stores = model
-        .sites
-        .iter()
-        .flat_map(|site| match site {
-            MaterializationSite::PublicBacking {
-                required_definitions,
-                ..
-            } => required_definitions.iter().copied().collect::<Vec<_>>(),
-        })
+        .store_dependents
+        .keys()
+        .copied()
         .collect::<BTreeSet<_>>();
     for store in &named_stores {
-        let deleted = BTreeSet::from([*store]);
-        if !matches!(
-            verify_model(&model, &deleted),
-            Err(PlanError::PreservedStoreDeleted(point)) if point == *store
-        ) {
+        if !matches!(verify_store_deletion(&model, *store),
+            Err(PlanError::PreservedStoreDeleted(point)) if point == *store)
+        {
             return Err(PlanError::PreservedStoreDeleted(*store));
         }
     }
+    let rss_after_deletion_audit_kib =
+        super::fused_state_feasibility::resident_memory_kib().map_or(0, |value| value.0);
 
     let mut block_distance_histogram = [0; 7];
     let mut cone_size_histogram = [0; 7];
@@ -300,7 +361,7 @@ pub(super) fn build_and_verify(
     for uses in demands_per_version.into_values() {
         version_demand_histogram[fanout_bucket(uses)] += 1;
     }
-    let mut keep_reason_histogram = [0; 5];
+    let mut keep_reason_histogram = [0; 6];
     for demand in demands
         .iter()
         .filter(|demand| demand.plan == DemandPlan::KeepPackedReload)
@@ -317,6 +378,8 @@ pub(super) fn build_and_verify(
         }
     }
 
+    let rss_after_summary_kib =
+        super::fused_state_feasibility::resident_memory_kib().map_or(0, |value| value.0);
     Ok(PlanSummary {
         versions: model.versions.len(),
         sites: model.sites.len(),
@@ -327,6 +390,14 @@ pub(super) fn build_and_verify(
             .filter(|effect| matches!(effect, FfPhaseEffect::StageNextFf { .. }))
             .count(),
         commit_ff_state_dependencies: model
+            .effects
+            .iter()
+            .map(|effect| match effect {
+                FfPhaseEffect::CommitFfState { publications } => publications.len(),
+                FfPhaseEffect::StageNextFf { .. } => 0,
+            })
+            .sum(),
+        commit_ff_state_barriers: model
             .effects
             .iter()
             .filter(|effect| matches!(effect, FfPhaseEffect::CommitFfState { .. }))
@@ -386,16 +457,35 @@ pub(super) fn build_and_verify(
         predicted_added_rematerialization_instructions: demands
             .iter()
             .filter(|demand| demand.plan == DemandPlan::Rematerialize)
-            .map(|demand| demand.rematerialization_cone_instructions)
-            .sum(),
-        predicted_extended_cross_block_live_ranges: demands
-            .iter()
-            .filter(|demand| {
-                demand.plan == DemandPlan::DirectForward
-                    && demand.producer_block_distance != 0
-                    && demand.producer_block_distance != usize::MAX
+            .map(|demand| {
+                demand.rematerialization_cone_instructions
+                    + demand
+                        .materialization_leaves
+                        .iter()
+                        .filter(|leaf| {
+                            matches!(leaf, MaterializationLeaf::ReadPersistentState { .. })
+                        })
+                        .count()
             })
+            .sum(),
+        predicted_extended_cross_block_live_ranges: 0,
+        predicted_relocated_closed_cones: demands
+            .iter()
+            .filter(|demand| demand.plan == DemandPlan::DirectForward)
             .count(),
+        materialization_leaves: demands
+            .iter()
+            .map(|demand| demand.materialization_leaves.len())
+            .sum(),
+        maximum_materialization_leaves_per_cluster: demands
+            .iter()
+            .map(|demand| demand.materialization_leaves.len())
+            .max()
+            .unwrap_or(0),
+        rss_after_model_build_kib,
+        rss_after_base_verification_kib,
+        rss_after_deletion_audit_kib,
+        rss_after_summary_kib,
         verifier_passed: true,
     })
 }
@@ -524,7 +614,11 @@ fn build_model(
                     .or_default()
                     .reload_at_entry
                     .insert(site_id);
-                SourceAction::KeepPackedReload(site_id)
+                SourceAction::KeepPackedReload {
+                    site: site_id,
+                    original_load: demand.load,
+                    extract_range: demand.range,
+                }
             }
         };
         let cluster_id = UseClusterId(model.clusters.len());
@@ -533,6 +627,7 @@ fn build_model(
             load: demand.load,
             versions: cluster_versions,
             source,
+            materialization_leaves: demand.materialization_leaves.clone(),
             exit: ExitAction::Dead,
         });
     }
@@ -543,12 +638,10 @@ fn build_model(
                 point: publication.point,
                 range: publication.range,
                 source,
+                earliest: publication.point,
+                latest_before: publication.point,
             });
         }
-        model.effects.push(FfPhaseEffect::CommitFfState {
-            point: publication.point,
-            range: publication.range,
-        });
         model
             .contracts
             .entry(publication.point.block)
@@ -556,23 +649,59 @@ fn build_model(
             .store_before_exit
             .insert(publication.point);
     }
+    if !publications.is_empty() {
+        model.effects.push(FfPhaseEffect::CommitFfState {
+            publications: publications
+                .iter()
+                .map(|publication| (publication.point, publication.range))
+                .collect(),
+        });
+    }
+    model.store_dependents = collect_store_dependents(&model);
     Ok(model)
 }
 
 fn verify_model(
+    cfg: &SirCfg,
     model: &MaterializationModel,
-    deleted_stores: &BTreeSet<ProgramPoint>,
+    publications: &BTreeSet<(ProgramPoint, StateRange)>,
 ) -> Result<(), PlanError> {
+    let commit_barriers = model
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect, FfPhaseEffect::CommitFfState { .. }))
+        .count();
+    if (!publications.is_empty() && commit_barriers != 1)
+        || (publications.is_empty() && commit_barriers != 0)
+    {
+        return Err(PlanError::InvalidPhaseEffect(ProgramPoint {
+            block: BlockId(0),
+            instruction: 0,
+        }));
+    }
+    for effect in &model.effects {
+        if let FfPhaseEffect::StageNextFf {
+            point,
+            range,
+            earliest,
+            latest_before,
+            ..
+        } = effect
+            && (earliest.block != point.block
+                || latest_before.block != point.block
+                || earliest.instruction > point.instruction
+                || latest_before.instruction < point.instruction
+                || !publications.contains(&(*point, *range)))
+        {
+            return Err(PlanError::InvalidPhaseEffect(*point));
+        }
+    }
     for (index, version) in model.versions.iter().enumerate() {
         if version.id != StateVersionId(index) {
             return Err(PlanError::ForwardVersionReference(version.id));
         }
         match &version.recipe {
-            DefiningRecipe::StoredValue { definition, .. } => {
-                if deleted_stores.contains(definition) {
-                    return Err(PlanError::PreservedStoreDeleted(*definition));
-                }
-            }
+            DefiningRecipe::StoredValue { .. } => {}
             DefiningRecipe::ControlMerge { inputs } => {
                 if inputs.is_empty() {
                     return Err(PlanError::EmptyMerge(version.id));
@@ -583,35 +712,112 @@ fn verify_model(
             }
         }
     }
-    for site in &model.sites {
-        match site {
-            MaterializationSite::PublicBacking {
-                required_definitions,
-                ..
-            } => {
-                if let Some(point) = required_definitions
-                    .iter()
-                    .find(|point| deleted_stores.contains(point))
-                {
-                    return Err(PlanError::PreservedStoreDeleted(*point));
-                }
-            }
-        }
+    if model.store_dependents != collect_store_dependents(model) {
+        return Err(PlanError::PreservedStoreDeleted(ProgramPoint {
+            block: BlockId(0),
+            instruction: 0,
+        }));
     }
     for cluster in &model.clusters {
         if cluster.versions.is_empty() {
             return Err(PlanError::ImplicitHome(cluster.id));
         }
-        match cluster.source {
-            SourceAction::KeepPackedReload(site) => {
+        match &cluster.source {
+            SourceAction::KeepPackedReload { site, .. } => {
                 if site.0 >= model.sites.len() {
-                    return Err(PlanError::MissingMaterialization(site));
+                    return Err(PlanError::MissingMaterialization(*site));
                 }
             }
             SourceAction::DirectForward | SourceAction::Rematerialize => {}
         }
+        for leaf in &cluster.materialization_leaves {
+            match leaf {
+                MaterializationLeaf::DominatingSsa {
+                    definition_block,
+                    insertion_point,
+                    ..
+                } if !cfg.dominates(*definition_block, insertion_point.block) => {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
+                MaterializationLeaf::DominatingSsa {
+                    insertion_point, ..
+                }
+                | MaterializationLeaf::ReadPersistentState {
+                    insertion_point, ..
+                } if insertion_point.block != cluster.load.block => {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
+                MaterializationLeaf::ReloadPreservedHome { site, version } => {
+                    if site.0 >= model.sites.len() || version.0 >= model.versions.len() {
+                        return Err(PlanError::ImplicitHome(cluster.id));
+                    }
+                }
+                MaterializationLeaf::ControlMerge { inputs } if inputs.is_empty() => {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
+                MaterializationLeaf::Constant { .. }
+                | MaterializationLeaf::DominatingSsa { .. }
+                | MaterializationLeaf::ReadPersistentState { .. }
+                | MaterializationLeaf::ControlMerge { .. } => {}
+            }
+        }
     }
     Ok(())
+}
+
+fn collect_store_dependents(
+    model: &MaterializationModel,
+) -> BTreeMap<ProgramPoint, BTreeSet<StoreDependent>> {
+    let mut dependents = BTreeMap::<ProgramPoint, BTreeSet<StoreDependent>>::new();
+    for version in &model.versions {
+        if let DefiningRecipe::StoredValue { definition, .. } = version.recipe {
+            dependents
+                .entry(definition)
+                .or_default()
+                .insert(StoreDependent::Version(version.id));
+        }
+    }
+    for site in &model.sites {
+        match site {
+            MaterializationSite::PublicBacking {
+                id,
+                required_definitions,
+                ..
+            } => {
+                for definition in required_definitions {
+                    dependents
+                        .entry(*definition)
+                        .or_default()
+                        .insert(StoreDependent::Site(*id));
+                }
+            }
+        }
+    }
+    dependents
+}
+
+fn verify_store_deletion(
+    model: &MaterializationModel,
+    deleted_store: ProgramPoint,
+) -> Result<(), PlanError> {
+    if model.store_dependents.contains_key(&deleted_store) {
+        Err(PlanError::PreservedStoreDeleted(deleted_store))
+    } else {
+        Ok(())
+    }
+}
+
+fn collect_publications(model: &MaterializationModel) -> BTreeSet<(ProgramPoint, StateRange)> {
+    model
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            FfPhaseEffect::CommitFfState { publications } => Some(publications),
+            FfPhaseEffect::StageNextFf { .. } => None,
+        })
+        .flatten()
+        .copied()
+        .collect()
 }
 
 fn verify_repair(old: SourceAction, new: SourceAction) -> Result<(), PlanError> {
@@ -623,24 +829,42 @@ fn verify_repair(old: SourceAction, new: SourceAction) -> Result<(), PlanError> 
 
 fn verify_repair_relation() -> Result<(), PlanError> {
     let placeholder = MaterializationSiteId(usize::MAX);
+    let point = ProgramPoint {
+        block: BlockId(0),
+        instruction: 0,
+    };
+    let range = StateRange {
+        object: RegionedAbsoluteAddr {
+            region: 0,
+            instance_id: crate::ir::InstanceId(0),
+            var_id: veryl_analyzer::ir::VarId::default(),
+        },
+        start: 0,
+        end: 1,
+    };
+    verify_repair(SourceAction::DirectForward, SourceAction::Rematerialize)?;
     verify_repair(
         SourceAction::DirectForward,
-        SourceAction::Rematerialize,
+        SourceAction::KeepPackedReload {
+            site: placeholder,
+            original_load: point,
+            extract_range: range,
+        },
     )?;
     verify_repair(
-        SourceAction::DirectForward,
-        SourceAction::KeepPackedReload(placeholder),
-    )?;
-    verify_repair(
         SourceAction::Rematerialize,
-        SourceAction::KeepPackedReload(placeholder),
+        SourceAction::KeepPackedReload {
+            site: placeholder,
+            original_load: point,
+            extract_range: range,
+        },
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{InstanceId, RegionedAbsoluteAddr};
+    use crate::ir::{BasicBlock, ExecutionUnit, InstanceId, RegionedAbsoluteAddr, SIRTerminator};
     use veryl_analyzer::ir::VarId;
 
     fn point(instruction: usize) -> ProgramPoint {
@@ -660,6 +884,21 @@ mod tests {
             start: 0,
             end: 8,
         }
+    }
+
+    fn one_block_cfg() -> SirCfg {
+        let block: BasicBlock<RegionedAbsoluteAddr> = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: crate::HashMap::default(),
+        };
+        SirCfg::analyze(&eu).unwrap()
     }
 
     #[test]
@@ -684,8 +923,9 @@ mod tests {
             producer_shared_uses: 1,
             keep_reason: Some(KeepReason::RematerializationMoreExpensive),
             failure_predicates: FailurePredicates::default(),
+            materialization_leaves: Vec::new(),
         }];
-        let summary = build_and_verify(&definitions, &demands, &[]).unwrap();
+        let summary = build_and_verify(&one_block_cfg(), &definitions, &demands, &[]).unwrap();
         assert_eq!(summary.versions, 1);
         assert_eq!(summary.sites, 2);
         assert_eq!(summary.verified_uses, 1);
@@ -695,19 +935,25 @@ mod tests {
 
     #[test]
     fn repair_relation_is_strictly_monotonic() {
-        assert!(verify_repair(
-            SourceAction::DirectForward,
-            SourceAction::Rematerialize
-        )
-        .is_ok());
-        assert!(verify_repair(
-            SourceAction::Rematerialize,
-            SourceAction::KeepPackedReload(MaterializationSiteId(0))
-        )
-        .is_ok());
+        assert!(verify_repair(SourceAction::DirectForward, SourceAction::Rematerialize).is_ok());
+        assert!(
+            verify_repair(
+                SourceAction::Rematerialize,
+                SourceAction::KeepPackedReload {
+                    site: MaterializationSiteId(0),
+                    original_load: point(1),
+                    extract_range: range(),
+                }
+            )
+            .is_ok()
+        );
         assert_eq!(
             verify_repair(
-                SourceAction::KeepPackedReload(MaterializationSiteId(0)),
+                SourceAction::KeepPackedReload {
+                    site: MaterializationSiteId(0),
+                    original_load: point(1),
+                    extract_range: range(),
+                },
                 SourceAction::DirectForward
             ),
             Err(PlanError::RepairCycle)
@@ -721,9 +967,11 @@ mod tests {
             range: range(),
             staged_source: Some(RegisterId(0)),
         };
-        let summary = build_and_verify(&BTreeMap::new(), &[], &[publication]).unwrap();
+        let summary =
+            build_and_verify(&one_block_cfg(), &BTreeMap::new(), &[], &[publication]).unwrap();
         assert_eq!(summary.stage_next_ff_sites, 1);
         assert_eq!(summary.commit_ff_state_dependencies, 1);
+        assert_eq!(summary.commit_ff_state_barriers, 1);
         assert_eq!(summary.block_contracts, 1);
     }
 }
