@@ -40,6 +40,55 @@ fn cssa_error_mapping_preserves_structured_context() {
     assert_eq!(mapped.message, "test CSSA failure");
 }
 
+#[test]
+fn allocation_boundary_removes_single_use_compare_results() {
+    let mut vregs = VRegAllocator::new();
+    let lhs = vregs.alloc();
+    let rhs = vregs.alloc();
+    let condition = vregs.alloc();
+    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+    let mut entry = MBlock::new(BlockId(0));
+    entry.push(MInst::LoadImm { dst: lhs, value: 1 });
+    entry.push(MInst::LoadImm { dst: rhs, value: 2 });
+    entry.push(MInst::Cmp {
+        dst: condition,
+        lhs,
+        rhs,
+        kind: CmpKind::LtU,
+    });
+    entry.push(MInst::Branch {
+        cond: condition,
+        true_bb: BlockId(1),
+        false_bb: BlockId(2),
+    });
+    let mut true_block = MBlock::new(BlockId(1));
+    true_block.push(MInst::Return);
+    let mut false_block = MBlock::new(BlockId(2));
+    false_block.push(MInst::Return);
+    func.blocks = vec![entry, true_block, false_block];
+
+    run_regalloc(&mut func).unwrap();
+
+    assert!(
+        !func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|instruction| instruction.def() == Some(condition))
+    );
+    assert!(matches!(
+        func.blocks[0].terminator(),
+        Some(MInst::BranchPred {
+            predicate: BranchPredicate::Compare {
+                kind: CmpKind::LtU,
+                ..
+            },
+            ..
+        })
+    ));
+}
+
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
     // Find the max VReg number used in instructions

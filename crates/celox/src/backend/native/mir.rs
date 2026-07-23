@@ -542,6 +542,27 @@ pub enum CmpKind {
     GeS,
 }
 
+/// A condition consumed directly by a machine branch without first
+/// materializing a zero/one SSA value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BranchPredicate {
+    Compare {
+        lhs: VReg,
+        rhs: VReg,
+        kind: CmpKind,
+    },
+    CompareImm {
+        lhs: VReg,
+        imm: i32,
+        kind: CmpKind,
+    },
+    MemoryNonZero {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PackedLaneCompareRhs {
     Scalar(VReg),
@@ -930,6 +951,13 @@ pub enum MInst {
         true_bb: BlockId,
         false_bb: BlockId,
     },
+    /// Conditional branch which consumes flags directly. Unlike `Branch`,
+    /// this instruction deliberately has no predicate-result VReg.
+    BranchPred {
+        predicate: BranchPredicate,
+        true_bb: BlockId,
+        false_bb: BlockId,
+    },
     /// Unconditional jump
     Jump { target: BlockId },
     /// Return from function (success, code 0)
@@ -1187,6 +1215,11 @@ impl fmt::Display for MInst {
                 true_bb,
                 false_bb,
             } => write!(f, "br {cond}, {true_bb}, {false_bb}"),
+            MInst::BranchPred {
+                predicate,
+                true_bb,
+                false_bb,
+            } => write!(f, "br_pred {predicate:?}, {true_bb}, {false_bb}"),
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
             MInst::ReturnError { code } => write!(f, "ret_error {code}"),
@@ -1318,6 +1351,7 @@ impl MInst {
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
             | MInst::Branch { .. }
+            | MInst::BranchPred { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => None,
@@ -1426,6 +1460,18 @@ impl MInst {
                 ..
             } => Uses::five(*guard, *lhs, *rhs, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
+            MInst::BranchPred {
+                predicate: BranchPredicate::Compare { lhs, rhs, .. },
+                ..
+            } => Uses::two(*lhs, *rhs),
+            MInst::BranchPred {
+                predicate: BranchPredicate::CompareImm { lhs, .. },
+                ..
+            } => Uses::one(*lhs),
+            MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero { .. },
+                ..
+            } => Uses::none(),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
     }
@@ -1663,6 +1709,22 @@ impl MInst {
                     *cond = new;
                 }
             }
+            MInst::BranchPred { predicate, .. } => match predicate {
+                BranchPredicate::Compare { lhs, rhs, .. } => {
+                    if *lhs == old {
+                        *lhs = new;
+                    }
+                    if *rhs == old {
+                        *rhs = new;
+                    }
+                }
+                BranchPredicate::CompareImm { lhs, .. } => {
+                    if *lhs == old {
+                        *lhs = new;
+                    }
+                }
+                BranchPredicate::MemoryNonZero { .. } => {}
+            },
             MInst::LoadImm { .. }
             | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
@@ -1682,8 +1744,40 @@ impl MInst {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            MInst::Branch { .. } | MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. }
+            MInst::Branch { .. }
+                | MInst::BranchPred { .. }
+                | MInst::Jump { .. }
+                | MInst::Return
+                | MInst::ReturnError { .. }
         )
+    }
+
+    pub fn branch_targets(&self) -> Option<(BlockId, BlockId)> {
+        match self {
+            MInst::Branch {
+                true_bb, false_bb, ..
+            }
+            | MInst::BranchPred {
+                true_bb, false_bb, ..
+            } => Some((*true_bb, *false_bb)),
+            _ => None,
+        }
+    }
+
+    pub fn rewrite_successors(&mut self, mut rewrite: impl FnMut(BlockId) -> BlockId) {
+        match self {
+            MInst::Branch {
+                true_bb, false_bb, ..
+            }
+            | MInst::BranchPred {
+                true_bb, false_bb, ..
+            } => {
+                *true_bb = rewrite(*true_bb);
+                *false_bb = rewrite(*false_bb);
+            }
+            MInst::Jump { target } => *target = rewrite(*target),
+            _ => {}
+        }
     }
 }
 
@@ -1730,6 +1824,9 @@ impl MBlock {
     pub fn successors(&self) -> Vec<BlockId> {
         match self.terminator() {
             Some(MInst::Branch {
+                true_bb, false_bb, ..
+            })
+            | Some(MInst::BranchPred {
                 true_bb, false_bb, ..
             }) => vec![*true_bb, *false_bb],
             Some(MInst::Jump { target }) => vec![*target],

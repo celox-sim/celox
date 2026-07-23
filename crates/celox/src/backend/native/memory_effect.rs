@@ -6,7 +6,7 @@
 
 use celox_analysis::memory::{MemoryEffect, MemoryLocation};
 
-use super::mir::{BaseReg, MInst};
+use super::mir::{BaseReg, BranchPredicate, MInst};
 
 const MAX_STATIC_RANGES: usize = 3;
 const EMPTY_RANGE: MemoryRange = MemoryRange {
@@ -227,6 +227,10 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
     match inst {
         MInst::Load {
             base, offset, size, ..
+        }
+        | MInst::BranchPred {
+            predicate: BranchPredicate::MemoryNonZero { base, offset, size },
+            ..
         } => checked_range(*base, *offset, size.bytes() as usize)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
@@ -346,8 +350,31 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
 mod tests {
     use super::*;
     use crate::backend::native::mir::{
-        CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
+        BlockId, BranchPredicate, CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
     };
+
+    #[test]
+    fn memory_branch_keeps_the_folded_load_effect() {
+        let instruction = MInst::BranchPred {
+            predicate: BranchPredicate::MemoryNonZero {
+                base: BaseReg::SimState,
+                offset: 12,
+                size: OpSize::S16,
+            },
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        };
+
+        assert_eq!(
+            reads(&instruction).ranges().collect::<Vec<_>>(),
+            vec![MemoryRange {
+                base: BaseReg::SimState,
+                offset: 12,
+                byte_len: 2,
+            }]
+        );
+        assert!(!writes(&instruction).has_effect());
+    }
 
     #[test]
     fn packed_memory_compare_reads_both_ranges_and_rejects_a_missing_bound() {

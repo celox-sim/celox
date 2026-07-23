@@ -432,12 +432,10 @@ fn analyze_shared_graph(successors: Vec<Vec<usize>>) -> Result<ForwardControlFlo
 
 fn split_critical_edges(func: &mut MFunction) -> Result<(), CfgError> {
     for block in &mut func.blocks {
-        if let Some(MInst::Branch {
-            true_bb, false_bb, ..
-        }) = block.insts.last()
+        if let Some((true_bb, false_bb)) = block.insts.last().and_then(MInst::branch_targets)
             && true_bb == false_bb
         {
-            let target = *true_bb;
+            let target = true_bb;
             if let Some(terminator) = block.insts.last_mut() {
                 *terminator = MInst::Jump { target };
             }
@@ -535,25 +533,21 @@ fn rewrite_target(
     new: BlockId,
     predecessor: BlockId,
 ) -> Result<(), CfgError> {
-    match terminator {
-        MInst::Branch {
-            true_bb, false_bb, ..
-        } => {
-            if *true_bb == old {
-                *true_bb = new;
-            }
-            if *false_bb == old {
-                *false_bb = new;
-            }
+    let mut rewritten = false;
+    terminator.rewrite_successors(|target| {
+        if target == old {
+            rewritten = true;
+            new
+        } else {
+            target
         }
-        MInst::Jump { target } if *target == old => *target = new,
-        _ => {
-            return Err(CfgError::new(
-                "CFG.TERMINATOR_NAMES_SPLIT_EDGE",
-                Some(predecessor),
-                "branch edge is not named by predecessor terminator",
-            ));
-        }
+    });
+    if !rewritten {
+        return Err(CfgError::new(
+            "CFG.TERMINATOR_NAMES_SPLIT_EDGE",
+            Some(predecessor),
+            "branch edge is not named by predecessor terminator",
+        ));
     }
     Ok(())
 }

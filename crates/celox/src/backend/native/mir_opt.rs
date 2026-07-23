@@ -2570,6 +2570,100 @@ fn algebraic_simplify(func: &mut MFunction) {
     }
 }
 
+/// Select flag-consuming branch forms before allocation.
+///
+/// A compare or direct load whose only use is the immediately following
+/// branch has no independently observable SSA result. Keeping that result
+/// until emission invents a live range and can make the allocator spill around
+/// a value which the machine code never materializes.
+///
+/// Direct-memory predicates are selected by a separate late pass after
+/// StateSSA forwarding. Register comparisons are selected exactly once at the
+/// register-allocation boundary, before pressure scheduling.
+pub(crate) fn fold_register_branch_predicates(func: &mut MFunction) -> usize {
+    fold_branch_predicates(func, BranchPredicateClass::Register)
+}
+
+pub(crate) fn fold_memory_branch_predicates(func: &mut MFunction) -> usize {
+    fold_branch_predicates(func, BranchPredicateClass::Memory)
+}
+
+#[derive(Clone, Copy)]
+enum BranchPredicateClass {
+    Register,
+    Memory,
+}
+
+fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> usize {
+    let mut use_counts = HashMap::<VReg, usize>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+        for instruction in &block.insts {
+            for source in instruction.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    let mut folded = 0usize;
+    for block in &mut func.blocks {
+        if block.insts.len() < 2 {
+            continue;
+        }
+        let MInst::Branch {
+            cond,
+            true_bb,
+            false_bb,
+        } = block.insts[block.insts.len() - 1].clone()
+        else {
+            continue;
+        };
+        if use_counts.get(&cond).copied() != Some(1) {
+            continue;
+        }
+
+        let predicate = match block.insts[block.insts.len() - 2].clone() {
+            MInst::Cmp {
+                dst,
+                lhs,
+                rhs,
+                kind,
+            } if matches!(class, BranchPredicateClass::Register) && dst == cond => {
+                BranchPredicate::Compare { lhs, rhs, kind }
+            }
+            MInst::CmpImm {
+                dst,
+                lhs,
+                imm,
+                kind,
+            } if matches!(class, BranchPredicateClass::Register) && dst == cond => {
+                BranchPredicate::CompareImm { lhs, imm, kind }
+            }
+            MInst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            } if matches!(class, BranchPredicateClass::Memory) && dst == cond => {
+                BranchPredicate::MemoryNonZero { base, offset, size }
+            }
+            _ => continue,
+        };
+        block.insts.truncate(block.insts.len() - 2);
+        block.insts.push(MInst::BranchPred {
+            predicate,
+            true_bb,
+            false_bb,
+        });
+        folded += 1;
+    }
+    folded
+}
+
 enum Simplification {
     Mov(VReg, VReg),
     Mov32(VReg, VReg),
@@ -2660,24 +2754,7 @@ fn simplify_cfg(func: &mut MFunction) {
     // Rewrite all jump/branch targets
     for block in &mut func.blocks {
         for inst in &mut block.insts {
-            match inst {
-                MInst::Jump { target } => {
-                    if let Some(&new_target) = resolved.get(target) {
-                        *target = new_target;
-                    }
-                }
-                MInst::Branch {
-                    true_bb, false_bb, ..
-                } => {
-                    if let Some(&new_t) = resolved.get(true_bb) {
-                        *true_bb = new_t;
-                    }
-                    if let Some(&new_f) = resolved.get(false_bb) {
-                        *false_bb = new_f;
-                    }
-                }
-                _ => {}
-            }
+            inst.rewrite_successors(|target| resolved.get(&target).copied().unwrap_or(target));
         }
     }
 
@@ -4653,6 +4730,162 @@ mod tests {
                 src: VReg(0)
             }
         ));
+    }
+
+    #[test]
+    fn folds_single_use_compare_branch_before_allocation() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::Cmp {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::LtU,
+                },
+                MInst::Branch {
+                    cond: VReg(2),
+                    true_bb: BlockId(1),
+                    false_bb: BlockId(2),
+                },
+            ],
+            3,
+        );
+
+        assert_eq!(fold_register_branch_predicates(&mut func), 1);
+        assert!(matches!(
+            func.blocks[0].insts.last(),
+            Some(MInst::BranchPred {
+                predicate: BranchPredicate::Compare {
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::LtU,
+                },
+                ..
+            })
+        ));
+        assert!(
+            !func.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| instruction.def() == Some(VReg(2)))
+        );
+    }
+
+    #[test]
+    fn delays_direct_memory_branch_until_after_state_forwarding() {
+        let original = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 4,
+                size: OpSize::S16,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut early = make_func(original.clone(), 1);
+        assert_eq!(fold_register_branch_predicates(&mut early), 0);
+        assert_eq!(early.blocks[0].insts, original);
+
+        let mut late = make_func(original, 1);
+        assert_eq!(fold_memory_branch_predicates(&mut late), 1);
+        assert!(matches!(
+            late.blocks[0].insts.as_slice(),
+            [MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero {
+                    base: BaseReg::SimState,
+                    offset: 4,
+                    size: OpSize::S16,
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn branch_predicate_keeps_a_compare_result_used_on_an_edge() {
+        let mut vregs = VRegAllocator::new();
+        let input = vregs.alloc();
+        let alternative = vregs.alloc();
+        let condition = vregs.alloc();
+        let merged = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::CmpImm {
+                dst: condition,
+                lhs: input,
+                imm: 0,
+                kind: CmpKind::Ne,
+            },
+            MInst::Branch {
+                cond: condition,
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.push(MInst::Jump { target: BlockId(3) });
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), condition), (BlockId(2), alternative)],
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, true_block, false_block, join];
+
+        assert_eq!(fold_register_branch_predicates(&mut func), 0);
+        assert!(matches!(
+            func.blocks[0].insts.last(),
+            Some(MInst::Branch { cond, .. }) if *cond == condition
+        ));
+    }
+
+    #[test]
+    fn branch_predicate_does_not_consume_an_unrelated_adjacent_compare() {
+        let original = vec![
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 7,
+            },
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 1,
+            },
+            MInst::CmpImm {
+                dst: VReg(1),
+                lhs: VReg(2),
+                imm: 0,
+                kind: CmpKind::Eq,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut func = make_func(original.clone(), 3);
+
+        assert_eq!(fold_register_branch_predicates(&mut func), 0);
+        assert_eq!(func.blocks[0].insts, original);
     }
 
     #[test]
@@ -9145,8 +9378,12 @@ mod tests {
             dst: VReg(0),
             value: 1,
         });
-        entry.push(MInst::Branch {
-            cond: VReg(0),
+        entry.push(MInst::BranchPred {
+            predicate: BranchPredicate::CompareImm {
+                lhs: VReg(0),
+                imm: 0,
+                kind: CmpKind::Ne,
+            },
             true_bb: BlockId(1),
             false_bb: BlockId(2),
         });
@@ -9170,7 +9407,7 @@ mod tests {
         assert_eq!(func.verify_result(), Ok(()));
         assert!(matches!(
             func.blocks[0].insts.last(),
-            Some(MInst::Branch {
+            Some(MInst::BranchPred {
                 true_bb: BlockId(3),
                 false_bb: BlockId(4),
                 ..

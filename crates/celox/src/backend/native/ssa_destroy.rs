@@ -1574,7 +1574,7 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn identity_only_branch_edges_keep_cmp_fusion_and_false_fallthrough() {
+    fn identity_only_branch_edges_keep_flag_predicate_and_false_fallthrough() {
         use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 
         let mut vregs = VRegAllocator::new();
@@ -1642,6 +1642,10 @@ mod tests {
         }
         assignment.set_edge_location(BlockId(0), value, EdgeLocation::Register(PhysReg::RSI));
 
+        assert_eq!(
+            crate::backend::native::mir_opt::fold_register_branch_predicates(&mut function),
+            1
+        );
         let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
         assert_eq!(plan.stats().effective_copies, 0);
         let emitted = emit::emit(&function, &assignment, 0).unwrap();

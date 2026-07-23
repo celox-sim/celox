@@ -266,6 +266,11 @@ fn run_regalloc_in_place(
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    // Allocation must never depend on callers having run the optional MIR
+    // optimization pipeline. Select flag-consuming register branches at the
+    // allocation boundary so their unmaterialized boolean result cannot
+    // acquire a live range.
+    super::mir_opt::fold_register_branch_predicates(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("input MIR verification", error))?;
     let cfg_start = timing.then(crate::timing::now);
@@ -346,11 +351,12 @@ fn run_regalloc_in_place(
     // the resulting store chain before CSSA so overwritten packed-state
     // updates do not survive into allocation and machine code.
     super::mir_opt::eliminate_redundant_local_stores(func);
+    let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("late state-forwarding verification", error))?;
     if let Some(start) = state_forward_start {
         eprintln!(
-            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} elapsed={:?}",
+            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} folded_memory_branches={folded_memory_branches} elapsed={:?}",
             start.elapsed()
         );
     }

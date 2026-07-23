@@ -849,6 +849,41 @@ enum EmittedBranchCondition {
     Compare(CmpKind),
 }
 
+fn emit_branch_predicate(
+    asm: &mut CodeAssembler,
+    predicate: BranchPredicate,
+    assignment: &AssignmentMap,
+) -> Result<EmittedBranchCondition, IcedError> {
+    match predicate {
+        BranchPredicate::Compare { lhs, rhs, kind } => {
+            asm.cmp(
+                preg_to_reg64(resolve(assignment, lhs)),
+                preg_to_reg64(resolve(assignment, rhs)),
+            )?;
+            Ok(EmittedBranchCondition::Compare(kind))
+        }
+        BranchPredicate::CompareImm { lhs, imm, kind } => {
+            let lhs = preg_to_reg64(resolve(assignment, lhs));
+            if imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
+                asm.test(lhs, lhs)?;
+            } else {
+                asm.cmp(lhs, imm)?;
+            }
+            Ok(EmittedBranchCondition::Compare(kind))
+        }
+        BranchPredicate::MemoryNonZero { base, offset, size } => {
+            let memory = mem_operand(base, offset);
+            match size {
+                OpSize::S8 => asm.cmp(byte_ptr(memory), 0)?,
+                OpSize::S16 => asm.cmp(word_ptr(memory), 0)?,
+                OpSize::S32 => asm.cmp(dword_ptr(memory), 0)?,
+                OpSize::S64 => asm.cmp(qword_ptr(memory), 0)?,
+            }
+            Ok(EmittedBranchCondition::NonZero)
+        }
+    }
+}
+
 fn emit_condition_jump(
     asm: &mut CodeAssembler,
     label: CodeLabel,
@@ -1118,13 +1153,10 @@ fn emission_block_order(func: &MFunction) -> Vec<usize> {
     let mut claimed = vec![false; func.blocks.len()];
     let mut after = vec![Vec::<usize>::new(); func.blocks.len()];
     for (predecessor, block) in func.blocks.iter().enumerate() {
-        let Some(MInst::Branch {
-            true_bb, false_bb, ..
-        }) = block.terminator()
-        else {
+        let Some((true_bb, false_bb)) = block.terminator().and_then(MInst::branch_targets) else {
             continue;
         };
-        for successor in [*true_bb, *false_bb] {
+        for successor in [true_bb, false_bb] {
             let Some(chain) = backedge_chain(func, &block_index, &cfg, predecessor, successor)
             else {
                 continue;
@@ -1502,34 +1534,6 @@ fn emit_planned(
         }
         previous_canonical_label = Some(canonical_label);
 
-        // Pre-scan: detect Cmp+Branch fusion opportunity.
-        // If the instruction immediately before Branch is Cmp/CmpImm,
-        // and the cmp result is only used by the Branch, we can fuse
-        // into cmp + jcc (skipping setcc + movzx + test).
-        let fused_cmp: Option<VReg> = if block.insts.len() >= 2 {
-            if let Some(MInst::Branch { cond, .. }) = block.terminator() {
-                let pre = &block.insts[block.insts.len() - 2];
-                let is_cmp = pre.def() == Some(*cond)
-                    && matches!(pre, MInst::Cmp { .. } | MInst::CmpImm { .. });
-                if is_cmp {
-                    // A condition can remain live through a successor phi even
-                    // when Branch is its only use in this block.  In that case
-                    // setcc must still materialize the SSA value for the edge.
-                    if use_counts.get(cond).copied() == Some(1) {
-                        Some(*cond)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let fallthrough_continuation = block.insts[..block.insts.len() - 1]
             .iter()
             .rposition(|inst| !instruction_emits_no_code(inst, assignment))
@@ -1568,51 +1572,35 @@ fn emit_planned(
                     true_bb,
                     false_bb,
                 } => {
-                    if fused_cmp == Some(*cond) {
-                        // Fused Cmp+Branch: emit cmp + jcc directly
-                        let cmp_inst = &block.insts[block.insts.len() - 2];
-                        let kind = match cmp_inst {
-                            MInst::Cmp { lhs, rhs, kind, .. } => {
-                                let l = preg_to_reg64(resolve(assignment, *lhs));
-                                let r = preg_to_reg64(resolve(assignment, *rhs));
-                                asm.cmp(l, r)?;
-                                *kind
-                            }
-                            MInst::CmpImm { lhs, imm, kind, .. } => {
-                                let l = preg_to_reg64(resolve(assignment, *lhs));
-                                if *imm == 0 && matches!(kind, CmpKind::Eq | CmpKind::Ne) {
-                                    asm.test(l, l)?;
-                                } else {
-                                    asm.cmp(l, *imm)?;
-                                }
-                                *kind
-                            }
-                            _ => unreachable!(),
-                        };
-                        emit_branch_with_edge_copies(
-                            &mut asm,
-                            &block_labels,
-                            plan,
-                            block.id,
-                            *true_bb,
-                            *false_bb,
-                            next_block_id,
-                            EmittedBranchCondition::Compare(kind),
-                        )?;
-                    } else {
-                        let c = preg_to_reg64(resolve(assignment, *cond));
-                        asm.test(c, c)?;
-                        emit_branch_with_edge_copies(
-                            &mut asm,
-                            &block_labels,
-                            plan,
-                            block.id,
-                            *true_bb,
-                            *false_bb,
-                            next_block_id,
-                            EmittedBranchCondition::NonZero,
-                        )?;
-                    } // end else (non-fused branch)
+                    let c = preg_to_reg64(resolve(assignment, *cond));
+                    asm.test(c, c)?;
+                    emit_branch_with_edge_copies(
+                        &mut asm,
+                        &block_labels,
+                        plan,
+                        block.id,
+                        *true_bb,
+                        *false_bb,
+                        next_block_id,
+                        EmittedBranchCondition::NonZero,
+                    )?;
+                }
+                MInst::BranchPred {
+                    predicate,
+                    true_bb,
+                    false_bb,
+                } => {
+                    let condition = emit_branch_predicate(&mut asm, *predicate, assignment)?;
+                    emit_branch_with_edge_copies(
+                        &mut asm,
+                        &block_labels,
+                        plan,
+                        block.id,
+                        *true_bb,
+                        *false_bb,
+                        next_block_id,
+                        condition,
+                    )?;
                 }
                 MInst::UDiv { dst, lhs, rhs } => {
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
@@ -1627,15 +1615,7 @@ fn emit_planned(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::SRem)?;
                 }
                 _ => {
-                    // Skip Cmp/CmpImm if it's fused with the following Branch
-                    if let Some(fc) = fused_cmp {
-                        if inst.def() == Some(fc) {
-                            inst_idx += 1;
-                            continue;
-                        }
-                    }
                     if inst_idx + 1 < block.insts.len()
-                        && fused_cmp.is_none_or(|fc| block.insts[inst_idx + 1].def() != Some(fc))
                         && try_emit_stack_reload_fold(
                             &mut asm,
                             inst,
@@ -3161,7 +3141,7 @@ fn emit_inst(
         }
 
         // Branch and Jump are handled in the main emit loop (with phi moves).
-        MInst::Branch { .. } | MInst::Jump { .. } => {
+        MInst::Branch { .. } | MInst::BranchPred { .. } | MInst::Jump { .. } => {
             unreachable!("Branch/Jump should be handled in main emit loop");
         }
 
@@ -4331,6 +4311,18 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::CmpImmSelect { .. }
                 | MInst::GuardedCmpSelect { .. } => select += 1,
                 MInst::Branch { .. } => branch += 1,
+                MInst::BranchPred { predicate, .. } => {
+                    branch += 1;
+                    match predicate {
+                        BranchPredicate::Compare { .. } | BranchPredicate::CompareImm { .. } => {
+                            cmp += 1;
+                        }
+                        BranchPredicate::MemoryNonZero { base, .. } => match base {
+                            BaseReg::SimState => load_sim += 1,
+                            BaseReg::StackFrame => load_stack += 1,
+                        },
+                    }
+                }
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
             }
@@ -4417,6 +4409,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::CmpImmSelect { .. }
                     | MInst::GuardedCmpSelect { .. } => select += 1,
                     MInst::Branch { .. }
+                    | MInst::BranchPred { .. }
                     | MInst::Jump { .. }
                     | MInst::Return
                     | MInst::ReturnError { .. } => control += 1,
@@ -4848,6 +4841,50 @@ mod shift_encoding_tests {
         }
 
         assert_eq!(conditional_branches, vec![Mnemonic::Je]);
+    }
+
+    #[test]
+    fn memory_branch_predicate_compares_in_place_for_every_width() {
+        for size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {
+            let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+            let mut entry = MBlock::new(BlockId(0));
+            entry.push(MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size,
+                },
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            });
+            let mut true_block = MBlock::new(BlockId(1));
+            true_block.push(MInst::ReturnError { code: 7 });
+            let mut false_block = MBlock::new(BlockId(2));
+            false_block.push(MInst::ReturnError { code: 9 });
+            func.blocks = vec![entry, true_block, false_block];
+            func.verify();
+
+            let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+            let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+            let mut mnemonics = Vec::new();
+            while decoder.can_decode() {
+                mnemonics.push(decoder.decode().mnemonic());
+            }
+            assert!(
+                mnemonics.contains(&Mnemonic::Cmp),
+                "{size:?}: {mnemonics:?}"
+            );
+            assert!(
+                !mnemonics.contains(&Mnemonic::Movzx),
+                "{size:?}: {mnemonics:?}"
+            );
+
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = [0u8; 16];
+            assert_eq!(unsafe { jit.call(&mut state) }, 9);
+            state[8] = 1;
+            assert_eq!(unsafe { jit.call(&mut state) }, 7);
+        }
     }
 
     fn decode_shift(
@@ -5503,7 +5540,7 @@ mod shift_encoding_tests {
     }
 
     #[test]
-    fn compare_branch_fusion_preserves_condition_used_after_the_branch() {
+    fn materialized_compare_branch_preserves_condition_used_after_the_branch() {
         let mut vregs = VRegAllocator::new();
         let zero = vregs.alloc();
         let alternative = vregs.alloc();
