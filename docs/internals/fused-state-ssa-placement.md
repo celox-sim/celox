@@ -974,6 +974,49 @@ shows that ordering-insensitive liveness was not the main remaining source of
 packed RMW work; the retained hot Stores feed real later versions and require
 Store/load elimination or use-local promotion rather than more exit DSE.
 
+An implementation probe then applied exactly that use-local policy to internal
+comb Store/load round trips. It required one direct MemorySSA definition,
+replaced every direct Load user of the Store, kept every materialization inside
+the Load block, and reran dirty-exit DSE. No value was carried across a CFG
+edge. Three progressively stricter subsets produced:
+
+| Use-local probe | Replaced Loads | optimized MIR | post-RA MIR | x86 instructions |
+|---|---:|---:|---:|---:|
+| executable partial frontier | 234 | 93,857 | 220,684 | 149,237 |
+| no `DominatingSSA` frontier | 210 | 93,922 | 220,806 | 149,244 |
+| one phase-stable state-read leaf, empty pure suffix | 174 | 93,984 | 221,033 | 149,348 |
+| retained MemorySSA-DSE baseline | 0 | 94,201 | 220,551 | 149,218 |
+
+All three probes improve pre-allocation instruction count and all three regress
+after allocation. Even the final subset is structurally allocation-neutral at
+the use: it changes a Store followed by a later Load into a phase-equivalent
+Load from the original persistent state object, without cloning arithmetic or
+extending an SSA value across blocks. Nevertheless it adds 482 post-RA
+instructions and 130 final x86 instructions. The probe implementation is not
+retained.
+
+This invalidates the current profitability contract, not the MemorySSA
+legality proof. SIR expression cost and block-local placement are insufficient:
+removing an explicit memory home changes the allocator's global home,
+reconstruction, phi/copy, and spill decisions. Milestone 2 must therefore
+remain stopped until the allocation pipeline can expose and validate a stable
+allocation-region contract. At minimum, a candidate plan must predict and then
+verify:
+
+```text
+boundary live-in/live-out delta by register class
+new reconstruction phi and edge-copy obligations
+removed and introduced explicit homes
+reload recipe availability at every use
+spill/reload delta inside the affected allocation regions
+```
+
+A failed contract repairs monotonically back to `KeepPackedReload`. Reordering
+SIR register identities or deleting a home must not be allowed to silently
+select a globally different, more expensive reconstruction plan. Re-enabling
+use-local code generation before this interface exists would merely move the
+performance failure from SIR into register allocation.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
