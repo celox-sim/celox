@@ -105,8 +105,8 @@ pub(super) fn schedule_for_pressure(
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
-        let original_pressure = max_pressure(&original, &live_out);
-        stats.maximum_before = stats.maximum_before.max(original_pressure);
+        let original_cost = pressure_cost(&original, &live_out, super::NUM_REGS);
+        stats.maximum_before = stats.maximum_before.max(original_cost.maximum);
         let scheduled = schedule_block(
             &original,
             &constraints.instructions[block_index],
@@ -118,16 +118,23 @@ pub(super) fn schedule_for_pressure(
             block: func.blocks[block_index].id,
             reason,
         })?;
-        let scheduled_pressure = max_pressure(&scheduled, &live_out);
-        if scheduled_pressure <= original_pressure {
+        let scheduled_cost = pressure_cost(&scheduled, &live_out, super::NUM_REGS);
+        // Peak pressure alone is not a sufficient spill-cost proxy. Two
+        // schedules can have the same peak while one keeps many values live
+        // above the physical register capacity for thousands more
+        // instructions. Prefer the candidate only when it does not increase
+        // that capacity-excess live area; use peak pressure as the tie-break.
+        if (scheduled_cost.excess_area, scheduled_cost.maximum)
+            <= (original_cost.excess_area, original_cost.maximum)
+        {
             if scheduled != original {
                 stats.changed_blocks += 1;
             }
             func.blocks[block_index].insts = scheduled;
-            stats.maximum_after = stats.maximum_after.max(scheduled_pressure);
+            stats.maximum_after = stats.maximum_after.max(scheduled_cost.maximum);
         } else {
             stats.pressure_rejections += 1;
-            stats.maximum_after = stats.maximum_after.max(original_pressure);
+            stats.maximum_after = stats.maximum_after.max(original_cost.maximum);
         }
     }
     Ok(stats)
@@ -546,17 +553,37 @@ fn priority_bucket(priority: i8) -> usize {
     (priority - MIN_PRIORITY) as usize
 }
 
-fn max_pressure(instructions: &[MInst], live_out: &BTreeSet<VReg>) -> usize {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PressureCost {
+    maximum: usize,
+    excess_area: u128,
+}
+
+fn pressure_cost(
+    instructions: &[MInst],
+    live_out: &BTreeSet<VReg>,
+    register_capacity: usize,
+) -> PressureCost {
     let mut live = live_out.clone();
     let mut maximum = live.len();
+    let mut excess_area = live.len().saturating_sub(register_capacity) as u128;
     for inst in instructions.iter().rev() {
         if let Some(definition) = inst.def() {
             live.remove(&definition);
         }
         live.extend(inst.uses());
         maximum = maximum.max(live.len());
+        excess_area += live.len().saturating_sub(register_capacity) as u128;
     }
-    maximum
+    PressureCost {
+        maximum,
+        excess_area,
+    }
+}
+
+#[cfg(test)]
+fn max_pressure(instructions: &[MInst], live_out: &BTreeSet<VReg>) -> usize {
+    pressure_cost(instructions, live_out, super::NUM_REGS).maximum
 }
 
 fn is_schedulable_at(
@@ -990,6 +1017,77 @@ mod tests {
         at_capacity.insert(0, 2, &mut work);
         at_capacity.insert(1, -1, &mut work);
         assert_eq!(at_capacity.pop_best(14, 14, &mut work), Some(1));
+    }
+
+    #[test]
+    fn excess_live_area_distinguishes_equal_peak_schedules() {
+        let prefix = vec![
+            MInst::LoadImm {
+                dst: VReg(10),
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: VReg(11),
+                value: 2,
+            },
+            MInst::LoadImm {
+                dst: VReg(12),
+                value: 3,
+            },
+            MInst::Select {
+                dst: VReg(13),
+                cond: VReg(10),
+                true_val: VReg(11),
+                false_val: VReg(12),
+            },
+        ];
+        let mut compact = prefix.clone();
+        compact.extend([
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 4,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 5,
+            },
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::LoadImm {
+                dst: VReg(3),
+                value: 6,
+            },
+        ]);
+        let mut stretched = prefix;
+        stretched.extend([
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 4,
+            },
+            MInst::LoadImm {
+                dst: VReg(3),
+                value: 6,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 5,
+            },
+            MInst::Add {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+        ]);
+        let live_out = BTreeSet::from([VReg(2), VReg(3)]);
+
+        let compact_cost = pressure_cost(&compact, &live_out, 1);
+        let stretched_cost = pressure_cost(&stretched, &live_out, 1);
+
+        assert_eq!(compact_cost.maximum, stretched_cost.maximum);
+        assert!(compact_cost.excess_area < stretched_cost.excess_area);
     }
 
     #[test]

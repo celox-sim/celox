@@ -19,6 +19,7 @@ x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  xor eax,eax
   0x0000000b  jmp short 000000000000000Dh
   0x0000000d  add rsp,8
@@ -32,34 +33,30 @@ Bindings:
 --- MIR after optimization, before register allocation ---
 bb0:
   v0 = load.i8 [sim + 40]
-  v1 = and.w32 v0, 0xff
   v2 = load.i8 [sim + 35]
   v4 = and.w64 v2, 0xffffffffffffff00
-  v3 = or.w64 v4, v1
+  v3 = or.w64 v4, v0
   store.i8 [sim + 35], v3
   ret
 --- MIR after pressure scheduling, before CSSA and spilling ---
 bb0:
   v0 = load.i8 [sim + 40]
-  v1 = and.w32 v0, 0xff
   v2 = load.i8 [sim + 35]
   v4 = and.w64 v2, 0xffffffffffffff00
-  v3 = or.w64 v4, v1
+  v3 = or.w64 v4, v0
   store.i8 [sim + 35], v3
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i8 [sim + 40]
-  v1 = and.w32 v0, 0xff
   v2 = load.i8 [sim + 35]
   v4 = and.w64 v2, 0xffffffffffffff00
-  v3 = or.w64 v4, v1
+  v3 = or.w64 v4, v0
   store.i8 [sim + 35], v3
   ret
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
-  v1 -> rax
   v2 -> rdx
   v3 -> rdx
   v4 -> rdx
@@ -67,17 +64,17 @@ x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  movzx eax,byte [r15+28h]
-  0x0000000e  and eax,0FFh
-  0x00000013  movzx edx,byte [r15+23h]
-  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
-  0x0000001f  or rdx,rax
-  0x00000022  mov [r15+23h],dl
-  0x00000026  xor eax,eax
-  0x00000028  jmp short 000000000000002Ah
-  0x0000002a  add rsp,8
-  0x0000002e  pop r15
-  0x00000030  ret
+  0x0000000e  movzx edx,byte [r15+23h]
+  0x00000013  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001a  or rdx,rax
+  0x0000001d  mov [r15+23h],dl
+  0x00000021  xor eax,eax
+  0x00000023  jmp short 0000000000000025h
+  0x00000025  add rsp,8
+  0x00000029  pop r15
+  0x0000002b  ret
 
 === Native function eval_apply_ff[0] ===
 Bindings:
@@ -101,8 +98,7 @@ bb3:
 --- MIR after pressure scheduling, before CSSA and spilling ---
 bb0:
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb4, bb5
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb4, bb5
 bb4:
   jmp bb1
 bb1:
@@ -120,16 +116,11 @@ bb3:
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb4, bb5
-bb4:
-  jmp bb1
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb1, bb2
 bb1:
   v3 = imm 0x0
   store.i8 [sim + 35], v3
   jmp bb3
-bb5:
-  jmp bb2
 bb2:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 35], v6
@@ -139,21 +130,24 @@ bb3:
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
-  v1 -> rax
   v3 -> rax
   v6 -> rax
 x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  movzx eax,byte [r15+21h]
   0x0000000e  test rax,rax
   0x00000011  je short 000000000000001Eh
+bb2:
   0x00000013  movzx eax,byte [r15+22h]
   0x00000018  mov [r15+23h],al
   0x0000001c  jmp short 0000000000000024h
+bb1:
   0x0000001e  xor eax,eax
   0x00000020  mov [r15+23h],al
+bb3:
   0x00000024  xor eax,eax
   0x00000026  jmp short 0000000000000028h
   0x00000028  add rsp,8
@@ -167,10 +161,9 @@ Bindings:
 --- MIR after optimization, before register allocation ---
 bb0:
   v7 = load.i8 [sim + 35]
-  v8 = and.w32 v7, 0xff
   v9 = load.i8 [sim + 40]
   v11 = and.w64 v9, 0xffffffffffffff00
-  v10 = or.w64 v11, v8
+  v10 = or.w64 v11, v7
   store.i8 [sim + 40], v10
   v0 = load.i8 [sim + 33]
   v1 = cmp.Eq v0, 0
@@ -188,14 +181,12 @@ bb3:
 --- MIR after pressure scheduling, before CSSA and spilling ---
 bb0:
   v7 = load.i8 [sim + 35]
-  v8 = and.w32 v7, 0xff
   v9 = load.i8 [sim + 40]
   v11 = and.w64 v9, 0xffffffffffffff00
-  v10 = or.w64 v11, v8
+  v10 = or.w64 v11, v7
   store.i8 [sim + 40], v10
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb4, bb5
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb4, bb5
 bb4:
   jmp bb1
 bb1:
@@ -213,22 +204,16 @@ bb3:
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v7 = load.i8 [sim + 35]
-  v8 = and.w32 v7, 0xff
   v9 = load.i8 [sim + 40]
   v11 = and.w64 v9, 0xffffffffffffff00
-  v10 = or.w64 v11, v8
+  v10 = or.w64 v11, v7
   store.i8 [sim + 40], v10
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb4, bb5
-bb4:
-  jmp bb1
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb1, bb2
 bb1:
   v3 = imm 0x0
   store.i8 [sim + 40], v3
   jmp bb3
-bb5:
-  jmp bb2
 bb2:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 40], v6
@@ -238,11 +223,9 @@ bb3:
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
-  v1 -> rax
   v3 -> rax
   v6 -> rax
   v7 -> rax
-  v8 -> rax
   v9 -> rdx
   v10 -> rdx
   v11 -> rdx
@@ -250,25 +233,28 @@ x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  movzx eax,byte [r15+23h]
-  0x0000000e  and eax,0FFh
-  0x00000013  movzx edx,byte [r15+28h]
-  0x00000018  and rdx,0FFFFFFFFFFFFFF00h
-  0x0000001f  or rdx,rax
-  0x00000022  mov [r15+28h],dl
-  0x00000026  movzx eax,byte [r15+21h]
-  0x0000002b  test rax,rax
-  0x0000002e  je short 000000000000003Bh
-  0x00000030  movzx eax,byte [r15+22h]
-  0x00000035  mov [r15+28h],al
-  0x00000039  jmp short 0000000000000041h
-  0x0000003b  xor eax,eax
-  0x0000003d  mov [r15+28h],al
-  0x00000041  xor eax,eax
-  0x00000043  jmp short 0000000000000045h
-  0x00000045  add rsp,8
-  0x00000049  pop r15
-  0x0000004b  ret
+  0x0000000e  movzx edx,byte [r15+28h]
+  0x00000013  and rdx,0FFFFFFFFFFFFFF00h
+  0x0000001a  or rdx,rax
+  0x0000001d  mov [r15+28h],dl
+  0x00000021  movzx eax,byte [r15+21h]
+  0x00000026  test rax,rax
+  0x00000029  je short 0000000000000036h
+bb2:
+  0x0000002b  movzx eax,byte [r15+22h]
+  0x00000030  mov [r15+28h],al
+  0x00000034  jmp short 000000000000003Ch
+bb1:
+  0x00000036  xor eax,eax
+  0x00000038  mov [r15+28h],al
+bb3:
+  0x0000003c  xor eax,eax
+  0x0000003e  jmp short 0000000000000040h
+  0x00000040  add rsp,8
+  0x00000044  pop r15
+  0x00000046  ret
 
 === Native function eval_comb_apply_ff[0] ===
 Bindings:
@@ -292,8 +278,7 @@ bb4:
 --- MIR after pressure scheduling, before CSSA and spilling ---
 bb0:
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb5, bb6
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb5, bb6
 bb5:
   jmp bb2
 bb2:
@@ -311,16 +296,11 @@ bb4:
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i8 [sim + 33]
-  v1 = cmp.Eq v0, 0
-  br v1, bb5, bb6
-bb5:
-  jmp bb2
+  br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb2, bb3
 bb2:
   v3 = imm 0x0
   store.i8 [sim + 35], v3
   jmp bb4
-bb6:
-  jmp bb3
 bb3:
   v6 = load.i8 [sim + 34]
   store.i8 [sim + 35], v6
@@ -330,21 +310,24 @@ bb4:
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
-  v1 -> rax
   v3 -> rax
   v6 -> rax
 x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  movzx eax,byte [r15+21h]
   0x0000000e  test rax,rax
   0x00000011  je short 000000000000001Eh
+bb3:
   0x00000013  movzx eax,byte [r15+22h]
   0x00000018  mov [r15+23h],al
   0x0000001c  jmp short 0000000000000024h
+bb2:
   0x0000001e  xor eax,eax
   0x00000020  mov [r15+23h],al
+bb4:
   0x00000024  xor eax,eax
   0x00000026  jmp short 0000000000000028h
   0x00000028  add rsp,8

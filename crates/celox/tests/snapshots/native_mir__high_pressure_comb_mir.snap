@@ -15,44 +15,29 @@ bb0:
   v11 = load.i32 [sim + 56]
   v13 = load.i32 [sim + 60]
   v31 = add.w32 v0, v1
-  v2 = and.w32 v31, 0xffffffff
   v15 = load.i32 [sim + 64]
   v17 = load.i32 [sim + 68]
-  v32 = add.w32 v2, v3
-  v4 = and.w32 v32, 0xffffffff
+  v32 = add.w32 v31, v3
   v19 = load.i32 [sim + 72]
-  v33 = add.w32 v4, v5
-  v6 = and.w32 v33, 0xffffffff
+  v33 = add.w32 v32, v5
   v21 = load.i32 [sim + 76]
-  v34 = add.w32 v6, v7
-  v8 = and.w32 v34, 0xffffffff
+  v34 = add.w32 v33, v7
   v23 = load.i32 [sim + 80]
-  v35 = add.w32 v8, v9
-  v10 = and.w32 v35, 0xffffffff
+  v35 = add.w32 v34, v9
   v25 = load.i32 [sim + 84]
-  v36 = add.w32 v10, v11
-  v12 = and.w32 v36, 0xffffffff
+  v36 = add.w32 v35, v11
   v27 = load.i32 [sim + 88]
-  v37 = add.w32 v12, v13
-  v14 = and.w32 v37, 0xffffffff
+  v37 = add.w32 v36, v13
   v29 = load.i32 [sim + 92]
-  v38 = add.w32 v14, v15
-  v16 = and.w32 v38, 0xffffffff
-  v39 = add.w32 v16, v17
-  v18 = and.w32 v39, 0xffffffff
-  v40 = add.w32 v18, v19
-  v20 = and.w32 v40, 0xffffffff
-  v41 = add.w32 v20, v21
-  v22 = and.w32 v41, 0xffffffff
-  v42 = add.w32 v22, v23
-  v24 = and.w32 v42, 0xffffffff
-  v43 = add.w32 v24, v25
-  v26 = and.w32 v43, 0xffffffff
-  v44 = add.w32 v26, v27
-  v28 = and.w32 v44, 0xffffffff
-  v45 = add.w32 v28, v29
-  v30 = and.w32 v45, 0xffffffff
-  store.i32 [sim + 96], v30
+  v38 = add.w32 v37, v15
+  v39 = add.w32 v38, v17
+  v40 = add.w32 v39, v19
+  v41 = add.w32 v40, v21
+  v42 = add.w32 v41, v23
+  v43 = add.w32 v42, v25
+  v44 = add.w32 v43, v27
+  v45 = add.w32 v44, v29
+  store.i32 [sim + 96], v45
   ret
 --- MIR after pressure scheduling, before CSSA and spilling ---
 bb0:
@@ -65,44 +50,29 @@ bb0:
   v11 = load.i32 [sim + 56]
   v13 = load.i32 [sim + 60]
   v31 = add.w32 v0, v1
-  v2 = and.w32 v31, 0xffffffff
   v15 = load.i32 [sim + 64]
   v17 = load.i32 [sim + 68]
-  v32 = add.w32 v2, v3
-  v4 = and.w32 v32, 0xffffffff
+  v32 = add.w32 v31, v3
   v19 = load.i32 [sim + 72]
-  v33 = add.w32 v4, v5
-  v6 = and.w32 v33, 0xffffffff
+  v33 = add.w32 v32, v5
   v21 = load.i32 [sim + 76]
-  v34 = add.w32 v6, v7
-  v8 = and.w32 v34, 0xffffffff
+  v34 = add.w32 v33, v7
   v23 = load.i32 [sim + 80]
-  v35 = add.w32 v8, v9
-  v10 = and.w32 v35, 0xffffffff
+  v35 = add.w32 v34, v9
   v25 = load.i32 [sim + 84]
-  v36 = add.w32 v10, v11
-  v12 = and.w32 v36, 0xffffffff
+  v36 = add.w32 v35, v11
   v27 = load.i32 [sim + 88]
-  v37 = add.w32 v12, v13
-  v14 = and.w32 v37, 0xffffffff
+  v37 = add.w32 v36, v13
   v29 = load.i32 [sim + 92]
-  v38 = add.w32 v14, v15
-  v16 = and.w32 v38, 0xffffffff
-  v39 = add.w32 v16, v17
-  v18 = and.w32 v39, 0xffffffff
-  v40 = add.w32 v18, v19
-  v20 = and.w32 v40, 0xffffffff
-  v41 = add.w32 v20, v21
-  v22 = and.w32 v41, 0xffffffff
-  v42 = add.w32 v22, v23
-  v24 = and.w32 v42, 0xffffffff
-  v43 = add.w32 v24, v25
-  v26 = and.w32 v43, 0xffffffff
-  v44 = add.w32 v26, v27
-  v28 = and.w32 v44, 0xffffffff
-  v45 = add.w32 v28, v29
-  v30 = and.w32 v45, 0xffffffff
-  store.i32 [sim + 96], v30
+  v38 = add.w32 v37, v15
+  v39 = add.w32 v38, v17
+  v40 = add.w32 v39, v19
+  v41 = add.w32 v40, v21
+  v42 = add.w32 v41, v23
+  v43 = add.w32 v42, v25
+  v44 = add.w32 v43, v27
+  v45 = add.w32 v44, v29
+  store.i32 [sim + 96], v45
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
@@ -115,78 +85,48 @@ bb0:
   v11 = load.i32 [sim + 56]
   v13 = load.i32 [sim + 60]
   v31 = add.w32 v0, v1
-  v2 = and.w32 v31, 0xffffffff
   v15 = load.i32 [sim + 64]
   v17 = load.i32 [sim + 68]
-  v32 = add.w32 v2, v3
-  v4 = and.w32 v32, 0xffffffff
+  v32 = add.w32 v31, v3
   v19 = load.i32 [sim + 72]
-  v33 = add.w32 v4, v5
-  v6 = and.w32 v33, 0xffffffff
+  v33 = add.w32 v32, v5
   v21 = load.i32 [sim + 76]
-  v34 = add.w32 v6, v7
-  v8 = and.w32 v34, 0xffffffff
+  v34 = add.w32 v33, v7
   v23 = load.i32 [sim + 80]
-  v35 = add.w32 v8, v9
-  v10 = and.w32 v35, 0xffffffff
+  v35 = add.w32 v34, v9
   v25 = load.i32 [sim + 84]
-  v36 = add.w32 v10, v11
-  v12 = and.w32 v36, 0xffffffff
+  v36 = add.w32 v35, v11
   v27 = load.i32 [sim + 88]
-  v37 = add.w32 v12, v13
-  v14 = and.w32 v37, 0xffffffff
+  v37 = add.w32 v36, v13
   v29 = load.i32 [sim + 92]
-  v38 = add.w32 v14, v15
-  v16 = and.w32 v38, 0xffffffff
-  v39 = add.w32 v16, v17
-  v18 = and.w32 v39, 0xffffffff
-  v40 = add.w32 v18, v19
-  v20 = and.w32 v40, 0xffffffff
-  v41 = add.w32 v20, v21
-  v22 = and.w32 v41, 0xffffffff
-  v42 = add.w32 v22, v23
-  v24 = and.w32 v42, 0xffffffff
-  v43 = add.w32 v24, v25
-  v26 = and.w32 v43, 0xffffffff
-  v44 = add.w32 v26, v27
-  v28 = and.w32 v44, 0xffffffff
-  v45 = add.w32 v28, v29
-  v30 = and.w32 v45, 0xffffffff
-  store.i32 [sim + 96], v30
+  v38 = add.w32 v37, v15
+  v39 = add.w32 v38, v17
+  v40 = add.w32 v39, v19
+  v41 = add.w32 v40, v21
+  v42 = add.w32 v41, v23
+  v43 = add.w32 v42, v25
+  v44 = add.w32 v43, v27
+  v45 = add.w32 v44, v29
+  store.i32 [sim + 96], v45
   ret
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
   v1 -> rdx
-  v2 -> rax
   v3 -> rsi
-  v4 -> rax
   v5 -> rdi
-  v6 -> rax
   v7 -> r8
-  v8 -> rax
   v9 -> r9
-  v10 -> rax
   v11 -> r10
-  v12 -> rax
   v13 -> r11
-  v14 -> rax
   v15 -> rdx
-  v16 -> rax
   v17 -> rcx
-  v18 -> rax
   v19 -> rsi
-  v20 -> rax
   v21 -> rdi
-  v22 -> rax
   v23 -> r8
-  v24 -> rax
   v25 -> r9
-  v26 -> rax
   v27 -> r10
-  v28 -> rax
   v29 -> r11
-  v30 -> rax
   v31 -> rax
   v32 -> rax
   v33 -> rax
@@ -206,6 +146,7 @@ x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  mov eax,[r15+20h]
   0x0000000d  mov edx,[r15+24h]
   0x00000011  mov esi,[r15+28h]
@@ -215,46 +156,31 @@ x86-64 disassembly of emitted function:
   0x00000021  mov r10d,[r15+38h]
   0x00000025  mov r11d,[r15+3Ch]
   0x00000029  add eax,edx
-  0x0000002b  and eax,0FFFFFFFFh
-  0x00000030  mov edx,[r15+40h]
-  0x00000034  mov ecx,[r15+44h]
-  0x00000038  add eax,esi
-  0x0000003a  and eax,0FFFFFFFFh
-  0x0000003f  mov esi,[r15+48h]
-  0x00000043  add eax,edi
-  0x00000045  and eax,0FFFFFFFFh
-  0x0000004a  mov edi,[r15+4Ch]
-  0x0000004e  add eax,r8d
-  0x00000051  and eax,0FFFFFFFFh
-  0x00000056  mov r8d,[r15+50h]
-  0x0000005a  add eax,r9d
-  0x0000005d  and eax,0FFFFFFFFh
-  0x00000062  mov r9d,[r15+54h]
-  0x00000066  add eax,r10d
-  0x00000069  and eax,0FFFFFFFFh
-  0x0000006e  mov r10d,[r15+58h]
-  0x00000072  add eax,r11d
-  0x00000075  and eax,0FFFFFFFFh
-  0x0000007a  mov r11d,[r15+5Ch]
-  0x0000007e  add eax,edx
-  0x00000080  and eax,0FFFFFFFFh
-  0x00000085  add eax,ecx
-  0x00000087  and eax,0FFFFFFFFh
-  0x0000008c  add eax,esi
-  0x0000008e  and eax,0FFFFFFFFh
-  0x00000093  add eax,edi
-  0x00000095  and eax,0FFFFFFFFh
-  0x0000009a  add eax,r8d
-  0x0000009d  and eax,0FFFFFFFFh
-  0x000000a2  add eax,r9d
-  0x000000a5  and eax,0FFFFFFFFh
-  0x000000aa  add eax,r10d
-  0x000000ad  and eax,0FFFFFFFFh
-  0x000000b2  add eax,r11d
-  0x000000b5  and eax,0FFFFFFFFh
-  0x000000ba  mov [r15+60h],eax
-  0x000000be  xor eax,eax
-  0x000000c0  jmp short 00000000000000C2h
-  0x000000c2  add rsp,8
-  0x000000c6  pop r15
-  0x000000c8  ret
+  0x0000002b  mov edx,[r15+40h]
+  0x0000002f  mov ecx,[r15+44h]
+  0x00000033  add eax,esi
+  0x00000035  mov esi,[r15+48h]
+  0x00000039  add eax,edi
+  0x0000003b  mov edi,[r15+4Ch]
+  0x0000003f  add eax,r8d
+  0x00000042  mov r8d,[r15+50h]
+  0x00000046  add eax,r9d
+  0x00000049  mov r9d,[r15+54h]
+  0x0000004d  add eax,r10d
+  0x00000050  mov r10d,[r15+58h]
+  0x00000054  add eax,r11d
+  0x00000057  mov r11d,[r15+5Ch]
+  0x0000005b  add eax,edx
+  0x0000005d  add eax,ecx
+  0x0000005f  add eax,esi
+  0x00000061  add eax,edi
+  0x00000063  add eax,r8d
+  0x00000066  add eax,r9d
+  0x00000069  add eax,r10d
+  0x0000006c  add eax,r11d
+  0x0000006f  mov [r15+60h],eax
+  0x00000073  xor eax,eax
+  0x00000075  jmp short 0000000000000077h
+  0x00000077  add rsp,8
+  0x0000007b  pop r15
+  0x0000007d  ret

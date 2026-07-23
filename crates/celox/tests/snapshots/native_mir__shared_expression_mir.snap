@@ -9,12 +9,10 @@ bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
   v7 = add.w32 v0, v1
-  v2 = and.w32 v7, 0xffffffff
-  v3 = imm 0x1
-  v4 = and.w32 v2, v3
+  v4 = and.w32 v7, 0x1
   store.i32 [sim + 40], v4
   v5 = imm 0x2
-  v6 = or.w32 v2, v5
+  v6 = or.w32 v7, v5
   store.i32 [sim + 44], v6
   ret
 --- MIR after pressure scheduling, before CSSA and spilling ---
@@ -22,12 +20,10 @@ bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
   v7 = add.w32 v0, v1
-  v2 = and.w32 v7, 0xffffffff
-  v3 = imm 0x1
-  v4 = and.w32 v2, v3
+  v4 = and.w32 v7, 0x1
   store.i32 [sim + 40], v4
   v5 = imm 0x2
-  v6 = or.w32 v2, v5
+  v6 = or.w32 v7, v5
   store.i32 [sim + 44], v6
   ret
 --- MIR after register allocation and post-RA peepholes ---
@@ -35,20 +31,16 @@ bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
   v7 = add.w32 v0, v1
-  v2 = and.w32 v7, 0xffffffff
-  v3 = imm 0x1
-  v4 = and.w32 v2, v3
+  v4 = and.w32 v7, 0x1
   store.i32 [sim + 40], v4
   v5 = imm 0x2
-  v6 = or.w32 v2, v5
+  v6 = or.w32 v7, v5
   store.i32 [sim + 44], v6
   ret
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
   v1 -> rdx
-  v2 -> rax
-  v3 -> rdx
   v4 -> rdx
   v5 -> rdx
   v6 -> rax
@@ -57,18 +49,18 @@ x86-64 disassembly of emitted function:
   0x00000000  push r15
   0x00000002  sub rsp,8
   0x00000006  mov r15,rdi
+bb0:
   0x00000009  mov eax,[r15+20h]
   0x0000000d  mov edx,[r15+24h]
   0x00000011  add eax,edx
-  0x00000013  and eax,0FFFFFFFFh
-  0x00000018  mov edx,1
-  0x0000001d  and edx,eax
-  0x0000001f  mov [r15+28h],edx
-  0x00000023  mov edx,2
-  0x00000028  or eax,edx
-  0x0000002a  mov [r15+2Ch],eax
-  0x0000002e  xor eax,eax
-  0x00000030  jmp short 0000000000000032h
-  0x00000032  add rsp,8
-  0x00000036  pop r15
-  0x00000038  ret
+  0x00000013  mov edx,eax
+  0x00000015  and edx,1
+  0x00000018  mov [r15+28h],edx
+  0x0000001c  mov edx,2
+  0x00000021  or eax,edx
+  0x00000023  mov [r15+2Ch],eax
+  0x00000027  xor eax,eax
+  0x00000029  jmp short 000000000000002Bh
+  0x0000002b  add rsp,8
+  0x0000002f  pop r15
+  0x00000031  ret

@@ -6532,6 +6532,113 @@ Status: **CFG-wide mask facts are Linux-correct and remove 1.0% of dynamically
 executed JIT instructions; the remaining Veryl gap is still dominated by
 other generated-code work**.
 
+### Step 76: Demand-bounded wide extraction
+
+A constant right shift from a wide SIR value to a narrow result was selected
+by the generic wide binary path before the existing extraction lowering could
+run.  The generic path shifted every source word and discarded all but the
+low result afterwards.  Even the extraction path combined the next source
+word when the declared result ended before that word.  A one-bit field inside
+one source word therefore became `shr; shl; or; and`.
+
+Constant two-state wide-to-narrow shifts now select extraction before generic
+wide lowering.  The extraction includes the next word only when the declared
+result range crosses the current 64-bit boundary.  One executable regression
+checks both a non-crossing one-bit field and an eight-bit field beginning at
+bit 60.  The complete Heliodor MIR shrinks by 148,243 text bytes, and the hot
+field extractions become `shr; and`; genuinely crossing fields retain their
+carry.  The library suite passes 1,055/1,055, and two trace-free non-LTO runs
+reach `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`.  Their
+execution times, 70.580 s and 68.643 s, do not establish an aggregate speedup.
+
+Status: **complete in `4a48b8db`; a local code-generation defect is removed,
+while the runtime effect is below whole-workload noise**.
+
+### Step 77: Joint scheduler and spiller redesign
+
+An execution-only `perf` sample attributes 95.63% of host cycles to generated
+JIT code.  The largest fused blocks are `bb4212` (1.92%) and `bb4182` (1.79%).
+In `bb4212`, the pre-scheduling MIR defines and consumes a floating-point
+normalization group locally.  The pressure scheduler moves that group to the
+block entry, keeps its outputs live across roughly 1,100 unrelated machine
+instructions, and the spiller then writes and reloads those outputs.  Peak
+live count does not increase, so the current scheduler accepts the order.
+
+This exposes an information-boundary defect rather than a missing tie-break:
+
+- scheduling runs before CSSA, final fixed-register constraints, exact
+  MemorySSA reload recipes, and the W/S spill plan;
+- its target model is one aggregate `K = 14`, so it cannot price clobbers,
+  edge copies, stack reloads, state reloads, or rematerialization;
+- the spiller consumes one frozen order and cannot ask for a use cluster to be
+  rescheduled; and
+- reconstruction is followed by a capacity proof and coloring, neither of
+  which can revise an expensive split.
+
+The replacement follows the conventional machine-compiler ownership split.
+It does not attempt an exponential joint ordering/coloring search:
+
+1. **Shared machine-range facts.**  After CSSA, construct sparse live
+   intervals, exact use clusters, loop weights, fixed-register reservations,
+   and point-specific stack/state/rematerialization costs once.  Scheduler,
+   allocator, and independent verifiers consume the same immutable facts.
+2. **Bidirectional pre-RA scheduling.**  Schedule each legal dependence region
+   from both boundaries with top and bottom pressure trackers.  Candidate
+   order is determined first by projected target-pressure and weighted
+   reconstruction cost, then by dependency depth, then deterministic source
+   order.  A definition is not pulled out of its use cluster merely because
+   another chain has a longer critical path.
+3. **Interval-owned splitting and spilling.**  Physical interval unions own
+   assignments.  Unassigned intervals are assigned, evicted, or split around
+   real use clusters; every live child returns to the same allocation queue.
+   Only a child that cannot be assigned after productive splits reaches the
+   spiller, which chooses an exact MemorySSA recipe, rematerialization, or an
+   explicit stack definition/reload.  Home selection never predetermines a
+   physical interval's topology.
+4. **Physical post-RA scheduling.**  Locally place the resulting reload/store
+   operations using exact physical liveness and memory dependencies.  This
+   phase may shorten a reload range but cannot change colors or invent hidden
+   scratch registers.
+
+Large-function complexity is a design constraint.  Live ranges and physical
+occupancy remain CFG-sparse; no pairwise interference graph, path
+enumeration, compact/tagged index, whole-function clone per candidate, or
+arbitrary retry cap is permitted.  A scheduling region is processed in
+`O((N + E) log N)` time and `O(N + E)` space.  Allocation edits update only
+the sparse ranges touched by a split.  Any transactional rescheduling or split
+is published only after a strict weighted-cost decrease, giving a finite
+monotonic termination argument instead of a fixed iteration limit.
+
+Migration is deliberately staged.  First retain a linear capacity-excess
+live-area guard so the current scheduler cannot accept equal-peak range
+inflation.  Next publish the shared range/cost model without changing code
+generation.  Then switch scheduling, interval allocation/spilling, and
+post-RA placement one boundary at a time.  Every code-generating stage must
+pass focused CFG/constraint/loop/recipe tests, the complete library and native
+testbench gates, complete SIR/MIR inspection, and an exact non-LTO Linux boot
+before the next boundary changes.
+
+The first guard computes peak pressure and the integral of
+`max(live - K, 0)` in the same backward liveness pass. A candidate schedule is
+accepted only when its capacity-excess area, then its peak, does not exceed the
+original order. It adds no path search or live-set copy. The three complete
+SIR dumps are byte-identical; complete MIR shrinks from 47,510,303 to
+47,481,270 text bytes. The guard does not repair the five FP homes in
+`bb4212`: aggregate area still prices all VRegs equally, confirming that the
+next stage must share actual reconstruction costs rather than add another
+scalar scheduling heuristic.
+
+The focused scheduler suite passes 20/20, the library suite 1,056/1,056,
+native testbench 60 passed with one ignored, counter 9 passed with three
+ignored, and refreshed full-pipeline MIR snapshots pass 6/6. Two trace-free
+non-LTO runs reach `reboot: Power down` with exactly
+`cy=9ae070 x3=aa pass=1`; compile times are 75.821/75.831 s and execution
+times are 67.614/67.592 s. The stable candidate samples are encouraging but
+are not presented as completion of the scheduler/spiller redesign.
+
+Status: **live-area guard complete; shared weighted machine-range facts and
+the scheduler/spiller replacement remain in progress**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6663,6 +6770,8 @@ other generated-code work**.
 | 73 path-sensitive priority recovery | `c50cd1e3` | guarded-region 30/30; BranchifyMux 51/51 | all-target strict Clippy and format; package suite reaches pre-existing all-backend four-state cast failures | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.048 s; execute 77.441 s | dead priority CFG removed; normal FP DAG moves below five early exits; runtime -2.4% versus adjacent retained sample |
 | 74 edge-known phi outcome selector | this step | selector compression 1/1 plus retained priority tests | check, strict Clippy, format, and exact native gate | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.179 / 84.341 s; execute 76.763 / 77.841 s | one selector replaces four path-history phis; inspected stack rows 9→3 and frames -112 B; aggregate runtime effect unconfirmed |
 | 75 CFG-wide machine known bits | this step | mask propagation 4/4 including narrow/wide phi arms | lib 1013/1013; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, strict Clippy, format | sampled non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 62.988 s; execute 71.283 s | emitted `and` -1,908; dynamic JIT instructions -1.0% from adjacent baseline |
+| 76 demand-bounded wide extraction | `4a48b8db` | non-crossing and crossing narrow wide extraction | lib 1055/1055 | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 73.676 / 76.646 s; execute 70.580 / 68.643 s | unnecessary source chunks and carry operations removed; aggregate runtime effect unconfirmed |
+| 77a capacity-excess live-area guard | this step | scheduler 20/20; native MIR 6/6 | lib 1056/1056; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 75.821 / 75.831 s; execute 67.614 / 67.592 s | equal-peak live-area regressions rejected; MIR -29,033 text bytes; weighted scheduler/spiller redesign remains open |
 
 ## Related design records
 
