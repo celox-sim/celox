@@ -975,6 +975,14 @@ pub enum MInst {
         true_bb: BlockId,
         false_bb: BlockId,
     },
+    /// Dense full-domain dispatch through signed offsets relative to
+    /// `table_base`. The index is proven to be within `targets`.
+    JumpTable {
+        index: VReg,
+        table_base: VReg,
+        target: VReg,
+        targets: Box<[BlockId]>,
+    },
     /// Unconditional jump
     Jump { target: BlockId },
     /// Return from function (success, code 0)
@@ -1249,6 +1257,16 @@ impl fmt::Display for MInst {
                 true_bb,
                 false_bb,
             } => write!(f, "br_pred {predicate:?}, {true_bb}, {false_bb}"),
+            MInst::JumpTable { index, targets, .. } => {
+                write!(f, "jmp_table {index}, [")?;
+                for (position, target) in targets.iter().enumerate() {
+                    if position != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{target}")?;
+                }
+                write!(f, "]")
+            }
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
             MInst::ReturnError { code } => write!(f, "ret_error {code}"),
@@ -1383,6 +1401,7 @@ impl MInst {
             | MInst::SparseCommitWorklist { .. }
             | MInst::Branch { .. }
             | MInst::BranchPred { .. }
+            | MInst::JumpTable { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => None,
@@ -1505,6 +1524,12 @@ impl MInst {
                 predicate: BranchPredicate::MemoryNonZero { .. },
                 ..
             } => Uses::none(),
+            MInst::JumpTable {
+                index,
+                table_base,
+                target,
+                ..
+            } => Uses::three(*index, *table_base, *target),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
     }
@@ -1758,6 +1783,22 @@ impl MInst {
                 }
                 BranchPredicate::MemoryNonZero { .. } => {}
             },
+            MInst::JumpTable {
+                index,
+                table_base,
+                target,
+                ..
+            } => {
+                if *index == old {
+                    *index = new;
+                }
+                if *table_base == old {
+                    *table_base = new;
+                }
+                if *target == old {
+                    *target = new;
+                }
+            }
             MInst::LoadImm { .. }
             | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
@@ -1781,6 +1822,7 @@ impl MInst {
             self,
             MInst::Branch { .. }
                 | MInst::BranchPred { .. }
+                | MInst::JumpTable { .. }
                 | MInst::Jump { .. }
                 | MInst::Return
                 | MInst::ReturnError { .. }
@@ -1809,6 +1851,11 @@ impl MInst {
             } => {
                 *true_bb = rewrite(*true_bb);
                 *false_bb = rewrite(*false_bb);
+            }
+            MInst::JumpTable { targets, .. } => {
+                for target in targets {
+                    *target = rewrite(*target);
+                }
             }
             MInst::Jump { target } => *target = rewrite(*target),
             _ => {}
@@ -1864,6 +1911,7 @@ impl MBlock {
             | Some(MInst::BranchPred {
                 true_bb, false_bb, ..
             }) => vec![*true_bb, *false_bb],
+            Some(MInst::JumpTable { targets, .. }) => targets.to_vec(),
             Some(MInst::Jump { target }) => vec![*target],
             _ => vec![],
         }

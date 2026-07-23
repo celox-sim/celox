@@ -651,6 +651,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::SRem { .. }
         | MInst::Branch { .. }
         | MInst::BranchPred { .. }
+        | MInst::JumpTable { .. }
         | MInst::Jump { .. }
         | MInst::Return
         | MInst::ReturnError { .. } => false,

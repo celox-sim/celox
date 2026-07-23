@@ -4,8 +4,8 @@
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
 use crate::ir::{
-    BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
-    UnaryOp,
+    BasicBlock, BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+    SIRTerminator, UnaryOp,
 };
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 
@@ -548,7 +548,7 @@ pub fn lower_execution_unit(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-    let block_ids = ordered_sir_blocks(eu);
+    let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
     let sparse_write_states = match sparse_worklist_run {
         Some((commit_block, commit_start, _)) => {
@@ -567,6 +567,20 @@ pub fn lower_execution_unit(
         None
     };
     let exact_constants = (!four_state).then(|| collect_exact_sir_constants(eu));
+    let dense_branch_table_plans = if !four_state {
+        find_dense_branch_table_plans(
+            eu,
+            exact_constants
+                .as_ref()
+                .expect("two-state branch tables require exact constants"),
+            sir_use_sites
+                .as_ref()
+                .expect("two-state branch tables require SIR uses"),
+        )
+    } else {
+        DenseBranchTablePlans::default()
+    };
+    block_ids.retain(|block| !dense_branch_table_plans.removed_blocks.contains(block));
     let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
         HashMap::default();
     if !four_state {
@@ -690,6 +704,7 @@ pub fn lower_execution_unit(
         let lookup_plans = dense_lookup_plans_by_block
             .remove(&sir_block_id)
             .unwrap_or_default();
+        let branch_table_plan = dense_branch_table_plans.roots.get(&sir_block_id);
         let packed_lane_compare_plans = if !four_state {
             find_packed_lane_compare_plans(
                 sir_block,
@@ -710,6 +725,9 @@ pub fn lower_execution_unit(
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
+                continue;
+            }
             if let Some((worklist_block, start, end)) = sparse_worklist_run
                 && sir_block_id == worklist_block
                 && (start..end).contains(&inst_idx)
@@ -918,7 +936,11 @@ pub fn lower_execution_unit(
         }
 
         // Lower terminator
-        lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
+        if let Some(plan) = branch_table_plan {
+            lower_dense_branch_table(&mut ctx, &mut mblock, plan);
+        } else {
+            lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
+        }
         let pred_mir_id = mblock.id;
         sir_exit_mir_blocks.insert(sir_block_id, pred_mir_id);
 
@@ -2263,6 +2285,252 @@ struct PriorityEncodePlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ExactSirConstant {
     value: u64,
+}
+
+#[derive(Default)]
+struct DenseBranchTablePlans {
+    roots: HashMap<crate::ir::BlockId, DenseBranchTablePlan>,
+    removed_blocks: HashSet<crate::ir::BlockId>,
+}
+
+struct DenseBranchTablePlan {
+    selector: RegisterId,
+    selector_width: usize,
+    targets: Box<[crate::ir::BlockId]>,
+    skip_indices: HashSet<usize>,
+}
+
+struct DenseBranchCondition {
+    selector: RegisterId,
+    selector_width: usize,
+    key: u64,
+    covered_indices: HashSet<usize>,
+}
+
+fn match_dense_branch_condition(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+    condition: RegisterId,
+) -> Option<DenseBranchCondition> {
+    let definitions = collect_sir_defs(block);
+    let mut cursor = condition;
+    let mut covered_indices = HashSet::default();
+    loop {
+        let &index = definitions.get(&cursor)?;
+        match &block.instructions[index] {
+            SIRInstruction::Unary(
+                _,
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Or,
+                source,
+            ) => {
+                covered_indices.insert(index);
+                cursor = *source;
+            }
+            _ => break,
+        }
+    }
+
+    let &compare_index = definitions.get(&cursor)?;
+    let SIRInstruction::Binary(_, lhs, operation, rhs) = &block.instructions[compare_index] else {
+        return None;
+    };
+    let (selector, key) = match operation {
+        BinaryOp::EqWildcard => (*lhs, constants.get(rhs)?.value),
+        BinaryOp::Eq => match (constants.get(lhs), constants.get(rhs)) {
+            (None, Some(key)) => (*lhs, key.value),
+            (Some(key), None) => (*rhs, key.value),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let selector_width = register_types.get(&selector)?.width();
+    if selector_width == 0 || selector_width > 8 || key & !mask_for_width(selector_width) != 0 {
+        return None;
+    }
+    covered_indices.insert(compare_index);
+
+    for &index in &covered_indices {
+        let definition = sir_def_reg(&block.instructions[index])?;
+        if uses.get(&definition).is_some_and(|sites| {
+            sites.iter().any(|site| {
+                site.block != block.id
+                    || site
+                        .inst_idx
+                        .is_some_and(|use_index| !covered_indices.contains(&use_index))
+                    || (site.inst_idx.is_none() && definition != condition)
+            })
+        }) {
+            return None;
+        }
+    }
+
+    Some(DenseBranchCondition {
+        selector,
+        selector_width,
+        key,
+        covered_indices,
+    })
+}
+
+fn find_dense_branch_table_plans(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> DenseBranchTablePlans {
+    let mut predecessors: HashMap<crate::ir::BlockId, Vec<crate::ir::BlockId>> =
+        eu.blocks.keys().map(|&block| (block, Vec::new())).collect();
+    for block in eu.blocks.values() {
+        let successors = match &block.terminator {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        };
+        for successor in successors {
+            predecessors.entry(successor).or_default().push(block.id);
+        }
+    }
+
+    let mut result = DenseBranchTablePlans::default();
+    for root in ordered_sir_blocks(eu) {
+        if result.removed_blocks.contains(&root) {
+            continue;
+        }
+        let mut current = root;
+        let mut selector = None;
+        let mut selector_width = None;
+        let mut targets = Vec::<Option<crate::ir::BlockId>>::new();
+        let mut decision_blocks = Vec::new();
+        let mut root_skip = HashSet::default();
+        let mut valid = true;
+
+        loop {
+            let block = &eu.blocks[&current];
+            let SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } = &block.terminator
+            else {
+                valid = false;
+                break;
+            };
+            if !true_block.1.is_empty()
+                || !false_block.1.is_empty()
+                || !eu.blocks[&true_block.0].params.is_empty()
+            {
+                valid = false;
+                break;
+            }
+            let Some(condition) =
+                match_dense_branch_condition(block, &eu.register_map, constants, uses, *cond)
+            else {
+                valid = false;
+                break;
+            };
+            if let Some(expected) = selector {
+                if expected != condition.selector
+                    || selector_width != Some(condition.selector_width)
+                    || block
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .any(|(index, instruction)| {
+                            !condition.covered_indices.contains(&index)
+                                && !matches!(instruction, SIRInstruction::Imm(..))
+                        })
+                {
+                    valid = false;
+                    break;
+                }
+            } else {
+                selector = Some(condition.selector);
+                selector_width = Some(condition.selector_width);
+                targets.resize(1usize << condition.selector_width, None);
+                root_skip = condition.covered_indices.clone();
+            }
+            let key = condition.key as usize;
+            if targets[key].replace(true_block.0).is_some() {
+                valid = false;
+                break;
+            }
+            decision_blocks.push(current);
+            if targets.iter().all(Option::is_some) {
+                break;
+            }
+
+            let next = false_block.0;
+            if next == root
+                || !eu.blocks[&next].params.is_empty()
+                || predecessors.get(&next).map(Vec::as_slice) != Some([current].as_slice())
+            {
+                valid = false;
+                break;
+            }
+            current = next;
+        }
+
+        if !valid || targets.len() < 4 || targets.iter().any(Option::is_none) {
+            continue;
+        }
+        let target_blocks = targets.iter().flatten().copied().collect::<HashSet<_>>();
+        if decision_blocks
+            .iter()
+            .skip(1)
+            .any(|block| target_blocks.contains(block))
+        {
+            continue;
+        }
+        result
+            .removed_blocks
+            .extend(decision_blocks.iter().skip(1).copied());
+        result.roots.insert(
+            root,
+            DenseBranchTablePlan {
+                selector: selector.expect("valid branch table has a selector"),
+                selector_width: selector_width.expect("valid branch table has a width"),
+                targets: targets
+                    .into_iter()
+                    .map(|target| target.expect("full domain has every target"))
+                    .collect(),
+                skip_indices: root_skip,
+            },
+        );
+    }
+
+    let mut reachable = HashSet::default();
+    let mut worklist = vec![eu.entry_block_id];
+    while let Some(block_id) = worklist.pop() {
+        if !reachable.insert(block_id) {
+            continue;
+        }
+        if let Some(plan) = result.roots.get(&block_id) {
+            worklist.extend(plan.targets.iter().copied());
+            continue;
+        }
+        let block = &eu.blocks[&block_id];
+        match &block.terminator {
+            SIRTerminator::Jump(target, _) => worklist.push(*target),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                worklist.push(true_block.0);
+                worklist.push(false_block.0);
+            }
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    result
+        .removed_blocks
+        .extend(eu.blocks.keys().filter(|block| !reachable.contains(block)));
+    result
 }
 
 #[derive(Default)]
@@ -11090,6 +11358,35 @@ fn sign_extend_pair(
     (sl, sr)
 }
 
+fn lower_dense_branch_table(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    plan: &DenseBranchTablePlan,
+) {
+    let selector = ctx.reg_map.get(plan.selector);
+    let normalized = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(
+        block,
+        normalized,
+        selector,
+        mask_for_width(plan.selector_width),
+    );
+    let table_base = ctx.alloc_vreg(SpillDesc::transient());
+    let target = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Scratch { dst: table_base });
+    block.push(MInst::Scratch { dst: target });
+    block.push(MInst::JumpTable {
+        index: normalized,
+        table_base,
+        target,
+        targets: plan
+            .targets
+            .iter()
+            .map(|target| BlockId(target.0 as u32))
+            .collect(),
+    });
+}
+
 fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTerminator) {
     match term {
         SIRTerminator::Jump(target, _args) => {
@@ -15789,6 +16086,98 @@ mod tests {
             &constants,
             &uses,
         )
+    }
+
+    fn dense_branch_table_fixture() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let selector = RegisterId(0);
+        let bit_type = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut register_map = [(selector, bit_type(2))]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut blocks = HashMap::default();
+        let mut next_register = 1usize;
+
+        for key in 0..4usize {
+            let key_register = RegisterId(next_register);
+            let comparison = RegisterId(next_register + 1);
+            let reduced = RegisterId(next_register + 2);
+            let condition = RegisterId(next_register + 3);
+            next_register += 4;
+            register_map.insert(key_register, bit_type(2));
+            register_map.insert(comparison, bit_type(1));
+            register_map.insert(reduced, bit_type(1));
+            register_map.insert(condition, bit_type(1));
+            let false_target = if key + 1 < 4 {
+                SirBlockId(key + 1)
+            } else {
+                SirBlockId(7)
+            };
+            blocks.insert(
+                SirBlockId(key),
+                BasicBlock {
+                    id: SirBlockId(key),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(key_register, SIRValue::new(BigUint::from(key as u64))),
+                        SIRInstruction::Binary(
+                            comparison,
+                            selector,
+                            BinaryOp::EqWildcard,
+                            key_register,
+                        ),
+                        SIRInstruction::Unary(reduced, UnaryOp::Or, comparison),
+                        SIRInstruction::Unary(condition, UnaryOp::ToTwoState, reduced),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: condition,
+                        true_block: (SirBlockId(4 + key), vec![]),
+                        false_block: (false_target, vec![]),
+                    },
+                },
+            );
+        }
+        for block in 4..8 {
+            blocks.insert(
+                SirBlockId(block),
+                BasicBlock {
+                    id: SirBlockId(block),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            );
+        }
+        ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn recognizes_full_domain_dense_branch_spine() {
+        let fixture = dense_branch_table_fixture();
+        let constants = collect_exact_sir_constants(&fixture);
+        let uses = collect_sir_use_sites(&fixture);
+        let plans = find_dense_branch_table_plans(&fixture, &constants, &uses);
+
+        let plan = &plans.roots[&SirBlockId(0)];
+        assert_eq!(plan.selector, RegisterId(0));
+        assert_eq!(plan.selector_width, 2);
+        assert_eq!(
+            plan.targets.as_ref(),
+            &[SirBlockId(4), SirBlockId(5), SirBlockId(6), SirBlockId(7)]
+        );
+        assert_eq!(
+            plans.removed_blocks,
+            [SirBlockId(1), SirBlockId(2), SirBlockId(3)]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(plan.skip_indices, [1, 2, 3].into_iter().collect());
     }
 
     #[test]

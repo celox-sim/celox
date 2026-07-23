@@ -436,6 +436,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         | MInst::SparseCommitWorklist { .. }
         | MInst::Branch { .. }
         | MInst::BranchPred { .. }
+        | MInst::JumpTable { .. }
         | MInst::Jump { .. }
         | MInst::Return
         | MInst::ReturnError { .. } => "none",

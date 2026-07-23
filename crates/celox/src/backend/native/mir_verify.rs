@@ -330,6 +330,28 @@ fn verify_instruction_constraints(
                 ),
             ))
         }
+        MInst::JumpTable {
+            index: selector,
+            table_base,
+            target,
+            targets,
+        } if targets.len() < 4
+            || targets.len() > 256
+            || !targets.len().is_power_of_two()
+            || selector == table_base
+            || selector == target
+            || table_base == target =>
+        {
+            Err(MirVerifyError::instruction(
+                "OPCODE.JUMP_TABLE_SHAPE",
+                block,
+                index,
+                format!(
+                    "jump table needs 4..=256 power-of-two entries and three distinct operands, got {} entries and ({selector}, {table_base}, {target})",
+                    targets.len()
+                ),
+            ))
+        }
         MInst::SparseMarkActive {
             active_index,
             active_capacity,

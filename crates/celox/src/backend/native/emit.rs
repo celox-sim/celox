@@ -1501,6 +1501,14 @@ fn emit_planned(
         .iter()
         .map(|_| asm.create_label())
         .collect::<Vec<_>>();
+    let mut jump_table_labels = HashMap::<(BlockId, usize), CodeLabel>::new();
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            if matches!(inst, MInst::JumpTable { .. }) {
+                jump_table_labels.insert((block.id, instruction), asm.create_label());
+            }
+        }
+    }
 
     let callee_saved = used_callee_saved(func, assignment);
     let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
@@ -1602,6 +1610,21 @@ fn emit_planned(
                         condition,
                     )?;
                 }
+                MInst::JumpTable {
+                    index,
+                    table_base,
+                    target,
+                    ..
+                } => {
+                    let index = preg_to_reg64(resolve(assignment, *index));
+                    let table_base = preg_to_reg64(resolve(assignment, *table_base));
+                    let target = preg_to_reg64(resolve(assignment, *target));
+                    let label = jump_table_labels[&(block.id, inst_idx)];
+                    asm.lea(table_base, ptr(label))?;
+                    asm.movsxd(target, dword_ptr(table_base + index * 4))?;
+                    asm.add(target, table_base)?;
+                    asm.jmp(target)?;
+                }
                 MInst::UDiv { dst, lhs, rhs } => {
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::Div)?;
                 }
@@ -1670,6 +1693,22 @@ fn emit_planned(
     }
     asm.ret()?;
 
+    // Keep immutable lookup and dispatch data out of every control-flow path.
+    // Jump tables contain signed offsets from their own table base, preserving
+    // relocatability when the complete code image is copied into JIT memory.
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            let MInst::JumpTable { targets, .. } = inst else {
+                continue;
+            };
+            let label = jump_table_labels
+                .get_mut(&(block.id, instruction))
+                .expect("every jump table has an assembler label");
+            asm.set_label(label)?;
+            asm.dd(&vec![0u32; targets.len()])?;
+        }
+    }
+
     // Keep immutable lookup data out of every control-flow path. Table
     // addresses are encoded RIP-relatively, so the resulting code remains
     // relocatable when copied into executable memory by the JIT.
@@ -1678,8 +1717,13 @@ fn emit_planned(
         asm.dq(table)?;
     }
 
-    let result = asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
-    let text_size = if let Some(label) = constant_table_labels.first() {
+    let mut result =
+        asm.assemble_options(0x0, BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)?;
+    let first_data_label = jump_table_labels
+        .values()
+        .chain(constant_table_labels.iter())
+        .min_by_key(|label| result.label_ip(label).unwrap_or(u64::MAX));
+    let text_size = if let Some(label) = first_data_label {
         usize::try_from(result.label_ip(label).map_err(|error| {
             EmitInputError::new(
                 "EMIT.CONSTANT_TABLE_LABEL_IP",
@@ -1714,6 +1758,51 @@ fn emit_planned(
             )
         })?;
         block_offsets.push((block.id, ip));
+    }
+    let block_ips = block_offsets.iter().copied().collect::<HashMap<_, _>>();
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            let MInst::JumpTable { targets, .. } = inst else {
+                continue;
+            };
+            let label = &jump_table_labels[&(block.id, instruction)];
+            let table_ip = result.label_ip(label).map_err(|error| {
+                EmitInputError::new(
+                    "EMIT.JUMP_TABLE_LABEL_IP",
+                    Some(block.id),
+                    Some(instruction),
+                    None,
+                    format!("failed to resolve jump-table label: {error}"),
+                )
+            })?;
+            let table_offset = usize::try_from(table_ip).map_err(|_| {
+                EmitInputError::new(
+                    "EMIT.JUMP_TABLE_OFFSET",
+                    Some(block.id),
+                    Some(instruction),
+                    None,
+                    "jump-table offset exceeds usize",
+                )
+            })?;
+            for (index, target) in targets.iter().enumerate() {
+                let target_ip = block_ips[target];
+                let relative = i64::try_from(target_ip)
+                    .expect("assembler block offset fits i64")
+                    .checked_sub(i64::try_from(table_ip).expect("assembler table offset fits i64"))
+                    .and_then(|offset| i32::try_from(offset).ok())
+                    .ok_or_else(|| {
+                        EmitInputError::new(
+                            "EMIT.JUMP_TABLE_TARGET_RANGE",
+                            Some(block.id),
+                            Some(instruction),
+                            None,
+                            format!("jump-table target {target} exceeds signed 32-bit reach"),
+                        )
+                    })?;
+                let entry = table_offset + index * 4;
+                result.inner.code_buffer[entry..entry + 4].copy_from_slice(&relative.to_le_bytes());
+            }
+        }
     }
     Ok(EmitResult {
         code: result.inner.code_buffer,
@@ -3170,7 +3259,10 @@ fn emit_inst(
         }
 
         // Branch and Jump are handled in the main emit loop (with phi moves).
-        MInst::Branch { .. } | MInst::BranchPred { .. } | MInst::Jump { .. } => {
+        MInst::Branch { .. }
+        | MInst::BranchPred { .. }
+        | MInst::JumpTable { .. }
+        | MInst::Jump { .. } => {
             unreachable!("Branch/Jump should be handled in main emit loop");
         }
 
@@ -4362,6 +4454,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                         },
                     }
                 }
+                MInst::JumpTable { .. } => jump += 1,
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
             }
@@ -4880,6 +4973,58 @@ mod shift_encoding_tests {
         }
 
         assert_eq!(conditional_branches, vec![Mnemonic::Je]);
+    }
+
+    #[test]
+    fn dense_jump_table_executes_every_masked_index() {
+        let mut vregs = VRegAllocator::new();
+        let loaded = vregs.alloc();
+        let index = vregs.alloc();
+        let table_base = vregs.alloc();
+        let target = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::Load {
+            dst: loaded,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S8,
+        });
+        entry.push(MInst::AndImm32 {
+            dst: index,
+            src: loaded,
+            imm: 3,
+        });
+        entry.push(MInst::Scratch { dst: table_base });
+        entry.push(MInst::Scratch { dst: target });
+        entry.push(MInst::JumpTable {
+            index,
+            table_base,
+            target,
+            targets: (1..=4).map(BlockId).collect(),
+        });
+        func.blocks.push(entry);
+        for code in 1..=4 {
+            let mut arm = MBlock::new(BlockId(code));
+            arm.push(MInst::ReturnError {
+                code: i64::from(code),
+            });
+            func.blocks.push(arm);
+        }
+        func.verify();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(loaded, PhysReg::RAX);
+        assignment.set(index, PhysReg::RCX);
+        assignment.set(table_base, PhysReg::RDX);
+        assignment.set(target, PhysReg::RBX);
+        let emitted = emit(&func, &assignment, 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for index in 0..4u8 {
+            let mut state = [0xfcu8 | index];
+            assert_eq!(unsafe { jit.call(&mut state) }, i64::from(index) + 1);
+        }
     }
 
     #[test]
