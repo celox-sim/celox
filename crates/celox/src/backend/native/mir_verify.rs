@@ -291,14 +291,12 @@ fn verify_instruction_constraints(
             ))
         }
         MInst::AndStoreImm { size, imm, .. } | MInst::OrStoreImm { size, imm, .. }
-            if *size == OpSize::S64
-                || *imm
-                    > match size {
-                        OpSize::S8 => u64::from(u8::MAX),
-                        OpSize::S16 => u64::from(u16::MAX),
-                        OpSize::S32 => u64::from(u32::MAX),
-                        OpSize::S64 => u64::MAX,
-                    } =>
+            if match size {
+                OpSize::S8 => *imm > u64::from(u8::MAX),
+                OpSize::S16 => *imm > u64::from(u16::MAX),
+                OpSize::S32 => *imm > u64::from(u32::MAX),
+                OpSize::S64 => (*imm as i32 as i64 as u64) != *imm,
+            } =>
         {
             Err(MirVerifyError::instruction(
                 "OPCODE.NARROW_STORE_IMMEDIATE_WIDTH",

@@ -63,16 +63,17 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
                     if load_base != store_base
                         || load_offset != store_offset
                         || load_size != store_size
-                        || !matches!(load_size, OpSize::S8 | OpSize::S16 | OpSize::S32)
                         || use_counts.get(loaded).copied() != Some(1)
                         || use_counts.get(stored).copied() != Some(1)
                     {
                         return None;
                     }
-                    let (result, source, immediate, is_or) = match update {
-                        MInst::AndImm { dst, src, imm } => (*dst, *src, *imm, false),
-                        MInst::AndImm32 { dst, src, imm } => (*dst, *src, u64::from(*imm), false),
-                        MInst::OrImm { dst, src, imm } => (*dst, *src, *imm, true),
+                    let (result, source, immediate, is_or, word32) = match update {
+                        MInst::AndImm { dst, src, imm } => (*dst, *src, *imm, false, false),
+                        MInst::AndImm32 { dst, src, imm } => {
+                            (*dst, *src, u64::from(*imm), false, true)
+                        }
+                        MInst::OrImm { dst, src, imm } => (*dst, *src, *imm, true, false),
                         _ => return None,
                     };
                     if source != *loaded || result != *stored {
@@ -82,21 +83,35 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
                         OpSize::S8 => u64::from(u8::MAX),
                         OpSize::S16 => u64::from(u16::MAX),
                         OpSize::S32 => u64::from(u32::MAX),
-                        OpSize::S64 => unreachable!(),
+                        OpSize::S64 => u64::MAX,
                     };
+                    let immediate = immediate & width_mask;
+                    // x86-64 encodes a qword ALU immediate by sign-extending
+                    // imm32. AndImm32 additionally promises a zero-extended
+                    // 32-bit result, so its qword form is equivalent only
+                    // while that sign extension also has zero upper bits.
+                    if *load_size == OpSize::S64
+                        && if word32 {
+                            immediate > i32::MAX as u64
+                        } else {
+                            sign_extended_i32(immediate).is_none()
+                        }
+                    {
+                        return None;
+                    }
                     Some(if is_or {
                         MInst::OrStoreImm {
                             base: *load_base,
                             offset: *load_offset,
                             size: *load_size,
-                            imm: immediate & width_mask,
+                            imm: immediate,
                         }
                     } else {
                         MInst::AndStoreImm {
                             base: *load_base,
                             offset: *load_offset,
                             size: *load_size,
-                            imm: immediate & width_mask,
+                            imm: immediate,
                         }
                     })
                 });
@@ -12034,6 +12049,77 @@ mod tests {
             ]
         );
         assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn folds_encodable_qword_load_and_store_into_direct_memory_and() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0x3f,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        assert_eq!(fold_direct_immediate_stores(&mut func), 1);
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::AndStoreImm {
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    size: OpSize::S64,
+                    imm: 0x3f,
+                },
+                MInst::Return,
+            ]
+        );
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn qword_direct_memory_and_preserves_word32_zero_extension() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xfc00_000f,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 40,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        assert_eq!(fold_direct_immediate_stores(&mut func), 0);
     }
 
     #[test]

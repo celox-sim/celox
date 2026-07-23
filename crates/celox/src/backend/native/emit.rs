@@ -2246,7 +2246,7 @@ fn emit_inst(
                 OpSize::S8 => asm.and(byte_ptr(mem), *imm as i32)?,
                 OpSize::S16 => asm.and(word_ptr(mem), *imm as i32)?,
                 OpSize::S32 => asm.and(dword_ptr(mem), *imm as i32)?,
-                OpSize::S64 => unreachable!("64-bit direct-memory AND is not selected"),
+                OpSize::S64 => asm.and(qword_ptr(mem), *imm as i32)?,
             }
         }
         MInst::OrStoreImm {
@@ -2260,7 +2260,7 @@ fn emit_inst(
                 OpSize::S8 => asm.or(byte_ptr(mem), *imm as i32)?,
                 OpSize::S16 => asm.or(word_ptr(mem), *imm as i32)?,
                 OpSize::S32 => asm.or(dword_ptr(mem), *imm as i32)?,
-                OpSize::S64 => unreachable!("64-bit direct-memory OR is not selected"),
+                OpSize::S64 => asm.or(qword_ptr(mem), *imm as i32)?,
             }
         }
 
