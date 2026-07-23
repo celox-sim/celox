@@ -4126,11 +4126,17 @@ fn direct_element_byte_offset(
         index,
         element_width,
         bit_offset,
-        dynamic_bit_offset: None,
+        dynamic_bit_offset,
     } = offset
     else {
         return None;
     };
+    if dynamic_bit_offset
+        .as_ref()
+        .is_some_and(|dynamic| ctx.consts.get(dynamic) != Some(&0))
+    {
+        return None;
+    }
     if !bit_offset.is_multiple_of(8) {
         return None;
     }
@@ -13975,6 +13981,124 @@ mod tests {
     fn preserves_element_quotient_and_remainder_when_storage_has_padding() {
         let (source, array_index) = quotient_remainder_array_load(16);
         assert_ne!(array_index, source);
+    }
+
+    #[test]
+    fn constant_zero_dynamic_element_bit_offset_uses_direct_byte_index() {
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut array_var = VarId::default();
+        array_var.inc();
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: array_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let index = RegisterId(0);
+        let zero = RegisterId(1);
+        let loaded = RegisterId(2);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(index, input, SIROffset::Static(0), 32),
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index,
+                                element_width: 64,
+                                bit_offset: 0,
+                                dynamic_bit_offset: Some(zero),
+                            },
+                            54,
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    zero,
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                ),
+                (loaded, RegisterType::Logic { width: 54 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(input_abs, 0), (array_abs, 8)].into_iter().collect();
+        layout.widths = [(input_abs, 32), (array_abs, 1024)].into_iter().collect();
+        layout.is_4states = [(input_abs, false), (array_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 64,
+                element_count: 16,
+                element_stride: 8,
+                plane_size: 128,
+            },
+        );
+        layout.total_size = 136;
+        layout.working_base_offset = 136;
+        layout.sparse_base_offset = 136;
+        layout.merged_total_size = 136;
+        layout.triggered_bits_offset = 136;
+        layout.scratch_base_offset = 136;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        let byte_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::LoadIndexed {
+                    index,
+                    offset: 8,
+                    size: OpSize::S64,
+                    ..
+                } => Some(*index),
+                _ => None,
+            })
+            .expect("direct indexed array load");
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MInst::ShlImm {
+                dst,
+                imm: 3,
+                ..
+            } if *dst == byte_index
+        )));
     }
 
     #[test]

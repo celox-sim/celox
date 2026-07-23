@@ -827,6 +827,41 @@ from this plan. A future restart requires either:
 Until then, optimization work should target the independently hot
 combinational control/dataflow and machine scheduling/allocation paths.
 
+### Post-gate hot-path follow-up
+
+A fresh `cycles:u` profile of the retained contained-Load build reached the
+exact Linux marker and collected 172,457 samples. The profile was regenerated
+because even a local rewrite changes JIT block placement; block identities from
+an older perf map were not reused.
+
+The profile still contains high-density counted-loop bodies. A representative
+post-RA body formed an element address as:
+
+```text
+mov index
+shl 6
+shr 3
+load [state + offset + index]
+```
+
+There are 130 static `shl 6; shr 3; state-memory operation` sequences in the
+fused function. Inspection of the corresponding SIR showed that the
+representative index is already a 32-bit value. The first rejection was not a
+missing loop-bound proof: the element offset retained a
+`dynamic_bit_offset=Some(zero_register)`, although that register has the exact
+constant value zero. Allowing this executable constant fact in direct element
+address lowering converts 28 sequences to direct byte-index computation and
+reduces fused x86 instructions from 152,230 to 152,198. The complete Linux run
+still ends at `cy=9ae070 x3=aa pass=1`.
+
+The remaining 102 sequences must be classified by their actual dynamic-offset
+recipes before adding a general range analysis. For direct byte indices which
+are already proven safe, the next machine-level opportunity is an explicit x86
+address scale so a power-of-two byte stride can be represented by the memory
+operand rather than a separate `ShlImm`. Range proof and scaled-address
+selection remain separate contracts: scale selection must not reinterpret a
+wrapping RTL bit-offset expression.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
