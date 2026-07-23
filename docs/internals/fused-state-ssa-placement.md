@@ -1017,6 +1017,44 @@ select a globally different, more expensive reconstruction plan. Re-enabling
 use-local code generation before this interface exists would merely move the
 performance failure from SIR into register allocation.
 
+The allocator audit then found an older transformation which violated this
+contract directly. `forward_state_round_trips` ran *after* pressure scheduling
+and replaced thousands of MemorySSA-proved state Loads with cross-block `Mov`
+affinities. The original Store remained in MIR, but production never assigned
+the advertised `deferred_state_home`: every assignment of that descriptor was
+test-only. The transformation therefore changed the live-range graph after the
+scheduler had fixed instruction order, without providing the allocator-owned
+home promised by its comment.
+
+Removing this late forwarding path, while retaining local post-schedule memory
+folds, changes the same fused function as follows:
+
+| Stage | Late state forwarding | No late forwarding | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 94,201 | 94,201 | 0 |
+| post-RA MIR | 220,551 | 213,542 | -7,009 |
+| x86 instructions | 149,218 | 148,370 | -848 |
+| spill frame | 4,688 bytes | 4,336 bytes | -352 bytes |
+| post-allocation blocks | 26,224 | 25,989 | -235 |
+
+This is the first allocation result in this investigation which improves the
+actual downstream representation rather than only pre-RA SIR/MIR. It also
+explains why the use-local Store-deletion probes were unstable: they were
+measured on top of a second, unplanned global forwarding pass which changed the
+same memory/value boundary after scheduling. State forwarding may return only
+as a plan-constrained transformation before pressure scheduling, or after
+scheduling with an independently verified no-pressure-delta contract and a
+concrete reload home. A raw MemorySSA reaching-definition proof is not enough.
+
+The native backend's 478 remaining tests pass after deleting the unused
+forwarding implementation. Native testbench 60/60, native execution 16/16, FF
+200/200, dynamic NBA 33/33, and cross-block NBA 11/11 also pass. The complete
+Linux workload reaches the exact `cy=9ae070 x3=aa pass=1` marker; code
+generation takes 52.738 seconds and generated execution takes 64.973 seconds.
+The structural allocation reduction is established, but this single runtime
+sample does not establish a throughput improvement over the noisy 61.9--64.7
+second range measured immediately before it.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

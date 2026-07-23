@@ -34,7 +34,6 @@ mod spilling;
 mod ssa;
 mod ssa_state_home;
 mod stack_color;
-mod state_promote;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -335,30 +334,18 @@ fn run_regalloc_in_place(
     }
     func.verify_result()
         .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
-    let state_forward_start = timing.then(crate::timing::now);
-    let forwarded =
-        state_promote::forward_state_round_trips(func, &normalized_cfg).map_err(|error| {
-            RegallocError::new(
-                "late physical-state forwarding",
-                error.rule,
-                error.block,
-                error.instruction,
-                Vec::new(),
-                error.message,
-            )
-        })?;
-    // Pressure scheduling runs after the ordinary MIR pipeline, and late
-    // MemorySSA forwarding can turn a state read into a register copy.  Close
-    // the resulting store chain before CSSA so overwritten packed-state
-    // updates do not survive into allocation and machine code.
+    let late_memory_fold_start = timing.then(crate::timing::now);
+    // These folds deliberately run after pressure scheduling because memory
+    // operations participate in its dependence graph. They only remove local
+    // instructions and never replace a load with a new cross-block VReg.
     super::mir_opt::eliminate_redundant_local_stores(func);
     let folded_direct_immediate_stores = super::mir_opt::fold_direct_immediate_stores(func);
     let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
     func.verify_result()
-        .map_err(|error| RegallocError::mir("late state-forwarding verification", error))?;
-    if let Some(start) = state_forward_start {
+        .map_err(|error| RegallocError::mir("late memory-fold verification", error))?;
+    if let Some(start) = late_memory_fold_start {
         eprintln!(
-            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
+            "[regalloc-timing] label={label} late_memory_fold folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
             start.elapsed()
         );
     }
