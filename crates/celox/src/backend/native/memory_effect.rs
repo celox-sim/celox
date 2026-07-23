@@ -236,10 +236,29 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
             .and_then(|range| checked_range(*base, range.offset(), range.byte_len()))
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),
-        MInst::PackedLaneEq { alias_range, .. } => alias_range
-            .and_then(|range| checked_range(BaseReg::SimState, range.offset(), range.byte_len()))
-            .map(|range| MemoryEffects::static_ranges(&[range]))
-            .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::PackedLaneCompare {
+            alias_range, rhs, ..
+        } => {
+            let lhs = alias_range.and_then(|range| {
+                checked_range(BaseReg::SimState, range.offset(), range.byte_len())
+            });
+            match rhs {
+                super::mir::PackedLaneCompareRhs::Scalar(_) => lhs
+                    .map(|lhs| MemoryEffects::static_ranges(&[lhs]))
+                    .unwrap_or_else(|| {
+                        MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))
+                    }),
+                super::mir::PackedLaneCompareRhs::Memory { alias_range, .. } => {
+                    let rhs = alias_range.and_then(|range| {
+                        checked_range(BaseReg::SimState, range.offset(), range.byte_len())
+                    });
+                    match (lhs, rhs) {
+                        (Some(lhs), Some(rhs)) => MemoryEffects::static_ranges(&[lhs, rhs]),
+                        _ => MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState)),
+                    }
+                }
+            }
+        }
         MInst::OrStoreIndexed {
             base, alias_range, ..
         } => alias_range
@@ -326,7 +345,55 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MemoryAliasRange, OpSize, VReg};
+    use crate::backend::native::mir::{
+        CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
+    };
+
+    #[test]
+    fn packed_memory_compare_reads_both_ranges_and_rejects_a_missing_bound() {
+        let mut inst = MInst::PackedLaneCompare {
+            dst: VReg(0),
+            rhs: PackedLaneCompareRhs::Memory {
+                offset: 200,
+                alias_range: MemoryAliasRange::new(200, 16),
+            },
+            kind: CmpKind::LtU,
+            offset: 100,
+            lane_count: 16,
+            element_stride: 1,
+            bit_offset: 0,
+            field_width: 8,
+            alias_range: MemoryAliasRange::new(100, 16),
+        };
+        assert_eq!(
+            reads(&inst).ranges().collect::<Vec<_>>(),
+            vec![
+                MemoryRange {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    byte_len: 16,
+                },
+                MemoryRange {
+                    base: BaseReg::SimState,
+                    offset: 200,
+                    byte_len: 16,
+                },
+            ]
+        );
+
+        let MInst::PackedLaneCompare {
+            rhs: PackedLaneCompareRhs::Memory { alias_range, .. },
+            ..
+        } = &mut inst
+        else {
+            unreachable!()
+        };
+        *alias_range = None;
+        assert_eq!(
+            reads(&inst).unknown_memory(),
+            Some(UnknownMemory::Direct(BaseReg::SimState))
+        );
+    }
 
     #[test]
     fn sparse_mark_active_has_only_metadata_write_ranges() {

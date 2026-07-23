@@ -542,6 +542,15 @@ pub enum CmpKind {
     GeS,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackedLaneCompareRhs {
+    Scalar(VReg),
+    Memory {
+        offset: i32,
+        alias_range: Option<MemoryAliasRange>,
+    },
+}
+
 /// One immutable row consumed by the sparse-region worklist commit loop.
 /// Rows are stored as eight u64 values in a function-local constant table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,15 +659,17 @@ pub enum MInst {
         /// `None` means the complete direct-addressed base may be observed.
         alias_range: Option<MemoryAliasRange>,
     },
-    /// Compare one scalar against an element-strided array field and return
-    /// one equality bit per lane in the low bits of `dst`.
+    /// Compare a byte-addressable lane sequence against either one scalar or a
+    /// second identically-shaped lane sequence and return one predicate bit per
+    /// lane in the low bits of `dst`.
     ///
     /// The physical element slots are 1, 2, or 4 bytes wide. Keeping this as
     /// one memory-reading MIR operation lets the emitter use packed SIMD
     /// comparisons without first rebuilding the logical packed array.
-    PackedLaneEq {
+    PackedLaneCompare {
         dst: VReg,
-        value: VReg,
+        rhs: PackedLaneCompareRhs,
+        kind: CmpKind,
         offset: i32,
         lane_count: u8,
         element_stride: u8,
@@ -975,9 +986,10 @@ impl fmt::Display for MInst {
                 size,
                 ..
             } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
-            MInst::PackedLaneEq {
+            MInst::PackedLaneCompare {
                 dst,
-                value,
+                rhs,
+                kind,
                 offset,
                 lane_count,
                 element_stride,
@@ -986,7 +998,7 @@ impl fmt::Display for MInst {
                 ..
             } => write!(
                 f,
-                "{dst} = packed_lane_eq [sim + {offset}], {value}, lanes={lane_count}, stride={element_stride}, field={bit_offset}:{field_width}"
+                "{dst} = packed_lane_compare.{kind:?} [sim + {offset}], {rhs:?}, lanes={lane_count}, stride={element_stride}, field={bit_offset}:{field_width}"
             ),
             MInst::StoreIndexed {
                 base,
@@ -1248,7 +1260,7 @@ impl MInst {
             | MInst::Load { dst, .. }
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
-            | MInst::PackedLaneEq { dst, .. }
+            | MInst::PackedLaneCompare { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Add32 { dst, .. }
@@ -1331,7 +1343,14 @@ impl MInst {
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
-            MInst::PackedLaneEq { value, .. } => Uses::one(*value),
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => Uses::one(*value),
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            } => Uses::none(),
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 Uses::two(*index, *src)
             }
@@ -1450,11 +1469,18 @@ impl MInst {
                     *index = new;
                 }
             }
-            MInst::PackedLaneEq { value, .. } => {
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => {
                 if *value == old {
                     *value = new;
                 }
             }
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            } => {}
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 if *index == old {
                     *index = new;

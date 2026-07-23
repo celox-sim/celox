@@ -84,6 +84,7 @@ pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsolut
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
+    four_state: bool,
 ) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
     let mut changed = false;
     if crate::ir::inline_single_predecessor_jumps(eu)
@@ -93,27 +94,46 @@ pub(crate) fn optimize_native_merged_chain(
     }
     eu.verify_result()
         .map_err(|error| ("after native jump inlining", error))?;
+    let element_widths = Arc::new(
+        layout
+            .unpacked_arrays
+            .iter()
+            .filter(|(_, array)| preserve_native_element_boundaries(array))
+            .flat_map(|(&address, array)| {
+                [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
+                    (
+                        RegionedAbsoluteAddr::from_absolute_addr(region, address),
+                        array.element_width,
+                    )
+                })
+            })
+            .collect::<crate::HashMap<_, _>>(),
+    );
     OptimizeBlocksPass {
         skip_final_schedule: false,
-        element_widths: Arc::new(
-            layout
-                .unpacked_arrays
-                .iter()
-                .filter(|(_, array)| preserve_native_element_boundaries(array))
-                .flat_map(|(&address, array)| {
-                    [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
-                        (
-                            RegionedAbsoluteAddr::from_absolute_addr(region, address),
-                            array.element_width,
-                        )
-                    })
-                })
-                .collect::<crate::HashMap<_, _>>(),
-        ),
+        element_widths: Arc::clone(&element_widths),
     }
     .run(eu, &PassOptions::default());
     eu.verify_result()
         .map_err(|error| ("after native block optimization", error))?;
+    let recovered_bit_maps = if four_state {
+        0
+    } else {
+        pass_circular_priority::recover_native_fixed_bit_map_loops(eu)
+    };
+    if recovered_bit_maps != 0 {
+        changed = true;
+        GvnPass.run(eu, &PassOptions::default());
+        OptimizeBlocksPass {
+            skip_final_schedule: false,
+            element_widths,
+        }
+        .run(eu, &PassOptions::default());
+        VectorizeConcatPass.run(eu, &PassOptions::default());
+        GvnPass.run(eu, &PassOptions::default());
+        eu.verify_result()
+            .map_err(|error| ("after native fixed bit-map recovery", error))?;
+    }
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
         eu.verify_result()

@@ -128,10 +128,17 @@ fn sparse_descriptor_table(layout: &MemoryLayout) -> Vec<u64> {
     table
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackedLaneComparePlanRhs {
+    Scalar(RegisterId),
+    Memory(RegionedAbsoluteAddr),
+}
+
 #[derive(Debug, Clone)]
-struct PackedLaneEqPlan {
+struct PackedLaneComparePlan {
     dst: RegisterId,
-    value: RegisterId,
+    rhs: PackedLaneComparePlanRhs,
+    kind: CmpKind,
     address: RegionedAbsoluteAddr,
     lane_count: usize,
     element_stride: usize,
@@ -141,22 +148,173 @@ struct PackedLaneEqPlan {
 }
 
 #[derive(Debug, Default)]
-struct PackedLaneEqPlans {
-    roots: HashMap<usize, PackedLaneEqPlan>,
+struct PackedLaneComparePlans {
+    roots: HashMap<usize, PackedLaneComparePlan>,
     skip_indices: HashSet<usize>,
 }
 
-/// Recognize the canonical SIR representation of a lane-wise array compare:
-/// static Load/Eq definitions followed by one Concat. Block scheduling may
-/// interleave independent work, so memory-version safety is proved by checking
-/// the interval from the earliest load to the root for a write to the object.
-fn find_packed_lane_eq_plans(
+#[derive(Clone, Copy)]
+struct StaticLaneLoad {
+    load_index: usize,
+    slice_index: Option<usize>,
+    address: RegionedAbsoluteAddr,
+    offset: usize,
+    width: usize,
+}
+
+fn static_lane_load(
     block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
     register_types: &HashMap<RegisterId, RegisterType>,
     layout: &MemoryLayout,
+    register: RegisterId,
+    lane: usize,
+) -> Option<StaticLaneLoad> {
+    fn constant_offset(
+        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        defs: &HashMap<RegisterId, usize>,
+        constants: &HashMap<RegisterId, ExactSirConstant>,
+        register_types: &HashMap<RegisterId, RegisterType>,
+        register: RegisterId,
+        active: &mut HashSet<RegisterId>,
+    ) -> Option<u64> {
+        if let Some(value) = constants.get(&register) {
+            return Some(value.value);
+        }
+        if !active.insert(register) {
+            return None;
+        }
+        let definition = *defs.get(&register)?;
+        let value = match block.instructions.get(definition)? {
+            SIRInstruction::Imm(_, value) => exact_sir_constant(value)?.value,
+            SIRInstruction::Binary(_, lhs, op, rhs) => {
+                let lhs = constant_offset(block, defs, constants, register_types, *lhs, active)?;
+                let rhs = constant_offset(block, defs, constants, register_types, *rhs, active)?;
+                match op {
+                    BinaryOp::Add => lhs.wrapping_add(rhs),
+                    BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        active.remove(&register);
+        let width = register_types.get(&register)?.width();
+        if width > 64 {
+            return None;
+        }
+        Some(if width == 64 {
+            value
+        } else {
+            value & ((1_u64 << width) - 1)
+        })
+    }
+
+    let load = |index: usize,
+                address: RegionedAbsoluteAddr,
+                offset: &SIROffset,
+                width: usize|
+     -> Option<StaticLaneLoad> {
+        let offset = match offset {
+            SIROffset::Static(offset) => *offset,
+            SIROffset::Dynamic(offset) => {
+                let value = constant_offset(
+                    block,
+                    defs,
+                    constants,
+                    register_types,
+                    *offset,
+                    &mut HashSet::default(),
+                );
+                usize::try_from(value?).ok()?
+            }
+            SIROffset::Element { .. } => return None,
+        };
+        Some(StaticLaneLoad {
+            load_index: index,
+            slice_index: None,
+            address,
+            offset,
+            width,
+        })
+    };
+    let definition = *defs.get(&register)?;
+    let lane_load = match block.instructions.get(definition)? {
+        SIRInstruction::Load(_, address, offset, width) => {
+            load(definition, *address, offset, *width)?
+        }
+        SIRInstruction::Slice(_, source, slice_offset, slice_width) => {
+            let load_index = *defs.get(source)?;
+            let SIRInstruction::Load(_, address, offset, load_width) =
+                block.instructions.get(load_index)?
+            else {
+                return None;
+            };
+            let mut load = load(load_index, *address, offset, *load_width)?;
+            load.slice_index = Some(definition);
+            load.offset = load.offset.checked_add(*slice_offset)?;
+            load.width = *slice_width;
+            load
+        }
+        _ => return None,
+    };
+    let belongs_to_lane = layout
+        .unpacked_arrays
+        .get(&lane_load.address.absolute_addr())
+        .map_or_else(
+            || {
+                lane_load.width.is_multiple_of(8)
+                    && lane_load.offset == lane.saturating_mul(lane_load.width)
+            },
+            |array| lane_load.offset / array.element_width == lane,
+        );
+    belongs_to_lane.then_some(lane_load)
+}
+
+fn packed_compare_kind(op: BinaryOp) -> Option<CmpKind> {
+    Some(match op {
+        BinaryOp::Eq => CmpKind::Eq,
+        BinaryOp::Ne => CmpKind::Ne,
+        BinaryOp::LtU => CmpKind::LtU,
+        BinaryOp::LtS => CmpKind::LtS,
+        BinaryOp::LeU => CmpKind::LeU,
+        BinaryOp::LeS => CmpKind::LeS,
+        BinaryOp::GtU => CmpKind::GtU,
+        BinaryOp::GtS => CmpKind::GtS,
+        BinaryOp::GeU => CmpKind::GeU,
+        BinaryOp::GeS => CmpKind::GeS,
+        _ => return None,
+    })
+}
+
+fn swap_compare_kind(kind: CmpKind) -> CmpKind {
+    match kind {
+        CmpKind::Eq => CmpKind::Eq,
+        CmpKind::Ne => CmpKind::Ne,
+        CmpKind::LtU => CmpKind::GtU,
+        CmpKind::LtS => CmpKind::GtS,
+        CmpKind::LeU => CmpKind::GeU,
+        CmpKind::LeS => CmpKind::GeS,
+        CmpKind::GtU => CmpKind::LtU,
+        CmpKind::GtS => CmpKind::LtS,
+        CmpKind::GeU => CmpKind::LeU,
+        CmpKind::GeS => CmpKind::LeS,
+    }
+}
+
+/// Recognize the canonical SIR representation of a lane-wise array compare:
+/// lane-aligned loads and comparisons followed by one Concat. Block scheduling
+/// may interleave independent work, so memory-version safety is proved by
+/// checking the interval from the earliest load to the root for an object write.
+fn find_packed_lane_compare_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    layout: &MemoryLayout,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
-) -> PackedLaneEqPlans {
-    let mut result = PackedLaneEqPlans::default();
+) -> PackedLaneComparePlans {
+    let mut result = PackedLaneComparePlans::default();
     let defs = collect_sir_defs(block);
     for (root_idx, instruction) in block.instructions.iter().enumerate() {
         let SIRInstruction::Concat(dst, predicates) = instruction else {
@@ -166,7 +324,8 @@ fn find_packed_lane_eq_plans(
         if lane_count == 0 || lane_count > 64 || register_types[dst].width() != lane_count {
             continue;
         }
-        let mut common = None;
+        let mut rhs_plan = None;
+        let mut kind = None;
         let mut address = None;
         let mut element_width = None;
         let mut bit_offset = None;
@@ -180,7 +339,7 @@ fn find_packed_lane_eq_plans(
                 valid = false;
                 break;
             };
-            let SIRInstruction::Binary(compare_dst, lhs, BinaryOp::Eq, rhs) =
+            let SIRInstruction::Binary(compare_dst, lhs, compare_op, rhs) =
                 &block.instructions[compare_idx]
             else {
                 valid = false;
@@ -192,113 +351,125 @@ fn find_packed_lane_eq_plans(
                 valid = false;
                 break;
             }
-            let load_candidates = [(*lhs, *rhs), (*rhs, *lhs)]
-                .into_iter()
-                .filter_map(|(compared, scalar)| {
-                    let compared_idx = *defs.get(&compared)?;
-                    let (load_idx, slice_idx, load_address, offset, width) = match block
-                        .instructions
-                        .get(compared_idx)?
-                    {
-                        SIRInstruction::Load(_, load_address, SIROffset::Static(offset), width) => {
-                            (compared_idx, None, *load_address, *offset, *width)
-                        }
-                        SIRInstruction::Slice(_, source, slice_offset, slice_width) => {
-                            let load_idx = *defs.get(source)?;
-                            let SIRInstruction::Load(
-                                _,
-                                load_address,
-                                SIROffset::Static(element_offset),
-                                _,
-                            ) = block.instructions.get(load_idx)?
-                            else {
-                                return None;
-                            };
-                            (
-                                load_idx,
-                                Some(compared_idx),
-                                *load_address,
-                                element_offset.checked_add(*slice_offset)?,
-                                *slice_width,
-                            )
-                        }
-                        _ => return None,
-                    };
-                    let array = layout.unpacked_arrays.get(&load_address.absolute_addr())?;
-                    (offset / array.element_width == lane_count - position - 1).then_some((
-                        load_idx,
-                        slice_idx,
-                        compared,
-                        scalar,
-                        load_address,
-                        offset,
-                        width,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            let [(load_idx, slice_idx, compared, scalar, load_address, offset, width)] =
-                load_candidates.as_slice()
-            else {
-                valid = false;
-                break;
-            };
-            if register_types[compared].width() != *width
-                || register_types[scalar].width() != *width
-                || common.is_some_and(|previous| previous != *scalar)
-                || address.is_some_and(|previous| previous != *load_address)
-                || field_width.is_some_and(|previous| previous != *width)
-            {
-                valid = false;
-                break;
-            }
-            let Some(array) = layout.unpacked_arrays.get(&load_address.absolute_addr()) else {
+            let Some(base_kind) = packed_compare_kind(*compare_op) else {
                 valid = false;
                 break;
             };
             let lane = lane_count - position - 1;
-            let within = *offset % array.element_width;
-            if *offset / array.element_width != lane
+            let lhs_load =
+                static_lane_load(block, &defs, constants, register_types, layout, *lhs, lane);
+            let mut rhs_load =
+                static_lane_load(block, &defs, constants, register_types, layout, *rhs, lane);
+            if matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Scalar(value)) if value == *rhs) {
+                rhs_load = None;
+            }
+            let (lhs_load, current_rhs, current_kind) = match (lhs_load, rhs_load) {
+                (Some(lhs_load), Some(rhs_load)) => (
+                    lhs_load,
+                    PackedLaneComparePlanRhs::Memory(rhs_load.address),
+                    base_kind,
+                ),
+                (Some(lhs_load), None) => {
+                    (lhs_load, PackedLaneComparePlanRhs::Scalar(*rhs), base_kind)
+                }
+                (None, Some(rhs_load)) => (
+                    rhs_load,
+                    PackedLaneComparePlanRhs::Scalar(*lhs),
+                    swap_compare_kind(base_kind),
+                ),
+                (None, None) => {
+                    valid = false;
+                    break;
+                }
+            };
+            let array = layout
+                .unpacked_arrays
+                .get(&lhs_load.address.absolute_addr());
+            let current_element_width = array.map_or(lhs_load.width, |array| array.element_width);
+            let current_element_stride =
+                array.map_or(lhs_load.width / 8, |array| array.element_stride);
+            let within = lhs_load.offset % current_element_width;
+            if register_types[lhs].width() != register_types[rhs].width()
+                || register_types[lhs].width() != lhs_load.width
+                || rhs_plan.is_some_and(|previous| previous != current_rhs)
+                || kind.is_some_and(|previous| previous != current_kind)
+                || address.is_some_and(|previous| previous != lhs_load.address)
+                || field_width.is_some_and(|previous| previous != lhs_load.width)
                 || within
-                    .checked_add(*width)
-                    .is_none_or(|end| end > array.element_width)
-                || element_width.is_some_and(|previous| previous != array.element_width)
+                    .checked_add(lhs_load.width)
+                    .is_none_or(|end| end > current_element_width)
+                || element_width.is_some_and(|previous| previous != current_element_width)
                 || bit_offset.is_some_and(|previous| previous != within)
             {
                 valid = false;
                 break;
             }
-            common = Some(*scalar);
-            address = Some(*load_address);
-            element_width = Some(array.element_width);
+            if let Some(rhs_load) = rhs_load {
+                let rhs_array = layout
+                    .unpacked_arrays
+                    .get(&rhs_load.address.absolute_addr());
+                let rhs_element_width =
+                    rhs_array.map_or(rhs_load.width, |array| array.element_width);
+                let rhs_element_stride =
+                    rhs_array.map_or(rhs_load.width / 8, |array| array.element_stride);
+                if rhs_load.width != lhs_load.width
+                    || rhs_load.offset % rhs_element_width != within
+                    || rhs_element_width != current_element_width
+                    || rhs_element_stride != current_element_stride
+                {
+                    valid = false;
+                    break;
+                }
+                earliest_load = earliest_load.min(rhs_load.load_index);
+                covered.push(rhs_load.load_index);
+                if let Some(slice_index) = rhs_load.slice_index {
+                    covered.push(slice_index);
+                }
+            }
+            rhs_plan = Some(current_rhs);
+            kind = Some(current_kind);
+            address = Some(lhs_load.address);
+            element_width = Some(current_element_width);
             bit_offset = Some(within);
-            field_width = Some(*width);
-            earliest_load = earliest_load.min(*load_idx);
-            covered.extend([*load_idx, compare_idx]);
-            if let Some(slice_idx) = slice_idx {
-                covered.push(*slice_idx);
+            field_width = Some(lhs_load.width);
+            earliest_load = earliest_load.min(lhs_load.load_index);
+            covered.extend([lhs_load.load_index, compare_idx]);
+            if let Some(slice_index) = lhs_load.slice_index {
+                covered.push(slice_index);
             }
         }
         if !valid {
             continue;
         }
         let address = address.expect("nonempty compare pack has an address");
-        let array = layout.unpacked_arrays[&address.absolute_addr()];
+        let element_stride = layout
+            .unpacked_arrays
+            .get(&address.absolute_addr())
+            .map_or_else(|| field_width.unwrap() / 8, |array| array.element_stride);
         let bit_offset = bit_offset.unwrap();
         let field_width = field_width.unwrap();
-        let physical_bytes = lane_count.saturating_mul(array.element_stride);
-        if !matches!(array.element_stride, 1 | 2 | 4)
+        let kind = kind.unwrap();
+        let physical_bytes = lane_count.saturating_mul(element_stride);
+        if !matches!(element_stride, 1 | 2 | 4)
             || physical_bytes == 0
             || !physical_bytes.is_multiple_of(16)
-            || bit_offset + field_width > array.element_stride * 8
-            || (array.element_stride == 1 && bit_offset != 0)
+            || bit_offset + field_width > element_stride * 8
+            || (element_stride == 1 && bit_offset != 0)
+            || (!matches!(kind, CmpKind::Eq | CmpKind::Ne) && field_width != element_stride * 8)
         {
             continue;
         }
         if block.instructions[earliest_load..root_idx]
             .iter()
             .any(|instruction| match instruction {
-                SIRInstruction::Store(destination, ..) => *destination == address,
-                SIRInstruction::Commit(_, destination, ..) => *destination == address,
+                SIRInstruction::Store(destination, ..) => {
+                    *destination == address
+                        || matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Memory(rhs)) if *destination == rhs)
+                }
+                SIRInstruction::Commit(_, destination, ..) => {
+                    *destination == address
+                        || matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Memory(rhs)) if *destination == rhs)
+                }
                 _ => false,
             })
         {
@@ -306,12 +477,13 @@ fn find_packed_lane_eq_plans(
         }
         result.roots.insert(
             root_idx,
-            PackedLaneEqPlan {
+            PackedLaneComparePlan {
                 dst: *dst,
-                value: common.unwrap(),
+                rhs: rhs_plan.unwrap(),
+                kind,
                 address,
                 lane_count,
-                element_stride: array.element_stride,
+                element_stride,
                 bit_offset,
                 field_width,
                 covered_indices: covered,
@@ -394,16 +566,19 @@ pub fn lower_execution_unit(
     } else {
         None
     };
+    let exact_constants = (!four_state).then(|| collect_exact_sir_constants(eu));
     let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
         HashMap::default();
     if !four_state {
-        let constants = collect_exact_sir_constants(eu);
         let uses = sir_use_sites
             .as_ref()
             .expect("two-state lookup planning must collect SIR uses");
+        let constants = exact_constants
+            .as_ref()
+            .expect("two-state lowering must collect exact constants");
         for &block_id in &block_ids {
             let block = &eu.blocks[&block_id];
-            let mut plans = find_dense_lookup_plans(block, &eu.register_map, &constants, uses);
+            let mut plans = find_dense_lookup_plans(block, &eu.register_map, constants, uses);
             let mut root_indices: Vec<_> = plans.roots.keys().copied().collect();
             root_indices.sort_unstable();
             for root_idx in root_indices {
@@ -515,17 +690,20 @@ pub fn lower_execution_unit(
         let lookup_plans = dense_lookup_plans_by_block
             .remove(&sir_block_id)
             .unwrap_or_default();
-        let packed_lane_eq_plans = if !four_state {
-            find_packed_lane_eq_plans(
+        let packed_lane_compare_plans = if !four_state {
+            find_packed_lane_compare_plans(
                 sir_block,
                 &eu.register_map,
+                exact_constants
+                    .as_ref()
+                    .expect("two-state packed compares must collect exact constants"),
                 layout,
                 sir_use_sites
                     .as_ref()
                     .expect("two-state packed compares must collect SIR uses"),
             )
         } else {
-            PackedLaneEqPlans::default()
+            PackedLaneComparePlans::default()
         };
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let sir_defs = collect_sir_defs(sir_block);
@@ -563,13 +741,26 @@ pub fn lower_execution_unit(
                     sir_block.id.0, inst_idx, dst.0, inst
                 );
             }
-            if packed_lane_eq_plans.skip_indices.contains(&inst_idx) {
-                if let Some(plan) = packed_lane_eq_plans.roots.get(&inst_idx) {
+            if packed_lane_compare_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = packed_lane_compare_plans.roots.get(&inst_idx) {
                     let offset = ctx.byte_offset(&plan.address, 0);
                     let byte_len = plan.lane_count * plan.element_stride;
-                    mblock.push(MInst::PackedLaneEq {
+                    let rhs = match plan.rhs {
+                        PackedLaneComparePlanRhs::Scalar(value) => {
+                            PackedLaneCompareRhs::Scalar(ctx.reg_map.get(value))
+                        }
+                        PackedLaneComparePlanRhs::Memory(address) => {
+                            let rhs_offset = ctx.byte_offset(&address, 0);
+                            PackedLaneCompareRhs::Memory {
+                                offset: rhs_offset,
+                                alias_range: MemoryAliasRange::new(rhs_offset, byte_len),
+                            }
+                        }
+                    };
+                    mblock.push(MInst::PackedLaneCompare {
                         dst: ctx.reg_map.get(plan.dst),
-                        value: ctx.reg_map.get(plan.value),
+                        rhs,
+                        kind: plan.kind,
                         offset,
                         lane_count: plan.lane_count as u8,
                         element_stride: plan.element_stride as u8,
@@ -12589,6 +12780,103 @@ mod tests {
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: vec![],
         }
+    }
+
+    #[test]
+    fn recognizes_dynamic_constant_lane_offsets_in_packed_layout() {
+        let lhs_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut rhs_var = VarId::default();
+        rhs_var.inc();
+        let rhs_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: rhs_var,
+        };
+        let lhs_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, lhs_abs);
+        let rhs_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, rhs_abs);
+        let mut next_register = 0usize;
+        let mut register_map = HashMap::default();
+        let mut allocate = |ty: RegisterType| {
+            let register = RegisterId(next_register);
+            next_register += 1;
+            register_map.insert(register, ty);
+            register
+        };
+        let eight = allocate(RegisterType::Logic { width: 8 });
+        let mut instructions = vec![SIRInstruction::Imm(eight, SIRValue::new(8u8))];
+        let mut predicates = Vec::with_capacity(16);
+        for lane in 0u8..16 {
+            let lane_register = allocate(RegisterType::Logic { width: 8 });
+            let offset = allocate(RegisterType::Logic { width: 8 });
+            let lhs = allocate(RegisterType::Logic { width: 8 });
+            let rhs = allocate(RegisterType::Logic { width: 8 });
+            let predicate = allocate(RegisterType::Bit {
+                width: 1,
+                signed: false,
+            });
+            instructions.extend([
+                SIRInstruction::Imm(lane_register, SIRValue::new(lane)),
+                SIRInstruction::Binary(offset, lane_register, BinaryOp::Mul, eight),
+                SIRInstruction::Load(lhs, lhs_addr, SIROffset::Dynamic(offset), 8),
+                SIRInstruction::Load(rhs, rhs_addr, SIROffset::Dynamic(offset), 8),
+                SIRInstruction::Binary(predicate, lhs, BinaryOp::LtU, rhs),
+            ]);
+            predicates.push(predicate);
+        }
+        predicates.reverse();
+        let packed = allocate(RegisterType::Logic { width: 16 });
+        instructions.push(SIRInstruction::Concat(packed, predicates));
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets = [(lhs_abs, 0), (rhs_abs, 16)].into_iter().collect();
+        layout.widths = [(lhs_abs, 128), (rhs_abs, 128)].into_iter().collect();
+        layout.is_4states = [(lhs_abs, false), (rhs_abs, false)].into_iter().collect();
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::PackedLaneCompare {
+                        kind: CmpKind::LtU,
+                        rhs: PackedLaneCompareRhs::Memory { .. },
+                        lane_count: 16,
+                        element_stride: 1,
+                        field_width: 8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 
     fn lower_widened_whole_variable_load(variable_width: usize) -> MFunction {

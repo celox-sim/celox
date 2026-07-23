@@ -2501,9 +2501,10 @@ fn emit_inst(
             }
         }
 
-        MInst::PackedLaneEq {
+        MInst::PackedLaneCompare {
             dst,
-            value,
+            rhs,
+            kind,
             offset,
             lane_count,
             element_stride,
@@ -2513,7 +2514,6 @@ fn emit_inst(
         } => {
             let d64 = preg_to_reg64(resolve(assignment, *dst));
             let d32 = preg_to_reg32(resolve(assignment, *dst));
-            let scalar = preg_to_reg32(resolve(assignment, *value));
             let stride = usize::from(*element_stride);
             debug_assert!(matches!(stride, 1 | 2 | 4));
             debug_assert_eq!(usize::from(*lane_count) * stride % 16, 0);
@@ -2521,22 +2521,30 @@ fn emit_inst(
             // XMM registers are outside the GPR allocator. The pseudo is one
             // indivisible emission unit, so these temporaries cannot overlap
             // another generated operation.
-            asm.movd(xmm1, scalar)?;
-            match stride {
-                1 => {
-                    asm.punpcklbw(xmm1, xmm1)?;
-                    asm.punpcklwd(xmm1, xmm1)?;
-                    asm.pshufd(xmm1, xmm1, 0)?;
+            if let PackedLaneCompareRhs::Scalar(value) = rhs {
+                let scalar = preg_to_reg32(resolve(assignment, *value));
+                asm.movd(xmm1, scalar)?;
+                match stride {
+                    1 => {
+                        asm.punpcklbw(xmm1, xmm1)?;
+                        asm.punpcklwd(xmm1, xmm1)?;
+                        asm.pshufd(xmm1, xmm1, 0)?;
+                    }
+                    2 => {
+                        asm.pshuflw(xmm1, xmm1, 0)?;
+                        asm.pshufd(xmm1, xmm1, 0)?;
+                    }
+                    4 => asm.pshufd(xmm1, xmm1, 0)?,
+                    _ => unreachable!(),
                 }
-                2 => {
-                    asm.pshuflw(xmm1, xmm1, 0)?;
-                    asm.pshufd(xmm1, xmm1, 0)?;
-                }
-                4 => asm.pshufd(xmm1, xmm1, 0)?,
-                _ => unreachable!(),
+                asm.movdqa(xmm3, xmm1)?;
             }
             let storage_width = stride * 8;
             let needs_mask = usize::from(*field_width) != storage_width;
+            debug_assert!(
+                matches!(kind, CmpKind::Eq | CmpKind::Ne) || !needs_mask,
+                "ordered packed comparisons require a full physical lane"
+            );
             if needs_mask {
                 let mask = if *field_width == 32 {
                     u32::MAX
@@ -2559,6 +2567,36 @@ fn emit_inst(
                     _ => unreachable!(),
                 }
             }
+            let ordered = !matches!(kind, CmpKind::Eq | CmpKind::Ne);
+            let unsigned = matches!(
+                kind,
+                CmpKind::LtU | CmpKind::LeU | CmpKind::GtU | CmpKind::GeU
+            );
+            let invert = matches!(
+                kind,
+                CmpKind::Ne | CmpKind::LeU | CmpKind::LeS | CmpKind::GeU | CmpKind::GeS
+            );
+            let swap = matches!(
+                kind,
+                CmpKind::LtU | CmpKind::LtS | CmpKind::GeU | CmpKind::GeS
+            );
+            if ordered && unsigned {
+                asm.mov(d32, 1u32 << (storage_width - 1))?;
+                asm.movd(xmm5, d32)?;
+                match stride {
+                    1 => {
+                        asm.punpcklbw(xmm5, xmm5)?;
+                        asm.punpcklwd(xmm5, xmm5)?;
+                        asm.pshufd(xmm5, xmm5, 0)?;
+                    }
+                    2 => {
+                        asm.pshuflw(xmm5, xmm5, 0)?;
+                        asm.pshufd(xmm5, xmm5, 0)?;
+                    }
+                    4 => asm.pshufd(xmm5, xmm5, 0)?,
+                    _ => unreachable!(),
+                }
+            }
             asm.pxor(xmm2, xmm2)?;
             let lanes_per_chunk = 16 / stride;
             for lane_base in (0..usize::from(*lane_count)).step_by(lanes_per_chunk) {
@@ -2569,38 +2607,82 @@ fn emit_inst(
                     xmm0,
                     xmmword_ptr(mem_operand(BaseReg::SimState, chunk_offset)),
                 )?;
+                if let PackedLaneCompareRhs::Memory { offset, .. } = rhs {
+                    let rhs_chunk_offset = offset
+                        .checked_add((lane_base * stride) as i32)
+                        .expect("packed lane compare RHS offset must fit i32");
+                    asm.movdqu(
+                        xmm1,
+                        xmmword_ptr(mem_operand(BaseReg::SimState, rhs_chunk_offset)),
+                    )?;
+                } else {
+                    asm.movdqa(xmm1, xmm3)?;
+                }
                 if *bit_offset != 0 {
                     match stride {
-                        2 => asm.psrlw(xmm0, u32::from(*bit_offset))?,
-                        4 => asm.psrld(xmm0, u32::from(*bit_offset))?,
+                        2 => {
+                            asm.psrlw(xmm0, u32::from(*bit_offset))?;
+                            if matches!(rhs, PackedLaneCompareRhs::Memory { .. }) {
+                                asm.psrlw(xmm1, u32::from(*bit_offset))?;
+                            }
+                        }
+                        4 => {
+                            asm.psrld(xmm0, u32::from(*bit_offset))?;
+                            if matches!(rhs, PackedLaneCompareRhs::Memory { .. }) {
+                                asm.psrld(xmm1, u32::from(*bit_offset))?;
+                            }
+                        }
                         _ => unreachable!("byte-lane shifts are rejected by ISel"),
                     }
                 }
                 if needs_mask {
                     asm.pand(xmm0, xmm4)?;
+                    asm.pand(xmm1, xmm4)?;
+                }
+                let result = if ordered {
+                    if unsigned {
+                        asm.pxor(xmm0, xmm5)?;
+                        asm.pxor(xmm1, xmm5)?;
+                    }
+                    match (stride, swap) {
+                        (1, false) => asm.pcmpgtb(xmm0, xmm1)?,
+                        (1, true) => asm.pcmpgtb(xmm1, xmm0)?,
+                        (2, false) => asm.pcmpgtw(xmm0, xmm1)?,
+                        (2, true) => asm.pcmpgtw(xmm1, xmm0)?,
+                        (4, false) => asm.pcmpgtd(xmm0, xmm1)?,
+                        (4, true) => asm.pcmpgtd(xmm1, xmm0)?,
+                        _ => unreachable!(),
+                    }
+                    if swap { xmm1 } else { xmm0 }
+                } else {
+                    match stride {
+                        1 => asm.pcmpeqb(xmm0, xmm1)?,
+                        2 => asm.pcmpeqw(xmm0, xmm1)?,
+                        4 => asm.pcmpeqd(xmm0, xmm1)?,
+                        _ => unreachable!(),
+                    }
+                    xmm0
+                };
+                if invert {
+                    let inverse_temp = if ordered && swap { xmm0 } else { xmm1 };
+                    asm.pcmpeqd(inverse_temp, inverse_temp)?;
+                    asm.pxor(result, inverse_temp)?;
                 }
                 match stride {
-                    1 => {
-                        asm.pcmpeqb(xmm0, xmm1)?;
-                        asm.pmovmskb(d32, xmm0)?;
-                    }
+                    1 => asm.pmovmskb(d32, result)?,
                     2 => {
-                        asm.pcmpeqw(xmm0, xmm1)?;
-                        asm.packsswb(xmm0, xmm0)?;
-                        asm.pmovmskb(d32, xmm0)?;
+                        asm.packsswb(result, result)?;
+                        asm.pmovmskb(d32, result)?;
                         asm.and(d32, 0xff)?;
                     }
-                    4 => {
-                        asm.pcmpeqd(xmm0, xmm1)?;
-                        asm.movmskps(d32, xmm0)?;
-                    }
+                    4 => asm.movmskps(d32, result)?,
                     _ => unreachable!(),
                 }
                 if lane_base != 0 {
                     asm.shl(d64, lane_base as u32)?;
                 }
-                asm.movd(xmm3, d32)?;
-                asm.por(xmm2, xmm3)?;
+                asm.movd(result, d32)?;
+                asm.por(xmm2, result)?;
             }
             asm.movq(d64, xmm2)?;
         }
@@ -3930,7 +4012,7 @@ fn emit_chained_eu_groups(
             verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
         }
     }
-    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout)
+    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     if let Some(trace) = trace.as_deref_mut() {
@@ -4174,7 +4256,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => store_ptr += 1,
                 MInst::LoadIndexed { .. }
                 | MInst::LoadPtrIndexed { .. }
-                | MInst::PackedLaneEq { .. } => indexed_load += 1,
+                | MInst::PackedLaneCompare { .. } => indexed_load += 1,
                 MInst::StoreIndexed { .. }
                 | MInst::OrStoreIndexed { .. }
                 | MInst::StorePtrIndexed { .. }
@@ -5731,9 +5813,10 @@ mod shift_encoding_tests {
                 offset: SCALAR_OFFSET as i32,
                 size: OpSize::S32,
             });
-            block.push(MInst::PackedLaneEq {
+            block.push(MInst::PackedLaneCompare {
                 dst: result,
-                value: scalar,
+                rhs: PackedLaneCompareRhs::Scalar(scalar),
+                kind: CmpKind::Eq,
                 offset: 0,
                 lane_count: LANES as u8,
                 element_stride: stride as u8,
@@ -5779,6 +5862,138 @@ mod shift_encoding_tests {
                 expected,
                 "stride={stride} bit_offset={bit_offset} field_width={field_width}"
             );
+        }
+    }
+
+    #[test]
+    fn packed_lane_compare_executes_all_relations_for_scalar_and_memory_rhs() {
+        const LANES: usize = 16;
+        const RHS_OFFSET: usize = 64;
+        const SCALAR_OFFSET: usize = 128;
+        const RESULT_OFFSET: usize = 136;
+        const KINDS: [CmpKind; 10] = [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LtS,
+            CmpKind::LeU,
+            CmpKind::LeS,
+            CmpKind::GtU,
+            CmpKind::GtS,
+            CmpKind::GeU,
+            CmpKind::GeS,
+        ];
+
+        fn relation(kind: CmpKind, lhs: u32, rhs: u32, bits: usize) -> bool {
+            let shift = 64 - bits;
+            let lhs_signed = ((u64::from(lhs) << shift) as i64) >> shift;
+            let rhs_signed = ((u64::from(rhs) << shift) as i64) >> shift;
+            match kind {
+                CmpKind::Eq => lhs == rhs,
+                CmpKind::Ne => lhs != rhs,
+                CmpKind::LtU => lhs < rhs,
+                CmpKind::LtS => lhs_signed < rhs_signed,
+                CmpKind::LeU => lhs <= rhs,
+                CmpKind::LeS => lhs_signed <= rhs_signed,
+                CmpKind::GtU => lhs > rhs,
+                CmpKind::GtS => lhs_signed > rhs_signed,
+                CmpKind::GeU => lhs >= rhs,
+                CmpKind::GeS => lhs_signed >= rhs_signed,
+            }
+        }
+
+        for stride in [1usize, 2, 4] {
+            let bits = stride * 8;
+            let mask = if bits == 32 {
+                u32::MAX
+            } else {
+                (1u32 << bits) - 1
+            };
+            let scalar_value = (0x8181_8181 & mask).max(1);
+            for kind in KINDS {
+                for memory_rhs in [false, true] {
+                    let mut vregs = VRegAllocator::new();
+                    let scalar = vregs.alloc();
+                    let result = vregs.alloc();
+                    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+                    let mut block = MBlock::new(BlockId(0));
+                    if !memory_rhs {
+                        block.push(MInst::Load {
+                            dst: scalar,
+                            base: BaseReg::SimState,
+                            offset: SCALAR_OFFSET as i32,
+                            size: OpSize::S32,
+                        });
+                    }
+                    block.push(MInst::PackedLaneCompare {
+                        dst: result,
+                        rhs: if memory_rhs {
+                            PackedLaneCompareRhs::Memory {
+                                offset: RHS_OFFSET as i32,
+                                alias_range: MemoryAliasRange::new(
+                                    RHS_OFFSET as i32,
+                                    LANES * stride,
+                                ),
+                            }
+                        } else {
+                            PackedLaneCompareRhs::Scalar(scalar)
+                        },
+                        kind,
+                        offset: 0,
+                        lane_count: LANES as u8,
+                        element_stride: stride as u8,
+                        bit_offset: 0,
+                        field_width: bits as u8,
+                        alias_range: MemoryAliasRange::new(0, LANES * stride),
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: RESULT_OFFSET as i32,
+                        src: result,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Return);
+                    func.push_block(block);
+
+                    mir_legalize::legalize(&mut func);
+                    mir_opt::optimize(&mut func);
+                    let allocation = regalloc::run_regalloc(&mut func).unwrap();
+                    let emitted =
+                        emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+                    let jit = JitCode::new(&emitted.code).unwrap();
+                    let mut state = [0u8; 144];
+                    let mut expected = 0u64;
+                    for lane in 0..LANES {
+                        let lhs = ((lane as u32).wrapping_mul(0x31) ^ (mask >> (lane % 5))) & mask;
+                        let rhs = if memory_rhs {
+                            ((15 - lane) as u32).wrapping_mul(0x27) ^ (1u32 << (bits - 1))
+                        } else {
+                            scalar_value
+                        } & mask;
+                        state[lane * stride..(lane + 1) * stride]
+                            .copy_from_slice(&lhs.to_le_bytes()[..stride]);
+                        if memory_rhs {
+                            let start = RHS_OFFSET + lane * stride;
+                            state[start..start + stride]
+                                .copy_from_slice(&rhs.to_le_bytes()[..stride]);
+                        }
+                        if relation(kind, lhs, rhs, bits) {
+                            expected |= 1u64 << lane;
+                        }
+                    }
+                    state[SCALAR_OFFSET..SCALAR_OFFSET + 4]
+                        .copy_from_slice(&scalar_value.to_le_bytes());
+
+                    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                    assert_eq!(
+                        u64::from_le_bytes(
+                            state[RESULT_OFFSET..RESULT_OFFSET + 8].try_into().unwrap()
+                        ),
+                        expected,
+                        "stride={stride} kind={kind:?} memory_rhs={memory_rhs}"
+                    );
+                }
+            }
         }
     }
 }
