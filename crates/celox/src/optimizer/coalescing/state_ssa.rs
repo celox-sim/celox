@@ -792,9 +792,17 @@ impl StateSsa {
                 .iter()
                 .any(|block| !cfg.dominance_frontier[cfg.index[block]].is_empty());
             let needs_liveness = region == WORKING_REGION || may_need_phi;
-            let live_in = needs_liveness.then(|| {
-                live_in_blocks(cfg, &facts[old].def_blocks, &facts[old].upward_use_blocks)
-            });
+            // Placement may query a block which did not contain a load in the
+            // original program. Build unpruned MemorySSA for that mode;
+            // pruning from only the original upward uses would omit a phi at
+            // a prospective destination and falsely report LiveOnEntry there.
+            let live_in = if include_read_only {
+                Some(vec![true; cfg.block_ids.len()])
+            } else {
+                needs_liveness.then(|| {
+                    live_in_blocks(cfg, &facts[old].def_blocks, &facts[old].upward_use_blocks)
+                })
+            };
             let phi_blocks = if may_need_phi {
                 phi_blocks_for_slot(
                     cfg,
@@ -1360,6 +1368,65 @@ mod tests {
         assert!(matches!(
             use_access.kind,
             MemoryAccessKind::Use { reaching, .. } if reaching == definition.id
+        ));
+    }
+
+    #[test]
+    fn placement_mode_versions_a_join_without_an_original_load() {
+        let stable = address(STABLE_REGION, 0);
+        let eu = unit(
+            vec![
+                block(
+                    0,
+                    vec![SIRInstruction::Load(
+                        RegisterId(0),
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), Vec::new()),
+                ),
+                block(2, Vec::new(), SIRTerminator::Jump(BlockId(3), Vec::new())),
+                block(3, Vec::new(), SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(1)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+        let cfg = SirCfg::analyze(&eu).unwrap();
+
+        let state =
+            StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION, &StatePhaseMap::default())
+                .unwrap();
+
+        let (slot, original) = state
+            .read_version(BlockId(0), 0, RegisterId(0))
+            .expect("the original load has a version");
+        let join = state
+            .entry_version(BlockId(3), slot)
+            .expect("placement mode versions every candidate block");
+        assert_ne!(join, original);
+        assert!(matches!(
+            state.accesses[join.0].kind,
+            MemoryAccessKind::Phi { .. }
         ));
     }
 
