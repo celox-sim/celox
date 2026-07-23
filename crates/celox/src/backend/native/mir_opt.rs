@@ -1017,8 +1017,9 @@ fn mask_width(mask: u64) -> Option<usize> {
 /// operations.  Track a conservative set of bits which may be one instead.
 /// This is the ordinary known-bits lattice restricted to the fact needed by
 /// this pass: `x & mask == x` exactly when every possible one-bit of `x` is in
-/// `mask`.  Value facts and chain rewrites are local to a block, so the pass
-/// neither reaches through the CFG to lengthen a live range nor invents an
+/// `mask`. Facts follow SSA values through the complete CFG, including phis.
+/// Rewrites remain at the original definition and use sites, so propagating a
+/// fact across a block boundary does not extend a live range or add an
 /// ordering constraint.
 fn redundant_mask_eliminate(func: &mut MFunction) {
     let mut constants: HashMap<VReg, u64> = HashMap::new();
@@ -1029,13 +1030,12 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
             }
         }
     }
+    let possible_ones = global_possible_one_bits(func, &constants);
 
     for block in &mut func.blocks {
-        let mut possible_ones: HashMap<VReg, u64> = HashMap::new();
         let mut definitions: HashMap<VReg, MaskDefinition> = HashMap::new();
 
         for inst in &mut block.insts {
-            let result_possible_ones = compute_possible_one_bits(inst, &possible_ones, &constants);
             let should_replace =
                 redundant_mask_action(inst, &possible_ones, &constants, &definitions);
 
@@ -1063,17 +1063,97 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
             }
 
             if let Some(dst) = inst.def() {
-                if result_possible_ones == u64::MAX {
-                    possible_ones.remove(&dst);
-                } else {
-                    possible_ones.insert(dst, result_possible_ones);
-                }
                 if let Some(definition) = MaskDefinition::from_inst(inst) {
                     definitions.insert(dst, definition);
                 }
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum PossibleOneDefinition {
+    Phi { block: usize, phi: usize },
+    Instruction { block: usize, instruction: usize },
+}
+
+/// Solve possible-one facts on the SSA def-use graph.
+///
+/// Facts only move from unknown (`u64::MAX`) toward a smaller set of possible
+/// bits. A changed definition schedules exactly its SSA users, so an acyclic
+/// chain is visited once after its inputs settle and a loop is revisited only
+/// when a backedge fact actually improves.
+fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) -> Vec<u64> {
+    let value_count = func.vregs.count() as usize;
+    let mut definitions = vec![None::<PossibleOneDefinition>; value_count];
+    let mut users = vec![Vec::<VReg>::new(); value_count];
+    let mut queue = VecDeque::new();
+    let mut queued = vec![false; value_count];
+
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (phi_index, phi) in block.phis.iter().enumerate() {
+            let destination = phi.dst.0 as usize;
+            definitions[destination] = Some(PossibleOneDefinition::Phi {
+                block: block_index,
+                phi: phi_index,
+            });
+            queue.push_back(phi.dst);
+            queued[destination] = true;
+            for &(_, source) in &phi.sources {
+                users[source.0 as usize].push(phi.dst);
+            }
+        }
+        for (instruction_index, instruction) in block.insts.iter().enumerate() {
+            let Some(dst) = instruction.def() else {
+                continue;
+            };
+            let destination = dst.0 as usize;
+            definitions[destination] = Some(PossibleOneDefinition::Instruction {
+                block: block_index,
+                instruction: instruction_index,
+            });
+            queue.push_back(dst);
+            queued[destination] = true;
+            for source in instruction.uses() {
+                users[source.0 as usize].push(dst);
+            }
+        }
+    }
+
+    let mut possible_ones = vec![u64::MAX; value_count];
+    while let Some(value) = queue.pop_front() {
+        let value_index = value.0 as usize;
+        queued[value_index] = false;
+        let Some(definition) = definitions[value_index] else {
+            continue;
+        };
+        let computed = match definition {
+            PossibleOneDefinition::Phi { block, phi } => func.blocks[block].phis[phi]
+                .sources
+                .iter()
+                .map(|(_, source)| possible_bits(*source, &possible_ones, constants))
+                .fold(0, |possible, source| possible | source),
+            PossibleOneDefinition::Instruction { block, instruction } => compute_possible_one_bits(
+                &func.blocks[block].insts[instruction],
+                &possible_ones,
+                constants,
+            ),
+        };
+        let old = possible_ones[value_index];
+        let improved = old & computed;
+        if improved == old {
+            continue;
+        }
+        possible_ones[value_index] = improved;
+        for &user in &users[value_index] {
+            let user_index = user.0 as usize;
+            if !queued[user_index] {
+                queued[user_index] = true;
+                queue.push_back(user);
+            }
+        }
+    }
+    possible_ones
 }
 
 enum MaskElimAction {
@@ -1117,13 +1197,10 @@ impl MaskDefinition {
     }
 }
 
-fn possible_bits(
-    value: VReg,
-    possible_ones: &HashMap<VReg, u64>,
-    constants: &HashMap<VReg, u64>,
-) -> u64 {
+fn possible_bits(value: VReg, possible_ones: &[u64], constants: &HashMap<VReg, u64>) -> u64 {
     possible_ones
-        .get(&value)
+        .get(value.0 as usize)
+        .filter(|&&possible| possible != u64::MAX)
         .or_else(|| constants.get(&value))
         .copied()
         .unwrap_or(u64::MAX)
@@ -1133,7 +1210,7 @@ fn redundant_32_bit_mask_action(
     dst: VReg,
     src: VReg,
     mask: u32,
-    possible_ones: &HashMap<VReg, u64>,
+    possible_ones: &[u64],
     constants: &HashMap<VReg, u64>,
 ) -> Option<MaskElimAction> {
     let source_bits = possible_bits(src, possible_ones, constants);
@@ -1163,7 +1240,7 @@ fn and_repeats_operand(definition: Option<&MaskDefinition>, operand: VReg, word3
 
 fn redundant_mask_action(
     inst: &MInst,
-    possible_ones: &HashMap<VReg, u64>,
+    possible_ones: &[u64],
     constants: &HashMap<VReg, u64>,
     definitions: &HashMap<VReg, MaskDefinition>,
 ) -> Option<MaskElimAction> {
@@ -1267,7 +1344,7 @@ fn machine_width_mask(size: OpSize) -> u64 {
 
 fn compute_possible_one_bits(
     inst: &MInst,
-    possible_ones: &HashMap<VReg, u64>,
+    possible_ones: &[u64],
     constants: &HashMap<VReg, u64>,
 ) -> u64 {
     let bits = |value| possible_bits(value, possible_ones, constants);
@@ -4750,6 +4827,113 @@ mod tests {
                 dst: VReg(2),
                 src: VReg(1),
             }
+        ));
+    }
+
+    #[test]
+    fn redundant_mask_elimination_follows_phi_across_blocks() {
+        let mut func = make_func(Vec::new(), 4);
+        func.blocks.clear();
+
+        let mut left = MBlock::new(BlockId(0));
+        left.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S8,
+            },
+            MInst::Jump { target: BlockId(2) },
+        ];
+        let mut right = MBlock::new(BlockId(1));
+        right.insts = vec![
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S16,
+            },
+            MInst::Jump { target: BlockId(2) },
+        ];
+        let mut join = MBlock::new(BlockId(2));
+        join.phis.push(PhiNode {
+            dst: VReg(2),
+            sources: vec![(BlockId(0), VReg(0)), (BlockId(1), VReg(1))],
+        });
+        join.insts = vec![
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: u64::from(u16::MAX),
+            },
+            MInst::Return,
+        ];
+        func.push_block(left);
+        func.push_block(right);
+        func.push_block(join);
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[2].insts[0],
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            }
+        ));
+    }
+
+    #[test]
+    fn redundant_mask_elimination_keeps_mask_for_wide_phi_arm() {
+        let mut func = make_func(Vec::new(), 4);
+        func.blocks.clear();
+
+        let mut left = MBlock::new(BlockId(0));
+        left.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S8,
+            },
+            MInst::Jump { target: BlockId(2) },
+        ];
+        let mut right = MBlock::new(BlockId(1));
+        right.insts = vec![
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 8,
+                size: OpSize::S64,
+            },
+            MInst::Jump { target: BlockId(2) },
+        ];
+        let mut join = MBlock::new(BlockId(2));
+        join.phis.push(PhiNode {
+            dst: VReg(2),
+            sources: vec![(BlockId(0), VReg(0)), (BlockId(1), VReg(1))],
+        });
+        join.insts = vec![
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: u64::from(u16::MAX),
+            },
+            MInst::Return,
+        ];
+        func.push_block(left);
+        func.push_block(right);
+        func.push_block(join);
+
+        redundant_mask_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[2].insts[0],
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm,
+            } if imm == u64::from(u16::MAX)
         ));
     }
 

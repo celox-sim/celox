@@ -6496,6 +6496,42 @@ copy reduction.
 Status: **structurally complete; exact semantics and concrete phi/frame/code
 reductions verified, aggregate runtime effect unconfirmed**.
 
+### Step 75: CFG-wide machine known-bits propagation
+
+The native redundant-mask pass previously discarded possible-one facts at
+every MIR block boundary.  Consequently a value loaded at a narrow machine
+width, selected on two narrow predecessors, or carried through a phi was
+treated as an arbitrary 64-bit value at its first successor use.  The backend
+then emitted another `and` even though the defining SSA graph already proved
+that every possible one-bit was inside the mask.
+
+Possible-one facts now use a sparse SSA def-use worklist over the complete MIR
+CFG.  Phi transfer is the union of incoming possible bits.  Facts start at the
+unknown 64-bit value and only become more precise; a changed definition queues
+exactly its users.  Thus an acyclic value is revisited only when an input
+improves, while a loop is revisited only when a backedge fact changes.  The
+rewrite still replaces the mask at its original instruction and does not move
+any definition or use, so the analysis cannot lengthen a live range.
+
+Focused tests prove that a phi of 8- and 16-bit loads makes a following
+16-bit mask redundant, while one 64-bit incoming arm keeps the mask.  The
+complete native trace shrinks from 47,764,004 to 47,522,416 bytes.  Emitted
+x86 `and` instructions across the traced native bodies fall from 37,394 to
+35,486.  More importantly, instruction sampling on the unchanged Linux
+workload reduces generated JIT instructions from approximately
+1,083,664,112,000 to 1,072,546,846,000 (1.0%).  The sampled generated-code
+execution interval changes from 72.124 s to 71.283 s.
+
+The library suite passes 1,013/1,013, native testbench 60 passed with one
+ignored, counter 9 passed with three ignored, and workspace all-target check,
+package all-target strict Clippy, formatting, and the focused mask tests pass.
+The sampled full run reaches `reboot: Power down` and exactly
+`cy=9ae070 x3=aa pass=1`.
+
+Status: **CFG-wide mask facts are Linux-correct and remove 1.0% of dynamically
+executed JIT instructions; the remaining Veryl gap is still dominated by
+other generated-code work**.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6626,6 +6662,7 @@ reductions verified, aggregate runtime effect unconfirmed**.
 | 72 final loop-phi component coloring | this step | regalloc 315/315 | lib 1058/1058; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace all-target check, package all-target strict Clippy, format, and diff checks pass | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; Step 71/candidate SIR and pre-RA MIR are byte-identical | trace 98.843 s; compile 75.299 / 74.672 s; execute 84.421 / 85.412 s | crossed loop components recolor in one rollback-safe matching; frames 5672/0/88/232/5704→4344/0/88/216/4368; emitted code -133,623 bytes; execute mean -9.3% |
 | 73 path-sensitive priority recovery | `c50cd1e3` | guarded-region 30/30; BranchifyMux 51/51 | all-target strict Clippy and format; package suite reaches pre-existing all-backend four-state cast failures | non-LTO pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.048 s; execute 77.441 s | dead priority CFG removed; normal FP DAG moves below five early exits; runtime -2.4% versus adjacent retained sample |
 | 74 edge-known phi outcome selector | this step | selector compression 1/1 plus retained priority tests | check, strict Clippy, format, and exact native gate | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 84.179 / 84.341 s; execute 76.763 / 77.841 s | one selector replaces four path-history phis; inspected stack rows 9→3 and frames -112 B; aggregate runtime effect unconfirmed |
+| 75 CFG-wide machine known bits | this step | mask propagation 4/4 including narrow/wide phi arms | lib 1013/1013; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, strict Clippy, format | sampled non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 62.988 s; execute 71.283 s | emitted `and` -1,908; dynamic JIT instructions -1.0% from adjacent baseline |
 
 ## Related design records
 
