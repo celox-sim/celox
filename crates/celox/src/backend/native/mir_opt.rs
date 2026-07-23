@@ -12,6 +12,98 @@ use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 mod pipeline;
 pub use pipeline::optimize;
 
+/// Select x86 direct-memory AND for an exact local load/and/store chain.
+///
+/// The two SSA temporaries must have no other users. Keeping the match local
+/// also fixes the memory observation point: there is no intervening effect to
+/// justify with instruction reordering. Wider immediates are truncated to the
+/// access width, exactly as the original final store truncates the register.
+pub(crate) fn fold_direct_and_stores(func: &mut MFunction) -> usize {
+    let mut use_counts = HashMap::<VReg, usize>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, source) in &phi.sources {
+                *use_counts.entry(*source).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for source in inst.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    let mut folded = 0usize;
+    for block in &mut func.blocks {
+        let original = std::mem::take(&mut block.insts);
+        let mut rewritten = Vec::with_capacity(original.len());
+        let mut index = 0usize;
+        while index < original.len() {
+            let replacement = original
+                .get(index..index.saturating_add(3))
+                .and_then(|window| {
+                    let [
+                        MInst::Load {
+                            dst: loaded,
+                            base: load_base,
+                            offset: load_offset,
+                            size: load_size,
+                        },
+                        and,
+                        MInst::Store {
+                            base: store_base,
+                            offset: store_offset,
+                            src: stored,
+                            size: store_size,
+                        },
+                    ] = window
+                    else {
+                        return None;
+                    };
+                    if load_base != store_base
+                        || load_offset != store_offset
+                        || load_size != store_size
+                        || !matches!(load_size, OpSize::S8 | OpSize::S16 | OpSize::S32)
+                        || use_counts.get(loaded).copied() != Some(1)
+                        || use_counts.get(stored).copied() != Some(1)
+                    {
+                        return None;
+                    }
+                    let (result, source, immediate) = match and {
+                        MInst::AndImm { dst, src, imm } => (*dst, *src, *imm),
+                        MInst::AndImm32 { dst, src, imm } => (*dst, *src, u64::from(*imm)),
+                        _ => return None,
+                    };
+                    if source != *loaded || result != *stored {
+                        return None;
+                    }
+                    let width_mask = match load_size {
+                        OpSize::S8 => u64::from(u8::MAX),
+                        OpSize::S16 => u64::from(u16::MAX),
+                        OpSize::S32 => u64::from(u32::MAX),
+                        OpSize::S64 => unreachable!(),
+                    };
+                    Some(MInst::AndStoreImm {
+                        base: *load_base,
+                        offset: *load_offset,
+                        size: *load_size,
+                        imm: immediate & width_mask,
+                    })
+                });
+            if let Some(replacement) = replacement {
+                rewritten.push(replacement);
+                folded += 1;
+                index += 3;
+            } else {
+                rewritten.push(original[index].clone());
+                index += 1;
+            }
+        }
+        block.insts = rewritten;
+    }
+    folded
+}
+
 /// Keep allocation metadata in sync with constants created by MIR rewrites.
 ///
 /// ISel attaches `Remat` descriptors to constants it creates directly, but
@@ -9368,6 +9460,83 @@ mod tests {
                 size: OpSize::S64,
             }
         )));
+    }
+
+    #[test]
+    fn folds_exact_narrow_load_and_store_into_direct_memory_and() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xffff_ffff_ffff_fffcu64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    src: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        assert_eq!(fold_direct_and_stores(&mut func), 1);
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::AndStoreImm {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                    imm: 0xfc,
+                },
+                MInst::Return,
+            ]
+        );
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn direct_memory_and_requires_exclusive_ssa_temporaries() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xfc,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    src: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 38,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        assert_eq!(fold_direct_and_stores(&mut func), 0);
     }
 
     #[test]

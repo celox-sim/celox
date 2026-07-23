@@ -2146,6 +2146,21 @@ fn emit_inst(
             }
         }
 
+        MInst::AndStoreImm {
+            base,
+            offset,
+            size,
+            imm,
+        } => {
+            let mem = mem_operand(*base, *offset);
+            match size {
+                OpSize::S8 => asm.and(byte_ptr(mem), *imm as i32)?,
+                OpSize::S16 => asm.and(word_ptr(mem), *imm as i32)?,
+                OpSize::S32 => asm.and(dword_ptr(mem), *imm as i32)?,
+                OpSize::S64 => unreachable!("64-bit direct-memory AND is not selected"),
+            }
+        }
+
         MInst::MemCopy {
             src_offset,
             dst_offset,
@@ -4254,6 +4269,16 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::Store { base, .. } => match base {
                     BaseReg::SimState => store_sim += 1,
                     BaseReg::StackFrame => store_stack += 1,
+                },
+                MInst::AndStoreImm { base, .. } => match base {
+                    BaseReg::SimState => {
+                        load_sim += 1;
+                        store_sim += 1;
+                    }
+                    BaseReg::StackFrame => {
+                        load_stack += 1;
+                        store_stack += 1;
+                    }
                 },
                 MInst::LoadPtr { .. } => load_ptr += 1,
                 MInst::StorePtr { .. } | MInst::ReleaseStorePtr { .. } => store_ptr += 1,

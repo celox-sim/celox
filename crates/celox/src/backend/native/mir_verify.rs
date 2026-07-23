@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use super::mir::{BlockId, MFunction, MInst, SparseCommitDescriptor, VReg};
+use super::mir::{BlockId, MFunction, MInst, OpSize, SparseCommitDescriptor, VReg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVerifyError {
@@ -288,6 +288,23 @@ fn verify_instruction_constraints(
                 block,
                 index,
                 format!("or immediate {imm:#x} is not encodable as sign-extended imm32"),
+            ))
+        }
+        MInst::AndStoreImm { size, imm, .. }
+            if *size == OpSize::S64
+                || *imm
+                    > match size {
+                        OpSize::S8 => u64::from(u8::MAX),
+                        OpSize::S16 => u64::from(u16::MAX),
+                        OpSize::S32 => u64::from(u32::MAX),
+                        OpSize::S64 => u64::MAX,
+                    } =>
+        {
+            Err(MirVerifyError::instruction(
+                "OPCODE.AND_STORE_IMMEDIATE_WIDTH",
+                block,
+                index,
+                format!("and-store immediate {imm:#x} is invalid for {size}"),
             ))
         }
         MInst::MemCopy { byte_len: 0, .. } => Err(MirVerifyError::instruction(

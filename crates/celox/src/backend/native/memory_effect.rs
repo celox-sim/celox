@@ -228,6 +228,9 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
         MInst::Load {
             base, offset, size, ..
         }
+        | MInst::AndStoreImm {
+            base, offset, size, ..
+        }
         | MInst::BranchPred {
             predicate: BranchPredicate::MemoryNonZero { base, offset, size },
             ..
@@ -299,6 +302,9 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
 pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
     match inst {
         MInst::Store {
+            base, offset, size, ..
+        }
+        | MInst::AndStoreImm {
             base, offset, size, ..
         } => checked_range(*base, *offset, size.bytes() as usize)
             .map(|range| MemoryEffects::static_ranges(&[range]))

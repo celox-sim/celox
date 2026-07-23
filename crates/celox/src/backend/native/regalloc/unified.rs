@@ -421,6 +421,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::CmpImmSelect { .. } => "cmp_imm_select",
         MInst::GuardedCmpSelect { .. } => "guarded_cmp_select",
         MInst::Store { .. }
+        | MInst::AndStoreImm { .. }
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StoreIndexed { .. }
