@@ -129,6 +129,51 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
     folded
 }
 
+/// Fold a proven power-of-two byte index into the x86 memory operand.
+///
+/// This pass does not infer an RTL range or replace a bit-offset expression.
+/// It only rewrites an already selected 64-bit `ShlImm` whose sole use is an
+/// indexed load. x86 effective-address scaling and the original shift both
+/// use modulo-64-bit arithmetic, so the rewrite preserves wrapping exactly.
+fn fold_scaled_indexed_loads(func: &mut MFunction) {
+    let mut use_counts = HashMap::<VReg, usize>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, source) in &phi.sources {
+                *use_counts.entry(*source).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for source in inst.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut shifts = HashMap::<VReg, (VReg, u8)>::new();
+        for inst in &mut block.insts {
+            if let MInst::ShlImm { dst, src, imm } = inst {
+                if (1..=3).contains(imm) {
+                    shifts.insert(*dst, (*src, *imm));
+                }
+                continue;
+            }
+            let MInst::LoadIndexed { index, scale, .. } = inst else {
+                continue;
+            };
+            if *scale != 1 || use_counts.get(index).copied() != Some(1) {
+                continue;
+            }
+            let Some((unscaled, shift)) = shifts.get(index).copied() else {
+                continue;
+            };
+            *index = unscaled;
+            *scale = 1 << shift;
+        }
+    }
+}
+
 /// Keep allocation metadata in sync with constants created by MIR rewrites.
 ///
 /// ISel attaches `Remat` descriptors to constants it creates directly, but
@@ -1095,10 +1140,14 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
                 dst,
                 base,
                 index,
+                scale,
                 size,
                 ..
             } = inst
             {
+                if *scale != 1 {
+                    continue;
+                }
                 selectable.insert(
                     *dst,
                     IndexedLoadTreeSummary {
@@ -1330,6 +1379,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
                 base,
                 offset: min_offset,
                 index: combined_index,
+                scale: 1,
                 size,
                 alias_range,
             });
@@ -6708,6 +6758,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 100,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: alias(100),
                 },
@@ -6716,6 +6767,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 200,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: alias(200),
                 },
@@ -6724,6 +6776,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 300,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: alias(300),
                 },
@@ -6732,6 +6785,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 400,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: alias(400),
                 },
@@ -6821,6 +6875,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 100,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: MemoryAliasRange::new(100, 8),
                 },
@@ -6835,6 +6890,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 200,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: MemoryAliasRange::new(200, 8),
                 },
@@ -6870,6 +6926,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 100,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: MemoryAliasRange::new(100, 8),
                 },
@@ -6878,6 +6935,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 200,
                     index: VReg(1),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: MemoryAliasRange::new(200, 8),
                 },
@@ -9396,6 +9454,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 16,
                     index: VReg(0),
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: None,
                 },
@@ -10091,6 +10150,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 0,
                     index: VReg(1),
+                    scale: 1,
                     size: OpSize::S8,
                     alias_range: None,
                 },
@@ -10160,6 +10220,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 64,
                     index: VReg(1),
+                    scale: 1,
                     size: OpSize::S8,
                     alias_range: MemoryAliasRange::new(64, 8),
                 },
@@ -10223,6 +10284,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 16,
                     index: VReg(1),
+                    scale: 1,
                     size: OpSize::S8,
                     alias_range: MemoryAliasRange::new(16, 8),
                 },

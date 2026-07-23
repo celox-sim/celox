@@ -598,6 +598,7 @@ mod tests {
             base: BaseReg::SimState,
             offset: 120,
             index: VReg(0),
+            scale: 1,
             size: OpSize::S64,
             alias_range: MemoryAliasRange::new(100, 64),
         };

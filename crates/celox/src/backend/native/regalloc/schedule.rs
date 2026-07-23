@@ -1352,6 +1352,7 @@ mod tests {
                 base: BaseReg::SimState,
                 offset: (lane * 8) as i32,
                 index,
+                scale: 1,
                 size: OpSize::S64,
                 alias_range: None,
             });
@@ -1417,6 +1418,7 @@ mod tests {
                 base: BaseReg::SimState,
                 offset: 64,
                 index,
+                scale: 1,
                 size: OpSize::S64,
                 alias_range: None,
             },

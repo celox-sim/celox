@@ -854,13 +854,29 @@ address lowering converts 28 sequences to direct byte-index computation and
 reduces fused x86 instructions from 152,230 to 152,198. The complete Linux run
 still ends at `cy=9ae070 x3=aa pass=1`.
 
-The remaining 102 sequences must be classified by their actual dynamic-offset
-recipes before adding a general range analysis. For direct byte indices which
-are already proven safe, the next machine-level opportunity is an explicit x86
-address scale so a power-of-two byte stride can be represented by the memory
-operand rather than a separate `ShlImm`. Range proof and scaled-address
-selection remain separate contracts: scale selection must not reinterpret a
-wrapping RTL bit-offset expression.
+The remaining 102 `shl 6; shr 3` sequences must be classified by their actual
+dynamic-offset recipes before adding a general range analysis. Independently,
+direct byte indices which are already proven safe now carry an explicit x86
+address scale. A single-use `ShlImm` by one, two, or three is folded into
+`LoadIndexed` scale 2, 4, or 8. This is an exact machine rewrite: both the
+64-bit shift and x86 effective-address multiplication wrap modulo 64 bits. It
+does not reinterpret the earlier RTL bit-offset expression.
+
+On the complete fused function, scaled addressing changes:
+
+| Stage | Before scale | With scale | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 96,767 | 96,561 | -206 |
+| pressure-scheduled MIR | 103,700 | 103,494 | -206 |
+| post-RA MIR | 225,868 | 225,462 | -406 |
+| x86 instructions | 152,198 | 151,872 | -326 |
+
+The representative hot loop now performs
+`load [state + index*8 + offset]` directly. All 490 native-backend tests pass,
+and the complete Linux workload reaches `cy=9ae070 x3=aa pass=1` with
+64.018 seconds of generated execution. The immediately preceding run took
+64.152 seconds, so the timing difference is treated as noise; the retained
+result is the structural removal of address temporaries and instructions.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,

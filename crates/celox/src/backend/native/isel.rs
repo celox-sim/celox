@@ -4594,6 +4594,7 @@ fn prepare_sparse_clean_single_chunk(
             base: BaseReg::SimState,
             offset: stable_base + plane_delta,
             index: data_index,
+            scale: 1,
             size: OpSize::S64,
             alias_range: sparse_plane_access_len
                 .and_then(|byte_len| MemoryAliasRange::new(stable_base + plane_delta, byte_len)),
@@ -5058,6 +5059,7 @@ fn prepare_sparse_store(
             base: BaseReg::SimState,
             offset: sparse.dirty_words_offset as i32,
             index: dirty_index,
+            scale: 1,
             size: OpSize::S64,
             alias_range: dirty_alias_range,
         });
@@ -5108,6 +5110,7 @@ fn prepare_sparse_store(
                 base: BaseReg::SimState,
                 offset: stable_base + plane_delta,
                 index: data_index,
+                scale: 1,
                 size: OpSize::S64,
                 alias_range: sparse_plane_access_len.and_then(|byte_len| {
                     MemoryAliasRange::new(stable_base + plane_delta, byte_len)
@@ -5118,6 +5121,7 @@ fn prepare_sparse_store(
                 base: BaseReg::SimState,
                 offset: sparse_base + plane_delta,
                 index: data_index,
+                scale: 1,
                 size: OpSize::S64,
                 alias_range: sparse_plane_access_len.and_then(|byte_len| {
                     MemoryAliasRange::new(sparse_base + plane_delta, byte_len)
@@ -5175,6 +5179,7 @@ fn prepare_sparse_store(
             base: BaseReg::SimState,
             offset: sparse.summary_words_offset as i32,
             index: summary_index,
+            scale: 1,
             size: OpSize::S64,
             alias_range: summary_alias_range,
         });
@@ -5277,6 +5282,7 @@ fn emit_aligned_dynamic_wide_store(
                 base: BaseReg::SimState,
                 offset,
                 index: byte_offset,
+                scale: 1,
                 size: OpSize::S8,
                 alias_range,
             });
@@ -5324,6 +5330,7 @@ fn emit_dynamic_scalar_bitfield_store(
         base: BaseReg::SimState,
         offset: base_offset,
         index: byte_offset,
+        scale: 1,
         size: ISelContext::op_size_for_width(width + 7),
         alias_range,
     });
@@ -5441,6 +5448,7 @@ fn emit_dynamic_scalar_bitfield_store(
         base: BaseReg::SimState,
         offset: base_offset + 8,
         index: byte_offset,
+        scale: 1,
         size: OpSize::S8,
         alias_range,
     });
@@ -6121,6 +6129,7 @@ fn lower_instruction(
                             base: BaseReg::SimState,
                             offset: base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
                             alias_range: value_alias_range,
                         });
@@ -6151,6 +6160,7 @@ fn lower_instruction(
                             base: BaseReg::SimState,
                             offset: base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
                             alias_range: value_alias_range,
                         });
@@ -6278,6 +6288,7 @@ fn lower_instruction(
                                 base: BaseReg::SimState,
                                 offset: mask_base_off,
                                 index: byte_off,
+                                scale: 1,
                                 size: load_size,
                                 alias_range: mask_alias_range,
                             });
@@ -6302,6 +6313,7 @@ fn lower_instruction(
                             base: BaseReg::SimState,
                             offset: mask_base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
                             alias_range: mask_alias_range,
                         });
@@ -6773,6 +6785,7 @@ fn lower_instruction(
                                     base: BaseReg::SimState,
                                     offset: base_off,
                                     index: byte_off,
+                                    scale: 1,
                                     size: store_size,
                                     alias_range: value_alias_range,
                                 });
@@ -7330,6 +7343,7 @@ fn lower_instruction(
                                 base: BaseReg::SimState,
                                 offset: src_base_off + copied as i32,
                                 index: byte_off,
+                                scale: 1,
                                 size: chunk_size,
                                 alias_range: MemoryAliasRange::new(
                                     src_base_off,
@@ -7432,6 +7446,7 @@ fn lower_instruction(
                                     base: BaseReg::SimState,
                                     offset: src_mask_base + copied as i32,
                                     index: byte_off,
+                                    scale: 1,
                                     size: cs,
                                     alias_range: MemoryAliasRange::new(
                                         src_mask_base,
@@ -11562,6 +11577,7 @@ fn lower_dynamic_wide_load_chunks(
                 base: BaseReg::SimState,
                 offset: base_off + (bit_pos / 8) as i32,
                 index: byte_off,
+                scale: 1,
                 size: ISelContext::op_size_for_width(chunk_bits),
                 alias_range,
             });
@@ -11613,6 +11629,7 @@ fn lower_dynamic_wide_load_chunks(
             base: BaseReg::SimState,
             offset: base_off + byte_delta,
             index: byte_off,
+            scale: 1,
             size: OpSize::S64,
             alias_range,
         });
@@ -11629,6 +11646,7 @@ fn lower_dynamic_wide_load_chunks(
             base: BaseReg::SimState,
             offset: base_off + byte_delta + 8,
             index: byte_off,
+            scale: 1,
             size: OpSize::S8,
             alias_range,
         });
@@ -13995,8 +14013,15 @@ mod tests {
             instance_id: InstanceId(0),
             var_id: array_var,
         };
+        let mut output_var = array_var;
+        output_var.inc();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
         let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
         let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
         let index = RegisterId(0);
         let zero = RegisterId(1);
         let loaded = RegisterId(2);
@@ -14020,6 +14045,14 @@ mod tests {
                                 dynamic_bit_offset: Some(zero),
                             },
                             54,
+                        ),
+                        SIRInstruction::Store(
+                            output,
+                            SIROffset::Static(0),
+                            54,
+                            loaded,
+                            vec![],
+                            vec![],
                         ),
                     ],
                     terminator: SIRTerminator::Return,
@@ -14051,9 +14084,13 @@ mod tests {
 
         let mut layout = empty_layout();
         layout.mode = MemoryLayoutMode::ElementStrided;
-        layout.offsets = [(input_abs, 0), (array_abs, 8)].into_iter().collect();
-        layout.widths = [(input_abs, 32), (array_abs, 1024)].into_iter().collect();
-        layout.is_4states = [(input_abs, false), (array_abs, false)]
+        layout.offsets = [(input_abs, 0), (array_abs, 8), (output_abs, 136)]
+            .into_iter()
+            .collect();
+        layout.widths = [(input_abs, 32), (array_abs, 1024), (output_abs, 54)]
+            .into_iter()
+            .collect();
+        layout.is_4states = [(input_abs, false), (array_abs, false), (output_abs, false)]
             .into_iter()
             .collect();
         layout.unpacked_arrays.insert(
@@ -14065,14 +14102,14 @@ mod tests {
                 plane_size: 128,
             },
         );
-        layout.total_size = 136;
-        layout.working_base_offset = 136;
-        layout.sparse_base_offset = 136;
-        layout.merged_total_size = 136;
-        layout.triggered_bits_offset = 136;
-        layout.scratch_base_offset = 136;
+        layout.total_size = 144;
+        layout.working_base_offset = 144;
+        layout.sparse_base_offset = 144;
+        layout.merged_total_size = 144;
+        layout.triggered_bits_offset = 144;
+        layout.scratch_base_offset = 144;
 
-        let function = lower_execution_unit(&unit, &layout, false);
+        let mut function = lower_execution_unit(&unit, &layout, false);
         function.verify();
         let instructions = function
             .blocks
@@ -14099,6 +14136,37 @@ mod tests {
                 ..
             } if *dst == byte_index
         )));
+
+        let source_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::Load {
+                    dst,
+                    offset: 0,
+                    size: OpSize::S32,
+                    ..
+                } => Some(*dst),
+                _ => None,
+            })
+            .expect("source index load");
+        mir_opt::optimize(&mut function);
+        function.verify();
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadIndexed {
+                        index,
+                        scale: 8,
+                        offset: 8,
+                        size: OpSize::S64,
+                        ..
+                    } if *index == source_index
+                ))
+        );
     }
 
     #[test]

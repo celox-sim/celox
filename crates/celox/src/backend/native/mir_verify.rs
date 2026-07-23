@@ -305,6 +305,14 @@ fn verify_instruction_constraints(
                 format!("direct-memory immediate {imm:#x} is invalid for {size}"),
             ))
         }
+        MInst::LoadIndexed { scale, .. } if !matches!(scale, 1 | 2 | 4 | 8) => {
+            Err(MirVerifyError::instruction(
+                "OPCODE.INDEX_SCALE",
+                block,
+                index,
+                format!("indexed-memory scale {scale} is not one of 1, 2, 4, or 8"),
+            ))
+        }
         MInst::MemCopy { byte_len: 0, .. } => Err(MirVerifyError::instruction(
             "OPCODE.MEMCOPY_NON_ZERO",
             block,

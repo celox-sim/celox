@@ -686,12 +686,17 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// dst = load [base + offset + index]  (register-indexed memory access)
+    /// dst = load [base + offset + index * scale].
+    ///
+    /// `scale` is an x86 addressing-mode scale (1, 2, 4, or 8). It is not a
+    /// value-width annotation: selecting a scale requires a prior proof that
+    /// the corresponding RTL offset computation cannot wrap differently.
     LoadIndexed {
         dst: VReg,
         base: BaseReg,
         offset: i32,
         index: VReg,
+        scale: u8,
         size: OpSize,
         /// Conservative physical envelope for every possible indexed read.
         /// `None` means the complete direct-addressed base may be observed.
@@ -1048,9 +1053,13 @@ impl fmt::Display for MInst {
                 base,
                 offset,
                 index,
+                scale,
                 size,
                 ..
-            } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
+            } => write!(
+                f,
+                "{dst} = load.{size} [{base} + {offset} + {index}*{scale}]"
+            ),
             MInst::PackedLaneCompare {
                 dst,
                 rhs,
@@ -2121,6 +2130,7 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 8,
                     index: a,
+                    scale: 1,
                     size: OpSize::S64,
                     alias_range: None,
                 },

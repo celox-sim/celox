@@ -127,12 +127,23 @@ fn mem_operand(base: BaseReg, offset: i32) -> AsmMemoryOperand {
     base_reg + offset
 }
 
-fn mem_operand_indexed(base: BaseReg, offset: i32, index: AsmRegister64) -> AsmMemoryOperand {
+fn mem_operand_indexed(
+    base: BaseReg,
+    offset: i32,
+    index: AsmRegister64,
+    scale: u8,
+) -> AsmMemoryOperand {
     let base_reg = match base {
         BaseReg::SimState => SIM_BASE,
         BaseReg::StackFrame => rsp,
     };
-    base_reg + index + offset
+    match scale {
+        1 => base_reg + index + offset,
+        2 => base_reg + index * 2 + offset,
+        4 => base_reg + index * 4 + offset,
+        8 => base_reg + index * 8 + offset,
+        _ => unreachable!("invalid indexed-memory scale {scale}"),
+    }
 }
 
 fn mem_operand_ptr(ptr: AsmRegister64, offset: i32) -> AsmMemoryOperand {
@@ -157,8 +168,8 @@ fn emit_sparse_chunk_copy(
     let mut copied = 0usize;
     for bytes in [8usize, 4, 2, 1] {
         while copied + bytes <= byte_len {
-            let src = mem_operand_indexed(BaseReg::SimState, src_offset + copied as i32, index);
-            let dst = mem_operand_indexed(BaseReg::SimState, dst_offset + copied as i32, index);
+            let src = mem_operand_indexed(BaseReg::SimState, src_offset + copied as i32, index, 1);
+            let dst = mem_operand_indexed(BaseReg::SimState, dst_offset + copied as i32, index, 1);
             match bytes {
                 8 => {
                     asm.mov(rsi, qword_ptr(src))?;
@@ -2426,6 +2437,7 @@ fn emit_inst(
                         BaseReg::SimState,
                         *dirty_words_offset,
                         rdi,
+                        1,
                     )),
                 )?;
                 asm.mov(
@@ -2433,6 +2445,7 @@ fn emit_inst(
                         BaseReg::SimState,
                         *dirty_words_offset,
                         rdi,
+                        1,
                     )),
                     0i32,
                 )?;
@@ -2602,12 +2615,13 @@ fn emit_inst(
             base,
             offset,
             index,
+            scale,
             size,
             ..
         } => {
             let d_preg = resolve(assignment, *dst);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx);
+            let mem = mem_operand_indexed(*base, *offset, idx, *scale);
             match size {
                 OpSize::S8 => {
                     asm.movzx(preg_to_reg32(d_preg), byte_ptr(mem))?;
@@ -2883,7 +2897,7 @@ fn emit_inst(
         } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx);
+            let mem = mem_operand_indexed(*base, *offset, idx, 1);
             match size {
                 OpSize::S8 => {
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
@@ -2910,7 +2924,7 @@ fn emit_inst(
         } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx);
+            let mem = mem_operand_indexed(*base, *offset, idx, 1);
             match size {
                 OpSize::S8 => asm.or(byte_ptr(mem), preg_to_reg8(s_preg))?,
                 OpSize::S16 => asm.or(word_ptr(mem), preg_to_reg16(s_preg))?,
