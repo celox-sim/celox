@@ -571,7 +571,9 @@ fn add_preference(preferences: &mut HashMap<VReg, Vec<VReg>>, left: VReg, right:
 fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
     match inst {
         MInst::Mov { src, .. }
+        | MInst::Mov32 { src, .. }
         | MInst::AndImm { src, .. }
+        | MInst::AndImm32 { src, .. }
         | MInst::OrImm { src, .. }
         | MInst::ShrImm { src, .. }
         | MInst::ShlImm { src, .. }
@@ -585,11 +587,17 @@ fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
         | MInst::Bsr { src, .. }
         | MInst::BsrOr { src, .. } => [Some(*src), None],
         MInst::Add { lhs, rhs, .. }
+        | MInst::Add32 { lhs, rhs, .. }
         | MInst::Mul { lhs, rhs, .. }
+        | MInst::Mul32 { lhs, rhs, .. }
         | MInst::And { lhs, rhs, .. }
+        | MInst::And32 { lhs, rhs, .. }
         | MInst::Or { lhs, rhs, .. }
-        | MInst::Xor { lhs, rhs, .. } => [Some(*lhs), Some(*rhs)],
+        | MInst::Or32 { lhs, rhs, .. }
+        | MInst::Xor { lhs, rhs, .. }
+        | MInst::Xor32 { lhs, rhs, .. } => [Some(*lhs), Some(*rhs)],
         MInst::Sub { lhs, .. }
+        | MInst::Sub32 { lhs, .. }
         | MInst::Shr { lhs, .. }
         | MInst::Shl { lhs, .. }
         | MInst::Sar { lhs, .. } => [Some(*lhs), None],
@@ -1045,6 +1053,72 @@ mod tests {
         assert_eq!(colored.assignment.get(sum), colored.assignment.get(left));
         assert_ne!(colored.assignment.get(sum), colored.assignment.get(later));
         assert_eq!(colored.assignment.get(result), colored.assignment.get(sum));
+    }
+
+    #[test]
+    fn word32_instructions_expose_their_destructive_operand_affinities() {
+        let unary = [
+            MInst::Mov32 {
+                dst: VReg(2),
+                src: VReg(0),
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(0),
+                imm: 0xff,
+            },
+        ];
+        for instruction in &unary {
+            assert_eq!(
+                definition_preferences(instruction),
+                [Some(VReg(0)), None],
+                "{instruction}"
+            );
+        }
+
+        let commutative = [
+            MInst::Add32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Mul32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::And32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Or32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Xor32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+        ];
+        for instruction in &commutative {
+            assert_eq!(
+                definition_preferences(instruction),
+                [Some(VReg(0)), Some(VReg(1))],
+                "{instruction}"
+            );
+        }
+
+        assert_eq!(
+            definition_preferences(&MInst::Sub32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            }),
+            [Some(VReg(0)), None]
+        );
     }
 
     #[test]
