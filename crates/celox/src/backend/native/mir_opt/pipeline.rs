@@ -81,6 +81,8 @@ fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("dead_code_eliminate", dead_code_eliminate);
     runner.run("fuse_compare_selects", fuse_compare_selects);
     runner.run("dead_code_eliminate", dead_code_eliminate);
+    runner.run("sink_selected_indexed_loads", sink_selected_indexed_loads);
+    runner.run("dead_code_eliminate", dead_code_eliminate);
     runner.run("sink_loads", sink_loads);
     runner.run("eliminate_redundant_or_terms", eliminate_redundant_or_terms);
     runner.run("dead_code_eliminate", dead_code_eliminate);
@@ -112,6 +114,8 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("copy_propagate", copy_propagate);
     runner.run("dead_code_eliminate", dead_code_eliminate);
     runner.run("fuse_compare_selects", fuse_compare_selects);
+    runner.run("dead_code_eliminate", dead_code_eliminate);
+    runner.run("sink_selected_indexed_loads", sink_selected_indexed_loads);
     runner.run("dead_code_eliminate", dead_code_eliminate);
 }
 
