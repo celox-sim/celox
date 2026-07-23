@@ -652,6 +652,13 @@ pub enum MInst {
         size: OpSize,
         imm: u64,
     },
+    /// Non-atomic `memory |= immediate` over simulator-owned direct memory.
+    OrStoreImm {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+        imm: u64,
+    },
     /// dst = load [ptr + offset] in the runtime-owned indirect-memory domain.
     /// This domain is disjoint from SimState and StackFrame.
     LoadPtr {
@@ -1004,6 +1011,12 @@ impl fmt::Display for MInst {
                 size,
                 imm,
             } => write!(f, "and_store.{size} [{base} + {offset}], {imm:#x}"),
+            MInst::OrStoreImm {
+                base,
+                offset,
+                size,
+                imm,
+            } => write!(f, "or_store_imm.{size} [{base} + {offset}], {imm:#x}"),
             MInst::LoadPtr {
                 dst,
                 ptr,
@@ -1356,6 +1369,7 @@ impl MInst {
 
             MInst::Store { .. }
             | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
@@ -1385,6 +1399,7 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
@@ -1748,6 +1763,7 @@ impl MInst {
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
             | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }

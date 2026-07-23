@@ -290,7 +290,7 @@ fn verify_instruction_constraints(
                 format!("or immediate {imm:#x} is not encodable as sign-extended imm32"),
             ))
         }
-        MInst::AndStoreImm { size, imm, .. }
+        MInst::AndStoreImm { size, imm, .. } | MInst::OrStoreImm { size, imm, .. }
             if *size == OpSize::S64
                 || *imm
                     > match size {
@@ -301,10 +301,10 @@ fn verify_instruction_constraints(
                     } =>
         {
             Err(MirVerifyError::instruction(
-                "OPCODE.AND_STORE_IMMEDIATE_WIDTH",
+                "OPCODE.NARROW_STORE_IMMEDIATE_WIDTH",
                 block,
                 index,
-                format!("and-store immediate {imm:#x} is invalid for {size}"),
+                format!("direct-memory immediate {imm:#x} is invalid for {size}"),
             ))
         }
         MInst::MemCopy { byte_len: 0, .. } => Err(MirVerifyError::instruction(

@@ -351,13 +351,13 @@ fn run_regalloc_in_place(
     // the resulting store chain before CSSA so overwritten packed-state
     // updates do not survive into allocation and machine code.
     super::mir_opt::eliminate_redundant_local_stores(func);
-    let folded_direct_and_stores = super::mir_opt::fold_direct_and_stores(func);
+    let folded_direct_immediate_stores = super::mir_opt::fold_direct_immediate_stores(func);
     let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("late state-forwarding verification", error))?;
     if let Some(start) = state_forward_start {
         eprintln!(
-            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} folded_direct_and_stores={folded_direct_and_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
+            "[regalloc-timing] label={label} late_state_forward forwarded={forwarded} folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
             start.elapsed()
         );
     }

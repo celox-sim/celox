@@ -2160,6 +2160,20 @@ fn emit_inst(
                 OpSize::S64 => unreachable!("64-bit direct-memory AND is not selected"),
             }
         }
+        MInst::OrStoreImm {
+            base,
+            offset,
+            size,
+            imm,
+        } => {
+            let mem = mem_operand(*base, *offset);
+            match size {
+                OpSize::S8 => asm.or(byte_ptr(mem), *imm as i32)?,
+                OpSize::S16 => asm.or(word_ptr(mem), *imm as i32)?,
+                OpSize::S32 => asm.or(dword_ptr(mem), *imm as i32)?,
+                OpSize::S64 => unreachable!("64-bit direct-memory OR is not selected"),
+            }
+        }
 
         MInst::MemCopy {
             src_offset,
@@ -4270,7 +4284,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     BaseReg::SimState => store_sim += 1,
                     BaseReg::StackFrame => store_stack += 1,
                 },
-                MInst::AndStoreImm { base, .. } => match base {
+                MInst::AndStoreImm { base, .. } | MInst::OrStoreImm { base, .. } => match base {
                     BaseReg::SimState => {
                         load_sim += 1;
                         store_sim += 1;

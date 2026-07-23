@@ -12,13 +12,13 @@ use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 mod pipeline;
 pub use pipeline::optimize;
 
-/// Select x86 direct-memory AND for an exact local load/and/store chain.
+/// Select x86 direct-memory updates for exact local load/ALU/store chains.
 ///
-/// The two SSA temporaries must have no other users. Keeping the match local
+/// The SSA temporaries must have no other users. Keeping the match local
 /// also fixes the memory observation point: there is no intervening effect to
 /// justify with instruction reordering. Wider immediates are truncated to the
 /// access width, exactly as the original final store truncates the register.
-pub(crate) fn fold_direct_and_stores(func: &mut MFunction) -> usize {
+pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
     let mut use_counts = HashMap::<VReg, usize>::new();
     for block in &func.blocks {
         for phi in &block.phis {
@@ -49,7 +49,7 @@ pub(crate) fn fold_direct_and_stores(func: &mut MFunction) -> usize {
                             offset: load_offset,
                             size: load_size,
                         },
-                        and,
+                        update,
                         MInst::Store {
                             base: store_base,
                             offset: store_offset,
@@ -69,9 +69,10 @@ pub(crate) fn fold_direct_and_stores(func: &mut MFunction) -> usize {
                     {
                         return None;
                     }
-                    let (result, source, immediate) = match and {
-                        MInst::AndImm { dst, src, imm } => (*dst, *src, *imm),
-                        MInst::AndImm32 { dst, src, imm } => (*dst, *src, u64::from(*imm)),
+                    let (result, source, immediate, is_or) = match update {
+                        MInst::AndImm { dst, src, imm } => (*dst, *src, *imm, false),
+                        MInst::AndImm32 { dst, src, imm } => (*dst, *src, u64::from(*imm), false),
+                        MInst::OrImm { dst, src, imm } => (*dst, *src, *imm, true),
                         _ => return None,
                     };
                     if source != *loaded || result != *stored {
@@ -83,11 +84,20 @@ pub(crate) fn fold_direct_and_stores(func: &mut MFunction) -> usize {
                         OpSize::S32 => u64::from(u32::MAX),
                         OpSize::S64 => unreachable!(),
                     };
-                    Some(MInst::AndStoreImm {
-                        base: *load_base,
-                        offset: *load_offset,
-                        size: *load_size,
-                        imm: immediate & width_mask,
+                    Some(if is_or {
+                        MInst::OrStoreImm {
+                            base: *load_base,
+                            offset: *load_offset,
+                            size: *load_size,
+                            imm: immediate & width_mask,
+                        }
+                    } else {
+                        MInst::AndStoreImm {
+                            base: *load_base,
+                            offset: *load_offset,
+                            size: *load_size,
+                            imm: immediate & width_mask,
+                        }
                     })
                 });
             if let Some(replacement) = replacement {
@@ -2424,10 +2434,17 @@ fn intersect_dom(
 fn algebraic_simplify(func: &mut MFunction) {
     // Build def map for constant lookups
     let mut consts: HashMap<VReg, u64> = HashMap::new();
+    let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::new();
     for block in &func.blocks {
         for inst in &block.insts {
-            if let MInst::LoadImm { dst, value } = inst {
-                consts.insert(*dst, *value);
+            match inst {
+                MInst::LoadImm { dst, value } => {
+                    consts.insert(*dst, *value);
+                }
+                MInst::AndImm { dst, src, imm } => {
+                    and_immediates.insert(*dst, (*src, *imm));
+                }
+                _ => {}
             }
         }
     }
@@ -2596,8 +2613,21 @@ fn algebraic_simplify(func: &mut MFunction) {
                         None
                     }
                 }
-                // OrImm identity
-                MInst::OrImm { dst, src, imm: 0 } => Some(Simplification::Mov(*dst, *src)),
+                // OrImm identity and `(x & keep) | set → x | set` when the OR
+                // restores every bit cleared by the preceding AND.
+                MInst::OrImm { dst, src, imm } => {
+                    if *imm == 0 {
+                        Some(Simplification::Mov(*dst, *src))
+                    } else if and_immediates
+                        .get(src)
+                        .is_some_and(|(_, keep_mask)| *keep_mask | *imm == u64::MAX)
+                    {
+                        let (original, _) = and_immediates[src];
+                        Some(Simplification::OrImm(*dst, original, *imm))
+                    } else {
+                        None
+                    }
+                }
                 // Double negate
                 MInst::BitNot { dst, src } => {
                     if let Some(&c) = consts.get(src) {
@@ -2655,6 +2685,9 @@ fn algebraic_simplify(func: &mut MFunction) {
                     }
                     Simplification::Shl(dst, src, imm) => {
                         *inst = MInst::ShlImm { dst, src, imm };
+                    }
+                    Simplification::OrImm(dst, src, imm) => {
+                        *inst = MInst::OrImm { dst, src, imm };
                     }
                 }
             }
@@ -2761,6 +2794,7 @@ enum Simplification {
     Mov32(VReg, VReg),
     Const(VReg, u64),
     Shl(VReg, VReg, u8),
+    OrImm(VReg, VReg, u64),
 }
 
 fn const32(consts: &HashMap<VReg, u64>, value: VReg) -> Option<u32> {
@@ -9488,7 +9522,9 @@ mod tests {
             2,
         );
 
-        assert_eq!(fold_direct_and_stores(&mut func), 1);
+        algebraic_simplify(&mut func);
+        dead_code_eliminate(&mut func);
+        assert_eq!(fold_direct_immediate_stores(&mut func), 1);
         assert_eq!(
             func.blocks[0].insts,
             vec![
@@ -9502,6 +9538,91 @@ mod tests {
             ]
         );
         assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn folds_clear_then_set_of_same_narrow_bits_into_direct_memory_or() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: !0x40,
+                },
+                MInst::OrImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0x40,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        algebraic_simplify(&mut func);
+        dead_code_eliminate(&mut func);
+        assert_eq!(fold_direct_immediate_stores(&mut func), 1);
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::OrStoreImm {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                    imm: 0x40,
+                },
+                MInst::Return,
+            ]
+        );
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn keeps_clear_then_set_when_the_or_does_not_restore_every_cleared_bit() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: !0x60,
+                },
+                MInst::OrImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0x40,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 37,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        algebraic_simplify(&mut func);
+        dead_code_eliminate(&mut func);
+        assert_eq!(fold_direct_immediate_stores(&mut func), 0);
     }
 
     #[test]
@@ -9536,7 +9657,7 @@ mod tests {
             2,
         );
 
-        assert_eq!(fold_direct_and_stores(&mut func), 0);
+        assert_eq!(fold_direct_immediate_stores(&mut func), 0);
     }
 
     #[test]
