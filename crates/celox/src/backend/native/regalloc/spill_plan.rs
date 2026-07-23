@@ -1271,16 +1271,15 @@ fn reload_cost_at_next_local_use(
     value: LogicalValue,
 ) -> u16 {
     let value = VReg(value.0);
-    if let Some(instruction) = next_use.next_local_use(block, instruction, value)
-        && let Some(cost) = planning_recipes.materialization_cost_at_point(PointUse {
+    let costs = super::cost::MachineSpillCosts::with_recipes(func, planning_recipes);
+    if let Some(instruction) = next_use.next_local_use(block, instruction, value) {
+        return costs.reload_at_point(PointUse {
             block: func.blocks[block].id,
             instruction,
             value,
-        })
-    {
-        return cost;
+        });
     }
-    reload_cost(func, planning_recipes, LogicalValue(value.0))
+    costs.persistent_reload(value)
 }
 
 /// Cost the complete guaranteed straight-line use cluster for a value which
@@ -1301,14 +1300,13 @@ fn local_use_cluster_cost(
     if uses.is_empty() {
         return u128::from(reload_cost(func, planning_recipes, LogicalValue(value.0)));
     }
+    let costs = super::cost::MachineSpillCosts::with_recipes(func, planning_recipes);
     uses.iter().fold(0u128, |cost, &instruction| {
-        let reload = planning_recipes
-            .materialization_cost_at_point(PointUse {
-                block: func.blocks[block].id,
-                instruction,
-                value,
-            })
-            .unwrap_or_else(|| reload_cost(func, planning_recipes, LogicalValue(value.0)));
+        let reload = costs.reload_at_point(PointUse {
+            block: func.blocks[block].id,
+            instruction,
+            value,
+        });
         cost.saturating_add(u128::from(reload))
     })
 }
@@ -1321,36 +1319,20 @@ fn reload_cost_on_edge(
     value: LogicalValue,
 ) -> u16 {
     let value = VReg(value.0);
-    if let Some(cost) = planning_recipes.materialization_cost_on_edge(EdgeUse {
+    super::cost::MachineSpillCosts::with_recipes(func, planning_recipes).reload_on_edge(EdgeUse {
         predecessor: func.blocks[predecessor].id,
         successor: func.blocks[successor].id,
         value,
-    }) {
-        return cost;
-    }
-    reload_cost(func, planning_recipes, LogicalValue(value.0))
+    })
 }
 
 fn reload_cost(func: &MFunction, planning_recipes: &PlanningRecipes, value: LogicalValue) -> u16 {
-    if let Some(cost) = planning_recipes.global_materialization_cost(VReg(value.0)) {
-        return cost;
-    }
-    stack_reload_cost(func, value)
-}
-
-fn stack_reload_cost(func: &MFunction, value: LogicalValue) -> u16 {
-    let Some(desc) = func.spill_desc(VReg(value.0)) else {
-        // A missing descriptor is rejected by MIR verification before this
-        // phase.  Keep this helper total so malformed input remains a
-        // structured verifier error rather than a planner panic.
-        return u16::MAX;
-    };
-    u16::from(desc.reload_cost)
+    super::cost::MachineSpillCosts::with_recipes(func, planning_recipes)
+        .persistent_reload(VReg(value.0))
 }
 
 fn spill_cost(func: &MFunction, value: LogicalValue) -> u16 {
-    func.spill_desc(VReg(value.0))
-        .map_or(u16::MAX, |desc| u16::from(desc.spill_cost))
+    super::cost::MachineSpillCosts::from_descriptors(func).spill(VReg(value.0))
 }
 
 fn logical_entry_distance(
@@ -1384,6 +1366,7 @@ impl SpillPlan {
         cfg: &NormalizedCfg,
         analysis: &ReloadRecipeAnalysis,
     ) -> Result<(), SpillPlanError> {
+        let base_costs = super::cost::MachineSpillCosts::from_descriptors(func);
         let mut candidates = BTreeSet::<SpillHome>::new();
         let mut rejected = BTreeSet::<SpillHome>::new();
         let mut baseline_costs = BTreeMap::<SpillHome, u128>::new();
@@ -1409,15 +1392,16 @@ impl SpillPlan {
                             )) {
                                 cost
                             } else {
-                                u128::from(stack_reload_cost(func, value))
+                                u128::from(base_costs.persistent_reload(VReg(value.0)))
                             },
                         );
                         let total = recipe_costs.entry(home).or_default();
                         *total = total.saturating_add(cost);
                     } else {
                         let baseline = baseline_costs.entry(home).or_default();
-                        *baseline =
-                            baseline.saturating_add(u128::from(stack_reload_cost(func, value)));
+                        *baseline = baseline.saturating_add(u128::from(
+                            base_costs.persistent_reload(VReg(value.0)),
+                        ));
                         rejected.insert(home);
                     }
                 }
@@ -1511,7 +1495,9 @@ impl SpillPlan {
                     PlannedOp::Reload { value, home } => {
                         candidates.insert(home);
                         let total = baseline_costs.entry(home).or_default();
-                        *total = total.saturating_add(u128::from(stack_reload_cost(func, value)));
+                        *total = total.saturating_add(u128::from(
+                            base_costs.persistent_reload(VReg(value.0)),
+                        ));
                         let query = PointUse {
                             block: insertion_block.id,
                             instruction: insertion.instruction,

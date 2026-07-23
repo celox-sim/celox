@@ -11,6 +11,7 @@ pub mod assignment;
 mod cfg;
 mod color;
 mod constraints;
+mod cost;
 #[allow(dead_code)]
 mod cssa;
 #[allow(dead_code)]

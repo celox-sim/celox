@@ -6639,6 +6639,15 @@ are not presented as completion of the scheduler/spiller redesign.
 Status: **live-area guard complete; shared weighted machine-range facts and
 the scheduler/spiller replacement remain in progress**.
 
+The first Step 77b boundary centralizes target spill/reload prices in
+`MachineSpillCosts`. Persistent `SpillDesc` costs and global, point, and edge
+MemorySSA planning-recipe overrides now have one interpretation used by the
+W/S planner; the scheduler can consume the descriptor-only view before exact
+point recipes are available. This refactor changes no placement decision.
+Focused cost tests pass 1/1, spill-plan tests 17/17, native MIR tests 6/6, and
+the library suite 1,057/1,057. All three complete SIR stages and the
+47,481,270-byte full MIR are SHA-256 identical to Step 77a.
+
 ## Execution record
 
 | Step | Commit | Focused tests | Common tests | Full Linux result | Wall time | Status |
@@ -6772,6 +6781,7 @@ the scheduler/spiller replacement remain in progress**.
 | 75 CFG-wide machine known bits | this step | mask propagation 4/4 including narrow/wide phi arms | lib 1013/1013; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored; workspace check, strict Clippy, format | sampled non-LTO run passes through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 62.988 s; execute 71.283 s | emitted `and` -1,908; dynamic JIT instructions -1.0% from adjacent baseline |
 | 76 demand-bounded wide extraction | `4a48b8db` | non-crossing and crossing narrow wide extraction | lib 1055/1055 | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1` | compile 73.676 / 76.646 s; execute 70.580 / 68.643 s | unnecessary source chunks and carry operations removed; aggregate runtime effect unconfirmed |
 | 77a capacity-excess live-area guard | this step | scheduler 20/20; native MIR 6/6 | lib 1056/1056; native testbench 60 passed, 1 ignored; counter 9 passed, 3 ignored | two non-LTO runs pass through `reboot: Power down` with exactly `cy=9ae070 x3=aa pass=1`; all SIR stages byte-identical | compile 75.821 / 75.831 s; execute 67.614 / 67.592 s | equal-peak live-area regressions rejected; MIR -29,033 text bytes; weighted scheduler/spiller redesign remains open |
+| 77b shared machine spill costs | this step | cost 1/1; spill plan 17/17; native MIR 6/6 | lib 1057/1057 | Step 77a exact Linux result applies because complete SIR and MIR are SHA-256 identical | trace 80.995 s | descriptor and MemorySSA recipe costs have one production interpretation; generated code unchanged |
 
 ## Related design records
 
