@@ -3234,24 +3234,12 @@ fn whole_priority_chain_benefit(
             .saturating_mul(PHI_COPY_COST_PER_CHUNK)
             .saturating_mul(SCALE),
     );
-    let suffix = block
-        .instructions
-        .iter()
-        .skip(outer.mux_idx + 1)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
-    live_through.retain(|register| *register != outer.dst);
-    live_through.sort_unstable();
-    live_through.dedup();
-    introduced = introduced.saturating_add(
-        live_through
-            .into_iter()
-            .map(chunks_for)
-            .sum::<u128>()
-            .saturating_mul(LIVE_THROUGH_COST_PER_CHUNK)
-            .saturating_mul(SCALE),
-    );
+    // Values used by the suffix were already live from their definitions to
+    // that suffix before this rewrite.  The priority region merely lies on
+    // the same path; it does not introduce a new live range for those values.
+    // The closed-placement proof above rejects any arm value with an external
+    // suffix use, so the only new region output is the outer Mux result, whose
+    // phi-copy cost is charged above.
 
     original_placed_cost
         .saturating_add(removed_mux_cost)
@@ -7756,9 +7744,9 @@ mod tests {
     }
 
     #[test]
-    fn atomic_selection_takes_a_complete_same_block_priority_spine() {
+    fn atomic_priority_does_not_charge_preexisting_suffix_live_ranges() {
         let mut register_map = HashMap::default();
-        for reg in 0..20 {
+        for reg in 0..60 {
             register_map.insert(
                 RegisterId(reg),
                 RegisterType::Bit {
@@ -7775,13 +7763,26 @@ mod tests {
             SIRInstruction::Mux(RegisterId(18), RegisterId(0), RegisterId(3), RegisterId(17)),
             SIRInstruction::Unary(RegisterId(19), crate::ir::UnaryOp::BitNot, RegisterId(18)),
         ]);
+        // These values are live from entry to the suffix both before and
+        // after priority-region formation.  They must not be treated as
+        // newly introduced live-through pressure.
+        instructions.extend((20..60).map(|register| {
+            SIRInstruction::Store(
+                addr(register),
+                SIROffset::Static(0),
+                64,
+                RegisterId(register),
+                Vec::new(),
+                Vec::new(),
+            )
+        }));
         let mut eu = ExecutionUnit {
             entry_block_id: BlockId(0),
             blocks: [(
                 BlockId(0),
                 BasicBlock {
                     id: BlockId(0),
-                    params: (0..=6).map(RegisterId).collect(),
+                    params: (0..=6).chain(20..60).map(RegisterId).collect(),
                     instructions,
                     terminator: SIRTerminator::Return,
                 },
