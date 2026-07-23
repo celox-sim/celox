@@ -157,6 +157,10 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
     );
     runner.run("post_lower_algebraic_simplify", algebraic_simplify);
     runner.run("post_lower_copy_propagate", copy_propagate);
+    runner.run(
+        "fold_contiguous_memory_copies",
+        fold_contiguous_memory_copies,
+    );
     runner.run("fold_scaled_indexed_loads", fold_scaled_indexed_loads);
     runner.run("final_dead_code_eliminate", dead_code_eliminate);
     runner.run("simplify_cfg", simplify_cfg);

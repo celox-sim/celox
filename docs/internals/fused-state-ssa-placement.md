@@ -878,6 +878,34 @@ and the complete Linux workload reaches `cy=9ae070 x3=aa pass=1` with
 64.152 seconds, so the timing difference is treated as noise; the retained
 result is the structural removal of address temporaries and instructions.
 
+The next structural inspection found fixed state copies which had already been
+scalarized into adjacent direct `Load`/`Store` pairs before allocation. This
+needlessly gives each copied machine word a VReg and hides the bulk operation
+from emission. A late MIR idiom pass now reconstructs `MemCopy` only when:
+
+- every loaded value is used exactly once by its adjacent matching Store;
+- all source and destination chunks are contiguous and equal-width;
+- the complete source and destination ranges are disjoint; and
+- the reconstructed copy is at least 16 bytes.
+
+Nonoverlapping copies use 16-byte machine moves with exact scalar tails;
+overlapping copies retain the existing ordered implementation. On the fused
+function this recovers 24 copies, including the two 64-byte copies in hot block
+`b4212`, and changes:
+
+| Stage | Before copy recovery | With copy recovery | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 96,561 | 96,131 | -430 |
+| pressure-scheduled MIR | 103,494 | 103,064 | -430 |
+| post-RA MIR | 225,462 | 224,681 | -781 |
+| x86 instructions | 151,872 | 151,596 | -276 |
+
+All 493 native-backend tests pass. The complete Linux workload reaches the
+exact `cy=9ae070 x3=aa pass=1` marker with 72.017 seconds of code generation
+and 65.280 seconds of generated execution. This run does not establish a
+timing improvement over the preceding 64.018-second run; the retained result
+is the removal of artificial allocation values and scalar copy instructions.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

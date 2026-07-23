@@ -2289,6 +2289,72 @@ fn emit_inst(
             if *byte_len == 0 {
                 return Ok(false);
             }
+            let src_end = i64::from(*src_offset) + *byte_len as i64;
+            let dst_end = i64::from(*dst_offset) + *byte_len as i64;
+            let nonoverlapping =
+                src_end <= i64::from(*dst_offset) || dst_end <= i64::from(*src_offset);
+            if nonoverlapping && *byte_len >= 16 {
+                let vector_bytes = byte_len / 16 * 16;
+                for copied in (0..vector_bytes).step_by(16) {
+                    asm.movdqu(
+                        xmm0,
+                        xmmword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
+                    )?;
+                    asm.movdqu(
+                        xmmword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
+                        xmm0,
+                    )?;
+                }
+                let mut copied = vector_bytes;
+                if copied != *byte_len {
+                    asm.push(rax)?;
+                    if copied + 8 <= *byte_len {
+                        asm.mov(
+                            rax,
+                            qword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
+                        )?;
+                        asm.mov(
+                            qword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
+                            rax,
+                        )?;
+                        copied += 8;
+                    }
+                    if copied + 4 <= *byte_len {
+                        asm.mov(
+                            eax,
+                            dword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
+                        )?;
+                        asm.mov(
+                            dword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
+                            eax,
+                        )?;
+                        copied += 4;
+                    }
+                    if copied + 2 <= *byte_len {
+                        asm.mov(
+                            ax,
+                            word_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
+                        )?;
+                        asm.mov(
+                            word_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
+                            ax,
+                        )?;
+                        copied += 2;
+                    }
+                    if copied < *byte_len {
+                        asm.mov(
+                            al,
+                            byte_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
+                        )?;
+                        asm.mov(
+                            byte_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
+                            al,
+                        )?;
+                    }
+                    asm.pop(rax)?;
+                }
+                return Ok(false);
+            }
             let qwords = byte_len / 8;
             let rem = byte_len % 8;
             if rem != 0 {
@@ -5282,6 +5348,36 @@ mod shift_encoding_tests {
         assert_eq!(&state[..START], &[0xa5; START]);
         assert_eq!(&state[START..START + LEN], &[0x5a; LEN]);
         assert_eq!(&state[START + LEN..], &[0xa5; 40 - START - LEN]);
+    }
+
+    #[test]
+    fn nonoverlapping_memcopy_executes_vector_body_and_tail_without_touching_neighbors() {
+        const SRC: usize = 3;
+        const DST: usize = 64;
+        const LEN: usize = 37;
+
+        let mut func = MFunction::new(VRegAllocator::new(), vec![]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::MemCopy {
+            src_offset: SRC as i32,
+            dst_offset: DST as i32,
+            byte_len: LEN,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 112];
+        for (index, byte) in state[SRC..SRC + LEN].iter_mut().enumerate() {
+            *byte = index as u8 ^ 0x6d;
+        }
+        let expected = state[SRC..SRC + LEN].to_vec();
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[DST..DST + LEN], expected);
+        assert_eq!(state[DST - 1], 0xa5);
+        assert_eq!(state[DST + LEN], 0xa5);
     }
 
     #[test]

@@ -174,6 +174,107 @@ fn fold_scaled_indexed_loads(func: &mut MFunction) {
     }
 }
 
+/// Recover fixed-size memory copies from scalarized direct load/store pairs.
+///
+/// The source and destination ranges must be disjoint, each loaded SSA value
+/// must be consumed only by its matching Store, and every pair must be
+/// adjacent. These conditions make the replacement independent of alias and
+/// scheduling speculation while removing one allocation value per chunk.
+fn fold_contiguous_memory_copies(func: &mut MFunction) {
+    let mut use_counts = HashMap::<VReg, usize>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, source) in &phi.sources {
+                *use_counts.entry(*source).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for source in inst.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let original = std::mem::take(&mut block.insts);
+        let mut rewritten = Vec::with_capacity(original.len());
+        let mut cursor = 0usize;
+        while cursor < original.len() {
+            let Some((src_offset, dst_offset, size)) =
+                direct_copy_pair(&original, cursor, &use_counts)
+            else {
+                rewritten.push(original[cursor].clone());
+                cursor += 1;
+                continue;
+            };
+            let chunk_bytes = size.bytes() as usize;
+            let mut pairs = 1usize;
+            while let Some((next_src, next_dst, next_size)) =
+                direct_copy_pair(&original, cursor + pairs * 2, &use_counts)
+            {
+                let Some(delta) = pairs
+                    .checked_mul(chunk_bytes)
+                    .and_then(|delta| i32::try_from(delta).ok())
+                else {
+                    break;
+                };
+                if next_size != size
+                    || src_offset.checked_add(delta) != Some(next_src)
+                    || dst_offset.checked_add(delta) != Some(next_dst)
+                {
+                    break;
+                }
+                pairs += 1;
+            }
+            let byte_len = pairs * chunk_bytes;
+            let src_end = i64::from(src_offset) + byte_len as i64;
+            let dst_end = i64::from(dst_offset) + byte_len as i64;
+            let disjoint = src_end <= i64::from(dst_offset) || dst_end <= i64::from(src_offset);
+            if byte_len >= 16 && disjoint {
+                rewritten.push(MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    byte_len,
+                });
+                cursor += pairs * 2;
+            } else {
+                rewritten.push(original[cursor].clone());
+                cursor += 1;
+            }
+        }
+        block.insts = rewritten;
+    }
+}
+
+fn direct_copy_pair(
+    instructions: &[MInst],
+    index: usize,
+    use_counts: &HashMap<VReg, usize>,
+) -> Option<(i32, i32, OpSize)> {
+    let [
+        MInst::Load {
+            dst,
+            base: BaseReg::SimState,
+            offset: src_offset,
+            size,
+        },
+        MInst::Store {
+            base: BaseReg::SimState,
+            offset: dst_offset,
+            src,
+            size: store_size,
+        },
+    ] = instructions.get(index..index.checked_add(2)?)?
+    else {
+        return None;
+    };
+    (*src == *dst && *store_size == *size && use_counts.get(dst).copied() == Some(1)).then_some((
+        *src_offset,
+        *dst_offset,
+        *size,
+    ))
+}
+
 /// Keep allocation metadata in sync with constants created by MIR rewrites.
 ///
 /// ISel attaches `Remat` descriptors to constants it creates directly, but
@@ -6308,6 +6409,90 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn folds_contiguous_single_use_state_copies() {
+        let mut insts = Vec::new();
+        for index in 0..8 {
+            insts.push(MInst::Load {
+                dst: VReg(index),
+                base: BaseReg::SimState,
+                offset: 64 + index as i32 * 8,
+                size: OpSize::S64,
+            });
+            insts.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 256 + index as i32 * 8,
+                src: VReg(index),
+                size: OpSize::S64,
+            });
+        }
+        insts.push(MInst::Return);
+        let mut func = make_func(insts, 8);
+
+        fold_contiguous_memory_copies(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::MemCopy {
+                    src_offset: 64,
+                    dst_offset: 256,
+                    byte_len: 64,
+                },
+                MInst::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_fold_state_copy_when_loaded_value_has_another_use() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 64,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 256,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 512,
+                    src: VReg(0),
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 72,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 264,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            2,
+        );
+
+        fold_contiguous_memory_copies(&mut func);
+
+        assert!(
+            !func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::MemCopy { .. }))
+        );
     }
 
     fn byte_load_pack(with_write_barrier: bool) -> MFunction {
