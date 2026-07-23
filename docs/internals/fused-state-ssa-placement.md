@@ -569,8 +569,8 @@ This milestone must leave generated SIR and MIR byte-identical.
 
 #### Milestone 0 result
 
-The complete Heliodor fused function was analyzed with semantic exit and load
-roots. A representative run produced:
+The complete Heliodor fused function was analyzed with semantic exit roots and
+FF range demands. A representative run produced:
 
 | Measure | Result |
 |---|---:|
@@ -583,15 +583,23 @@ roots. A representative run produced:
 | FF demands / admitted FF loads | 3,666 / 2,485 |
 | Candidate backing stores | 1,282 |
 | Immediately removable backing stores | 0 |
-| Materialized range fragments | 330,172 |
+| Cumulative resolved range fragments | 330,172 |
 | Admitted / partial / rejected objects | 942 / 2 / 261 |
 | Analysis time | 1.79 s |
+| RSS before / after analysis | 4,685,516 / 4,751,852 KiB |
+| Process peak RSS | 4,751,852 KiB |
 
 All 3,666 demands and 3,187 noncandidate/exit roots were independently
 resolved and verified. The candidate backing stores remain required by the
 final public state, so the result specifically supports forwarding promoted
 values to FF uses while retaining final stores; it rejects a store-deletion
 only implementation.
+
+`resolved_range_fragments` is the cumulative number of fragments returned by
+memoized range-resolution queries. It is neither a simultaneously resident
+fragment count nor a count of retained rewrite candidates. Resident memory is
+reported separately above; the analysis increased RSS by about 65 MiB in the
+isolated run.
 
 Instruction sampling used 10,219 samples in `eval_comb_apply_ff`. Mapping each
 sample to the final emitted instruction and to the candidate producer block
@@ -629,6 +637,59 @@ Before any Store deletion, define and independently verify:
 - block boundary contracts;
 - the finite monotonic plan-repair relation.
 
+The measured Milestone 0 result narrows the initial source choices for each FF
+range demand to:
+
+```text
+DirectForward
+Rematerialize
+KeepPackedReload
+```
+
+All public backing stores remain. `KeepPackedReload` is therefore a concrete,
+always-correct fallback, not a failed promotion. The initial model does not
+introduce private scratch. Direct forwarding is admitted only after its block
+boundary pressure contract validates; rematerialization accepts only an
+executable pure cone. Different use clusters of one StateVersion may select
+different choices.
+
+The first strict-pure-cone run is a diagnostic baseline, not a profitability
+pass:
+
+| Initial plan | FF range demands |
+|---|---:|
+| `DirectForward` | 0 |
+| `Rematerialize` | 36 |
+| `KeepPackedReload` | 2,449 |
+
+The exclusive fallback reasons were 112 multiple reaching definitions, 2,319
+producer cones containing a non-pure frontier, and 18 cases where
+rematerialization was estimated to cost more than the packed reload. The
+non-exclusive predicate order is:
+
+```text
+multiple-definitions, unsupported-recipe, non-pure-producer,
+no-legal-placement, cone-over-16-instructions, shared-producer,
+cross-block-direct-range, rematerialization-more-expensive
+```
+
+This result does not pass the profitability gate. It shows that requiring the
+complete producer cone to be pure is the dominant rejection. The next
+analysis slice must introduce an explicit materialization frontier and prove
+the version available at each frontier leaf; it must not weaken purity by
+assumption.
+
+The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
+and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
+`17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
+`9..16`, and `17+`.
+
+The analysis distinguishes effect units in its output:
+
+- `stage_next_ff_sites` counts movable staged-write sites;
+- `commit_ff_state_dependencies` counts range publication dependencies on the
+  fixed suffix barrier, not barrier instructions.
+
 Run the model on Milestone 0 facts without rewriting generated SIR. Every
 retained use must have one concrete source, and deleting a preserved Store
 must invalidate every plan which names that Store.
@@ -638,12 +699,12 @@ untyped FF Store/commit effect, or repair cycle.
 
 This milestone also requires review before code-generating work begins.
 
-### Milestone 2: atomic range promotion
+### Milestone 2: use-local FF forwarding
 
-On focused fixtures, replace admitted comb Store/Load chains with range SSA
-values according to a complete materialization plan. Preserved state and
-private scratch homes remain explicit operations. Apply one verified plan to
-a new function.
+On focused fixtures, bypass admitted FF Load/extract chains according to a
+complete materialization plan while preserving every public backing Store.
+Apply one verified plan to a new function. No Load is promoted implicitly when
+its use cluster lacks a plan.
 
 Tests include:
 

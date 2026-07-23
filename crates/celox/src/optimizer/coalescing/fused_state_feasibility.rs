@@ -10,18 +10,17 @@ use std::sync::Arc;
 
 use celox_analysis::ssa::{self, Event, SparseSsa, Version};
 
+use super::fused_state_plan::{
+    self, DefinitionFact, DemandFact, DemandPlan, FailurePredicates, FragmentFact, KeepReason,
+    PlanSummary, ProgramPoint, PublicationFact, StateRange,
+};
+use super::placement_analysis::{PlacementAnalysis, PlacementAnalysisError, ValueOrigin};
 use super::state_ssa::StatePhaseMap;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
     SIRTerminator, STABLE_REGION,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ProgramPoint {
-    block: BlockId,
-    instruction: usize,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BitRange {
@@ -34,6 +33,16 @@ impl BitRange {
     fn new(object: RegionedAbsoluteAddr, start: usize, width: usize) -> Option<Self> {
         let end = start.checked_add(width)?;
         (start < end).then_some(Self { object, start, end })
+    }
+}
+
+impl From<BitRange> for StateRange {
+    fn from(range: BitRange) -> Self {
+        Self {
+            object: range.object,
+            start: range.start,
+            end: range.end,
+        }
     }
 }
 
@@ -315,7 +324,7 @@ enum ResolveFrame {
 
 #[derive(Debug, Default)]
 struct ResolverStats {
-    materialized_fragments: usize,
+    resolved_fragments: usize,
     phi_operands: usize,
     phi_versions: BTreeSet<(RegionedAbsoluteAddr, usize, usize, usize)>,
     phi_sources: BTreeMap<LogicalSource, Vec<LogicalSource>>,
@@ -549,7 +558,7 @@ impl<'a> DemandResolver<'a> {
 
     fn finish(&mut self, key: DemandKey, value: Vec<Piece>) {
         self.active.remove(&key);
-        self.stats.materialized_fragments += value.len();
+        self.stats.resolved_fragments += value.len();
         let versions = self
             .stats
             .maximum_versions_per_object
@@ -623,7 +632,7 @@ pub(crate) struct FeasibilityReport {
     pub rejected_unknown: usize,
     pub rejected_ff_definition: usize,
     pub rejected_effectful_definition: usize,
-    pub materialized_range_fragments: usize,
+    pub resolved_range_fragments: usize,
     pub admitted_objects: usize,
     pub partially_admitted_objects: usize,
     pub rejected_objects: usize,
@@ -631,9 +640,15 @@ pub(crate) struct FeasibilityReport {
     pub verified_roots: usize,
     pub verifier_passed: bool,
     pub rss_before_kib: usize,
+    pub rss_after_range_partition_kib: usize,
+    pub rss_after_state_ssa_kib: usize,
+    pub rss_after_planning_kib: usize,
+    pub rss_after_verification_kib: usize,
+    pub rss_after_temporary_drop_kib: usize,
     pub rss_after_kib: usize,
     pub process_peak_rss_kib: usize,
     pub origins: OriginCounts,
+    plan: PlanSummary,
     range_decisions: Vec<RangeDecision>,
     block_origins: BTreeMap<BlockId, OriginCounts>,
 }
@@ -651,10 +666,30 @@ impl fmt::Display for FeasibilityReport {
              candidate_producer_instructions={} rejected_live_on_entry={} \
              rejected_unknown={} rejected_ff_definition={} \
              rejected_effectful_definition={} \
-             materialized_range_fragments={} admitted_objects={} \
+             resolved_range_fragments={} admitted_objects={} \
              partially_admitted_objects={} rejected_objects={} \
              verified_demands={} verified_roots={} verifier_passed={} \
              rss_before_kib={} rss_after_kib={} process_peak_rss_kib={} \
+             rss_after_range_partition_kib={} rss_after_state_ssa_kib={} \
+             rss_after_planning_kib={} rss_after_verification_kib={} \
+             rss_after_temporary_drop_kib={} \
+             plan_versions={} plan_sites={} plan_clusters={} \
+             plan_stage_next_ff_sites={} plan_commit_ff_state_dependencies={} \
+             plan_block_contracts={} plan_verified_uses={} \
+             plan_invalidated_store_deletions={} plan_verifier_passed={} \
+             plan_direct_forward={} plan_rematerialize={} \
+             plan_keep_packed_reload={} plan_same_block={} \
+             plan_crosses_loop_depth={} plan_maximum_block_distance={} \
+             plan_maximum_rematerialization_cone={} \
+             plan_maximum_producer_shared_uses={} \
+             plan_block_distance_histogram={:?} plan_cone_size_histogram={:?} \
+             plan_version_demand_histogram={:?} \
+             plan_keep_reason_histogram={:?} \
+             plan_failure_predicate_histogram={:?} \
+             plan_predicted_removed_loads={} plan_predicted_removed_shifts={} \
+             plan_predicted_removed_masks={} plan_predicted_removed_merges={} \
+             plan_predicted_added_rematerialization_instructions={} \
+             plan_predicted_extended_cross_block_live_ranges={} \
              origin_address={} origin_memory={} \
              origin_extract={} origin_insert={} origin_mask={} origin_mux={} \
              origin_other={}",
@@ -677,7 +712,7 @@ impl fmt::Display for FeasibilityReport {
             self.rejected_unknown,
             self.rejected_ff_definition,
             self.rejected_effectful_definition,
-            self.materialized_range_fragments,
+            self.resolved_range_fragments,
             self.admitted_objects,
             self.partially_admitted_objects,
             self.rejected_objects,
@@ -687,6 +722,39 @@ impl fmt::Display for FeasibilityReport {
             self.rss_before_kib,
             self.rss_after_kib,
             self.process_peak_rss_kib,
+            self.rss_after_range_partition_kib,
+            self.rss_after_state_ssa_kib,
+            self.rss_after_planning_kib,
+            self.rss_after_verification_kib,
+            self.rss_after_temporary_drop_kib,
+            self.plan.versions,
+            self.plan.sites,
+            self.plan.clusters,
+            self.plan.stage_next_ff_sites,
+            self.plan.commit_ff_state_dependencies,
+            self.plan.block_contracts,
+            self.plan.verified_uses,
+            self.plan.invalidated_store_deletions,
+            self.plan.verifier_passed,
+            self.plan.direct_forward,
+            self.plan.rematerialize,
+            self.plan.keep_packed_reload,
+            self.plan.same_block,
+            self.plan.crosses_loop_depth,
+            self.plan.maximum_block_distance,
+            self.plan.maximum_rematerialization_cone,
+            self.plan.maximum_producer_shared_uses,
+            self.plan.block_distance_histogram,
+            self.plan.cone_size_histogram,
+            self.plan.version_demand_histogram,
+            self.plan.keep_reason_histogram,
+            self.plan.failure_predicate_histogram,
+            self.plan.predicted_removed_loads,
+            self.plan.predicted_removed_shifts,
+            self.plan.predicted_removed_masks,
+            self.plan.predicted_removed_merges,
+            self.plan.predicted_added_rematerialization_instructions,
+            self.plan.predicted_extended_cross_block_live_ranges,
             self.origins.packed_address_calculation,
             self.origins.memory_traffic,
             self.origins.range_extraction,
@@ -699,6 +767,14 @@ impl fmt::Display for FeasibilityReport {
 }
 
 impl FeasibilityReport {
+    pub(crate) fn record_post_drop_memory(&mut self) {
+        if let Some((resident, peak)) = resident_memory_kib() {
+            self.rss_after_temporary_drop_kib = resident;
+            self.rss_after_kib = resident;
+            self.process_peak_rss_kib = peak;
+        }
+    }
+
     pub(crate) fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
         self.range_decisions
             .iter()
@@ -745,6 +821,8 @@ pub(crate) enum FeasibilityError {
     Cfg(crate::ir::cfg::SirCfgError),
     Phase(super::state_ssa::StateSsaError),
     StateSsa(ssa::SsaError),
+    Plan(fused_state_plan::PlanError),
+    Placement(PlacementAnalysisError),
     InvalidMemoryGraph(&'static str),
 }
 
@@ -754,6 +832,8 @@ impl fmt::Display for FeasibilityError {
             Self::Cfg(error) => write!(f, "CFG: {error}"),
             Self::Phase(error) => write!(f, "phase: {error}"),
             Self::StateSsa(error) => write!(f, "object StateSSA: {error}"),
+            Self::Plan(error) => write!(f, "materialization plan: {error}"),
+            Self::Placement(error) => write!(f, "materialization placement: {error}"),
             Self::InvalidMemoryGraph(message) => write!(f, "range resolver: {message}"),
         }
     }
@@ -779,6 +859,9 @@ pub(crate) fn analyze(
     let mut object_loads =
         BTreeMap::<RegionedAbsoluteAddr, Vec<(ProgramPoint, Option<BitRange>)>>::new();
     let mut store_sources = BTreeMap::<ProgramPoint, RegisterId>::new();
+    let mut plan_definitions = BTreeMap::<ProgramPoint, DefinitionFact>::new();
+    let mut plan_demands = Vec::<DemandFact>::new();
+    let mut publications = Vec::<PublicationFact>::new();
 
     for (block, &block_id) in cfg.block_ids.iter().enumerate() {
         for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
@@ -836,6 +919,23 @@ pub(crate) fn analyze(
                     };
                     definitions.insert(point, definition);
                     store_sources.insert(point, *source);
+                    if let DefinitionKind::Exact(range) = kind {
+                        plan_definitions.insert(
+                            point,
+                            DefinitionFact {
+                                point,
+                                source: *source,
+                                stored_range: range.into(),
+                            },
+                        );
+                        if definition.in_ff_suffix {
+                            publications.push(PublicationFact {
+                                point,
+                                range: range.into(),
+                                staged_source: Some(*source),
+                            });
+                        }
+                    }
                     let events = object_events.entry(*address).or_default();
                     events.push((
                         block,
@@ -872,6 +972,15 @@ pub(crate) fn analyze(
                         effectful: !triggers.is_empty(),
                     };
                     definitions.insert(point, definition);
+                    if definition.in_ff_suffix
+                        && let DefinitionKind::Exact(range) = kind
+                    {
+                        publications.push(PublicationFact {
+                            point,
+                            range: range.into(),
+                            staged_source: None,
+                        });
+                    }
                     let events = object_events.entry(*destination).or_default();
                     events.push((
                         block,
@@ -902,6 +1011,8 @@ pub(crate) fn analyze(
         .map(|block| block.instructions.len() + 1)
         .sum();
     report.demanded_ff_loads = demanded_loads.len();
+    report.rss_after_range_partition_kib =
+        resident_memory_kib().map_or(0, |(resident, _)| resident);
 
     let mut demanded_by_object =
         BTreeMap::<RegionedAbsoluteAddr, Vec<(ProgramPoint, BitRange)>>::new();
@@ -1003,6 +1114,37 @@ pub(crate) fn analyze(
                 report.candidate_removable_loads += 1;
                 candidate_loads.insert(point);
                 candidate_stores.extend(load_stores);
+                let fragments = pieces
+                    .iter()
+                    .map(|piece| {
+                        let mut reaching_definitions = BTreeSet::new();
+                        collect_required_sources(
+                            std::slice::from_ref(piece),
+                            &resolver.stats.phi_sources,
+                            &mut reaching_definitions,
+                        )?;
+                        Ok(FragmentFact {
+                            range: StateRange {
+                                object: range.object,
+                                start: piece.start,
+                                end: piece.end,
+                            },
+                            reaching_definitions,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, FeasibilityError>>()?;
+                plan_demands.push(DemandFact {
+                    load: point,
+                    range: range.into(),
+                    fragments,
+                    plan: DemandPlan::KeepPackedReload,
+                    producer_block_distance: usize::MAX,
+                    loop_depth_delta: 0,
+                    rematerialization_cone_instructions: 0,
+                    producer_shared_uses: 0,
+                    keep_reason: Some(KeepReason::UnsupportedRecipe),
+                    failure_predicates: FailurePredicates::default(),
+                });
             }
         }
         let points = &endpoints[&object];
@@ -1042,7 +1184,7 @@ pub(crate) fn analyze(
             report.verified_roots += 1;
         }
         report.memory_phi_operands += resolver.stats.phi_operands;
-        report.materialized_range_fragments += resolver.stats.materialized_fragments;
+        report.resolved_range_fragments += resolver.stats.resolved_fragments;
         report.maximum_versions_per_object = report.maximum_versions_per_object.max(
             resolver
                 .stats
@@ -1053,8 +1195,31 @@ pub(crate) fn analyze(
                 .unwrap_or(0),
         );
     }
+    report.rss_after_state_ssa_kib =
+        resident_memory_kib().map_or(0, |(resident, _)| resident);
     report.candidate_backing_stores = candidate_stores.len();
     report.candidate_removable_stores = candidate_stores.difference(&required_stores).count();
+    classify_demand_plans(eu, &mut plan_demands, &plan_definitions)
+        .map_err(FeasibilityError::Placement)?;
+    report.rss_after_planning_kib =
+        resident_memory_kib().map_or(0, |(resident, _)| resident);
+    let candidate_plan_definitions = candidate_stores
+        .iter()
+        .filter_map(|point| {
+            plan_definitions
+                .get(point)
+                .copied()
+                .map(|definition| (*point, definition))
+        })
+        .collect::<BTreeMap<_, _>>();
+    report.plan = fused_state_plan::build_and_verify(
+        &candidate_plan_definitions,
+        &plan_demands,
+        &publications,
+    )
+    .map_err(FeasibilityError::Plan)?;
+    report.rss_after_verification_kib =
+        resident_memory_kib().map_or(0, |(resident, _)| resident);
     (report.origins, report.block_origins) =
         classify_candidate_origins(eu, &candidate_loads, &candidate_stores, &store_sources);
     report.candidate_extract_merge_instructions =
@@ -1074,6 +1239,119 @@ pub(crate) fn analyze(
         report.process_peak_rss_kib = peak;
     }
     Ok(report)
+}
+
+fn classify_demand_plans(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    demands: &mut [DemandFact],
+    definitions: &BTreeMap<ProgramPoint, DefinitionFact>,
+) -> Result<(), PlacementAnalysisError> {
+    let placement = PlacementAnalysis::analyze_pure_values(eu)?;
+    for demand in demands {
+        demand.failure_predicates = FailurePredicates::default();
+        let reaching = demand
+            .fragments
+            .iter()
+            .flat_map(|fragment| fragment.reaching_definitions.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if reaching.len() != 1 {
+            demand.keep_reason = Some(KeepReason::MultipleReachingDefinitions);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::MULTIPLE_REACHING_DEFINITIONS);
+            continue;
+        }
+        let definition = definitions[reaching.first().unwrap()];
+        let Some(root) = placement.value_for_register(definition.source) else {
+            demand.keep_reason = Some(KeepReason::UnsupportedRecipe);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::UNSUPPORTED_RECIPE);
+            continue;
+        };
+        let origin = placement.value(root).unwrap().origin.block();
+        let Some(bounds) = placement.sink_bounds_for_use_blocks(root, [demand.load.block]) else {
+            demand.keep_reason = Some(KeepReason::NoLegalPlacement);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::NO_LEGAL_PLACEMENT);
+            continue;
+        };
+        let Some(cone) = placement.rematerialization_cone(root, demand.load.block) else {
+            demand.keep_reason = Some(KeepReason::ProducerNotPure);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::PRODUCER_NOT_PURE);
+            continue;
+        };
+        demand.producer_block_distance = bounds.legal_blocks.len().saturating_sub(1);
+        demand.loop_depth_delta = placement
+            .loop_depth(origin)
+            .zip(placement.loop_depth(demand.load.block))
+            .map_or(0, |(producer, consumer)| producer.abs_diff(consumer));
+        demand.rematerialization_cone_instructions = cone.len();
+        demand.producer_shared_uses = cone
+            .iter()
+            .map(|value| {
+                placement
+                    .value(*value)
+                    .unwrap()
+                    .uses
+                    .len()
+                    .saturating_sub(1)
+            })
+            .sum();
+        if demand.rematerialization_cone_instructions > 16 {
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::CONE_TOO_LARGE);
+        }
+        if demand.producer_shared_uses != 0 {
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::SHARED_PRODUCER);
+        }
+        if demand.producer_block_distance != 0 {
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::DIRECT_LIVE_RANGE_LONG);
+        }
+
+        if demand.producer_shared_uses == 0 {
+            demand.plan = DemandPlan::DirectForward;
+            demand.keep_reason = None;
+            continue;
+        }
+        let rematerialization_cost = cone
+            .iter()
+            .map(|value| match placement.value(*value).unwrap().origin {
+                ValueOrigin::Instruction { block, index } => {
+                    super::cost_model::estimate_clif_cost(
+                        &eu.blocks[&block].instructions[index],
+                        &eu.register_map,
+                        false,
+                    )
+                }
+                ValueOrigin::Parameter { .. } => usize::MAX,
+            })
+            .try_fold(0usize, |sum, cost| sum.checked_add(cost))
+            .unwrap_or(usize::MAX);
+        let packed_reload_cost = super::cost_model::estimate_clif_cost(
+            &eu.blocks[&demand.load.block].instructions[demand.load.instruction],
+            &eu.register_map,
+            false,
+        );
+        if rematerialization_cost <= packed_reload_cost {
+            demand.plan = DemandPlan::Rematerialize;
+            demand.keep_reason = None;
+        } else {
+            demand.keep_reason = Some(KeepReason::RematerializationMoreExpensive);
+            demand
+                .failure_predicates
+                .insert(FailurePredicates::REMATERIALIZATION_MORE_EXPENSIVE);
+        }
+    }
+    Ok(())
 }
 
 fn classify_candidate_source(
@@ -1561,7 +1839,7 @@ mod tests {
         assert_eq!(report.logical_segments, NARROW);
         assert_eq!(report.maximum_fragments_per_access, NARROW);
         assert!(report.overlap_edges >= NARROW * NARROW);
-        assert_eq!(report.materialized_range_fragments, 0);
+        assert_eq!(report.resolved_range_fragments, 0);
     }
 
     #[test]
@@ -1830,6 +2108,6 @@ mod tests {
         assert_eq!(report.candidate_removable_loads, RANGES);
         assert_eq!(report.candidate_backing_stores, RANGES);
         // One fragment per FF demand plus one complete exit-root partition.
-        assert_eq!(report.materialized_range_fragments, RANGES * 2);
+        assert_eq!(report.resolved_range_fragments, RANGES * 2);
     }
 }

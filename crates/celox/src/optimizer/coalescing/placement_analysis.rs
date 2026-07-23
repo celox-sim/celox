@@ -226,11 +226,31 @@ impl PlacementAnalysis {
     pub fn analyze(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     ) -> Result<Self, PlacementAnalysisError> {
+        Self::analyze_impl(eu, true)
+    }
+
+    /// Build only CFG and register value occurrences. State reads remain
+    /// pinned and effect SSA is omitted; this is the bounded-memory query used
+    /// while classifying strictly pure rematerialization cones.
+    pub fn analyze_pure_values(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    ) -> Result<Self, PlacementAnalysisError> {
+        Self::analyze_impl(eu, false)
+    }
+
+    fn analyze_impl(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        include_state_and_effects: bool,
+    ) -> Result<Self, PlacementAnalysisError> {
         if eu.verify_result().is_err() {
             return Err(PlacementAnalysisError::InvalidSir);
         }
         let cfg = SirCfg::analyze(eu)?;
-        let state = analyze_state_versions(eu, &cfg)?;
+        let state = if include_state_and_effects {
+            analyze_state_versions(eu, &cfg)?
+        } else {
+            BTreeMap::new()
+        };
 
         let mut values = Vec::<ValueOccurrence>::new();
         let mut register_values = HashMap::<RegisterId, ValueId>::default();
@@ -259,17 +279,25 @@ impl PlacementAnalysis {
                     | SIRInstruction::Concat(..)
                     | SIRInstruction::Slice(..)
                     | SIRInstruction::Mux(..) => ValueSafety::Pure,
-                    SIRInstruction::Load(destination, address, ..) => state
-                        .get(&address.region)
-                        .and_then(|state| state.read_version(block_id, index, *destination))
-                        .map(|(slot, version)| {
-                            ValueSafety::StateRead(StateToken {
-                                fragment: state[&address.region].slots[slot].fragment,
-                                slot,
-                                version,
-                            })
-                        })
-                        .unwrap_or(ValueSafety::Pinned(PinReason::UnversionedStateRead)),
+                    SIRInstruction::Load(destination, address, ..) => {
+                        if include_state_and_effects {
+                            state
+                                .get(&address.region)
+                                .and_then(|state| {
+                                    state.read_version(block_id, index, *destination)
+                                })
+                                .map(|(slot, version)| {
+                                    ValueSafety::StateRead(StateToken {
+                                        fragment: state[&address.region].slots[slot].fragment,
+                                        slot,
+                                        version,
+                                    })
+                                })
+                                .unwrap_or(ValueSafety::Pinned(PinReason::UnversionedStateRead))
+                        } else {
+                            ValueSafety::Pinned(PinReason::UnversionedStateRead)
+                        }
+                    }
                     SIRInstruction::Store(..)
                     | SIRInstruction::Commit(..)
                     | SIRInstruction::RuntimeEvent { .. }
@@ -292,7 +320,11 @@ impl PlacementAnalysis {
         }
 
         collect_value_uses(eu, &cfg, &register_values, &mut values)?;
-        let (effects, effect_phis) = build_effect_ssa(eu, &cfg)?;
+        let (effects, effect_phis) = if include_state_and_effects {
+            build_effect_ssa(eu, &cfg)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut loop_membership = vec![Vec::new(); cfg.block_ids.len()];
         for (loop_index, natural_loop) in cfg.loops.iter().enumerate() {
             for &block in &natural_loop.blocks {
@@ -319,6 +351,51 @@ impl PlacementAnalysis {
 
     pub fn value(&self, value: ValueId) -> Option<&ValueOccurrence> {
         self.values.get(value.0)
+    }
+
+    /// Return the complete executable producer cone when every value can be
+    /// placed at `target` without changing its state version or execution
+    /// frequency. The result is postorder and therefore directly cloneable.
+    pub fn rematerialization_cone(
+        &self,
+        root: ValueId,
+        target: BlockId,
+    ) -> Option<Vec<ValueId>> {
+        let mut visited = BTreeSet::new();
+        let mut active = BTreeSet::new();
+        let mut output = Vec::new();
+        let mut work = vec![(root, false)];
+        while let Some((value, exiting)) = work.pop() {
+            if exiting {
+                active.remove(&value);
+                output.push(value);
+                continue;
+            }
+            if visited.contains(&value) {
+                continue;
+            }
+            let occurrence = self.value(value)?;
+            if matches!(occurrence.safety, ValueSafety::Pinned(_))
+                || self
+                    .sink_bounds_for_use_blocks(value, [target])
+                    .is_none_or(|bounds| bounds.latest != target)
+                || !active.insert(value)
+            {
+                return None;
+            }
+            visited.insert(value);
+            work.push((value, true));
+            for operand in occurrence.operands.iter().rev().copied() {
+                work.push((operand, false));
+            }
+        }
+        Some(output)
+    }
+
+    pub fn loop_depth(&self, block: BlockId) -> Option<usize> {
+        self.cfg
+            .block_index(block)
+            .map(|block| self.loop_depth[block])
     }
 
     pub fn sink_bounds(&self, value: ValueId) -> Option<PlacementBounds> {

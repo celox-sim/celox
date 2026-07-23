@@ -4138,22 +4138,25 @@ fn emit_chained_eu_groups(
             verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
         }
     }
-    if std::env::var_os("CELOX_FUSED_STATE_SSA_FEASIBILITY").is_some()
+    if let Some(feasibility_mode) = std::env::var_os("CELOX_FUSED_STATE_SSA_FEASIBILITY")
         && let Some(suffix_entry) = stable_suffix_entry
     {
         let start = crate::timing::now();
-        let report =
+        let mut report =
             crate::optimizer::coalescing::analyze_fused_state_feasibility(&sir_eu, suffix_entry)
                 .map_err(|message| ChainedEmitError::Analysis {
                     phase: "fused StateSSA feasibility",
                     message,
                 })?;
+        report.record_post_drop_memory();
         eprintln!(
             "[fused-state-ssa-feasibility] label={label} {report} elapsed={:?}",
             start.elapsed()
         );
-        for detail in report.detail_lines() {
-            eprintln!("[fused-state-ssa-feasibility-range] label={label} {detail}");
+        if feasibility_mode != "summary" {
+            for detail in report.detail_lines() {
+                eprintln!("[fused-state-ssa-feasibility-range] label={label} {detail}");
+            }
         }
     }
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)

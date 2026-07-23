@@ -9,6 +9,8 @@ pub mod cost_model;
 mod dead_working_stores;
 #[cfg(target_arch = "x86_64")]
 mod fused_state_feasibility;
+#[cfg(target_arch = "x86_64")]
+mod fused_state_plan;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
