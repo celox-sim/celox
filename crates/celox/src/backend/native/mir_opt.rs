@@ -5113,6 +5113,584 @@ fn resolve_alias(mut reg: VReg, aliases: &HashMap<VReg, VReg>) -> VReg {
     reg
 }
 
+type LocalMemoryByte = (BaseReg, i64);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalMemoryEvent {
+    Load(usize),
+    Store(usize),
+}
+
+#[derive(Clone)]
+struct PartialStoreEvent {
+    slot: MemorySlot,
+    source: VReg,
+    insert: Option<StateInsertDesc>,
+    prior_events: [Option<LocalMemoryEvent>; 8],
+    prior_writes: [Option<usize>; 8],
+}
+
+struct PartialRoundTripPlan {
+    load_instruction: usize,
+    insertion_instruction: usize,
+    load_slot: MemorySlot,
+    destination: VReg,
+    stores: Vec<usize>,
+}
+
+fn slot_bytes(slot: MemorySlot) -> impl Iterator<Item = LocalMemoryByte> {
+    let start = i64::from(slot.offset);
+    (0..slot.size.bytes() as usize).map(move |byte| (slot.base, start + byte as i64))
+}
+
+fn direct_memory_barrier(inst: &MInst) -> bool {
+    let reads = memory_effect::reads(inst);
+    let writes = memory_effect::writes(inst);
+    [reads, writes].into_iter().any(|effects| {
+        matches!(
+            effects.unknown_memory(),
+            Some(memory_effect::UnknownMemory::Direct(_))
+        ) || effects.ranges().next().is_some()
+    })
+}
+
+fn contained_slot(inner: MemorySlot, outer: MemorySlot) -> bool {
+    if inner.base != outer.base {
+        return false;
+    }
+    let inner_start = i64::from(inner.offset);
+    let outer_start = i64::from(outer.offset);
+    let inner_end = inner_start + i64::from(inner.size.bytes());
+    let outer_end = outer_start + i64::from(outer.size.bytes());
+    outer_start <= inner_start && inner_end <= outer_end
+}
+
+fn recover_partial_store_insert(
+    definitions: &HashMap<VReg, &MInst>,
+    slot: MemorySlot,
+    source: VReg,
+    possible_ones: &[u64],
+    constants: &HashMap<VReg, u64>,
+) -> Option<StateInsertDesc> {
+    let MInst::Or { lhs, rhs, .. } = definitions.get(&source)? else {
+        return None;
+    };
+    let storage_mask = machine_width_mask(slot.size);
+
+    let cleared = |value: VReg| -> Option<(VReg, u64)> {
+        match definitions.get(&value)? {
+            MInst::AndImm { src, imm, .. } => Some((*src, *imm & storage_mask)),
+            MInst::AndImm32 { src, imm, .. } => Some((*src, u64::from(*imm) & storage_mask)),
+            MInst::And { lhs, rhs, .. } | MInst::And32 { lhs, rhs, .. } => constants
+                .get(rhs)
+                .map(|mask| (*lhs, *mask & storage_mask))
+                .or_else(|| constants.get(lhs).map(|mask| (*rhs, *mask & storage_mask))),
+            _ => None,
+        }
+    };
+    let ((old, clear_mask), inserted) = cleared(*lhs)
+        .map(|clear| (clear, *rhs))
+        .or_else(|| cleared(*rhs).map(|clear| (clear, *lhs)))?;
+    if !matches!(
+        definitions.get(&old),
+        Some(MInst::Load {
+            base,
+            offset,
+            size,
+            ..
+        }) if *base == slot.base && *offset == slot.offset && *size == slot.size
+    ) {
+        return None;
+    }
+
+    let changed_mask = storage_mask & !clear_mask;
+    let bit_offset = changed_mask.trailing_zeros() as usize;
+    let width_bits = changed_mask.count_ones() as usize;
+    let field_mask = if width_bits == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << width_bits) - 1
+    };
+    if width_bits == 0
+        || changed_mask != field_mask.checked_shl(bit_offset as u32).unwrap_or(0)
+        || possible_bits(inserted, possible_ones, constants) & !changed_mask != 0
+    {
+        return None;
+    }
+
+    let (value, value_bit_offset) = match definitions.get(&inserted) {
+        Some(MInst::ShlImm { src, imm, .. })
+            if usize::from(*imm) == bit_offset
+                && possible_bits(*src, possible_ones, constants) & !field_mask == 0 =>
+        {
+            (*src, 0)
+        }
+        _ => (inserted, bit_offset),
+    };
+    Some(StateInsertDesc {
+        value,
+        value_bit_offset,
+        bit_offset,
+        width_bits,
+        complete_value: false,
+    })
+}
+
+fn discover_partial_round_trips(
+    block: &MBlock,
+    spill_descs: &[SpillDesc],
+    defined_values: &HashSet<VReg>,
+    possible_ones: &[u64],
+    constants: &HashMap<VReg, u64>,
+) -> (Vec<PartialRoundTripPlan>, Vec<Option<PartialStoreEvent>>) {
+    let mut last_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::new();
+    let mut last_writes = HashMap::<LocalMemoryByte, usize>::new();
+    let mut stores = vec![None; block.insts.len()];
+    let mut plans = Vec::new();
+    let mut region_start = 0usize;
+    let mut definitions = HashMap::<VReg, &MInst>::new();
+
+    for (instruction, inst) in block.insts.iter().enumerate() {
+        match *inst {
+            MInst::Store {
+                base,
+                offset,
+                src,
+                size,
+            } => {
+                let slot = MemorySlot { base, offset, size };
+                let mut prior_events = [None; 8];
+                let mut prior_writes = [None; 8];
+                for (byte, key) in slot_bytes(slot).enumerate() {
+                    prior_events[byte] = last_events.get(&key).copied();
+                    prior_writes[byte] = last_writes.get(&key).copied();
+                    last_events.insert(key, LocalMemoryEvent::Store(instruction));
+                    last_writes.insert(key, instruction);
+                }
+                let insert = spill_descs
+                    .get(src.0 as usize)
+                    .and_then(|descriptor| descriptor.state_insert)
+                    .filter(|insert| {
+                        defined_values.contains(&insert.value)
+                            && insert.width_bits != 0
+                            && insert
+                                .bit_offset
+                                .checked_add(insert.width_bits)
+                                .is_some_and(|end| end <= size.bytes() as usize * 8)
+                            && insert
+                                .value_bit_offset
+                                .checked_add(insert.width_bits)
+                                .is_some_and(|end| end <= 64)
+                    })
+                    .or_else(|| {
+                        recover_partial_store_insert(
+                            &definitions,
+                            slot,
+                            src,
+                            possible_ones,
+                            constants,
+                        )
+                        .filter(|insert| defined_values.contains(&insert.value))
+                    });
+                stores[instruction] = Some(PartialStoreEvent {
+                    slot,
+                    source: src,
+                    insert,
+                    prior_events,
+                    prior_writes,
+                });
+            }
+            MInst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            } => {
+                let load_slot = MemorySlot { base, offset, size };
+                let mut candidates = slot_bytes(load_slot)
+                    .filter_map(|byte| match last_events.get(&byte) {
+                        Some(LocalMemoryEvent::Store(store)) => Some(*store),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_unstable();
+                candidates.dedup();
+
+                let valid = !candidates.is_empty()
+                    && candidates.iter().all(|&store| {
+                        let Some(event) = stores[store].as_ref() else {
+                            return false;
+                        };
+                        event.slot.size.bytes() < size.bytes()
+                            && contained_slot(event.slot, load_slot)
+                            && slot_bytes(event.slot).all(|byte| {
+                                last_events.get(&byte) == Some(&LocalMemoryEvent::Store(store))
+                            })
+                    });
+                if valid {
+                    let mut barrier = region_start;
+                    for byte in slot_bytes(load_slot) {
+                        let mut write = last_writes.get(&byte).copied();
+                        while let Some(candidate) = write.filter(|write| candidates.contains(write))
+                        {
+                            let event = stores[candidate]
+                                .as_ref()
+                                .expect("candidate store has an event");
+                            let byte_index = usize::try_from(byte.1 - i64::from(event.slot.offset))
+                                .expect("candidate contains queried byte");
+                            write = event.prior_writes[byte_index];
+                        }
+                        if let Some(write) = write {
+                            barrier = barrier.max(write.saturating_add(1));
+                        }
+                    }
+
+                    let first_store = candidates[0];
+                    let mut insertion = first_store;
+                    for &store in &candidates {
+                        let event = stores[store]
+                            .as_ref()
+                            .expect("candidate store has an event");
+                        for prior in event.prior_events.into_iter().flatten() {
+                            if let LocalMemoryEvent::Load(load) = prior
+                                && load >= barrier
+                            {
+                                insertion = insertion.min(load);
+                            }
+                        }
+                    }
+                    insertion = insertion.max(barrier);
+                    if insertion <= first_store {
+                        plans.push(PartialRoundTripPlan {
+                            load_instruction: instruction,
+                            insertion_instruction: insertion,
+                            load_slot,
+                            destination: dst,
+                            stores: candidates,
+                        });
+                    }
+                }
+
+                for byte in slot_bytes(load_slot) {
+                    last_events.insert(byte, LocalMemoryEvent::Load(instruction));
+                }
+            }
+            _ if direct_memory_barrier(inst) => {
+                last_events.clear();
+                last_writes.clear();
+                region_start = instruction.saturating_add(1);
+            }
+            _ => {}
+        }
+        if let Some(destination) = inst.def() {
+            definitions.insert(destination, inst);
+        }
+    }
+
+    (plans, stores)
+}
+
+fn retain_dead_partial_store_plans(
+    block: &MBlock,
+    plans: Vec<PartialRoundTripPlan>,
+) -> Vec<PartialRoundTripPlan> {
+    let mut plans_by_load = plans
+        .iter()
+        .enumerate()
+        .map(|(plan, candidate)| (candidate.load_instruction, plan))
+        .collect::<HashMap<_, _>>();
+    let mut accepted = vec![false; plans.len()];
+    let mut removed_stores = HashSet::<usize>::new();
+    let mut next_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::new();
+
+    for (instruction, inst) in block.insts.iter().enumerate().rev() {
+        if let Some(plan) = plans_by_load.remove(&instruction) {
+            let candidate = &plans[plan];
+            let all_overwritten = candidate.stores.iter().all(|&store| {
+                let MInst::Store {
+                    base, offset, size, ..
+                } = block.insts[store]
+                else {
+                    return false;
+                };
+                slot_bytes(MemorySlot { base, offset, size }).all(|byte| {
+                    matches!(
+                        next_events.get(&byte),
+                        Some(LocalMemoryEvent::Store(next)) if !removed_stores.contains(next)
+                    )
+                })
+            });
+            if all_overwritten {
+                accepted[plan] = true;
+                removed_stores.extend(candidate.stores.iter().copied());
+            }
+        }
+
+        match *inst {
+            MInst::Store {
+                base, offset, size, ..
+            } if !removed_stores.contains(&instruction) => {
+                for byte in slot_bytes(MemorySlot { base, offset, size }) {
+                    next_events.insert(byte, LocalMemoryEvent::Store(instruction));
+                }
+            }
+            MInst::Store { .. } => {}
+            MInst::Load {
+                base, offset, size, ..
+            } => {
+                for byte in slot_bytes(MemorySlot { base, offset, size }) {
+                    next_events.insert(byte, LocalMemoryEvent::Load(instruction));
+                }
+            }
+            _ if direct_memory_barrier(inst) => next_events.clear(),
+            _ => {}
+        }
+    }
+
+    plans
+        .into_iter()
+        .zip(accepted)
+        .filter_map(|(plan, accepted)| accepted.then_some(plan))
+        .collect()
+}
+
+fn emit_partial_store_overlay(
+    instructions: &mut Vec<MInst>,
+    vregs: &mut VRegAllocator,
+    spill_descs: &mut Vec<SpillDesc>,
+    mut current: VReg,
+    destination: VReg,
+    load_slot: MemorySlot,
+    stores: &[PartialStoreEvent],
+) {
+    let load_mask = match load_slot.size {
+        OpSize::S8 => u8::MAX as u64,
+        OpSize::S16 => u16::MAX as u64,
+        OpSize::S32 => u32::MAX as u64,
+        OpSize::S64 => u64::MAX,
+    };
+
+    for (index, store) in stores.iter().enumerate() {
+        let (source, source_bit_offset, width_bits, store_bit_offset) =
+            if let Some(insert) = store.insert {
+                (
+                    insert.value,
+                    insert.value_bit_offset,
+                    insert.width_bits,
+                    insert.bit_offset,
+                )
+            } else {
+                (store.source, 0, store.slot.size.bytes() as usize * 8, 0)
+            };
+        let stored_mask = match width_bits {
+            64 => u64::MAX,
+            width => (1_u64 << width) - 1,
+        };
+        let shift =
+            u8::try_from((store.slot.offset - load_slot.offset) * 8 + store_bit_offset as i32)
+                .expect("contained scalar store shift fits one word");
+        let source = if source_bit_offset == 0 {
+            source
+        } else {
+            let shifted = alloc_transient_vreg(vregs, spill_descs);
+            instructions.push(MInst::ShrImm {
+                dst: shifted,
+                src: source,
+                imm: source_bit_offset as u8,
+            });
+            shifted
+        };
+        let normalized = if width_bits == 64 {
+            source
+        } else {
+            let normalized = alloc_transient_vreg(vregs, spill_descs);
+            if width_bits <= 32 {
+                instructions.push(MInst::AndImm32 {
+                    dst: normalized,
+                    src: source,
+                    imm: stored_mask as u32,
+                });
+            } else if and_imm_ok(stored_mask) {
+                instructions.push(MInst::AndImm {
+                    dst: normalized,
+                    src: source,
+                    imm: stored_mask,
+                });
+            } else {
+                let mask = alloc_transient_vreg(vregs, spill_descs);
+                instructions.push(MInst::LoadImm {
+                    dst: mask,
+                    value: stored_mask,
+                });
+                instructions.push(MInst::And {
+                    dst: normalized,
+                    lhs: source,
+                    rhs: mask,
+                });
+            }
+            normalized
+        };
+
+        let shifted = if shift == 0 {
+            normalized
+        } else {
+            let shifted = alloc_transient_vreg(vregs, spill_descs);
+            instructions.push(MInst::ShlImm {
+                dst: shifted,
+                src: normalized,
+                imm: shift,
+            });
+            shifted
+        };
+
+        let clear_mask = load_mask & !(stored_mask << shift);
+        let cleared = alloc_transient_vreg(vregs, spill_descs);
+        if load_slot.size != OpSize::S64 {
+            instructions.push(MInst::AndImm32 {
+                dst: cleared,
+                src: current,
+                imm: clear_mask as u32,
+            });
+        } else if and_imm_ok(clear_mask) {
+            instructions.push(MInst::AndImm {
+                dst: cleared,
+                src: current,
+                imm: clear_mask,
+            });
+        } else {
+            let mask = alloc_transient_vreg(vregs, spill_descs);
+            instructions.push(MInst::LoadImm {
+                dst: mask,
+                value: clear_mask,
+            });
+            instructions.push(MInst::And {
+                dst: cleared,
+                lhs: current,
+                rhs: mask,
+            });
+        }
+
+        let merged = if index + 1 == stores.len() {
+            destination
+        } else {
+            alloc_transient_vreg(vregs, spill_descs)
+        };
+        instructions.push(MInst::Or {
+            dst: merged,
+            lhs: cleared,
+            rhs: shifted,
+        });
+        current = merged;
+    }
+}
+
+/// Promote a local sequence of partial state writes through its sole wide
+/// observation.
+///
+/// For every physical byte, the forward scan proves that the wide load is the
+/// first observer of each selected store. The reverse scan proves that every
+/// selected byte is overwritten before another observer. The load can
+/// therefore move to the preceding memory version, while the removed stores
+/// are represented as ordinary SSA inserts at the original load point.
+///
+/// Direct scalar accesses touch at most eight byte facts. Both scans and the
+/// rewrite are linear in block instructions and use storage proportional to
+/// the direct bytes referenced by one block. Insert recovery additionally
+/// reuses one sparse whole-function possible-bit solve.
+fn promote_partial_store_round_trips(func: &mut MFunction) {
+    let constants = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match inst {
+            MInst::LoadImm { dst, value } => Some((*dst, *value)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let possible_ones = global_possible_one_bits(func, &constants);
+    let defined_values = func
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .phis
+                .iter()
+                .map(|phi| phi.dst)
+                .chain(block.insts.iter().filter_map(MInst::def))
+        })
+        .collect::<HashSet<_>>();
+    let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
+    for block in blocks {
+        let (plans, store_events) = discover_partial_round_trips(
+            block,
+            spill_descs,
+            &defined_values,
+            &possible_ones,
+            &constants,
+        );
+        let plans = retain_dead_partial_store_plans(block, plans);
+        if plans.is_empty() {
+            continue;
+        }
+
+        let mut insertions = HashMap::<usize, Vec<MInst>>::new();
+        let mut replacements = HashMap::<usize, Vec<MInst>>::new();
+        let mut removals = HashSet::<usize>::new();
+        for plan in plans {
+            let old = alloc_transient_vreg(vregs, spill_descs);
+            insertions
+                .entry(plan.insertion_instruction)
+                .or_default()
+                .push(MInst::Load {
+                    dst: old,
+                    base: plan.load_slot.base,
+                    offset: plan.load_slot.offset,
+                    size: plan.load_slot.size,
+                });
+            let stores = plan
+                .stores
+                .iter()
+                .map(|&store| {
+                    store_events[store]
+                        .as_ref()
+                        .expect("planned store retains its event")
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let mut replacement = Vec::new();
+            emit_partial_store_overlay(
+                &mut replacement,
+                vregs,
+                spill_descs,
+                old,
+                plan.destination,
+                plan.load_slot,
+                &stores,
+            );
+            replacements.insert(plan.load_instruction, replacement);
+            removals.extend(plan.stores);
+            spill_descs[plan.destination.0 as usize] = SpillDesc::transient();
+        }
+
+        let original = std::mem::take(&mut block.insts);
+        let mut rewritten = Vec::with_capacity(original.len());
+        for (instruction, inst) in original.into_iter().enumerate() {
+            if let Some(mut inserted) = insertions.remove(&instruction) {
+                rewritten.append(&mut inserted);
+            }
+            if removals.contains(&instruction) {
+                continue;
+            }
+            if let Some(mut replacement) = replacements.remove(&instruction) {
+                rewritten.append(&mut replacement);
+            } else {
+                rewritten.push(inst);
+            }
+        }
+        block.insts = rewritten;
+    }
+}
+
 fn forward_local_store_loads(func: &mut MFunction) {
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
@@ -5754,6 +6332,347 @@ mod tests {
                 .iter()
                 .any(|instruction| matches!(instruction, MInst::Or { dst: VReg(21), .. }))
         );
+    }
+
+    fn partial_store_round_trip(extra_read: bool, final_store: bool) -> MFunction {
+        let mut insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S8,
+            },
+            MInst::AndImm {
+                dst: VReg(1),
+                src: VReg(0),
+                imm: !7,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 5,
+            },
+            MInst::Or {
+                dst: VReg(3),
+                lhs: VReg(1),
+                rhs: VReg(2),
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                src: VReg(3),
+                size: OpSize::S8,
+            },
+            MInst::Load {
+                dst: VReg(4),
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S64,
+            },
+        ];
+        if extra_read {
+            insts.push(MInst::Load {
+                dst: VReg(5),
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S8,
+            });
+        }
+        if final_store {
+            insts.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                src: VReg(4),
+                size: OpSize::S64,
+            });
+        }
+        let mut func = make_func(insts, 6);
+        func.spill_descs[3] = SpillDesc::transient().with_state_insert(VReg(2), 0, 3);
+        func
+    }
+
+    #[test]
+    fn promotes_dead_partial_store_through_its_only_wide_observer() {
+        let mut func = partial_store_round_trip(false, true);
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::Load {
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S64,
+                ..
+            }
+        ));
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Store {
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            0
+        );
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Load {
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm32 {
+                src: VReg(2),
+                imm: 7,
+                ..
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm32 {
+                src: VReg(3),
+                imm: 0xff,
+                ..
+            }
+        )));
+        assert!(matches!(
+            func.blocks[0].insts.last(),
+            Some(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                src: VReg(4),
+                size: OpSize::S64,
+            })
+        ));
+    }
+
+    #[test]
+    fn recovers_partial_insert_when_store_provenance_is_stale() {
+        let mut func = partial_store_round_trip(false, true);
+        func.spill_descs[3].state_insert = None;
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm32 {
+                src: VReg(2),
+                imm: 7,
+                ..
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm32 {
+                src: VReg(3),
+                imm: 0xff,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn keeps_partial_store_observed_again_before_covering_overwrite() {
+        let mut func = partial_store_round_trip(true, true);
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S8,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn keeps_partial_store_live_at_block_exit() {
+        let mut func = partial_store_round_trip(false, false);
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S8,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn promotes_disjoint_partial_stores_in_program_order() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 0x12,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    src: VReg(0),
+                    size: OpSize::S8,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0x34,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 101,
+                    src: VReg(1),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+            ],
+            3,
+        );
+        promote_partial_store_round_trips(&mut func);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Store {
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            0
+        );
+        assert!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::ShlImm { imm: 8, .. }))
+        );
+    }
+
+    #[test]
+    fn recovers_nonzero_bit_insert_without_assuming_padding_is_zero() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: !0x38,
+                },
+                MInst::LoadImm {
+                    dst: VReg(2),
+                    value: 5,
+                },
+                MInst::ShlImm {
+                    dst: VReg(3),
+                    src: VReg(2),
+                    imm: 3,
+                },
+                MInst::Or {
+                    dst: VReg(4),
+                    lhs: VReg(1),
+                    rhs: VReg(3),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    src: VReg(4),
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(5),
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    src: VReg(5),
+                    size: OpSize::S64,
+                },
+            ],
+            6,
+        );
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::ShlImm {
+                src: VReg(2),
+                imm: 3,
+                ..
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::AndImm32 {
+                src: VReg(4),
+                imm: 0xff,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn keeps_partial_store_across_unknown_direct_alias() {
+        let mut func = partial_store_round_trip(false, true);
+        func.blocks[0].insts.insert(
+            5,
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 0,
+                index: VReg(2),
+                src: VReg(2),
+                size: OpSize::S8,
+                alias_range: None,
+            },
+        );
+        promote_partial_store_round_trips(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 100,
+                size: OpSize::S8,
+                ..
+            }
+        )));
     }
 
     #[test]

@@ -56,6 +56,10 @@ fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {
         runner.run("constant_fold", constant_fold);
         runner.run("constant_dedup", constant_dedup);
         runner.run("copy_propagate", copy_propagate);
+        runner.run(
+            "promote_partial_store_round_trips",
+            promote_partial_store_round_trips,
+        );
         runner.run("forward_local_store_loads", forward_local_store_loads);
         runner.run(
             "eliminate_redundant_local_stores",
@@ -97,6 +101,10 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("constant_fold", constant_fold);
     runner.run("constant_dedup", constant_dedup);
     runner.run("copy_propagate", copy_propagate);
+    runner.run(
+        "promote_partial_store_round_trips",
+        promote_partial_store_round_trips,
+    );
     runner.run("forward_local_store_loads", forward_local_store_loads);
     runner.run(
         "eliminate_redundant_local_stores",
