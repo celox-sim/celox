@@ -5,6 +5,7 @@ use super::shared::{
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use std::collections::BTreeMap;
 
 pub(super) struct StoreLoadForwardingPass;
 
@@ -33,40 +34,38 @@ fn forward_and_simplify(
     register_map: &HashMap<RegisterId, RegisterType>,
     four_state: bool,
 ) {
-    // Track latest stored register for each (addr, bit_offset, width)
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    struct StoreKey {
-        addr: RegionedAbsoluteAddr,
-        bit_offset: usize,
-    }
-
     struct StoreEntry {
         src: RegisterId,
         width: usize,
     }
 
-    let mut known_stores: HashMap<StoreKey, StoreEntry> = HashMap::default();
+    // Entries for one address are non-overlapping. Containing-definition
+    // queries and invalidation visit only the predecessor and overlapping
+    // ranges instead of rescanning every Store in the block.
+    let mut known_stores: HashMap<RegionedAbsoluteAddr, BTreeMap<usize, StoreEntry>> =
+        HashMap::default();
     let mut known_constants: HashMap<RegisterId, u64> = HashMap::default();
     let mut aliases: HashMap<RegisterId, RegisterId> = HashMap::default();
 
     for inst in instructions.iter_mut() {
         match inst {
             SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _triggers, _) => {
-                let key = StoreKey {
-                    addr: *addr,
-                    bit_offset: *off,
-                };
-                // Invalidate overlapping entries for same addr
-                let store_end = *off + *width;
-                known_stores.retain(|k, v| {
-                    k.addr != *addr || {
-                        let existing_end = k.bit_offset + v.width;
-                        // Keep if ranges don't overlap
-                        store_end <= k.bit_offset || existing_end <= *off
-                    }
-                });
-                known_stores.insert(
-                    key,
+                let store_end = off.saturating_add(*width);
+                let ranges = known_stores.entry(*addr).or_default();
+                let mut overlapping = Vec::new();
+                if let Some((&start, entry)) = ranges.range(..=*off).next_back()
+                    && start.saturating_add(entry.width) > *off
+                {
+                    overlapping.push(start);
+                }
+                overlapping.extend(ranges.range(*off..store_end).map(|(&start, _)| start));
+                overlapping.sort_unstable();
+                overlapping.dedup();
+                for start in overlapping {
+                    ranges.remove(&start);
+                }
+                ranges.insert(
+                    *off,
                     StoreEntry {
                         src: *src,
                         width: *width,
@@ -82,15 +81,17 @@ fn forward_and_simplify(
                 _,
             ) => {
                 // Conservatively invalidate all entries for this addr
-                known_stores.retain(|k, _| k.addr != *addr);
+                known_stores.remove(addr);
             }
             SIRInstruction::Load(dst, addr, SIROffset::Static(off), width) => {
-                let key = StoreKey {
-                    addr: *addr,
-                    bit_offset: *off,
-                };
-                if let Some(entry) = known_stores.get(&key) {
-                    if entry.width == *width
+                let load_end = off.saturating_add(*width);
+                if let Some((&store_offset, entry)) = known_stores
+                    .get(addr)
+                    .and_then(|ranges| ranges.range(..=*off).next_back())
+                    && load_end <= store_offset.saturating_add(entry.width)
+                {
+                    if store_offset == *off
+                        && entry.width == *width
                         && forwarding_types_are_compatible(
                             register_map.get(dst),
                             register_map.get(&entry.src),
@@ -100,6 +101,14 @@ fn forward_and_simplify(
                     {
                         // Forward: alias dst to the stored register
                         aliases.insert(*dst, entry.src);
+                    } else if forwarding_slice_types_are_compatible(
+                        register_map.get(dst),
+                        register_map.get(&entry.src),
+                        *width,
+                        entry.width,
+                        four_state,
+                    ) {
+                        *inst = SIRInstruction::Slice(*dst, entry.src, *off - store_offset, *width);
                     }
                 }
             }
@@ -153,7 +162,7 @@ fn forward_and_simplify(
             }
             SIRInstruction::Commit(_, dst_addr, SIROffset::Static(_), _, _) => {
                 // Invalidate known stores for the destination address
-                known_stores.retain(|k, _| k.addr != *dst_addr);
+                known_stores.remove(dst_addr);
             }
             SIRInstruction::Commit(
                 _,
@@ -162,7 +171,7 @@ fn forward_and_simplify(
                 _,
                 _,
             ) => {
-                known_stores.retain(|k, _| k.addr != *dst_addr);
+                known_stores.remove(dst_addr);
             }
             _ => {}
         }
@@ -209,6 +218,36 @@ fn forwarding_types_are_compatible(
     !four_state
         && matches!(load, RegisterType::Logic { .. })
         && matches!(stored, RegisterType::Bit { signed: false, .. })
+}
+
+fn forwarding_slice_types_are_compatible(
+    load: Option<&RegisterType>,
+    stored: Option<&RegisterType>,
+    load_width: usize,
+    stored_width: usize,
+    four_state: bool,
+) -> bool {
+    let (Some(load), Some(stored)) = (load, stored) else {
+        return false;
+    };
+    if load.width() != load_width || stored.width() != stored_width {
+        return false;
+    }
+    match (load, stored) {
+        (RegisterType::Logic { .. }, RegisterType::Logic { .. }) => true,
+        (
+            RegisterType::Bit {
+                signed: load_signed,
+                ..
+            },
+            RegisterType::Bit {
+                signed: stored_signed,
+                ..
+            },
+        ) => load_signed == stored_signed,
+        (RegisterType::Logic { .. }, RegisterType::Bit { signed: false, .. }) => !four_state,
+        _ => false,
+    }
 }
 
 fn apply_aliases_to_inst(
@@ -498,5 +537,72 @@ mod tests {
             instructions[2],
             SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
         ));
+    }
+
+    #[test]
+    fn forwards_a_contained_load_as_a_slice() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                64,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(16), 16),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Eq, RegisterId(2)),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(64)),
+            (RegisterId(1), bit(16)),
+            (RegisterId(2), bit(16)),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert_eq!(
+            instructions[1],
+            SIRInstruction::Slice(RegisterId(1), RegisterId(0), 16, 16)
+        );
+    }
+
+    #[test]
+    fn overlapping_store_invalidates_a_containing_definition() {
+        let addr = address();
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(0),
+                64,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                addr,
+                SIROffset::Static(8),
+                8,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(2), addr, SIROffset::Static(16), 16),
+        ];
+        let register_map = [
+            (RegisterId(0), bit(64)),
+            (RegisterId(1), bit(8)),
+            (RegisterId(2), bit(16)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert!(matches!(instructions[2], SIRInstruction::Load(..)));
     }
 }

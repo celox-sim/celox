@@ -787,8 +787,7 @@ explain the native/Veryl gap while all public backing Stores remain. The
 earlier 35.6% producer-block attribution measured where candidate values were
 computed, not work removable by this plan.
 
-Two code-generation probes independently confirmed this gate. They are
-negative experiments and are not retained:
+Two code-generation probes independently confirmed this gate:
 
 | Probe | final Loads | final Concats | fused x86 instructions | hot `b4212` x86 instructions |
 |---|---:|---:|---:|---:|
@@ -806,6 +805,16 @@ profitability. The measured reduction remains far too small to overturn the
 profile gate above. The Store and its packed reload may be removed together
 only under a plan which proves the Store unobservable; otherwise
 `KeepPackedReload` remains an intentional materialization choice.
+
+The broad contained-Load rewrite is retained as a separately justified local
+mem2reg improvement: it uses an exact containing Store range, preserves
+overlap invalidation, and materializes the requested subrange with a `Slice`.
+It does not authorize Milestone 2 or Store deletion. Two unchanged-workload
+Linux runs reached the exact baseline marker
+`cy=9ae070 x3=aa pass=1` in 65.002 and 66.484 seconds of execution, versus a
+recent 70.010-second baseline run. This is evidence of no observed runtime
+regression, not a claimed 6% improvement: the historical run-to-run variation
+overlaps the difference. The adjacent round-trip probe is not retained.
 
 Milestone 1 therefore fails the profitability gate. Milestone 2 must not start
 from this plan. A future restart requires either:
