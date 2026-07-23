@@ -906,6 +906,52 @@ and 65.280 seconds of generated execution. This run does not establish a
 timing improvement over the preceding 64.018-second run; the retained result
 is the removal of artificial allocation values and scalar copy instructions.
 
+The first larger post-gate improvement comes from strengthening the fused-call
+observability contract, not from forwarding more FF reloads. The only caller,
+`tick_deferred_comb`, sets `dirty = true` immediately after
+`eval_comb_apply_ff` returns. Every external signal read then runs the ordinary
+`eval_comb` before reading simulator state. Consequently, a comb-prefix Store
+in the fused clone is not an exit root merely because the standalone
+combinational function publishes the same signal.
+
+The initial production subset removes a comb-prefix Store only when all of the
+following hold:
+
+- it is a static two-state STABLE Store outside the FF suffix;
+- its trigger and capture sets are empty;
+- no static Load, Commit source, or effectful Store in the complete fused
+  function reads an overlapping bit range; and
+- the same object has no dynamic Load or Store.
+
+FF-suffix Stores remain persistent-state publications. This is intentionally
+more conservative than full range MemorySSA DSE: even a Load which occurs only
+before the Store keeps it live. Static read ranges are sorted and merged once
+per object, then queried by binary search, giving `O(I + R log R + S log R)`
+time and `O(R)` range storage rather than a Store-by-read quadratic scan.
+It nevertheless removes 321 fused SIR Stores
+and their now-dead producer cones. The complete function changes:
+
+| Stage | Before dirty-exit DSE | With dirty-exit DSE | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 96,131 | 94,305 | -1,826 |
+| pressure-scheduled MIR | 103,064 | 101,267 | -1,797 |
+| post-RA MIR | 224,681 | 220,726 | -3,955 |
+| x86 instructions | 151,596 | 149,327 | -2,269 |
+
+The native backend's 493 tests and the high-level native-testbench, native
+execution, counter, FF, dynamic-NBA, and cross-block-NBA suites pass. Two
+complete Linux runs both reached `cy=9ae070 x3=aa pass=1`; code generation took
+70.116 and 70.841 seconds, while generated execution took 61.912 and 64.696
+seconds. The structural reduction is established. The timing mean is lower
+than the preceding 64--67 second profile runs, but the overlap remains too
+large to attribute the complete difference to this pass.
+
+This is a conservative Milestone 3 subset and does not authorize the failed
+Milestone 1 FF materialization plan. The next extension should replace the
+whole-function “any overlapping read” rule with range MemorySSA liveness, so a
+comb Store can also die when every overlapping read precedes it or observes a
+different reaching version.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

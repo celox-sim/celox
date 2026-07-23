@@ -92,6 +92,13 @@ pub(crate) fn analyze_fused_state_feasibility(
     fused_state_feasibility::analyze(eu, ff_entry).map_err(|error| error.to_string())
 }
 
+pub(crate) fn eliminate_unread_fused_comb_stores(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    ff_entry: BlockId,
+) -> Result<usize, String> {
+    pass_dead_store_elimination::eliminate_unread_fused_comb_stores(eu, ff_entry)
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,

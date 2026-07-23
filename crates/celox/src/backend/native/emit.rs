@@ -4210,6 +4210,20 @@ fn emit_chained_eu_groups(
         &sir_boundaries,
     );
     verify_sir(&sir_eu, "after native direct working rewrite")?;
+    if let Some(suffix_entry) = stable_suffix_entry {
+        let removed = crate::optimizer::coalescing::eliminate_unread_fused_comb_stores(
+            &mut sir_eu,
+            suffix_entry,
+        )
+        .map_err(|message| ChainedEmitError::Analysis {
+            phase: "fused dirty-exit store elimination",
+            message,
+        })?;
+        if removed != 0 {
+            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            verify_sir(&sir_eu, "after fused dirty-exit Store DCE")?;
+        }
+    }
     if ENABLE_CROSS_PHASE_STABLE_FORWARDING && let Some(suffix_entry) = stable_suffix_entry {
         if crate::optimizer::coalescing::forward_stable_static_slots_from(&mut sir_eu, suffix_entry)
         {
