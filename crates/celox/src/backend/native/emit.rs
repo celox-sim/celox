@@ -649,13 +649,32 @@ impl From<EmitError> for ChainedEmitError {
 
 /// Disassemble the emitted code to a string (NASM syntax).
 pub fn disassemble(code: &[u8], base_addr: u64) -> String {
+    disassemble_with_block_offsets(code, base_addr, &[])
+}
+
+fn disassemble_with_block_offsets(
+    code: &[u8],
+    base_addr: u64,
+    block_offsets: &[(BlockId, u64)],
+) -> String {
     use iced_x86::{Decoder, DecoderOptions, Formatter, NasmFormatter};
     let mut decoder = Decoder::with_ip(64, code, base_addr, DecoderOptions::NONE);
     let mut formatter = NasmFormatter::new();
     let mut output = String::new();
     let mut instruction = iced_x86::Instruction::default();
+    let mut labels = block_offsets.to_vec();
+    labels.sort_unstable_by_key(|(block, offset)| (*offset, *block));
+    let mut next_label = 0usize;
     while decoder.can_decode() {
         decoder.decode_out(&mut instruction);
+        let offset = instruction.ip().saturating_sub(base_addr);
+        while labels
+            .get(next_label)
+            .is_some_and(|(_, label_offset)| *label_offset == offset)
+        {
+            output.push_str(&format!("bb{}:\n", labels[next_label].0.0));
+            next_label += 1;
+        }
         let mut text = String::new();
         formatter.format(&instruction, &mut text);
         output.push_str(&format!("  {:#010x}  {}\n", instruction.ip(), text));
@@ -4189,7 +4208,11 @@ fn emit_chained_eu_groups(
         &ra.ssa_destruction,
     )?;
     if let Some(trace) = trace {
-        trace.disassembly = disassemble(&result.code[..result.text_size], 0);
+        trace.disassembly = disassemble_with_block_offsets(
+            &result.code[..result.text_size],
+            0,
+            &result.block_offsets,
+        );
     }
     if let Some(start) = emit_start {
         eprintln!(
@@ -4723,6 +4746,21 @@ mod shift_encoding_tests {
     use crate::backend::native::jit_mem::JitCode;
     use crate::backend::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
+
+    #[test]
+    fn traced_disassembly_labels_exact_basic_block_offsets() {
+        let text = disassemble_with_block_offsets(
+            &[0x90, 0xc3],
+            0x1000,
+            &[(BlockId(9), 1), (BlockId(3), 0)],
+        );
+
+        assert_eq!(text, "bb3:\n  0x00001000  nop\nbb9:\n  0x00001001  ret\n");
+        assert_eq!(
+            disassemble(&[0x90, 0xc3], 0x1000),
+            "  0x00001000  nop\n  0x00001001  ret\n"
+        );
+    }
 
     #[test]
     fn emission_layout_pulls_a_backedge_chain_next_to_its_latch() {
