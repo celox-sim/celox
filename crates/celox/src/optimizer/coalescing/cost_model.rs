@@ -227,6 +227,7 @@ pub fn estimate_eu_cost(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bo
         cost += match &block.terminator {
             SIRTerminator::Jump(_, _) => 1,
             SIRTerminator::Branch { .. } => 2,
+            SIRTerminator::Switch { .. } => 2,
             SIRTerminator::Return => 2,
             SIRTerminator::Error(_) => 2,
         };

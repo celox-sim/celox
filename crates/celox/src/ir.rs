@@ -735,6 +735,11 @@ impl<A: Display> Display for ExecutionUnit<A> {
                     false_block,
                     ..
                 } => vec![true_block.0, false_block.0],
+                SIRTerminator::Switch { cases, default, .. } => cases
+                    .iter()
+                    .map(|case| case.target)
+                    .chain(std::iter::once(*default))
+                    .collect(),
                 SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
             },
         );
@@ -896,6 +901,21 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
                         false_block.1.iter().map(|a| r(*a)).collect(),
                     ),
                 },
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => SIRTerminator::Switch {
+                    selector: r(*selector),
+                    cases: cases
+                        .iter()
+                        .map(|case| SIRSwitchCase {
+                            value: case.value.clone(),
+                            target: b(case.target),
+                        })
+                        .collect(),
+                    default: b(*default),
+                },
             };
 
             merged_blocks.insert(
@@ -933,6 +953,11 @@ pub(crate) fn inline_single_predecessor_jumps<A: Clone>(
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         }
     }
@@ -1157,6 +1182,13 @@ fn replace_sir_terminator_uses(
                 replace(arg);
             }
         }
+        SIRTerminator::Switch {
+            selector,
+            cases: _,
+            default: _,
+        } => {
+            replace(selector);
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -1287,9 +1319,23 @@ pub enum SIRTerminator {
         true_block: (BlockId, Vec<RegisterId>),
         false_block: (BlockId, Vec<RegisterId>),
     },
+    /// Exact multiway dispatch for a selector of at most eight bits. Cases are
+    /// tested against the declared bit width; values not listed take `default`.
+    Switch {
+        selector: RegisterId,
+        cases: Vec<SIRSwitchCase>,
+        default: BlockId,
+    },
     /// End of module execution
     Return,
     Error(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SIRSwitchCase {
+    #[serde(with = "crate::serde_helpers::biguint")]
+    pub value: BigUint,
+    pub target: BlockId,
 }
 
 impl fmt::Display for SIRTerminator {
@@ -1326,6 +1372,23 @@ impl fmt::Display for SIRTerminator {
                 fmt_target(f, true_block.0, &true_block.1)?;
                 write!(f, " : ")?;
                 fmt_target(f, false_block.0, &false_block.1)?;
+                write!(f, ")")
+            }
+            SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                write!(f, "Switch(r{}; ", selector.0)?;
+                for (index, case) in cases.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{:#x} => ", case.value)?;
+                    fmt_target(f, case.target, &[])?;
+                }
+                write!(f, "; default => ")?;
+                fmt_target(f, *default, &[])?;
                 write!(f, ")")
             }
             SIRTerminator::Return => write!(f, "Return"),

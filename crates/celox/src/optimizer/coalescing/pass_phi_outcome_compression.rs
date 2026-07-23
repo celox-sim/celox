@@ -443,6 +443,7 @@ fn replace_terminator_use(terminator: &mut SIRTerminator, old: RegisterId, new: 
                 replace(argument, old, new);
             }
         }
+        SIRTerminator::Switch { selector, .. } => replace(selector, old, new),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }

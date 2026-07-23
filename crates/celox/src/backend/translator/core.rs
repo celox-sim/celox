@@ -2,7 +2,7 @@ use cranelift::codegen::ir::{
     BlockArg, FuncRef, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
 };
 use cranelift::prelude::*;
-use cranelift_frontend::FunctionBuilder;
+use cranelift_frontend::{FunctionBuilder, Switch};
 
 use crate::{
     HashMap, SimulatorOptions,
@@ -1489,6 +1489,50 @@ impl SIRTranslator {
                             &false_block.1,
                         );
                     }
+                }
+            }
+            crate::ir::SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                let mut trampolines = HashMap::<BlockId, (Block, usize)>::default();
+                let mut target_block = |target: BlockId, state: &mut TranslationState| -> Block {
+                    if let Some(&chunk) = cross_chunk_targets.get(&target) {
+                        trampolines
+                            .entry(target)
+                            .or_insert_with(|| (state.builder.create_block(), chunk))
+                            .0
+                    } else {
+                        block_map[&target]
+                    }
+                };
+                let mut switch = Switch::new();
+                for case in cases {
+                    let digits = case.value.to_u64_digits();
+                    let value = match digits.as_slice() {
+                        [] => 0,
+                        [value] => *value as u128,
+                        _ => unreachable!("verified switch key fits eight bits"),
+                    };
+                    switch.set_entry(value, target_block(case.target, state));
+                }
+                let default_block = target_block(*default, state);
+                let selector = state.regs[selector].first_value(state.builder);
+                switch.emit(state.builder, selector, default_block);
+
+                let mut trampolines = trampolines.into_iter().collect::<Vec<_>>();
+                trampolines.sort_unstable_by_key(|(target, _)| *target);
+                for (target, (trampoline, chunk)) in trampolines {
+                    state.builder.switch_to_block(trampoline);
+                    self.emit_spill_and_tail_call(
+                        state,
+                        outgoing_spills,
+                        scratch_base_offset,
+                        chunk_func_refs[chunk],
+                        cross_chunk_edges.get(&target),
+                        &[],
+                    );
                 }
             }
             crate::ir::SIRTerminator::Return => {

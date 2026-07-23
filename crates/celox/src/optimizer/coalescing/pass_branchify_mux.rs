@@ -6085,7 +6085,9 @@ fn param_only_replacement(
         return None;
     }
     match &block.terminator {
-        SIRTerminator::Jump(_, _) | SIRTerminator::Branch { .. } => Some(block.terminator.clone()),
+        SIRTerminator::Jump(_, _) | SIRTerminator::Branch { .. } | SIRTerminator::Switch { .. } => {
+            Some(block.terminator.clone())
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => None,
     }
 }
@@ -6126,6 +6128,12 @@ fn predecessor_info(
                 *pred_counts.entry(true_block.0).or_default() += 1;
                 *pred_counts.entry(false_block.0).or_default() += 1;
             }
+            SIRTerminator::Switch { cases, default, .. } => {
+                for case in cases {
+                    *pred_counts.entry(case.target).or_default() += 1;
+                }
+                *pred_counts.entry(*default).or_default() += 1;
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
@@ -6158,6 +6166,15 @@ fn substitute_terminator(
                 false_block.0,
                 false_block.1.iter().copied().map(replace).collect(),
             ),
+        },
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => SIRTerminator::Switch {
+            selector: replace(*selector),
+            cases: cases.clone(),
+            default: *default,
         },
         SIRTerminator::Return => SIRTerminator::Return,
         SIRTerminator::Error(code) => SIRTerminator::Error(*code),
@@ -6304,6 +6321,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
             uses.extend(false_block.1.iter().copied());
             uses
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

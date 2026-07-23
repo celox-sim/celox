@@ -56,6 +56,16 @@ fn append_edge_arguments(
                 false_block.1.extend(extra);
             }
         }
+        SIRTerminator::Switch { cases, default, .. } => {
+            debug_assert!(
+                cases
+                    .iter()
+                    .map(|case| case.target)
+                    .chain(std::iter::once(*default))
+                    .all(|target| successor_arguments.get(&target).is_none_or(Vec::is_empty)),
+                "switch edges cannot carry promoted state arguments"
+            );
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -160,6 +170,19 @@ fn rewrite_global_static_slots_in_place(
             })
         })
         .collect::<Vec<_>>();
+    // A Switch edge deliberately carries no SSA arguments. Do not promote a
+    // fragment whose iterated dominance frontier would require adding one:
+    // the target remains memory-resident and other fragments are unaffected.
+    candidates.retain(|candidate| {
+        candidate.phi_blocks.iter().all(|&block| {
+            cfg.predecessors[block].iter().all(|&predecessor| {
+                !matches!(
+                    eu.blocks[&cfg.block_ids[predecessor]].terminator,
+                    SIRTerminator::Switch { .. }
+                )
+            })
+        })
+    });
     candidates.sort_by_key(|candidate| candidate.fragment);
     if candidates.is_empty() {
         return Some(false);
@@ -865,6 +888,9 @@ fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
                 for &argument in true_block.1.iter().chain(&false_block.1) {
                     add_register_use(&mut counts, argument);
                 }
+            }
+            SIRTerminator::Switch { selector, .. } => {
+                add_register_use(&mut counts, *selector);
             }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }

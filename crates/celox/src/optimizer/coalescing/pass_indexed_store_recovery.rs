@@ -956,6 +956,10 @@ fn remove_unreachable_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                 work.push(true_block.0);
                 work.push(false_block.0);
             }
+            SIRTerminator::Switch { cases, default, .. } => {
+                work.extend(cases.iter().map(|case| case.target));
+                work.push(*default);
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
@@ -1069,6 +1073,7 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
             uses.extend(false_block.1.iter().copied());
             uses
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -1372,6 +1377,9 @@ mod tests {
                     };
                     assert!(target.1.is_empty());
                     current = target.0;
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in indexed-store test")
                 }
                 SIRTerminator::Return => return writes,
                 SIRTerminator::Error(code) => panic!("unexpected Error({code})"),

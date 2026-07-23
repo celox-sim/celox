@@ -6292,6 +6292,9 @@ mod tests {
                         (true_block.0, &true_block.1)
                     }
                 }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in grouped-fold lowering test")
+                }
                 SIRTerminator::Return => return values,
                 SIRTerminator::Error(code) => panic!("unexpected Error({code})"),
             };

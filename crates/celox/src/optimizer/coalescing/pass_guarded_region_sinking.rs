@@ -629,6 +629,7 @@ fn merge_accepts_phi(
                 false_block,
                 ..
             } => true_block.0 == merge || false_block.0 == merge,
+            SIRTerminator::Switch { .. } => false,
             SIRTerminator::Return | SIRTerminator::Error(_) => false,
         }
     })
@@ -901,6 +902,10 @@ pub(super) fn eliminate_dead_control_regions(eu: &mut ExecutionUnit<RegionedAbso
                         work.push(true_block.0);
                         work.push(false_block.0);
                     }
+                    SIRTerminator::Switch { cases, default, .. } => {
+                        work.extend(cases.iter().map(|case| case.target));
+                        work.push(*default);
+                    }
                     SIRTerminator::Return | SIRTerminator::Error(_) => {
                         valid = false;
                         break;
@@ -1058,6 +1063,10 @@ fn sink_deferred_value_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     work.push(true_block.0);
                     work.push(false_block.0);
                 }
+                SIRTerminator::Switch { cases, default, .. } => {
+                    work.extend(cases.iter().map(|case| case.target));
+                    work.push(*default);
+                }
                 SIRTerminator::Return | SIRTerminator::Error(_) => {
                     valid = false;
                     break;
@@ -1101,6 +1110,10 @@ fn sink_deferred_value_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                     ..
                 } => {
                     valid &= region.contains(&true_block.0) && region.contains(&false_block.0);
+                }
+                SIRTerminator::Switch { cases, default, .. } => {
+                    valid &= cases.iter().all(|case| region.contains(&case.target))
+                        && region.contains(default);
                 }
                 SIRTerminator::Return | SIRTerminator::Error(_) => valid = false,
             }
@@ -1530,6 +1543,7 @@ fn replace_register_uses_in_terminator(
                 replace(arg);
             }
         }
+        SIRTerminator::Switch { selector, .. } => replace(selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -4166,6 +4180,9 @@ mod tests {
                     } else {
                         (false_block.0, false_block.1.clone())
                     }
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in guarded-region test")
                 }
                 SIRTerminator::Return => return ExecutionTrace { stores },
                 SIRTerminator::Error(code) => panic!("unexpected test error {code}"),

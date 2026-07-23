@@ -158,6 +158,10 @@ fn remove_unreachable_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bo
                 work.push(true_block.0);
                 work.push(false_block.0);
             }
+            SIRTerminator::Switch { cases, default, .. } => {
+                work.extend(cases.iter().map(|case| case.target));
+                work.push(*default);
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
@@ -394,6 +398,18 @@ fn collect_edge_parameter_facts(
                     .entry(false_block.0)
                     .or_default()
                     .push((false_block.1.clone(), Some((*cond, false))));
+            }
+            SIRTerminator::Switch { cases, default, .. } => {
+                for case in cases {
+                    incoming
+                        .entry(case.target)
+                        .or_default()
+                        .push((Vec::new(), None));
+                }
+                incoming
+                    .entry(*default)
+                    .or_default()
+                    .push((Vec::new(), None));
             }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
@@ -914,6 +930,23 @@ fn correlated_edges(
                     has_arguments: !false_block.1.is_empty(),
                 },
             ],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| CorrelatedEdge {
+                    target: cfg
+                        .block_index(case.target)
+                        .expect("SirCfg validated every switch target"),
+                    truth: None,
+                    has_arguments: false,
+                })
+                .chain(std::iter::once(CorrelatedEdge {
+                    target: cfg
+                        .block_index(*default)
+                        .expect("SirCfg validated the switch default target"),
+                    truth: None,
+                    has_arguments: false,
+                }))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         })
         .collect()
@@ -1483,6 +1516,7 @@ fn replace_register_uses_in_block(
                 replace(argument);
             }
         }
+        SIRTerminator::Switch { selector, .. } => replace(selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -1520,6 +1554,17 @@ fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Analysis {
                     arguments: false_block.1.clone(),
                 },
             ],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| Edge {
+                    target: case.target,
+                    arguments: Vec::new(),
+                })
+                .chain(std::iter::once(Edge {
+                    target: *default,
+                    arguments: Vec::new(),
+                }))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         };
         edges.insert(block_id, outgoing);
@@ -1570,6 +1615,7 @@ fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Analysis {
                 Some(false) => vec![1],
                 None => vec![0, 1],
             },
+            SIRTerminator::Switch { cases, .. } => (0..=cases.len()).collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         };
 
@@ -1970,6 +2016,7 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
             .chain(true_block.1.iter().copied())
             .chain(false_block.1.iter().copied())
             .collect(),
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

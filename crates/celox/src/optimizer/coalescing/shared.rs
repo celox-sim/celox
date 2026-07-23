@@ -179,6 +179,9 @@ fn collect_terminator_used_regs(term: &SIRTerminator, out: &mut HashSet<Register
             out.extend(true_block.1.iter().copied());
             out.extend(false_block.1.iter().copied());
         }
+        SIRTerminator::Switch { selector, .. } => {
+            out.insert(*selector);
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -213,6 +216,11 @@ pub(super) fn replace_reg_in_terminator(
                 if *arg == from {
                     *arg = to;
                 }
+            }
+        }
+        SIRTerminator::Switch { selector, .. } => {
+            if *selector == from {
+                *selector = to;
             }
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
@@ -514,6 +522,11 @@ pub(super) fn batch_replace_in_terminator(
                 if let Some(&to) = map.get(arg) {
                     *arg = to;
                 }
+            }
+        }
+        SIRTerminator::Switch { selector, .. } => {
+            if let Some(&to) = map.get(selector) {
+                *selector = to;
             }
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}

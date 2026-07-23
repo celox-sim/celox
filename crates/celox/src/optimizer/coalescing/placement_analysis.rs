@@ -584,6 +584,14 @@ fn collect_value_uses(
                     values,
                 )?;
             }
+            SIRTerminator::Switch { selector, .. } => {
+                let selector = *register_values
+                    .get(selector)
+                    .ok_or(PlacementAnalysisError::MissingDefinition(*selector))?;
+                values[selector.0]
+                    .uses
+                    .push(ValueUse::BranchCondition { block: block_id });
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }

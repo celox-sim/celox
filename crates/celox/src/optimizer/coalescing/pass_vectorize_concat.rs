@@ -174,6 +174,7 @@ fn push_terminator_uses(terminator: &SIRTerminator, worklist: &mut Vec<RegisterI
             worklist.extend(true_block.1.iter().copied());
             worklist.extend(false_block.1.iter().copied());
         }
+        SIRTerminator::Switch { selector, .. } => worklist.push(*selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }

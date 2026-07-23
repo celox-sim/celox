@@ -226,6 +226,50 @@ fn verify_edges<A>(eu: &ExecutionUnit<A>, block: &BasicBlock<A>) -> Result<(), S
                 (false_block.0, false_block.1.as_slice()),
             ]
         }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            let selector_ty = register_type(eu, block.id, None, *selector)?;
+            let width = selector_ty.width();
+            if width == 0 || width > 8 {
+                return Err(SirVerifyError::block(
+                    "TYPE.SWITCH_SELECTOR",
+                    block.id,
+                    format!(
+                        "switch selector r{} has width {}, expected 1..=8",
+                        selector.0, width
+                    ),
+                ));
+            }
+            let limit = BigUint::from(1u8) << width;
+            let mut values = crate::HashSet::default();
+            for case in cases {
+                if case.value >= limit {
+                    return Err(SirVerifyError::block(
+                        "TYPE.SWITCH_CASE",
+                        block.id,
+                        format!(
+                            "switch case {:#x} does not fit selector width {}",
+                            case.value, width
+                        ),
+                    ));
+                }
+                if !values.insert(case.value.clone()) {
+                    return Err(SirVerifyError::block(
+                        "CFG.SWITCH_DUPLICATE",
+                        block.id,
+                        format!("duplicate switch case {:#x}", case.value),
+                    ));
+                }
+            }
+            cases
+                .iter()
+                .map(|case| (case.target, &[][..]))
+                .chain(std::iter::once((*default, &[][..])))
+                .collect()
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     };
 
@@ -773,6 +817,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
             uses.extend(false_block.1.iter().copied());
             uses
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -785,6 +830,11 @@ fn successor_ids(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

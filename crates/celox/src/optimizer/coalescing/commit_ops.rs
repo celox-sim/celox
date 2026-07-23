@@ -365,6 +365,12 @@ pub(crate) fn direct_stable_store_hazards(
                 propagate(true_block.0);
                 propagate(false_block.0);
             }
+            SIRTerminator::Switch { cases, default, .. } => {
+                for case in cases {
+                    propagate(case.target);
+                }
+                propagate(*default);
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {
                 // Publishing a redirected state Store on a path where the
                 // source program never reaches its Commit changes the final

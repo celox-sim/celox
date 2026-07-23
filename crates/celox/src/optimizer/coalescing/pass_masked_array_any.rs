@@ -605,6 +605,7 @@ fn register_use_counts(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
                     add(argument);
                 }
             }
+            SIRTerminator::Switch { selector, .. } => add(*selector),
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
@@ -1172,6 +1173,9 @@ mod tests {
                     } else {
                         (false_block.0, false_block.1.clone())
                     }
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in masked-array test")
                 }
                 SIRTerminator::Return => {
                     return (

@@ -134,6 +134,12 @@ pub(super) fn collect_uses(
                         .push(UseSite::FalseEdgeArgument { block: block.id });
                 }
             }
+            SIRTerminator::Switch { selector, .. } => {
+                result
+                    .entry(*selector)
+                    .or_default()
+                    .push(UseSite::BranchCondition { block: block.id });
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }

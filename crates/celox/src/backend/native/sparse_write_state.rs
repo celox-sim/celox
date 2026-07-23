@@ -277,6 +277,9 @@ fn visit_terminator_uses(terminator: &SIRTerminator, mut visit: impl FnMut(Regis
                 visit(argument);
             }
         }
+        SIRTerminator::Switch { selector, .. } => {
+            visit(*selector);
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }

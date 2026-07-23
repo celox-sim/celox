@@ -5238,6 +5238,31 @@ fn compile_terminator(
 
             instrs.push(Instruction::Br(br_dispatch_depth)); // br $dispatch
         }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            instrs.push(Instruction::I64Const(block_index[default] as i64));
+            instrs.push(Instruction::LocalSet(block_id_local));
+            let selector = &locals.reg_map[selector];
+            for case in cases {
+                let digits = case.value.to_u64_digits();
+                let value = match digits.as_slice() {
+                    [] => 0,
+                    [value] => *value,
+                    _ => unreachable!("verified switch key fits eight bits"),
+                };
+                instrs.push(Instruction::LocalGet(selector.value_idx));
+                instrs.push(Instruction::I64Const(value as i64));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+                instrs.push(Instruction::I64Const(block_index[&case.target] as i64));
+                instrs.push(Instruction::LocalSet(block_id_local));
+                instrs.push(Instruction::End);
+            }
+            instrs.push(Instruction::Br(br_dispatch_depth));
+        }
         SIRTerminator::Return => {
             // Break out of dispatch loop and unit.
             instrs.push(Instruction::Br(br_exit_depth)); // br $exit

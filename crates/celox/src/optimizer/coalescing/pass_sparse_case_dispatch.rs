@@ -2,7 +2,7 @@ use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
 use crate::ir::{
     AbsoluteAddr, BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
-    RegisterType, SIRInstruction, SIROffset, SIRTerminator, STABLE_REGION, UnaryOp,
+    RegisterType, SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, STABLE_REGION, UnaryOp,
 };
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
@@ -10,10 +10,9 @@ use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// Turns a prioritized chain of exact, same-selector muxes into one balanced
-/// sparse dispatch.  This remains separate from `BranchifyMuxPass`: the latter
-/// makes a local decision for one mux, while this pass proves a whole-chain
-/// replacement before changing the CFG.
+/// Turns a prioritized chain of exact, same-selector muxes into one sparse
+/// dispatch. Narrow selectors remain a first-class multi-way branch through
+/// backend lowering; wider selectors use a balanced comparison tree.
 #[derive(Clone, Default)]
 pub(super) struct SparseCaseDispatchPass {
     stable_alias_class: HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -80,6 +79,8 @@ struct SparseCasePlan {
     selector: RegisterId,
     stages: Vec<CaseStage>,
     arms: Vec<DispatchArm>,
+    cases: Vec<(BigUint, usize)>,
+    direct_switch: bool,
     initial_arm: usize,
     boundaries: Vec<Boundary>,
     reachable_arms: Vec<usize>,
@@ -435,7 +436,8 @@ fn recognize_sparse_case_chain(
     let mut arm_by_value = HashMap::default();
     arm_by_value.insert(cursor, 0usize);
     let mut changes = BTreeMap::<BigUint, usize>::new();
-    for (key, value) in effective {
+    let mut cases = Vec::with_capacity(effective.len());
+    for (key, &value) in &effective {
         let arm = *arm_by_value.entry(value).or_insert_with(|| {
             let arm = arms.len();
             arms.push(DispatchArm {
@@ -444,8 +446,11 @@ fn recognize_sparse_case_chain(
             });
             arm
         });
+        if arm != 0 {
+            cases.push((key.clone(), arm));
+        }
         changes.insert(key.clone(), arm);
-        let next = &key + BigUint::one();
+        let next = key + BigUint::one();
         if value_fits_width(&next, selector_width) {
             // A following consecutive key overwrites this transition, so the
             // tree contains no empty default interval between adjacent cases.
@@ -473,9 +478,15 @@ fn recognize_sparse_case_chain(
         return None;
     }
 
+    let direct_switch = selector_width <= 8;
     let mut reachable = HashSet::default();
-    reachable.insert(initial_arm);
-    reachable.extend(boundaries.iter().map(|boundary| boundary.right_arm));
+    if direct_switch {
+        reachable.insert(0);
+        reachable.extend(cases.iter().map(|(_, arm)| *arm));
+    } else {
+        reachable.insert(initial_arm);
+        reachable.extend(boundaries.iter().map(|boundary| boundary.right_arm));
+    }
     let mut reachable_arms = reachable.into_iter().collect::<Vec<_>>();
     reachable_arms.sort_unstable();
 
@@ -510,7 +521,7 @@ fn recognize_sparse_case_chain(
         root_index,
         &stages,
         selector,
-        boundaries.len(),
+        if direct_switch { 1 } else { boundaries.len() },
         &arms,
         &reachable_arms,
         use_counts,
@@ -522,7 +533,7 @@ fn recognize_sparse_case_chain(
         block,
         &stages,
         selector,
-        boundaries.len(),
+        if direct_switch { 1 } else { boundaries.len() },
         &arms,
         &reachable_arms,
         use_counts,
@@ -539,6 +550,7 @@ fn recognize_sparse_case_chain(
         &dead_defs,
         &cross_block_dead_defs,
         boundaries.len(),
+        direct_switch,
     );
     if !profitability.proves_worst_case_benefit() {
         return None;
@@ -546,9 +558,13 @@ fn recognize_sparse_case_chain(
 
     let additional_blocks = reachable_arms
         .len()
-        .checked_add(boundaries.len())?
+        .checked_add(if direct_switch { 0 } else { boundaries.len() })?
         .checked_add(1)?;
-    let additional_registers = boundaries.len().checked_mul(2)?;
+    let additional_registers = if direct_switch {
+        0
+    } else {
+        boundaries.len().checked_mul(2)?
+    };
     let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
     let max_register = eu.register_map.keys().map(|id| id.0).max().unwrap_or(0);
     // `fresh_*` maintains a one-past-the-last sentinel after returning an ID,
@@ -565,6 +581,8 @@ fn recognize_sparse_case_chain(
         selector,
         stages,
         arms,
+        cases,
+        direct_switch,
         initial_arm,
         boundaries,
         reachable_arms,
@@ -1317,6 +1335,11 @@ fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -1347,6 +1370,7 @@ fn sparse_case_profitability(
     dead_defs: &HashSet<usize>,
     cross_block_dead_defs: &HashSet<DefSite>,
     boundary_count: usize,
+    direct_switch: bool,
 ) -> SparseCaseProfitability {
     let chain_cost = saturating_sum(stages.iter().map(|stage| {
         runtime_instruction_cost(&block.instructions[stage.mux_index], &eu.register_map)
@@ -1380,7 +1404,11 @@ fn sparse_case_profitability(
         .saturating_add(3u128.saturating_mul(selector_chunks))
         .saturating_add(BRANCH_CONTROL_COST)
         .saturating_add(WORST_CASE_MISPREDICT_COST);
-    let depth = balanced_tree_depth(boundary_count) as u128;
+    let depth = if direct_switch {
+        1
+    } else {
+        balanced_tree_depth(boundary_count)
+    } as u128;
     let result_chunks = result_width.div_ceil(64).max(1) as u128;
     let introduced_cost = depth
         .saturating_mul(decision_cost)
@@ -1512,21 +1540,40 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
         arm_blocks.insert(arm_index, id);
     }
 
-    let selector_type = eu.register_map[&plan.selector].clone();
-    let decision_root = build_decision_tree(
-        &plan.boundaries,
-        plan.initial_arm,
-        &arm_blocks,
-        plan.selector,
-        &selector_type,
-        &mut next_block,
-        &mut next_register,
-        &mut eu.register_map,
-        &mut generated,
-    );
-    let root_decision = generated
-        .remove(&decision_root)
-        .expect("non-empty boundary tree must have a decision root");
+    let (decision_instructions, decision_terminator) = if plan.direct_switch {
+        (
+            Vec::new(),
+            SIRTerminator::Switch {
+                selector: plan.selector,
+                cases: plan
+                    .cases
+                    .iter()
+                    .map(|(value, arm)| SIRSwitchCase {
+                        value: value.clone(),
+                        target: arm_blocks[arm],
+                    })
+                    .collect(),
+                default: arm_blocks[&0],
+            },
+        )
+    } else {
+        let selector_type = eu.register_map[&plan.selector].clone();
+        let decision_root = build_decision_tree(
+            &plan.boundaries,
+            plan.initial_arm,
+            &arm_blocks,
+            plan.selector,
+            &selector_type,
+            &mut next_block,
+            &mut next_register,
+            &mut eu.register_map,
+            &mut generated,
+        );
+        let root_decision = generated
+            .remove(&decision_root)
+            .expect("non-empty boundary tree must have a decision root");
+        (root_decision.instructions, root_decision.terminator)
+    };
 
     let mut head_instructions = original
         .instructions
@@ -1536,12 +1583,12 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
         .filter(|(index, _)| !removed.contains(index))
         .map(|(_, inst)| inst.clone())
         .collect::<Vec<_>>();
-    head_instructions.extend(root_decision.instructions);
+    head_instructions.extend(decision_instructions);
     let head = BasicBlock {
         id: plan.block_id,
         params: original.params,
         instructions: head_instructions,
-        terminator: root_decision.terminator,
+        terminator: decision_terminator,
     };
     let merge = BasicBlock {
         id: merge_id,
@@ -1755,6 +1802,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
             result.extend(false_block.1.iter().copied());
             result
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -2010,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_prioritized_duplicates_to_balanced_semantic_dispatch() {
+    fn lowers_prioritized_duplicates_to_direct_semantic_dispatch() {
         let (mut eu, selector, output) = expensive_duplicate_fixture();
         eu.verify();
         let expected = (0..16)
@@ -2026,7 +2074,10 @@ mod tests {
                 .iter()
                 .any(|inst| matches!(inst, SIRInstruction::Mux(..)))
         }));
-        assert!(maximum_branch_depth(&eu, eu.entry_block_id) <= 4);
+        assert!(matches!(
+            eu.blocks[&eu.entry_block_id].terminator,
+            SIRTerminator::Switch { .. }
+        ));
         let actual = (0..16)
             .map(|value| evaluate(&eu, selector, value, output))
             .collect::<Vec<_>>();
@@ -2620,7 +2671,7 @@ mod tests {
                 .iter()
                 .any(|inst| def_reg(inst) == Some(loaded))
         );
-        assert!(matches!(head.terminator, SIRTerminator::Branch { .. }));
+        assert!(matches!(head.terminator, SIRTerminator::Switch { .. }));
     }
 
     #[test]
@@ -2745,7 +2796,7 @@ mod tests {
         );
         assert!(matches!(
             eu.blocks[&BlockId(0)].terminator,
-            SIRTerminator::Branch { .. }
+            SIRTerminator::Switch { .. }
         ));
     }
 
@@ -2943,6 +2994,16 @@ mod tests {
                     assign_edge_params(eu, &mut values, edge.0, &edge.1);
                     block_id = edge.0;
                 }
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => {
+                    block_id = cases
+                        .iter()
+                        .find(|case| case.value == values[selector])
+                        .map_or(*default, |case| case.target);
+                }
                 SIRTerminator::Return => return values[&output].clone(),
                 SIRTerminator::Error(code) => panic!("unexpected error {code}"),
             }
@@ -2963,29 +3024,5 @@ mod tests {
         for (&param, value) in eu.blocks[&target].params.iter().zip(incoming) {
             values.insert(param, value);
         }
-    }
-
-    fn maximum_branch_depth(eu: &ExecutionUnit<RegionedAbsoluteAddr>, block_id: BlockId) -> usize {
-        fn visit(
-            eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-            block_id: BlockId,
-            memo: &mut HashMap<BlockId, usize>,
-        ) -> usize {
-            if let Some(&depth) = memo.get(&block_id) {
-                return depth;
-            }
-            let depth = match &eu.blocks[&block_id].terminator {
-                SIRTerminator::Branch {
-                    true_block,
-                    false_block,
-                    ..
-                } => 1 + visit(eu, true_block.0, memo).max(visit(eu, false_block.0, memo)),
-                SIRTerminator::Jump(target, _) => visit(eu, *target, memo),
-                SIRTerminator::Return | SIRTerminator::Error(_) => 0,
-            };
-            memo.insert(block_id, depth);
-            depth
-        }
-        visit(eu, block_id, &mut HashMap::default())
     }
 }

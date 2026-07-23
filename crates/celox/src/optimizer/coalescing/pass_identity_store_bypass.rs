@@ -397,6 +397,7 @@ fn terminator_uses(terminator: &SIRTerminator, uses: &mut Vec<RegisterId>) {
             uses.extend(true_block.1.iter().copied());
             uses.extend(false_block.1.iter().copied());
         }
+        SIRTerminator::Switch { selector, .. } => uses.push(*selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -807,6 +808,11 @@ fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

@@ -337,6 +337,9 @@ fn record_terminator_uses(term: &SIRTerminator, use_count: &mut HashMap<Register
                 *use_count.entry(*arg).or_default() += 1;
             }
         }
+        SIRTerminator::Switch { selector, .. } => {
+            *use_count.entry(*selector).or_default() += 1;
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }

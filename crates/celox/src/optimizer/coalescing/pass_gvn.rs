@@ -341,6 +341,11 @@ fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -820,6 +825,9 @@ fn apply_aliases_to_terminator(
             for arg in args {
                 *arg = resolve_canonical(*arg, aliases);
             }
+        }
+        SIRTerminator::Switch { selector, .. } => {
+            *selector = resolve_canonical(*selector, aliases);
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }

@@ -244,6 +244,11 @@ fn sir_dominance_order<A>(eu: &ExecutionUnit<A>) -> Vec<crate::ir::BlockId> {
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         },
     )

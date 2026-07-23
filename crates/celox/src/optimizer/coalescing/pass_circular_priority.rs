@@ -2262,6 +2262,7 @@ fn terminator_uses(terminator: &SIRTerminator, uses: &mut Vec<RegisterId>) {
             uses.extend(true_block.1.iter().copied());
             uses.extend(false_block.1.iter().copied());
         }
+        SIRTerminator::Switch { selector, .. } => uses.push(*selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
@@ -4270,6 +4271,9 @@ mod tests {
                     } else {
                         (false_block.0, &false_block.1)
                     }
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in circular-priority test")
                 }
                 SIRTerminator::Return => {
                     return outputs

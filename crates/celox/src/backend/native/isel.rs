@@ -956,6 +956,7 @@ pub fn lower_execution_unit(
                     (true_block.0, true_block.1.as_slice()),
                     (false_block.0, false_block.1.as_slice()),
                 ],
+                SIRTerminator::Switch { .. } => Vec::new(),
                 _ => vec![],
             };
             for (target_sir_id, args) in edges {
@@ -1018,6 +1019,7 @@ pub fn lower_execution_unit(
                     (true_block.0, true_block.1.as_slice()),
                     (false_block.0, false_block.1.as_slice()),
                 ],
+                SIRTerminator::Switch { .. } => Vec::new(),
                 _ => vec![],
             };
             for (target_sir_id, args) in edges {
@@ -1146,6 +1148,11 @@ fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::ir
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         }
     }
@@ -2389,6 +2396,11 @@ fn find_dense_branch_table_plans(
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         };
         for successor in successors {
@@ -2523,6 +2535,10 @@ fn find_dense_branch_table_plans(
             } => {
                 worklist.push(true_block.0);
                 worklist.push(false_block.0);
+            }
+            SIRTerminator::Switch { cases, default, .. } => {
+                worklist.extend(cases.iter().map(|case| case.target));
+                worklist.push(*default);
             }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
@@ -3006,6 +3022,9 @@ fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) 
             for &arg in &false_block.1 {
                 add(arg);
             }
+        }
+        SIRTerminator::Switch { selector, .. } => {
+            add(*selector);
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
@@ -11411,6 +11430,37 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
                 cond: cond_vreg,
                 true_bb: BlockId(true_block.0.0 as u32),
                 false_bb: BlockId(false_block.0.0 as u32),
+            });
+        }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            let selector_width = ctx.sir_width(selector);
+            debug_assert!((1..=8).contains(&selector_width));
+            let selector = ctx.reg_map.get(*selector);
+            let normalized = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, normalized, selector, mask_for_width(selector_width));
+            let mut targets = vec![BlockId(default.0 as u32); 1usize << selector_width];
+            for case in cases {
+                let digits = case.value.to_u64_digits();
+                let index = match digits.as_slice() {
+                    [] => 0,
+                    [value] => *value as usize,
+                    _ => unreachable!("verified switch key fits eight bits"),
+                };
+                targets[index] = BlockId(case.target.0 as u32);
+            }
+            let table_base = ctx.alloc_vreg(SpillDesc::transient());
+            let target = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Scratch { dst: table_base });
+            block.push(MInst::Scratch { dst: target });
+            block.push(MInst::JumpTable {
+                index: normalized,
+                table_base,
+                target,
+                targets: targets.into(),
             });
         }
         SIRTerminator::Return => {

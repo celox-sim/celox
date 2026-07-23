@@ -714,6 +714,7 @@ fn terminator_uses(terminator: &SIRTerminator, out: &mut Vec<RegisterId>) {
             out.extend(true_block.1.iter().copied());
             out.extend(false_block.1.iter().copied());
         }
+        SIRTerminator::Switch { selector, .. } => out.push(*selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }

@@ -249,6 +249,11 @@ pub(crate) fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> 
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

@@ -1389,6 +1389,7 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
             result.extend(false_block.1.iter().copied());
             result
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -1763,6 +1764,9 @@ mod tests {
                     };
                     assert!(target.1.is_empty());
                     block = target.0;
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in packed-scatter test")
                 }
                 SIRTerminator::Error(code) => panic!("unexpected Error({code})"),
             }

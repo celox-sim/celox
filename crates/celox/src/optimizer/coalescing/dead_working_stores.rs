@@ -81,6 +81,11 @@ pub(super) fn eliminate_dead_working_stores(eu: &mut ExecutionUnit<RegionedAbsol
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return => vec![],
             SIRTerminator::Error(_code) => vec![],
         }
