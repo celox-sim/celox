@@ -3702,6 +3702,214 @@ fn memory_offset_vreg(
     }
 }
 
+/// Recover a byte index from the quotient/remainder form produced by a
+/// dynamic packed selection inside an unpacked element:
+///
+///     (x >> log2(D / L)) * D + ((x * L) & (D - 1)) == x * L
+///
+/// Here `D` is the logical unpacked-element width and `L` is the selected
+/// packed-lane width.  This is also a physical-address identity only when the
+/// storage layout has no padding between those unpacked elements.
+fn recomposed_element_byte_offset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+) -> Option<VReg> {
+    let SIROffset::Element {
+        index,
+        element_width,
+        bit_offset,
+        dynamic_bit_offset: Some(dynamic),
+    } = offset
+    else {
+        return None;
+    };
+    if !element_width.is_power_of_two() || !bit_offset.is_multiple_of(8) {
+        return None;
+    }
+    if let Some(array) = ctx.layout.unpacked_arrays.get(&addr.absolute_addr())
+        && array.element_stride.checked_mul(8) != Some(*element_width)
+    {
+        return None;
+    }
+
+    let instruction = |register: RegisterId| {
+        sir_defs
+            .get(&register)
+            .and_then(|&position| sir_block.instructions.get(position))
+    };
+    let SIRInstruction::Binary(_, source, BinaryOp::Shr, shift_register) = instruction(*index)?
+    else {
+        return None;
+    };
+    let shift = *ctx.consts.get(shift_register)?;
+
+    let SIRInstruction::Binary(_, and_lhs, BinaryOp::And, and_rhs) = instruction(*dynamic)? else {
+        return None;
+    };
+    let (product, remainder_mask) = match (ctx.consts.get(and_lhs), ctx.consts.get(and_rhs)) {
+        (Some(&mask), None) => (*and_rhs, mask),
+        (None, Some(&mask)) => (*and_lhs, mask),
+        _ => return None,
+    };
+    if remainder_mask != (*element_width as u64).wrapping_sub(1) {
+        return None;
+    }
+
+    let SIRInstruction::Binary(_, mul_lhs, BinaryOp::Mul, mul_rhs) = instruction(product)? else {
+        return None;
+    };
+    let (product_source, lane_width) = match (ctx.consts.get(mul_lhs), ctx.consts.get(mul_rhs)) {
+        (Some(&lane_width), None) => (*mul_rhs, lane_width),
+        (None, Some(&lane_width)) => (*mul_lhs, lane_width),
+        _ => return None,
+    };
+    if product_source != *source
+        || lane_width == 0
+        || !lane_width.is_power_of_two()
+        || !lane_width.is_multiple_of(8)
+        || lane_width > *element_width as u64
+    {
+        return None;
+    }
+    let lanes_per_element = (*element_width as u64) / lane_width;
+    if !lanes_per_element.is_power_of_two() || shift != lanes_per_element.trailing_zeros() as u64 {
+        return None;
+    }
+
+    // All arithmetic which formed the quotient and remainder must have the
+    // same modulo semantics.  The recovered physical byte index must also fit
+    // the native 64-bit address calculation without wrapping.
+    let source_width = ctx.sir_width(source);
+    if [*index, product, *dynamic]
+        .into_iter()
+        .any(|register| ctx.sir_width(&register) != source_width)
+    {
+        return None;
+    }
+    let lane_byte_shift = (lane_width / 8).trailing_zeros() as usize;
+    if source_width.saturating_add(lane_width.trailing_zeros() as usize) > 64 {
+        return None;
+    }
+
+    let source = ctx.reg_map.get(*source);
+    let scaled = if lane_byte_shift == 0 {
+        source
+    } else {
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm {
+            dst: scaled,
+            src: source,
+            imm: lane_byte_shift as u8,
+        });
+        ctx.known_bits
+            .insert(scaled, source_width + lane_byte_shift);
+        scaled
+    };
+    let static_bytes = bit_offset / 8;
+    if static_bytes == 0 {
+        Some(scaled)
+    } else if let Ok(imm) = i32::try_from(static_bytes) {
+        let result = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::AddImm {
+            dst: result,
+            src: scaled,
+            imm,
+        });
+        Some(result)
+    } else {
+        None
+    }
+}
+
+/// Lower a byte-aligned element address in byte units from the start.  The
+/// physical stride comes from MemoryLayout, so this handles both compact and
+/// padded element storage without constructing a bit offset only to divide it
+/// by eight again.
+fn direct_element_byte_offset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+) -> Option<VReg> {
+    let SIROffset::Element {
+        index,
+        element_width,
+        bit_offset,
+        dynamic_bit_offset: None,
+    } = offset
+    else {
+        return None;
+    };
+    if !bit_offset.is_multiple_of(8) {
+        return None;
+    }
+    let stride_bytes = if let Some(array) = ctx.layout.unpacked_arrays.get(&addr.absolute_addr()) {
+        array.element_stride
+    } else {
+        element_width
+            .checked_div(8)
+            .filter(|_| element_width.is_multiple_of(8))?
+    };
+    if stride_bytes == 0 {
+        return None;
+    }
+
+    // The old path formed `index * (stride_bytes * 8)` in a u64 and then
+    // shifted right.  Only bypass it when that bit product cannot wrap.
+    let source_width = ctx.sir_width(index);
+    let stride_bits =
+        usize::BITS as usize - stride_bytes.saturating_sub(1).leading_zeros() as usize;
+    if source_width.saturating_add(stride_bits) > 61 {
+        return None;
+    }
+
+    let index = ctx.reg_map.get(*index);
+    let scaled = if stride_bytes == 1 {
+        index
+    } else if stride_bytes.is_power_of_two() {
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        let shift = stride_bytes.trailing_zeros() as u8;
+        block.push(MInst::ShlImm {
+            dst: scaled,
+            src: index,
+            imm: shift,
+        });
+        ctx.known_bits.insert(scaled, source_width + shift as usize);
+        scaled
+    } else {
+        let stride = ctx.alloc_vreg(SpillDesc::remat(stride_bytes as u64));
+        block.push(MInst::LoadImm {
+            dst: stride,
+            value: stride_bytes as u64,
+        });
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mul {
+            dst: scaled,
+            lhs: index,
+            rhs: stride,
+        });
+        scaled
+    };
+    let static_bytes = bit_offset / 8;
+    if static_bytes == 0 {
+        Some(scaled)
+    } else if let Ok(imm) = i32::try_from(static_bytes) {
+        let result = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::AddImm {
+            dst: result,
+            src: scaled,
+            imm,
+        });
+        Some(result)
+    } else {
+        None
+    }
+}
+
 fn memory_offset_low_zero_bits(
     ctx: &ISelContext,
     addr: &RegionedAbsoluteAddr,
@@ -5518,8 +5726,22 @@ fn lower_instruction(
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                     let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
-                    let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
-                    let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
+                    let direct_byte_off = (*width_bits <= 64)
+                        .then(|| {
+                            recomposed_element_byte_offset(
+                                ctx, block, addr, offset, sir_block, sir_defs,
+                            )
+                            .or_else(|| direct_element_byte_offset(ctx, block, addr, offset))
+                        })
+                        .flatten();
+                    let offset_vreg = direct_byte_off
+                        .is_none()
+                        .then(|| memory_offset_vreg(ctx, block, addr, offset));
+                    let offset_low_zero_bits = if direct_byte_off.is_some() {
+                        3
+                    } else {
+                        memory_offset_low_zero_bits(ctx, addr, offset)
+                    };
                     let base_off = ctx.byte_offset(addr, 0);
                     let value_alias_range = MemoryAliasRange::new(
                         base_off,
@@ -5527,14 +5749,21 @@ fn lower_instruction(
                     );
 
                     // Compute byte offset and intra-byte bit shift
-                    let byte_off = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::ShrImm {
-                        dst: byte_off,
-                        src: offset_vreg,
-                        imm: 3,
-                    });
+                    let byte_off = if let Some(byte_off) = direct_byte_off {
+                        byte_off
+                    } else {
+                        let byte_off = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm {
+                            dst: byte_off,
+                            src: offset_vreg.expect("non-recomposed offset has a bit offset"),
+                            imm: 3,
+                        });
+                        byte_off
+                    };
                     let may_cross_native_word = *width_bits + 7 > 64 && offset_low_zero_bits < 3;
                     if *width_bits > 64 || may_cross_native_word {
+                        let offset_vreg =
+                            offset_vreg.expect("wide dynamic load requires a bit offset");
                         let chunks = lower_dynamic_wide_load_chunks(
                             ctx,
                             block,
@@ -5613,7 +5842,12 @@ fn lower_instruction(
                         }
                     } else {
                         let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                        ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
+                        ctx.emit_and_imm(
+                            block,
+                            bit_shift,
+                            offset_vreg.expect("unaligned dynamic load requires a bit offset"),
+                            7,
+                        );
 
                         // Load containing word at [sim + base_off + byte_off]
                         // Use a slightly larger load to account for bit_shift
@@ -13243,6 +13477,234 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn quotient_remainder_array_load(element_stride: usize) -> (VReg, VReg) {
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut array_var = VarId::default();
+        array_var.inc();
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: array_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+
+        let source = RegisterId(0);
+        let shift = RegisterId(1);
+        let quotient = RegisterId(2);
+        let lane_width = RegisterId(3);
+        let product = RegisterId(4);
+        let remainder_mask = RegisterId(5);
+        let remainder = RegisterId(6);
+        let loaded = RegisterId(7);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(source, input, SIROffset::Static(0), 32),
+                        SIRInstruction::Imm(shift, SIRValue::new(3u8)),
+                        SIRInstruction::Binary(quotient, source, BinaryOp::Shr, shift),
+                        SIRInstruction::Imm(lane_width, SIRValue::new(8u8)),
+                        SIRInstruction::Binary(product, source, BinaryOp::Mul, lane_width),
+                        SIRInstruction::Imm(remainder_mask, SIRValue::new(63u8)),
+                        SIRInstruction::Binary(remainder, product, BinaryOp::And, remainder_mask),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index: quotient,
+                                element_width: 64,
+                                bit_offset: 0,
+                                dynamic_bit_offset: Some(remainder),
+                            },
+                            8,
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..=6)
+                .map(|register| {
+                    (
+                        RegisterId(register),
+                        RegisterType::Bit {
+                            width: 32,
+                            signed: false,
+                        },
+                    )
+                })
+                .chain([(loaded, RegisterType::Logic { width: 8 })])
+                .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(input_abs, 0), (array_abs, 8)].into_iter().collect();
+        layout.widths = [(input_abs, 32), (array_abs, 128)].into_iter().collect();
+        layout.is_4states = [(input_abs, false), (array_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 64,
+                element_count: 2,
+                element_stride,
+                plane_size: element_stride * 2,
+            },
+        );
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        let source_vreg = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::Load {
+                    dst,
+                    offset: 0,
+                    size: OpSize::S32,
+                    ..
+                } => Some(*dst),
+                _ => None,
+            })
+            .expect("source load");
+        let array_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::LoadIndexed {
+                    index,
+                    offset: 8,
+                    size: OpSize::S8,
+                    ..
+                } => Some(*index),
+                _ => None,
+            })
+            .expect("array load");
+        (source_vreg, array_index)
+    }
+
+    #[test]
+    fn recomposes_contiguous_element_quotient_and_remainder_into_byte_index() {
+        let (source, array_index) = quotient_remainder_array_load(8);
+        assert_eq!(array_index, source);
+    }
+
+    #[test]
+    fn preserves_element_quotient_and_remainder_when_storage_has_padding() {
+        let (source, array_index) = quotient_remainder_array_load(16);
+        assert_ne!(array_index, source);
+    }
+
+    #[test]
+    fn wide_dynamic_element_load_retains_its_bit_offset() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let index = RegisterId(0);
+        let loaded = RegisterId(1);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index,
+                                element_width: 128,
+                                bit_offset: 0,
+                                dynamic_bit_offset: None,
+                            },
+                            128,
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (loaded, RegisterType::Logic { width: 128 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(array_abs, 0);
+        layout.widths.insert(array_abs, 256);
+        layout.is_4states.insert(array_abs, false);
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 128,
+                element_count: 2,
+                element_stride: 16,
+                plane_size: 32,
+            },
+        );
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::LoadIndexed {
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count()
+                >= 2
+        );
     }
 
     #[test]
