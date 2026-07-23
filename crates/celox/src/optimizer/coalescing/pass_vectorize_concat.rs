@@ -1081,6 +1081,127 @@ fn is_vectorizable_bit_extract_concat(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ContiguousSlice {
+    source: RegisterId,
+    start: usize,
+    width: usize,
+}
+
+/// Resolve one Concat argument to an exact contiguous source range. This is
+/// deliberately a range identity, not a known-bits approximation: every
+/// output bit must name exactly one source bit.
+fn resolve_contiguous_slice(
+    register: RegisterId,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<ContiguousSlice> {
+    let width = register_map.get(&register)?.width();
+    let mut current = register;
+    let mut visited = HashSet::default();
+    while visited.insert(current) {
+        match defs.get(&current)? {
+            SIRInstruction::Unary(_, UnaryOp::Ident, source) => current = *source,
+            SIRInstruction::Slice(_, source, start, slice_width) if *slice_width == width => {
+                return Some(ContiguousSlice {
+                    source: *source,
+                    start: *start,
+                    width,
+                });
+            }
+            SIRInstruction::Binary(_, lhs, BinaryOp::And, rhs) => {
+                if width > 64 {
+                    return None;
+                }
+                let (value, mask) = if let Some(mask) = constant_u64(*rhs, defs) {
+                    (*lhs, mask)
+                } else {
+                    (*rhs, constant_u64(*lhs, defs)?)
+                };
+                let required_mask = if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                if mask & required_mask != required_mask {
+                    return None;
+                }
+                return match defs.get(&value) {
+                    Some(SIRInstruction::Binary(_, source, BinaryOp::Shr, amount)) => {
+                        let start = usize::try_from(constant_u64(*amount, defs)?).ok()?;
+                        (start.checked_add(width)? <= register_map.get(source)?.width()).then_some(
+                            ContiguousSlice {
+                                source: *source,
+                                start,
+                                width,
+                            },
+                        )
+                    }
+                    _ if width <= register_map.get(&value)?.width() => Some(ContiguousSlice {
+                        source: value,
+                        start: 0,
+                        width,
+                    }),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn constant_u64(
+    register: RegisterId,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<u64> {
+    let mut current = register;
+    let mut visited = HashSet::default();
+    while visited.insert(current) {
+        match defs.get(&current)? {
+            SIRInstruction::Imm(_, value) => return sir_value_to_u64(value),
+            SIRInstruction::Unary(_, UnaryOp::Ident, source) => current = *source,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Fold a mixed-width Concat which merely reassembles one contiguous source
+/// range. Arguments are ordered most-significant first; walking them in
+/// reverse gives monotonically increasing destination offsets.
+fn contiguous_concat_source(
+    args: &[RegisterId],
+    concat_width: usize,
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<(RegisterId, usize)> {
+    if args.len() < 2 {
+        return None;
+    }
+    let mut source = None;
+    let mut source_base = None;
+    let mut destination = 0usize;
+    for argument in args.iter().rev().copied() {
+        let slice = resolve_contiguous_slice(argument, register_map, defs)?;
+        if source.is_some_and(|known| known != slice.source) {
+            return None;
+        }
+        source.get_or_insert(slice.source);
+        let base = slice.start.checked_sub(destination)?;
+        if source_base.is_some_and(|known| known != base) {
+            return None;
+        }
+        source_base.get_or_insert(base);
+        destination = destination.checked_add(slice.width)?;
+    }
+    let source = source?;
+    let source_base = source_base?;
+    (destination == concat_width
+        && source_base.checked_add(concat_width)? <= register_map.get(&source)?.width())
+    .then_some((source, source_base))
+}
+
 /// Find contiguous shift groups in a non-in-place Concat.
 /// Returns groups as (src_start, dest_start, length).
 fn find_shift_groups(
@@ -1275,6 +1396,25 @@ fn vectorize_concats(
             continue;
         };
         if !(3..=64).contains(&concat_width) {
+            packed_vectors.insert(key, *dst);
+            continue;
+        }
+
+        if args
+            .iter()
+            .any(|argument| register_map[argument].width() != 1)
+            && let Some((source, start)) =
+                contiguous_concat_source(args, concat_width, register_map, defs)
+        {
+            let instruction = if start == 0 && register_map.get(&source) == register_map.get(dst) {
+                SIRInstruction::Unary(*dst, UnaryOp::Ident, source)
+            } else {
+                SIRInstruction::Slice(*dst, source, start, concat_width)
+            };
+            replacements.push(Replacement::LaneDag {
+                inst_idx: idx,
+                instructions: vec![instruction],
+            });
             packed_vectors.insert(key, *dst);
             continue;
         }
@@ -1702,6 +1842,49 @@ mod tests {
             blocks,
             register_map,
         }
+    }
+
+    #[test]
+    fn folds_mixed_width_contiguous_slices_back_to_one_slice() {
+        let unsigned = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let register_map = [
+            (RegisterId(0), unsigned(16)),
+            (RegisterId(1), unsigned(3)),
+            (RegisterId(2), unsigned(5)),
+            (RegisterId(3), unsigned(8)),
+        ]
+        .into_iter()
+        .collect();
+        let mut eu = make_eu(
+            vec![
+                SIRInstruction::Slice(RegisterId(1), RegisterId(0), 3, 3),
+                SIRInstruction::Slice(RegisterId(2), RegisterId(0), 6, 5),
+                SIRInstruction::Concat(RegisterId(3), vec![RegisterId(2), RegisterId(1)]),
+                SIRInstruction::RuntimeEvent {
+                    site_id: 0,
+                    args: vec![RegisterId(3)],
+                },
+            ],
+            register_map,
+        );
+        eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
+
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            [
+                SIRInstruction::Slice(RegisterId(3), RegisterId(0), 3, 8),
+                SIRInstruction::RuntimeEvent {
+                    site_id: 0,
+                    args: vec![RegisterId(3)],
+                },
+            ]
+        );
     }
 
     #[test]
