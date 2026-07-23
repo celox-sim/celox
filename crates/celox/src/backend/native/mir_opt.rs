@@ -2473,9 +2473,299 @@ fn intersect_dom(
 // Phase 1D: Algebraic simplification
 // ────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+struct MaskAndSite {
+    block: usize,
+    instruction: usize,
+}
+
+struct MaskAndPlan {
+    block: usize,
+    root: usize,
+    nodes: Vec<usize>,
+    combined_mask: u64,
+}
+
+fn is_mask_and_instruction(inst: &MInst) -> bool {
+    matches!(
+        inst,
+        MInst::And { .. } | MInst::And32 { .. } | MInst::AndImm { .. } | MInst::AndImm32 { .. }
+    )
+}
+
+fn resolve_mask_alias(mut value: VReg, aliases: &HashMap<VReg, VReg>) -> VReg {
+    while let Some(&source) = aliases.get(&value) {
+        value = source;
+    }
+    value
+}
+
+fn transient_vreg(func: &mut MFunction) -> VReg {
+    let value = func.vregs.alloc();
+    while func.spill_descs.len() <= value.0 as usize {
+        func.spill_descs.push(SpillDesc::transient());
+    }
+    value
+}
+
+/// Sink leaf truncations through an exclusively consumed bitwise AND
+/// component.
+///
+/// Element-strided state deliberately permits non-zero physical padding, so a
+/// load of a one-bit element really does require `& 1`. Applying that mask to
+/// every leaf is redundant, however:
+///
+/// `(a & m) & (b & m) & (c & m) == (a & b & c) & m`.
+///
+/// Definitions stay at their original positions. Mask destinations become
+/// aliases of their unmasked sources, each existing AND consumes those aliases,
+/// and one combined mask remains at the component root. Restricting traversal
+/// to single-use definitions in one block prevents live-range extension across
+/// CFG edges and leaves shared expressions untouched.
+///
+/// Definition, use, and consumer tables are built once. Exclusive components
+/// are disjoint, so total traversal and rewriting are O(instructions + operand
+/// edges) time and O(vregs + instructions) space.
+fn sink_bitwise_and_masks(func: &mut MFunction) {
+    let value_count = func.vregs.count() as usize;
+    let mut definitions = vec![None::<MaskAndSite>; value_count];
+    let mut use_counts = vec![0usize; value_count];
+    let mut consumers = vec![None::<MaskAndSite>; value_count];
+
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                let index = source.0 as usize;
+                use_counts[index] += 1;
+                consumers[index] = None;
+            }
+        }
+        for (instruction_index, instruction) in block.insts.iter().enumerate() {
+            if let Some(dst) = instruction.def() {
+                definitions[dst.0 as usize] = Some(MaskAndSite {
+                    block: block_index,
+                    instruction: instruction_index,
+                });
+            }
+            let site = MaskAndSite {
+                block: block_index,
+                instruction: instruction_index,
+            };
+            for source in instruction.uses() {
+                let index = source.0 as usize;
+                if use_counts[index] == 0 {
+                    consumers[index] = Some(site);
+                } else {
+                    consumers[index] = None;
+                }
+                use_counts[index] += 1;
+            }
+        }
+    }
+
+    let mut plans = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (root_index, root_instruction) in block.insts.iter().enumerate() {
+            if !is_mask_and_instruction(root_instruction) {
+                continue;
+            }
+            let root_value = root_instruction
+                .def()
+                .expect("mask/AND instruction must define a value");
+            let root_value_index = root_value.0 as usize;
+            let has_local_parent = use_counts[root_value_index] == 1
+                && consumers[root_value_index].is_some_and(|consumer| {
+                    consumer.block == block_index
+                        && is_mask_and_instruction(
+                            &func.blocks[consumer.block].insts[consumer.instruction],
+                        )
+                });
+            if has_local_parent {
+                continue;
+            }
+
+            let mut stack = vec![(root_value, true)];
+            let mut nodes = Vec::new();
+            let mut visited = HashSet::new();
+            let mut combined_mask = u64::MAX;
+            let mut immediate_masks = 0usize;
+            let mut has_binary_and = false;
+
+            while let Some((value, is_root)) = stack.pop() {
+                let value_index = value.0 as usize;
+                if !is_root && use_counts[value_index] != 1 {
+                    continue;
+                }
+                let Some(site) = definitions[value_index] else {
+                    continue;
+                };
+                if site.block != block_index || !visited.insert(site.instruction) {
+                    continue;
+                }
+                match &func.blocks[site.block].insts[site.instruction] {
+                    MInst::And { lhs, rhs, .. } => {
+                        has_binary_and = true;
+                        nodes.push(site.instruction);
+                        stack.push((*rhs, false));
+                        stack.push((*lhs, false));
+                    }
+                    MInst::And32 { lhs, rhs, .. } => {
+                        has_binary_and = true;
+                        combined_mask &= u64::from(u32::MAX);
+                        nodes.push(site.instruction);
+                        stack.push((*rhs, false));
+                        stack.push((*lhs, false));
+                    }
+                    MInst::AndImm { src, imm, .. } => {
+                        immediate_masks += 1;
+                        combined_mask &= *imm;
+                        nodes.push(site.instruction);
+                        stack.push((*src, false));
+                    }
+                    MInst::AndImm32 { src, imm, .. } => {
+                        immediate_masks += 1;
+                        combined_mask &= u64::from(*imm);
+                        nodes.push(site.instruction);
+                        stack.push((*src, false));
+                    }
+                    _ => {}
+                }
+            }
+
+            if has_binary_and && immediate_masks >= 2 {
+                nodes.sort_unstable();
+                plans.push(MaskAndPlan {
+                    block: block_index,
+                    root: root_index,
+                    nodes,
+                    combined_mask,
+                });
+            }
+        }
+    }
+
+    let mut removals = vec![HashSet::<usize>::new(); func.blocks.len()];
+    let mut replacements = vec![BTreeMap::<usize, Vec<MInst>>::new(); func.blocks.len()];
+    for plan in plans {
+        let root_instruction = func.blocks[plan.block].insts[plan.root].clone();
+        let root_is_mask = matches!(
+            root_instruction,
+            MInst::AndImm { .. } | MInst::AndImm32 { .. }
+        );
+        let word32 = plan.combined_mask <= u64::from(u32::MAX);
+        let root_raw_destination =
+            (!root_is_mask && plan.combined_mask != u64::MAX).then(|| transient_vreg(func));
+        let original = &func.blocks[plan.block].insts;
+        let mut aliases = HashMap::new();
+
+        for &instruction_index in &plan.nodes {
+            match &original[instruction_index] {
+                MInst::AndImm { dst, src, .. } | MInst::AndImm32 { dst, src, .. } => {
+                    aliases.insert(*dst, resolve_mask_alias(*src, &aliases));
+                    if instruction_index != plan.root {
+                        removals[plan.block].insert(instruction_index);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for &instruction_index in &plan.nodes {
+            let replacement = match &original[instruction_index] {
+                MInst::And { dst, lhs, rhs } | MInst::And32 { dst, lhs, rhs } => {
+                    let lhs = resolve_mask_alias(*lhs, &aliases);
+                    let rhs = resolve_mask_alias(*rhs, &aliases);
+                    let raw_dst = if instruction_index == plan.root {
+                        root_raw_destination.unwrap_or(*dst)
+                    } else {
+                        *dst
+                    };
+                    let raw = if word32 {
+                        MInst::And32 {
+                            dst: raw_dst,
+                            lhs,
+                            rhs,
+                        }
+                    } else {
+                        MInst::And {
+                            dst: raw_dst,
+                            lhs,
+                            rhs,
+                        }
+                    };
+                    if instruction_index == plan.root
+                        && !root_is_mask
+                        && plan.combined_mask != u64::MAX
+                    {
+                        let mask = if word32 {
+                            MInst::AndImm32 {
+                                dst: *dst,
+                                src: raw_dst,
+                                imm: plan.combined_mask as u32,
+                            }
+                        } else {
+                            MInst::AndImm {
+                                dst: *dst,
+                                src: raw_dst,
+                                imm: plan.combined_mask,
+                            }
+                        };
+                        vec![raw, mask]
+                    } else {
+                        vec![raw]
+                    }
+                }
+                MInst::AndImm { dst, src, .. } | MInst::AndImm32 { dst, src, .. }
+                    if instruction_index == plan.root =>
+                {
+                    let src = resolve_mask_alias(*src, &aliases);
+                    if plan.combined_mask == u64::MAX {
+                        vec![MInst::Mov { dst: *dst, src }]
+                    } else if word32 {
+                        vec![MInst::AndImm32 {
+                            dst: *dst,
+                            src,
+                            imm: plan.combined_mask as u32,
+                        }]
+                    } else {
+                        vec![MInst::AndImm {
+                            dst: *dst,
+                            src,
+                            imm: plan.combined_mask,
+                        }]
+                    }
+                }
+                _ => continue,
+            };
+            replacements[plan.block].insert(instruction_index, replacement);
+        }
+    }
+
+    for (block_index, block) in func.blocks.iter_mut().enumerate() {
+        if removals[block_index].is_empty() && replacements[block_index].is_empty() {
+            continue;
+        }
+        let original = std::mem::take(&mut block.insts);
+        let mut rewritten = Vec::with_capacity(original.len());
+        for (instruction_index, instruction) in original.into_iter().enumerate() {
+            if removals[block_index].contains(&instruction_index) {
+                continue;
+            }
+            if let Some(replacement) = replacements[block_index].remove(&instruction_index) {
+                rewritten.extend(replacement);
+            } else {
+                rewritten.push(instruction);
+            }
+        }
+        block.insts = rewritten;
+    }
+}
+
 /// Algebraic simplification: identity, annihilation, self-inverse, and
 /// strength reduction rules.
 fn algebraic_simplify(func: &mut MFunction) {
+    sink_bitwise_and_masks(func);
+
     // Build def map for constant lookups
     let mut consts: HashMap<VReg, u64> = HashMap::new();
     let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::new();
@@ -4804,6 +5094,236 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn algebraic_simplify_sinks_repeated_leaf_masks_to_and_root() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 1,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 2,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 1,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(4),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(5),
+                    src: VReg(2),
+                    imm: 1,
+                },
+                MInst::And {
+                    dst: VReg(6),
+                    lhs: VReg(3),
+                    rhs: VReg(4),
+                },
+                MInst::And {
+                    dst: VReg(7),
+                    lhs: VReg(6),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(7),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            8,
+        );
+
+        algebraic_simplify(&mut func);
+
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::AndImm { .. } | MInst::AndImm32 { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::And { .. } | MInst::And32 { .. }
+                ))
+                .count(),
+            2
+        );
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::AndImm32 {
+                dst: VReg(7),
+                imm: 1,
+                ..
+            }
+        )));
+        func.verify();
+    }
+
+    #[test]
+    fn algebraic_simplify_combines_different_and_masks() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 1,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 0xf,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(1),
+                    imm: 3,
+                },
+                MInst::And {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(3),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(4),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        algebraic_simplify(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::AndImm32 {
+                dst: VReg(4),
+                imm: 3,
+                ..
+            }
+        )));
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::AndImm { .. } | MInst::AndImm32 { .. }
+                ))
+                .count(),
+            1
+        );
+        func.verify();
+    }
+
+    #[test]
+    fn algebraic_simplify_keeps_shared_leaf_masks() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 1,
+                    size: OpSize::S8,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 2,
+                    size: OpSize::S8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 1,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(4),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(5),
+                    src: VReg(2),
+                    imm: 1,
+                },
+                MInst::And {
+                    dst: VReg(6),
+                    lhs: VReg(3),
+                    rhs: VReg(4),
+                },
+                MInst::And {
+                    dst: VReg(7),
+                    lhs: VReg(3),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(6),
+                    size: OpSize::S8,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 9,
+                    src: VReg(7),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            8,
+        );
+        let original = func.blocks[0].insts.clone();
+
+        algebraic_simplify(&mut func);
+
+        assert_eq!(func.blocks[0].insts, original);
+        func.verify();
     }
 
     #[test]
