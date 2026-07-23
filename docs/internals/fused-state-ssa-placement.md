@@ -1,10 +1,10 @@
 # Fused state SSA and code placement
 
-> **Status:** Milestone 0 is complete. Milestone 1 has an analysis-only
-> executable materialization-frontier model, but its profile-weighted
-> profitability gate has not passed yet. This document does not authorize a
-> production switch. Each code-generating milestone has an independent
-> semantic, generated-code, and Linux execution gate.
+> **Status:** Milestone 0 and the analysis-only Milestone 1 contract are
+> complete. Milestone 1 fails its profile-weighted profitability gate, so
+> Milestone 2 code generation is not authorized. Each future code-generating
+> milestone still requires an independent semantic, generated-code, and Linux
+> execution gate.
 
 ## Objective
 
@@ -670,9 +670,10 @@ gave:
 
 Block attribution is deliberately conservative when a block contains both a
 candidate cone and unrelated work. It is nevertheless large enough to pass
-the coverage stop condition. Later rewriting gates compare the removed
-instructions directly, rather than treating these percentages as predicted
-speedup.
+the Milestone 0 structural-coverage condition. It did **not** prove removable
+work: those producer blocks include the public backing Stores which the
+Milestone 1 contract must preserve. The profile-weighted Milestone 1 result
+below supersedes this diagnostic attribution for the profitability decision.
 
 With analysis disabled and enabled, SHA-256 hashes were identical for all
 four complete outputs: pre-optimized SIR, post-optimized SIR,
@@ -764,8 +765,38 @@ removed before accepting this result:
 - per-value cone queries no longer allocate the complete dominator path merely
   to test one target placement.
 
-The profile-weighted share of removed packed Load/extract work remains the
-Milestone 1 profitability gate. Static demand coverage alone does not pass it.
+Mapping the existing 10,216 `eval_comb_apply_ff` instruction samples to final
+emitted blocks gives:
+
+| Profile scope | Samples | Share |
+|---|---:|---:|
+| any block containing one of the 2,485 candidate FF reloads | 252 | 2.47% |
+| block containing a `DirectForward` or `Rematerialize` plan | 81 | 0.79% |
+
+The operation-specific block upper bounds are:
+
+| Emitted operation | All samples | Any candidate-use block | Executable-plan block |
+|---|---:|---:|---:|
+| zero-extending load | 344 | 15 (4.36%) | 6 (1.74%) |
+| shift | 836 | 21 (2.51%) | 3 (0.36%) |
+| mask `and` | 1,628 | 28 (1.72%) | 6 (0.37%) |
+
+These are deliberately upper bounds because a block may contain unrelated
+instructions. Even transforming every currently admitted FF reload cannot
+explain the native/Veryl gap while all public backing Stores remain. The
+earlier 35.6% producer-block attribution measured where candidate values were
+computed, not work removable by this plan.
+
+Milestone 1 therefore fails the profitability gate. Milestone 2 must not start
+from this plan. A future restart requires either:
+
+- a stronger fused-call observability contract which makes a measured hot set
+  of public Stores genuinely dead; or
+- new profile evidence showing that FF reload/extract work itself has become a
+  dominant cost.
+
+Until then, optimization work should target the independently hot
+combinational control/dataflow and machine scheduling/allocation paths.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
@@ -785,7 +816,26 @@ must invalidate every plan which names that Store.
 Stop if planning can produce an implicit home, whole-function mandatory VReg,
 untyped FF Store/commit effect, or repair cycle.
 
-This milestone also requires review before code-generating work begins.
+#### Milestone 1 result
+
+Every non-packed plan has an executable, phase-correct frontier source. The
+model contains 228 target-local closed-cone `DirectForward` contracts. Each
+records the original producer/use identity, native 32-bit, 64-bit, or
+multi-chunk GPR class, target-only legal placement interval, and empty
+cross-block live-in/live-out contribution. Carry-style forwarding is not
+silently inferred.
+
+The concrete repair relation implements the lexicographic rank
+`(unsplit use pairs, direct plans, rematerialize plans)`. Cluster repair only
+refines a partition; tests reject rejoining a split cluster and every reverse
+source-action transition.
+
+The reverse Store dependency index names exact StateVersion/materialization
+dependents and validates all 1,282 preserved Stores without repeatedly walking
+the complete model.
+
+The semantic/type contract passes, but the profile-weighted profitability gate
+above fails. Code-generating Milestone 2 is stopped.
 
 ### Milestone 2: use-local FF forwarding
 

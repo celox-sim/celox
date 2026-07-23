@@ -49,6 +49,36 @@ pub(super) struct DemandFact {
     pub keep_reason: Option<KeepReason>,
     pub failure_predicates: FailurePredicates,
     pub materialization_leaves: Vec<MaterializationLeaf>,
+    pub direct_forward: Option<DirectForwardFact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoundaryRegisterClass {
+    Gpr32,
+    Gpr64,
+    Gpr64Tuple(usize),
+}
+
+impl BoundaryRegisterClass {
+    pub fn for_width(width: usize) -> Self {
+        match width {
+            0..=32 => Self::Gpr32,
+            33..=64 => Self::Gpr64,
+            _ => Self::Gpr64Tuple(width.div_ceil(64)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DirectForwardFact {
+    pub producer: ProgramPoint,
+    pub producer_value: RegisterId,
+    pub use_site: ProgramPoint,
+    pub register_class: BoundaryRegisterClass,
+    pub allowed_placement_blocks: Vec<BlockId>,
+    pub traversed_cfg_edges: Vec<(BlockId, BlockId)>,
+    pub mandatory_live_in_blocks: BTreeSet<BlockId>,
+    pub mandatory_live_out_blocks: BTreeSet<BlockId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -209,6 +239,19 @@ struct UseClusterPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectForwardContract {
+    cluster: UseClusterId,
+    producer: ProgramPoint,
+    producer_value: RegisterId,
+    use_site: ProgramPoint,
+    register_class: BoundaryRegisterClass,
+    allowed_placement_blocks: Vec<BlockId>,
+    traversed_cfg_edges: Vec<(BlockId, BlockId)>,
+    mandatory_live_in_blocks: BTreeSet<BlockId>,
+    mandatory_live_out_blocks: BTreeSet<BlockId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FfPhaseEffect {
     StageNextFf {
         point: ProgramPoint,
@@ -238,6 +281,7 @@ struct MaterializationModel {
     clusters: Vec<UseClusterPlan>,
     effects: Vec<FfPhaseEffect>,
     contracts: BTreeMap<BlockId, BlockBoundaryContract>,
+    direct_contracts: Vec<DirectForwardContract>,
     store_dependents: BTreeMap<ProgramPoint, BTreeSet<StoreDependent>>,
 }
 
@@ -256,6 +300,7 @@ pub(super) struct PlanSummary {
     pub commit_ff_state_dependencies: usize,
     pub commit_ff_state_barriers: usize,
     pub block_contracts: usize,
+    pub direct_boundary_contracts: usize,
     pub verified_uses: usize,
     pub invalidated_store_deletions: usize,
     pub direct_forward: usize,
@@ -403,6 +448,7 @@ pub(super) fn build_and_verify(
             .filter(|effect| matches!(effect, FfPhaseEffect::CommitFfState { .. }))
             .count(),
         block_contracts: model.contracts.len(),
+        direct_boundary_contracts: model.direct_contracts.len(),
         verified_uses: model.clusters.len(),
         invalidated_store_deletions: named_stores.len(),
         direct_forward: demands
@@ -622,6 +668,25 @@ fn build_model(
             }
         };
         let cluster_id = UseClusterId(model.clusters.len());
+        if demand.plan == DemandPlan::DirectForward {
+            let fact = demand
+                .direct_forward
+                .clone()
+                .ok_or(PlanError::ImplicitHome(cluster_id))?;
+            model.direct_contracts.push(DirectForwardContract {
+                cluster: cluster_id,
+                producer: fact.producer,
+                producer_value: fact.producer_value,
+                use_site: fact.use_site,
+                register_class: fact.register_class,
+                allowed_placement_blocks: fact.allowed_placement_blocks,
+                traversed_cfg_edges: fact.traversed_cfg_edges,
+                mandatory_live_in_blocks: fact.mandatory_live_in_blocks,
+                mandatory_live_out_blocks: fact.mandatory_live_out_blocks,
+            });
+        } else if demand.direct_forward.is_some() {
+            return Err(PlanError::ImplicitHome(cluster_id));
+        }
         model.clusters.push(UseClusterPlan {
             id: cluster_id,
             load: demand.load,
@@ -762,6 +827,54 @@ fn verify_model(
             }
         }
     }
+    for contract in &model.direct_contracts {
+        let cluster = model
+            .clusters
+            .get(contract.cluster.0)
+            .ok_or(PlanError::ImplicitHome(contract.cluster))?;
+        if !matches!(cluster.source, SourceAction::DirectForward)
+            || cluster.load != contract.use_site
+            || cluster.versions.iter().any(|version| {
+                !matches!(
+                    model.versions.get(version.0).map(|version| &version.recipe),
+                    Some(DefiningRecipe::StoredValue { register, .. })
+                        if *register == contract.producer_value
+                )
+            })
+            || contract.allowed_placement_blocks.first().copied() != Some(contract.use_site.block)
+            || contract.allowed_placement_blocks.last().copied() != Some(contract.use_site.block)
+            || contract.allowed_placement_blocks.iter().any(|block| {
+                !cfg.dominates(contract.producer.block, *block)
+                    || !cfg.dominates(*block, contract.use_site.block)
+            })
+        {
+            return Err(PlanError::ImplicitHome(contract.cluster));
+        }
+        match contract.register_class {
+            BoundaryRegisterClass::Gpr32 | BoundaryRegisterClass::Gpr64 => {}
+            BoundaryRegisterClass::Gpr64Tuple(chunks) if chunks >= 2 => {}
+            BoundaryRegisterClass::Gpr64Tuple(_) => {
+                return Err(PlanError::ImplicitHome(contract.cluster));
+            }
+        }
+        if contract.traversed_cfg_edges.is_empty() {
+            if !contract.mandatory_live_in_blocks.is_empty()
+                || !contract.mandatory_live_out_blocks.is_empty()
+            {
+                return Err(PlanError::ImplicitHome(contract.cluster));
+            }
+        } else if contract.traversed_cfg_edges.iter().any(|(source, target)| {
+            let Some(source) = cfg.block_index(*source) else {
+                return true;
+            };
+            let Some(target) = cfg.block_index(*target) else {
+                return true;
+            };
+            !cfg.successors[source].contains(&target)
+        }) {
+            return Err(PlanError::ImplicitHome(contract.cluster));
+        }
+    }
     Ok(())
 }
 
@@ -827,6 +940,79 @@ fn verify_repair(old: SourceAction, new: SourceAction) -> Result<(), PlanError> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PlanRepairRank {
+    unsplit_use_pairs: usize,
+    direct_plans: usize,
+    rematerialize_plans: usize,
+}
+
+fn plan_repair_rank(
+    partition: &[BTreeSet<ProgramPoint>],
+    actions: &[SourceAction],
+) -> Option<PlanRepairRank> {
+    if partition.len() != actions.len() || !is_partition(partition) {
+        return None;
+    }
+    Some(PlanRepairRank {
+        unsplit_use_pairs: partition
+            .iter()
+            .map(|cluster| {
+                cluster
+                    .len()
+                    .saturating_mul(cluster.len().saturating_sub(1))
+                    / 2
+            })
+            .sum(),
+        direct_plans: actions
+            .iter()
+            .filter(|action| matches!(action, SourceAction::DirectForward))
+            .count(),
+        rematerialize_plans: actions
+            .iter()
+            .filter(|action| matches!(action, SourceAction::Rematerialize))
+            .count(),
+    })
+}
+
+fn verify_plan_repair(
+    old_partition: &[BTreeSet<ProgramPoint>],
+    old_actions: &[SourceAction],
+    new_partition: &[BTreeSet<ProgramPoint>],
+    new_actions: &[SourceAction],
+) -> Result<(), PlanError> {
+    let old_rank = plan_repair_rank(old_partition, old_actions).ok_or(PlanError::RepairCycle)?;
+    let new_rank = plan_repair_rank(new_partition, new_actions).ok_or(PlanError::RepairCycle)?;
+    let old_uses = old_partition
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let new_uses = new_partition
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let refines = new_partition.iter().all(|new_cluster| {
+        old_partition
+            .iter()
+            .filter(|old_cluster| new_cluster.is_subset(old_cluster))
+            .count()
+            == 1
+    });
+    if old_uses != new_uses || !refines || new_rank >= old_rank {
+        return Err(PlanError::RepairCycle);
+    }
+    Ok(())
+}
+
+fn is_partition(partition: &[BTreeSet<ProgramPoint>]) -> bool {
+    let mut uses = BTreeSet::new();
+    partition
+        .iter()
+        .all(|cluster| !cluster.is_empty() && cluster.iter().all(|use_site| uses.insert(*use_site)))
+}
+
 fn verify_repair_relation() -> Result<(), PlanError> {
     let placeholder = MaterializationSiteId(usize::MAX);
     let point = ProgramPoint {
@@ -858,6 +1044,24 @@ fn verify_repair_relation() -> Result<(), PlanError> {
             original_load: point,
             extract_range: range,
         },
+    )?;
+    verify_plan_repair(
+        &[BTreeSet::from([
+            point,
+            ProgramPoint {
+                block: BlockId(0),
+                instruction: 1,
+            },
+        ])],
+        &[SourceAction::DirectForward],
+        &[
+            BTreeSet::from([point]),
+            BTreeSet::from([ProgramPoint {
+                block: BlockId(0),
+                instruction: 1,
+            }]),
+        ],
+        &[SourceAction::DirectForward, SourceAction::DirectForward],
     )
 }
 
@@ -924,6 +1128,7 @@ mod tests {
             keep_reason: Some(KeepReason::RematerializationMoreExpensive),
             failure_predicates: FailurePredicates::default(),
             materialization_leaves: Vec::new(),
+            direct_forward: None,
         }];
         let summary = build_and_verify(&one_block_cfg(), &definitions, &demands, &[]).unwrap();
         assert_eq!(summary.versions, 1);
@@ -955,6 +1160,29 @@ mod tests {
                     extract_range: range(),
                 },
                 SourceAction::DirectForward
+            ),
+            Err(PlanError::RepairCycle)
+        );
+
+        let first = point(1);
+        let second = point(2);
+        let joined = [BTreeSet::from([first, second])];
+        let split = [BTreeSet::from([first]), BTreeSet::from([second])];
+        assert!(
+            verify_plan_repair(
+                &joined,
+                &[SourceAction::DirectForward],
+                &split,
+                &[SourceAction::DirectForward, SourceAction::DirectForward],
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            verify_plan_repair(
+                &split,
+                &[SourceAction::DirectForward, SourceAction::DirectForward],
+                &joined,
+                &[SourceAction::DirectForward],
             ),
             Err(PlanError::RepairCycle)
         );

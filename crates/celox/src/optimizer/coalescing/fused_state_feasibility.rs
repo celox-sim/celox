@@ -11,8 +11,9 @@ use std::sync::Arc;
 use celox_analysis::ssa::{self, Event, SparseSsa, Version};
 
 use super::fused_state_plan::{
-    self, DefinitionFact, DemandFact, DemandPlan, FailurePredicates, FragmentFact, KeepReason,
-    MaterializationLeaf, PlanSummary, ProgramPoint, PublicationFact, StateRange,
+    self, BoundaryRegisterClass, DefinitionFact, DemandFact, DemandPlan, DirectForwardFact,
+    FailurePredicates, FragmentFact, KeepReason, MaterializationLeaf, PlanSummary, ProgramPoint,
+    PublicationFact, StateRange,
 };
 use super::placement_analysis::{PlacementAnalysis, PlacementAnalysisError, ValueId, ValueOrigin};
 use super::state_ssa::StatePhaseMap;
@@ -685,7 +686,8 @@ impl fmt::Display for FeasibilityReport {
              plan_versions={} plan_sites={} plan_clusters={} \
              plan_stage_next_ff_sites={} plan_commit_ff_state_dependencies={} \
              plan_commit_ff_state_barriers={} \
-             plan_block_contracts={} plan_verified_uses={} \
+             plan_block_contracts={} plan_direct_boundary_contracts={} \
+             plan_verified_uses={} \
              plan_invalidated_store_deletions={} plan_verifier_passed={} \
              plan_direct_forward={} plan_rematerialize={} \
              plan_keep_packed_reload={} plan_same_block={} \
@@ -751,6 +753,7 @@ impl fmt::Display for FeasibilityReport {
             self.plan.commit_ff_state_dependencies,
             self.plan.commit_ff_state_barriers,
             self.plan.block_contracts,
+            self.plan.direct_boundary_contracts,
             self.plan.verified_uses,
             self.plan.invalidated_store_deletions,
             self.plan.verifier_passed,
@@ -1176,6 +1179,7 @@ pub(crate) fn analyze(
                     keep_reason: Some(KeepReason::UnsupportedRecipe),
                     failure_predicates: FailurePredicates::default(),
                     materialization_leaves: Vec::new(),
+                    direct_forward: None,
                 });
             }
         }
@@ -1300,6 +1304,9 @@ struct FrontierQuery {
 struct FrontierCandidate {
     demand: usize,
     backing_store: ProgramPoint,
+    producer: Option<ProgramPoint>,
+    producer_value: RegisterId,
+    register_class: BoundaryRegisterClass,
     instructions: Vec<ValueId>,
     query_ids: Vec<usize>,
     has_local_frontier: bool,
@@ -1320,6 +1327,7 @@ fn classify_demand_plans(
     for (demand_index, demand) in demands.iter_mut().enumerate() {
         demand.failure_predicates = FailurePredicates::default();
         demand.materialization_leaves.clear();
+        demand.direct_forward = None;
         let reaching = demand
             .fragments
             .iter()
@@ -1450,6 +1458,17 @@ fn classify_demand_plans(
         candidates.push(FrontierCandidate {
             demand: demand_index,
             backing_store: definition.point,
+            producer: match placement.value(root).unwrap().origin {
+                ValueOrigin::Instruction { block, index } => Some(ProgramPoint {
+                    block,
+                    instruction: index,
+                }),
+                ValueOrigin::Parameter { .. } => None,
+            },
+            producer_value: definition.source,
+            register_class: BoundaryRegisterClass::for_width(
+                eu.register_map[&definition.source].width(),
+            ),
             instructions: cone.instructions,
             query_ids,
             has_local_frontier,
@@ -1500,8 +1519,28 @@ fn classify_demand_plans(
             && !candidate.has_local_frontier
             && cfg.dominates(candidate.backing_store.block, demand.load.block)
         {
+            let Some(producer) = candidate.producer else {
+                demand.keep_reason = Some(KeepReason::UnsupportedRecipe);
+                demand
+                    .failure_predicates
+                    .insert(FailurePredicates::UNSUPPORTED_RECIPE);
+                continue;
+            };
             demand.plan = DemandPlan::DirectForward;
             demand.keep_reason = None;
+            demand.direct_forward = Some(DirectForwardFact {
+                producer,
+                producer_value: candidate.producer_value,
+                use_site: demand.load,
+                register_class: candidate.register_class,
+                // The current DirectForward subset relocates a closed cone
+                // and materializes every frontier at the use. It therefore
+                // contributes no cross-block live range.
+                allowed_placement_blocks: vec![demand.load.block],
+                traversed_cfg_edges: Vec::new(),
+                mandatory_live_in_blocks: BTreeSet::new(),
+                mandatory_live_out_blocks: BTreeSet::new(),
+            });
             continue;
         }
         let rematerialization_cost = candidate
@@ -2252,6 +2291,7 @@ mod tests {
 
         let report = analyze(&eu, BlockId(1)).unwrap();
         assert_eq!(report.plan.direct_forward, 1);
+        assert_eq!(report.plan.direct_boundary_contracts, 1);
         assert_eq!(report.plan.rematerialize, 0);
         assert_eq!(report.plan.keep_packed_reload, 0);
     }
