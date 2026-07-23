@@ -3668,6 +3668,237 @@ struct SelectTerm {
     false_val: VReg,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinearBitCopy {
+    source: VReg,
+    /// `output_bit = source_bit + shift`.
+    shift: i16,
+    /// Output bits which still copy the corresponding source bit.
+    output_mask: u64,
+}
+
+const MAX_RECONSTRUCTION_TERMS: usize = 64;
+const MAX_RECONSTRUCTION_DEPTH: usize = 64;
+
+/// Collapse an OR tree which partitions one value into bit fields and deposits
+/// every field back at its original position.
+///
+/// SIR struct projection followed by reconstruction commonly lowers to:
+///
+/// ```text
+/// ((src >> 0) & m0) << 0 |
+/// ((src >> n) & mn) << n | ...
+/// ```
+///
+/// Ordinary GVN cannot see that the complete tree is just `src & union(mask)`,
+/// because every field has a different SSA definition.  Track the affine bit
+/// position through only the operations which copy bits (`mov`, logical shifts,
+/// and immediate masks).  A rewrite is made only when every nonzero OR term
+/// copies bits from one source with `output_bit == source_bit`; relocated bits,
+/// constants, and mixed sources are rejected.
+fn fold_reconstructed_bit_partitions(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        let definitions = block
+            .insts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| instruction.def().map(|dst| (dst, index)))
+            .collect::<HashMap<_, _>>();
+        let mut replacements = Vec::new();
+
+        for (index, instruction) in block.insts.iter().enumerate() {
+            let dst = match instruction {
+                MInst::Or { dst, .. } | MInst::Or32 { dst, .. } => *dst,
+                _ => continue,
+            };
+            let mut terms = Vec::new();
+            if !collect_reconstructed_terms(
+                dst,
+                u64::MAX,
+                &block.insts,
+                &definitions,
+                &mut terms,
+                0,
+            ) || terms.len() < 2
+            {
+                continue;
+            }
+
+            let source = terms[0].source;
+            if terms
+                .iter()
+                .any(|term| term.source != source || term.shift != 0)
+            {
+                continue;
+            }
+            let mask = terms
+                .iter()
+                .fold(0u64, |mask, term| mask | term.output_mask);
+            let replacement = if mask == u64::MAX {
+                MInst::Mov { dst, src: source }
+            } else if mask == u64::from(u32::MAX) {
+                MInst::Mov32 { dst, src: source }
+            } else if let Ok(imm) = u32::try_from(mask) {
+                MInst::AndImm32 {
+                    dst,
+                    src: source,
+                    imm,
+                }
+            } else if and_imm_ok(mask) {
+                MInst::AndImm {
+                    dst,
+                    src: source,
+                    imm: mask,
+                }
+            } else {
+                continue;
+            };
+            replacements.push((index, replacement));
+        }
+
+        for (index, replacement) in replacements {
+            block.insts[index] = replacement;
+        }
+    }
+}
+
+fn collect_reconstructed_terms(
+    value: VReg,
+    output_mask: u64,
+    instructions: &[MInst],
+    definitions: &HashMap<VReg, usize>,
+    terms: &mut Vec<LinearBitCopy>,
+    depth: usize,
+) -> bool {
+    if depth >= MAX_RECONSTRUCTION_DEPTH || terms.len() >= MAX_RECONSTRUCTION_TERMS {
+        return false;
+    }
+    let Some(&definition) = definitions.get(&value) else {
+        terms.push(LinearBitCopy {
+            source: value,
+            shift: 0,
+            output_mask,
+        });
+        return true;
+    };
+
+    match &instructions[definition] {
+        MInst::Or { lhs, rhs, .. } => {
+            collect_reconstructed_terms(
+                *lhs,
+                output_mask,
+                instructions,
+                definitions,
+                terms,
+                depth + 1,
+            ) && collect_reconstructed_terms(
+                *rhs,
+                output_mask,
+                instructions,
+                definitions,
+                terms,
+                depth + 1,
+            )
+        }
+        MInst::Or32 { lhs, rhs, .. } => {
+            let output_mask = output_mask & u64::from(u32::MAX);
+            collect_reconstructed_terms(
+                *lhs,
+                output_mask,
+                instructions,
+                definitions,
+                terms,
+                depth + 1,
+            ) && collect_reconstructed_terms(
+                *rhs,
+                output_mask,
+                instructions,
+                definitions,
+                terms,
+                depth + 1,
+            )
+        }
+        MInst::LoadImm { value: 0, .. } => true,
+        _ => {
+            let Some(mut term) = trace_linear_bit_copy(value, instructions, definitions, depth + 1)
+            else {
+                return false;
+            };
+            term.output_mask &= output_mask;
+            if term.output_mask != 0 {
+                terms.push(term);
+            }
+            true
+        }
+    }
+}
+
+fn trace_linear_bit_copy(
+    value: VReg,
+    instructions: &[MInst],
+    definitions: &HashMap<VReg, usize>,
+    depth: usize,
+) -> Option<LinearBitCopy> {
+    if depth >= MAX_RECONSTRUCTION_DEPTH {
+        return None;
+    }
+    let Some(&definition) = definitions.get(&value) else {
+        return Some(LinearBitCopy {
+            source: value,
+            shift: 0,
+            output_mask: u64::MAX,
+        });
+    };
+
+    let instruction = &instructions[definition];
+    let (source, operation) = match instruction {
+        MInst::Mov { src, .. } => (*src, LinearCopyOp::Mask(u64::MAX)),
+        MInst::Mov32 { src, .. } => (*src, LinearCopyOp::Mask(u64::from(u32::MAX))),
+        MInst::AndImm { src, imm, .. } => (*src, LinearCopyOp::Mask(*imm)),
+        MInst::AndImm32 { src, imm, .. } => (*src, LinearCopyOp::Mask(u64::from(*imm))),
+        MInst::ShrImm { src, imm, .. } => (*src, LinearCopyOp::ShiftRight(*imm)),
+        MInst::ShlImm { src, imm, .. } => (*src, LinearCopyOp::ShiftLeft(*imm)),
+        MInst::LoadImm { value: 0, .. } => {
+            return Some(LinearBitCopy {
+                source: value,
+                shift: 0,
+                output_mask: 0,
+            });
+        }
+        // An OR below a field extraction is deliberately treated as one
+        // opaque source. This lets a reconstructed value fold back to the
+        // already-available packed value instead of duplicating its inputs.
+        _ => {
+            return Some(LinearBitCopy {
+                source: value,
+                shift: 0,
+                output_mask: u64::MAX,
+            });
+        }
+    };
+
+    let mut copy = trace_linear_bit_copy(source, instructions, definitions, depth + 1)?;
+    match operation {
+        LinearCopyOp::Mask(mask) => copy.output_mask &= mask,
+        LinearCopyOp::ShiftRight(shift) => {
+            copy.output_mask >>= shift;
+            copy.shift -= i16::from(shift);
+        }
+        LinearCopyOp::ShiftLeft(shift) => {
+            copy.output_mask <<= shift;
+            copy.shift += i16::from(shift);
+        }
+    }
+    Some(copy)
+}
+
+#[derive(Clone, Copy)]
+enum LinearCopyOp {
+    Mask(u64),
+    ShiftRight(u8),
+    ShiftLeft(u8),
+}
+
 fn eliminate_redundant_or_terms(func: &mut MFunction) {
     for block in &mut func.blocks {
         let mut mov_aliases: HashMap<VReg, VReg> = HashMap::new();
@@ -4326,6 +4557,165 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn folds_complete_bit_partition_reconstruction_to_original_word() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Mov32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0x1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 0x7f,
+                },
+                MInst::ShlImm {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 1,
+                },
+                MInst::Or {
+                    dst: VReg(6),
+                    lhs: VReg(2),
+                    rhs: VReg(5),
+                },
+                MInst::ShrImm {
+                    dst: VReg(7),
+                    src: VReg(1),
+                    imm: 8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(8),
+                    src: VReg(7),
+                    imm: 0xff,
+                },
+                MInst::ShlImm {
+                    dst: VReg(9),
+                    src: VReg(8),
+                    imm: 8,
+                },
+                MInst::Or {
+                    dst: VReg(10),
+                    lhs: VReg(6),
+                    rhs: VReg(9),
+                },
+                MInst::ShrImm {
+                    dst: VReg(11),
+                    src: VReg(1),
+                    imm: 16,
+                },
+                MInst::ShlImm {
+                    dst: VReg(12),
+                    src: VReg(11),
+                    imm: 16,
+                },
+                MInst::Or {
+                    dst: VReg(13),
+                    lhs: VReg(10),
+                    rhs: VReg(12),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(13),
+                    size: OpSize::S32,
+                },
+                MInst::Return,
+            ],
+            14,
+        );
+
+        fold_reconstructed_bit_partitions(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[13],
+            MInst::Mov32 {
+                dst: VReg(13),
+                src: VReg(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn bit_partition_reconstruction_rejects_mixed_sources() {
+        let mut func = make_func(
+            vec![
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 0xff,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(1),
+                    imm: 0xff00,
+                },
+                MInst::Or {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(3),
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        fold_reconstructed_bit_partitions(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[2], MInst::Or { .. }));
+    }
+
+    #[test]
+    fn bit_partition_reconstruction_rejects_relocated_bits() {
+        let mut func = make_func(
+            vec![
+                MInst::AndImm32 {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 0xff,
+                },
+                MInst::ShlImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 8,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 0xff00,
+                },
+                MInst::Or {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(3),
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        fold_reconstructed_bit_partitions(&mut func);
+
+        assert!(matches!(func.blocks[0].insts[3], MInst::Or { .. }));
     }
 
     #[test]

@@ -137,6 +137,10 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("final_copy_propagate", copy_propagate);
     runner.run("final_constant_fold", constant_fold);
     runner.run("final_lower_to_imm_forms", lower_to_imm_forms);
+    runner.run(
+        "fold_reconstructed_bit_partitions",
+        fold_reconstructed_bit_partitions,
+    );
     runner.run("post_lower_algebraic_simplify", algebraic_simplify);
     runner.run("post_lower_copy_propagate", copy_propagate);
     runner.run("final_dead_code_eliminate", dead_code_eliminate);
