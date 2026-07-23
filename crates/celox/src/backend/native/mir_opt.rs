@@ -179,16 +179,25 @@ fn fold_proven_comparisons(func: &mut MFunction) {
     }
 }
 
-/// `ToTwoState` and boolean lowering can leave `cmp.ne boolean, 0` after the
-/// comparison itself has already normalized the value to zero or one. These
-/// become visible especially after immediate-form lowering, so remove them
-/// late and let copy propagation collapse the resulting aliases.
+/// Remove redundant normalization of values already known to be boolean, and
+/// fold an exclusively consumed `cmp.eq (cmp ...), 0` by inverting the inner
+/// comparison. These forms become visible especially after immediate lowering;
+/// eliminating them here avoids materializing an intermediate condition.
 fn fold_boolean_normalizations(func: &mut MFunction) {
     let mut defs = HashMap::new();
+    let mut use_counts = HashMap::<VReg, usize>::new();
     for block in &func.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
                 defs.insert(dst, inst.clone());
+            }
+            for source in inst.uses() {
+                *use_counts.entry(source).or_default() += 1;
             }
         }
     }
@@ -229,12 +238,47 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
                         src: *lhs,
                     })
                 }
+                MInst::CmpImm {
+                    dst,
+                    lhs,
+                    imm: 0,
+                    kind: CmpKind::Eq,
+                } if use_counts.get(lhs).copied() == Some(1) => match defs.get(lhs) {
+                    Some(MInst::Cmp { lhs, rhs, kind, .. }) => Some(MInst::Cmp {
+                        dst: *dst,
+                        lhs: *lhs,
+                        rhs: *rhs,
+                        kind: invert_compare_kind(*kind),
+                    }),
+                    Some(MInst::CmpImm { lhs, imm, kind, .. }) => Some(MInst::CmpImm {
+                        dst: *dst,
+                        lhs: *lhs,
+                        imm: *imm,
+                        kind: invert_compare_kind(*kind),
+                    }),
+                    _ => None,
+                },
                 _ => None,
             };
             if let Some(replacement) = replacement {
                 *inst = replacement;
             }
         }
+    }
+}
+
+fn invert_compare_kind(kind: CmpKind) -> CmpKind {
+    match kind {
+        CmpKind::Eq => CmpKind::Ne,
+        CmpKind::Ne => CmpKind::Eq,
+        CmpKind::LtU => CmpKind::GeU,
+        CmpKind::LtS => CmpKind::GeS,
+        CmpKind::LeU => CmpKind::GtU,
+        CmpKind::LeS => CmpKind::GtS,
+        CmpKind::GtU => CmpKind::LeU,
+        CmpKind::GtS => CmpKind::LeS,
+        CmpKind::GeU => CmpKind::LtU,
+        CmpKind::GeS => CmpKind::LtS,
     }
 }
 
@@ -5841,6 +5885,145 @@ mod tests {
             MInst::Mov {
                 dst: VReg(2),
                 src: VReg(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn folds_exclusive_boolean_negation_into_register_compare() {
+        let mut func = make_func(
+            vec![
+                MInst::Cmp {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::LtU,
+                },
+                MInst::CmpImm {
+                    dst: VReg(3),
+                    lhs: VReg(2),
+                    imm: 0,
+                    kind: CmpKind::Eq,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        fold_boolean_normalizations(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::Cmp {
+                    dst: VReg(3),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::GeU,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(3),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn folds_exclusive_boolean_negation_into_immediate_compare() {
+        let mut func = make_func(
+            vec![
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm: 7,
+                    kind: CmpKind::Eq,
+                },
+                MInst::CmpImm {
+                    dst: VReg(2),
+                    lhs: VReg(1),
+                    imm: 0,
+                    kind: CmpKind::Eq,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+
+        fold_boolean_normalizations(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![
+                MInst::CmpImm {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    imm: 7,
+                    kind: CmpKind::Ne,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(2),
+                    size: OpSize::S8,
+                },
+                MInst::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_shared_boolean_comparison_without_duplication() {
+        let mut func = make_func(
+            vec![
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm: 7,
+                    kind: CmpKind::Eq,
+                },
+                MInst::CmpImm {
+                    dst: VReg(2),
+                    lhs: VReg(1),
+                    imm: 0,
+                    kind: CmpKind::Eq,
+                },
+                MInst::And {
+                    dst: VReg(3),
+                    lhs: VReg(1),
+                    rhs: VReg(0),
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+
+        fold_boolean_normalizations(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::CmpImm {
+                lhs: VReg(1),
+                imm: 0,
+                kind: CmpKind::Eq,
+                ..
             }
         ));
     }
