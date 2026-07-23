@@ -7458,6 +7458,22 @@ fn lower_instruction(
             debug_assert!(lhs_width > 64 || !ctx.wide_regs.contains_key(lhs));
             debug_assert!(rhs_width > 64 || !ctx.wide_regs.contains_key(rhs));
 
+            // A constant logical shift whose wide source is consumed as one
+            // narrow result is an extraction, not a full-width shift. Select
+            // it before the generic wide dispatcher; otherwise that path
+            // constructs every shifted source chunk and only afterwards drops
+            // all but the low destination bits.
+            if !ctx.four_state
+                && d_width <= 64
+                && lhs_width > 64
+                && rhs_width <= 64
+                && matches!(op, BinaryOp::Shr)
+                && ctx.consts.contains_key(rhs)
+            {
+                lower_wide_extract(ctx, block, *dst, *lhs, *rhs);
+                return;
+            }
+
             // Wide (>64-bit) binary operations: dispatch to multi-word handler.
             // For comparisons/logic, the result may be narrow (1 bit) but the
             // operands can be wide — dispatch based on operand width too.
@@ -7632,13 +7648,6 @@ fn lower_instruction(
                     set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::Shr => {
-                    // Check for wide-to-narrow extraction: lhs is >64 bits, dst is ≤64 bits
-                    let lhs_width = ctx.sir_width(lhs);
-                    if lhs_width > 64 {
-                        lower_wide_extract(ctx, block, *dst, *lhs, *rhs);
-                        return;
-                    }
-
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
                     if let Some(&shift_amt) = ctx.consts.get(rhs) {
                         if shift_amt < 64 {
@@ -11271,8 +11280,12 @@ fn lower_wide_extract(
                 imm: is,
             });
 
-            // Carry from next chunk
-            if (ci + 1) < n_src {
+            // Include the next source word only if the declared result crosses
+            // this word boundary. For a one-bit slice, unconditionally forming
+            // `hi << (64 - bit)` creates two transients and an OR whose value
+            // is discarded by the result mask.
+            let crosses_chunk = d_width > 64 - usize::from(is);
+            if crosses_chunk && (ci + 1) < n_src {
                 let next_vreg = src_chunks[ci + 1].0;
                 let carry = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::ShlImm {
@@ -16842,9 +16855,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_result_of_wide_shift_uses_declared_width_afterwards() {
+    fn narrow_wide_shift_uses_only_chunks_covered_by_the_result() {
         let input_var = VarId::default();
         let output_var = VarId::from_raw(1);
+        let crossing_output_var = VarId::from_raw(2);
         let input_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: input_var,
@@ -16853,8 +16867,14 @@ mod tests {
             instance_id: InstanceId(0),
             var_id: output_var,
         };
+        let crossing_output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: crossing_output_var,
+        };
         let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
         let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let crossing_output_addr =
+            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, crossing_output_abs);
 
         let wide = RegisterId(0);
         let bit_index = RegisterId(1);
@@ -16862,6 +16882,8 @@ mod tests {
         let sign_index = RegisterId(3);
         let shifted = RegisterId(4);
         let extended = RegisterId(5);
+        let crossing_index = RegisterId(6);
+        let crossing = RegisterId(7);
         let eu = ExecutionUnit {
             entry_block_id: SirBlockId(0),
             blocks: [(
@@ -16871,16 +16893,26 @@ mod tests {
                     params: vec![],
                     instructions: vec![
                         SIRInstruction::Load(wide, input_addr, SIROffset::Static(0), 128),
-                        SIRInstruction::Imm(bit_index, SIRValue::new(127u8)),
+                        SIRInstruction::Imm(bit_index, SIRValue::new(15u8)),
                         SIRInstruction::Binary(gate, wide, BinaryOp::Shr, bit_index),
                         SIRInstruction::Imm(sign_index, SIRValue::new(31u8)),
                         SIRInstruction::Binary(shifted, gate, BinaryOp::Shl, sign_index),
                         SIRInstruction::Binary(extended, shifted, BinaryOp::Sar, sign_index),
+                        SIRInstruction::Imm(crossing_index, SIRValue::new(60u8)),
+                        SIRInstruction::Binary(crossing, wide, BinaryOp::Shr, crossing_index),
                         SIRInstruction::Store(
                             output_addr,
                             SIROffset::Static(0),
                             32,
                             extended,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            crossing_output_addr,
+                            SIROffset::Static(0),
+                            8,
+                            crossing,
                             vec![],
                             vec![],
                         ),
@@ -16933,6 +16965,20 @@ mod tests {
                         signed: true,
                     },
                 ),
+                (
+                    crossing_index,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    crossing,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
             ]
             .into_iter()
             .collect(),
@@ -16943,11 +16989,19 @@ mod tests {
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
-            offsets: [(input_abs, 0), (output_abs, 16)].into_iter().collect(),
-            widths: [(input_abs, 128), (output_abs, 32)].into_iter().collect(),
-            is_4states: [(input_abs, false), (output_abs, false)]
+            offsets: [(input_abs, 0), (output_abs, 16), (crossing_output_abs, 20)]
                 .into_iter()
                 .collect(),
+            widths: [(input_abs, 128), (output_abs, 32), (crossing_output_abs, 8)]
+                .into_iter()
+                .collect(),
+            is_4states: [
+                (input_abs, false),
+                (output_abs, false),
+                (crossing_output_abs, false),
+            ]
+            .into_iter()
+            .collect(),
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
@@ -16969,6 +17023,22 @@ mod tests {
 
         let mut function = lower_execution_unit(&eu, &layout, false);
         function.verify();
+        assert!(
+            !function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(instruction, MInst::ShlImm { imm: 49, .. })),
+            "a one-bit extraction wholly inside the low word must not combine the next word"
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(instruction, MInst::ShlImm { imm: 4, .. })),
+            "an eight-bit extraction starting at bit 60 must combine the next word"
+        );
         mir_legalize::legalize(&mut function);
         function.verify();
         mir_opt::optimize(&mut function);
@@ -16984,9 +17054,12 @@ mod tests {
         .unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = vec![0u8; 24];
-        state[15] = 0x80;
+        state[1] = 0x80;
+        state[7] = 0x80;
+        state[8] = 0x01;
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(&state[16..20], &u32::MAX.to_le_bytes());
+        assert_eq!(state[20], 0x18);
     }
 
     #[test]
