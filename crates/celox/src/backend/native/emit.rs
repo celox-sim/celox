@@ -4152,6 +4152,9 @@ fn emit_chained_eu_groups(
             "[fused-state-ssa-feasibility] label={label} {report} elapsed={:?}",
             start.elapsed()
         );
+        for detail in report.detail_lines() {
+            eprintln!("[fused-state-ssa-feasibility-range] label={label} {detail}");
+        }
     }
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;

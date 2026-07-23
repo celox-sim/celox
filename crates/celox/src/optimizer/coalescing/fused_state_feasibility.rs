@@ -19,7 +19,7 @@ use crate::ir::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ProgramPoint {
-    block: usize,
+    block: BlockId,
     instruction: usize,
 }
 
@@ -76,6 +76,34 @@ enum LogicalSource {
         start: usize,
         end: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RejectionReason {
+    LiveOnEntry,
+    UnknownWrite,
+    FfDefinition,
+    EffectfulDefinition,
+    UnresolvedPhi,
+}
+
+impl fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::LiveOnEntry => "live-on-entry",
+            Self::UnknownWrite => "unknown-write",
+            Self::FfDefinition => "ff-definition",
+            Self::EffectfulDefinition => "effectful-definition",
+            Self::UnresolvedPhi => "unresolved-phi",
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RangeDecision {
+    point: ProgramPoint,
+    range: BitRange,
+    rejection_reasons: BTreeSet<RejectionReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,6 +592,7 @@ fn merge_adjacent(mut pieces: Vec<Piece>) -> Vec<Piece> {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct OriginCounts {
+    pub packed_address_calculation: usize,
     pub memory_traffic: usize,
     pub range_extraction: usize,
     pub range_insertion: usize,
@@ -585,13 +614,27 @@ pub(crate) struct FeasibilityReport {
     pub maximum_versions_per_object: usize,
     pub demanded_ff_loads: usize,
     pub candidate_removable_loads: usize,
+    pub candidate_removable_stores: usize,
     pub candidate_backing_stores: usize,
+    pub candidate_extract_merge_instructions: usize,
+    pub candidate_producer_instructions: usize,
     pub rejected_live_on_entry: usize,
     pub rejected_unknown: usize,
     pub rejected_ff_definition: usize,
     pub rejected_effectful_definition: usize,
     pub materialized_range_fragments: usize,
+    pub admitted_objects: usize,
+    pub partially_admitted_objects: usize,
+    pub rejected_objects: usize,
+    pub verified_demands: usize,
+    pub verified_roots: usize,
+    pub verifier_passed: bool,
+    pub rss_before_kib: usize,
+    pub rss_after_kib: usize,
+    pub process_peak_rss_kib: usize,
     pub origins: OriginCounts,
+    range_decisions: Vec<RangeDecision>,
+    block_origins: BTreeMap<BlockId, OriginCounts>,
 }
 
 impl fmt::Display for FeasibilityReport {
@@ -602,10 +645,16 @@ impl fmt::Display for FeasibilityReport {
              memory_def_fragments={} overlap_edges={} memory_phi_operands={} \
              maximum_fragments_per_access={} maximum_versions_per_object={} \
              demanded_ff_loads={} candidate_removable_loads={} \
-             candidate_backing_stores={} rejected_live_on_entry={} \
+             candidate_removable_stores={} candidate_backing_stores={} \
+             candidate_extract_merge_instructions={} \
+             candidate_producer_instructions={} rejected_live_on_entry={} \
              rejected_unknown={} rejected_ff_definition={} \
              rejected_effectful_definition={} \
-             materialized_range_fragments={} origin_memory={} \
+             materialized_range_fragments={} admitted_objects={} \
+             partially_admitted_objects={} rejected_objects={} \
+             verified_demands={} verified_roots={} verifier_passed={} \
+             rss_before_kib={} rss_after_kib={} process_peak_rss_kib={} \
+             origin_address={} origin_memory={} \
              origin_extract={} origin_insert={} origin_mask={} origin_mux={} \
              origin_other={}",
             self.blocks,
@@ -619,12 +668,25 @@ impl fmt::Display for FeasibilityReport {
             self.maximum_versions_per_object,
             self.demanded_ff_loads,
             self.candidate_removable_loads,
+            self.candidate_removable_stores,
             self.candidate_backing_stores,
+            self.candidate_extract_merge_instructions,
+            self.candidate_producer_instructions,
             self.rejected_live_on_entry,
             self.rejected_unknown,
             self.rejected_ff_definition,
             self.rejected_effectful_definition,
             self.materialized_range_fragments,
+            self.admitted_objects,
+            self.partially_admitted_objects,
+            self.rejected_objects,
+            self.verified_demands,
+            self.verified_roots,
+            self.verifier_passed,
+            self.rss_before_kib,
+            self.rss_after_kib,
+            self.process_peak_rss_kib,
+            self.origins.packed_address_calculation,
             self.origins.memory_traffic,
             self.origins.range_extraction,
             self.origins.range_insertion,
@@ -632,6 +694,48 @@ impl fmt::Display for FeasibilityReport {
             self.origins.mux_lowering,
             self.origins.unrelated_arithmetic,
         )
+    }
+}
+
+impl FeasibilityReport {
+    pub(crate) fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.range_decisions
+            .iter()
+            .map(|decision| {
+                let disposition = if decision.rejection_reasons.is_empty() {
+                    "admitted".to_owned()
+                } else {
+                    decision
+                        .rejection_reasons
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                format!(
+                    "kind=range point=b{}:i{} object={:?} range={}..{} \
+                     disposition={disposition}",
+                    decision.point.block.0,
+                    decision.point.instruction,
+                    decision.range.object,
+                    decision.range.start,
+                    decision.range.end,
+                )
+            })
+            .chain(self.block_origins.iter().map(|(block, origins)| {
+                format!(
+                    "kind=candidate-block block=b{} address={} memory={} extract={} insert={} \
+                     mask={} mux={} other={}",
+                    block.0,
+                    origins.packed_address_calculation,
+                    origins.memory_traffic,
+                    origins.range_extraction,
+                    origins.range_insertion,
+                    origins.mask_generation,
+                    origins.mux_lowering,
+                    origins.unrelated_arithmetic,
+                )
+            }))
     }
 }
 
@@ -660,11 +764,14 @@ pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     ff_entry: BlockId,
 ) -> Result<FeasibilityReport, FeasibilityError> {
+    let rss_before_kib = resident_memory_kib().map_or(0, |(resident, _)| resident);
     let cfg = SirCfg::analyze(eu).map_err(FeasibilityError::Cfg)?;
     let phases = StatePhaseMap::fused(eu, &cfg, ff_entry).map_err(FeasibilityError::Phase)?;
     let ff_blocks = phases.ff_blocks().expect("fused phases expose FF blocks");
-    let mut events =
-        vec![Vec::<Event<RegionedAbsoluteAddr, ProgramPoint, Usage>>::new(); cfg.block_ids.len()];
+    let mut object_events = BTreeMap::<
+        RegionedAbsoluteAddr,
+        Vec<(usize, Event<RegionedAbsoluteAddr, ProgramPoint, Usage>)>,
+    >::new();
     let mut definitions = BTreeMap::<ProgramPoint, MemoryDefinition>::new();
     let mut accesses = Vec::<(BitRange, bool)>::new();
     let mut demanded_loads = Vec::<(ProgramPoint, BitRange)>::new();
@@ -672,7 +779,10 @@ pub(crate) fn analyze(
 
     for (block, &block_id) in cfg.block_ids.iter().enumerate() {
         for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
-            let point = ProgramPoint { block, instruction };
+            let point = ProgramPoint {
+                block: block_id,
+                instruction,
+            };
             match inst {
                 SIRInstruction::Load(_, address, offset, width)
                     if address.region == STABLE_REGION =>
@@ -683,10 +793,13 @@ pub(crate) fn analyze(
                         accesses.push((range, false));
                         if ff_blocks.contains(&block_id) {
                             demanded_loads.push((point, range));
-                            events[block].push(Event::Use {
-                                variable: *address,
-                                usage: Usage::FfLoad(point),
-                            });
+                            object_events.entry(*address).or_default().push((
+                                block,
+                                Event::Use {
+                                    variable: *address,
+                                    usage: Usage::FfLoad(point),
+                                },
+                            ));
                         }
                     }
                 }
@@ -714,14 +827,21 @@ pub(crate) fn analyze(
                     };
                     definitions.insert(point, definition);
                     store_sources.insert(point, *source);
-                    events[block].push(Event::Use {
-                        variable: *address,
-                        usage: Usage::DefinitionInput(point),
-                    });
-                    events[block].push(Event::Definition {
-                        variable: *address,
-                        definition: point,
-                    });
+                    let events = object_events.entry(*address).or_default();
+                    events.push((
+                        block,
+                        Event::Use {
+                            variable: *address,
+                            usage: Usage::DefinitionInput(point),
+                        },
+                    ));
+                    events.push((
+                        block,
+                        Event::Definition {
+                            variable: *address,
+                            definition: point,
+                        },
+                    ));
                 }
                 SIRInstruction::Commit(_, destination, offset, width, triggers)
                     if destination.region == STABLE_REGION =>
@@ -743,34 +863,27 @@ pub(crate) fn analyze(
                         effectful: !triggers.is_empty(),
                     };
                     definitions.insert(point, definition);
-                    events[block].push(Event::Use {
-                        variable: *destination,
-                        usage: Usage::DefinitionInput(point),
-                    });
-                    events[block].push(Event::Definition {
-                        variable: *destination,
-                        definition: point,
-                    });
+                    let events = object_events.entry(*destination).or_default();
+                    events.push((
+                        block,
+                        Event::Use {
+                            variable: *destination,
+                            usage: Usage::DefinitionInput(point),
+                        },
+                    ));
+                    events.push((
+                        block,
+                        Event::Definition {
+                            variable: *destination,
+                            definition: point,
+                        },
+                    ));
                 }
                 _ => {}
             }
         }
     }
 
-    let state_ssa = ssa::build(&cfg, &events).map_err(FeasibilityError::StateSsa)?;
-    let definition_inputs = definitions
-        .keys()
-        .map(|&point| {
-            state_ssa
-                .uses
-                .get(&Usage::DefinitionInput(point))
-                .copied()
-                .map(|version| (point, version))
-                .ok_or(FeasibilityError::InvalidMemoryGraph(
-                    "definition has no incoming object version",
-                ))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let endpoints = range_endpoints(&accesses);
     let mut report = range_shape_report(&accesses, &endpoints);
     report.blocks = eu.blocks.len();
@@ -781,46 +894,121 @@ pub(crate) fn analyze(
         .sum();
     report.demanded_ff_loads = demanded_loads.len();
 
-    let mut resolver =
-        DemandResolver::new(&state_ssa, &endpoints, &definitions, &definition_inputs);
-    let mut candidate_stores = BTreeSet::<ProgramPoint>::new();
+    let mut demanded_by_object =
+        BTreeMap::<RegionedAbsoluteAddr, Vec<(ProgramPoint, BitRange)>>::new();
     for (point, range) in demanded_loads {
-        let start = state_ssa.uses.get(&Usage::FfLoad(point)).copied().ok_or(
-            FeasibilityError::InvalidMemoryGraph("FF load has no reaching object version"),
-        )?;
-        let pieces = resolver.resolve(DemandKey {
-            version: start,
-            range,
-        })?;
-        let mut candidate = true;
-        let mut load_stores = BTreeSet::<ProgramPoint>::new();
-        let mut visited_sources = BTreeSet::new();
-        for piece in &pieces {
-            candidate &= classify_candidate_source(
-                piece.source,
-                &resolver.stats.phi_sources,
-                &definitions,
-                &mut load_stores,
-                &mut visited_sources,
-                &mut report,
-            );
+        demanded_by_object
+            .entry(range.object)
+            .or_default()
+            .push((point, range));
+    }
+    let mut candidate_stores = BTreeSet::<ProgramPoint>::new();
+    let mut candidate_loads = BTreeSet::<ProgramPoint>::new();
+    for (object, demanded_loads) in demanded_by_object {
+        let sparse_events =
+            object_events
+                .remove(&object)
+                .ok_or(FeasibilityError::InvalidMemoryGraph(
+                    "demanded object has no StateSSA events",
+                ))?;
+        let definition_points = sparse_events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                Event::Definition { definition, .. } => Some(*definition),
+                Event::Use { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let mut events = vec![
+            Vec::<Event<RegionedAbsoluteAddr, ProgramPoint, Usage>>::new();
+            cfg.block_ids.len()
+        ];
+        for (block, event) in sparse_events {
+            events[block].push(event);
         }
-        if candidate {
-            report.candidate_removable_loads += 1;
-            candidate_stores.extend(load_stores);
+        let state_ssa = ssa::build(&cfg, &events).map_err(FeasibilityError::StateSsa)?;
+        let definition_inputs = definition_points
+            .into_iter()
+            .map(|point| {
+                state_ssa
+                    .uses
+                    .get(&Usage::DefinitionInput(point))
+                    .copied()
+                    .map(|version| (point, version))
+                    .ok_or(FeasibilityError::InvalidMemoryGraph(
+                        "definition has no incoming object version",
+                    ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut resolver =
+            DemandResolver::new(&state_ssa, &endpoints, &definitions, &definition_inputs);
+        for (point, range) in demanded_loads {
+            let start = state_ssa.uses.get(&Usage::FfLoad(point)).copied().ok_or(
+                FeasibilityError::InvalidMemoryGraph("FF load has no reaching object version"),
+            )?;
+            let pieces = resolver.resolve(DemandKey {
+                version: start,
+                range,
+            })?;
+            verify_resolved_pieces(range, &pieces, &definitions, &resolver.stats.phi_sources)?;
+            report.verified_demands += 1;
+            let mut candidate = true;
+            let mut load_stores = BTreeSet::<ProgramPoint>::new();
+            let mut visited_sources = BTreeSet::new();
+            let mut rejection_reasons = BTreeSet::new();
+            for piece in &pieces {
+                candidate &= classify_candidate_source(
+                    piece.source,
+                    &resolver.stats.phi_sources,
+                    &definitions,
+                    &mut load_stores,
+                    &mut visited_sources,
+                    &mut rejection_reasons,
+                    &mut report,
+                );
+            }
+            report.range_decisions.push(RangeDecision {
+                point,
+                range,
+                rejection_reasons,
+            });
+            if candidate {
+                report.candidate_removable_loads += 1;
+                candidate_loads.insert(point);
+                candidate_stores.extend(load_stores);
+            }
         }
+        report.memory_phi_operands += resolver.stats.phi_operands;
+        report.materialized_range_fragments += resolver.stats.materialized_fragments;
+        report.maximum_versions_per_object = report.maximum_versions_per_object.max(
+            resolver
+                .stats
+                .maximum_versions_per_object
+                .values()
+                .map(BTreeSet::len)
+                .max()
+                .unwrap_or(0),
+        );
     }
     report.candidate_backing_stores = candidate_stores.len();
-    report.memory_phi_operands = resolver.stats.phi_operands;
-    report.materialized_range_fragments = resolver.stats.materialized_fragments;
-    report.maximum_versions_per_object = resolver
-        .stats
-        .maximum_versions_per_object
-        .values()
-        .map(BTreeSet::len)
-        .max()
-        .unwrap_or(0);
-    report.origins = classify_candidate_origins(eu, &candidate_stores, &store_sources);
+    report.verified_roots = candidate_stores.len();
+    (report.origins, report.block_origins) =
+        classify_candidate_origins(eu, &candidate_loads, &candidate_stores, &store_sources);
+    report.candidate_extract_merge_instructions =
+        report.origins.range_extraction + report.origins.range_insertion;
+    report.candidate_producer_instructions = report
+        .origins
+        .range_extraction
+        .saturating_add(report.origins.range_insertion)
+        .saturating_add(report.origins.mask_generation)
+        .saturating_add(report.origins.mux_lowering)
+        .saturating_add(report.origins.unrelated_arithmetic);
+    classify_object_coverage(&mut report);
+    report.verifier_passed = report.verified_demands == report.demanded_ff_loads;
+    if let Some((resident, peak)) = resident_memory_kib() {
+        report.rss_before_kib = rss_before_kib;
+        report.rss_after_kib = resident;
+        report.process_peak_rss_kib = peak;
+    }
     Ok(report)
 }
 
@@ -830,6 +1018,7 @@ fn classify_candidate_source(
     definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
     stores: &mut BTreeSet<ProgramPoint>,
     visited: &mut BTreeSet<LogicalSource>,
+    reasons: &mut BTreeSet<RejectionReason>,
     report: &mut FeasibilityReport,
 ) -> bool {
     if !visited.insert(source) {
@@ -841,10 +1030,12 @@ fn classify_candidate_source(
             let mut admissible = true;
             if definition.in_ff_suffix {
                 report.rejected_ff_definition += 1;
+                reasons.insert(RejectionReason::FfDefinition);
                 admissible = false;
             }
             if definition.effectful {
                 report.rejected_effectful_definition += 1;
+                reasons.insert(RejectionReason::EffectfulDefinition);
                 admissible = false;
             }
             if admissible {
@@ -854,23 +1045,135 @@ fn classify_candidate_source(
         }
         LogicalSource::LiveOnEntry => {
             report.rejected_live_on_entry += 1;
+            reasons.insert(RejectionReason::LiveOnEntry);
             false
         }
         LogicalSource::Unknown(_) => {
             report.rejected_unknown += 1;
+            reasons.insert(RejectionReason::UnknownWrite);
             false
         }
         phi @ LogicalSource::Phi { .. } => {
             let Some(inputs) = phi_sources.get(&phi) else {
                 report.rejected_unknown += 1;
+                reasons.insert(RejectionReason::UnresolvedPhi);
                 return false;
             };
             inputs.iter().copied().fold(true, |admissible, input| {
-                classify_candidate_source(input, phi_sources, definitions, stores, visited, report)
-                    && admissible
+                classify_candidate_source(
+                    input,
+                    phi_sources,
+                    definitions,
+                    stores,
+                    visited,
+                    reasons,
+                    report,
+                ) && admissible
             })
         }
     }
+}
+
+fn verify_resolved_pieces(
+    demand: BitRange,
+    pieces: &[Piece],
+    definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
+    phi_sources: &BTreeMap<LogicalSource, Vec<LogicalSource>>,
+) -> Result<(), FeasibilityError> {
+    let mut next = demand.start;
+    for piece in pieces {
+        if piece.start != next || piece.start >= piece.end || piece.end > demand.end {
+            return Err(FeasibilityError::InvalidMemoryGraph(
+                "resolved fragments do not exactly partition the demand",
+            ));
+        }
+        match piece.source {
+            LogicalSource::Definition(point) => {
+                let Some(definition) = definitions.get(&point) else {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "resolved definition is absent",
+                    ));
+                };
+                let DefinitionKind::Exact(range) = definition.kind else {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "exact source names an unknown definition",
+                    ));
+                };
+                if range.object != demand.object
+                    || piece.start < range.start
+                    || range.end < piece.end
+                {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "resolved definition does not cover its fragment",
+                    ));
+                }
+            }
+            LogicalSource::Unknown(point) => {
+                let Some(definition) = definitions.get(&point) else {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "resolved unknown definition is absent",
+                    ));
+                };
+                if definition_object(*definition) != demand.object {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "unknown definition belongs to another object",
+                    ));
+                }
+            }
+            phi @ LogicalSource::Phi {
+                object, start, end, ..
+            } => {
+                if object != demand.object
+                    || start != piece.start
+                    || end != piece.end
+                    || !phi_sources.contains_key(&phi)
+                {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "resolved phi has no exact source certificate",
+                    ));
+                }
+            }
+            LogicalSource::LiveOnEntry => {}
+        }
+        next = piece.end;
+    }
+    if next != demand.end {
+        return Err(FeasibilityError::InvalidMemoryGraph(
+            "resolved fragments leave an uncovered suffix",
+        ));
+    }
+    Ok(())
+}
+
+fn classify_object_coverage(report: &mut FeasibilityReport) {
+    let mut objects = BTreeMap::<RegionedAbsoluteAddr, (bool, bool)>::new();
+    for decision in &report.range_decisions {
+        let entry = objects.entry(decision.range.object).or_default();
+        if decision.rejection_reasons.is_empty() {
+            entry.0 = true;
+        } else {
+            entry.1 = true;
+        }
+    }
+    for (has_admitted, has_rejected) in objects.into_values() {
+        match (has_admitted, has_rejected) {
+            (true, false) => report.admitted_objects += 1,
+            (true, true) => report.partially_admitted_objects += 1,
+            (false, true) => report.rejected_objects += 1,
+            (false, false) => unreachable!("an object has at least one range decision"),
+        }
+    }
+}
+
+fn resident_memory_kib() -> Option<(usize, usize)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let value = |name: &str| {
+        status.lines().find_map(|line| {
+            let value = line.strip_prefix(name)?;
+            value.split_ascii_whitespace().next()?.parse::<usize>().ok()
+        })
+    };
+    Some((value("VmRSS:")?, value("VmHWM:")?))
 }
 
 fn range_endpoints(accesses: &[(BitRange, bool)]) -> BTreeMap<RegionedAbsoluteAddr, Vec<usize>> {
@@ -913,14 +1216,25 @@ fn range_shape_report(
 
 fn classify_candidate_origins(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    loads: &BTreeSet<ProgramPoint>,
     stores: &BTreeSet<ProgramPoint>,
     store_sources: &BTreeMap<ProgramPoint, RegisterId>,
-) -> OriginCounts {
-    let mut definitions = HashMap::<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>::new();
+) -> (OriginCounts, BTreeMap<BlockId, OriginCounts>) {
+    let mut definitions =
+        HashMap::<RegisterId, (ProgramPoint, &SIRInstruction<RegionedAbsoluteAddr>)>::new();
     for block in eu.blocks.values() {
-        for inst in &block.instructions {
+        for (instruction, inst) in block.instructions.iter().enumerate() {
             if let Some(definition) = super::shared::def_reg(inst) {
-                definitions.insert(definition, inst);
+                definitions.insert(
+                    definition,
+                    (
+                        ProgramPoint {
+                            block: block.id,
+                            instruction,
+                        },
+                        inst,
+                    ),
+                );
             }
         }
     }
@@ -930,26 +1244,45 @@ fn classify_candidate_origins(
         .collect::<Vec<_>>();
     let mut visited = HashSet::new();
     let mut counts = OriginCounts {
-        memory_traffic: stores.len(),
+        memory_traffic: stores.len() + loads.len(),
         ..OriginCounts::default()
     };
+    let mut block_counts = BTreeMap::<BlockId, OriginCounts>::new();
+    for point in loads.iter().chain(stores) {
+        block_counts.entry(point.block).or_default().memory_traffic += 1;
+    }
     while let Some(value) = work.pop() {
         if !visited.insert(value) {
             continue;
         }
-        let Some(inst) = definitions.get(&value).copied() else {
+        let Some((point, inst)) = definitions.get(&value).copied() else {
             continue;
         };
+        let in_block = block_counts.entry(point.block).or_default();
         match inst {
-            SIRInstruction::Load(..) => counts.memory_traffic += 1,
-            SIRInstruction::Slice(..) => counts.range_extraction += 1,
-            SIRInstruction::Concat(..) => counts.range_insertion += 1,
+            SIRInstruction::Load(..) => {
+                counts.memory_traffic += 1;
+                in_block.memory_traffic += 1;
+            }
+            SIRInstruction::Slice(..) => {
+                counts.range_extraction += 1;
+                in_block.range_extraction += 1;
+            }
+            SIRInstruction::Concat(..) => {
+                counts.range_insertion += 1;
+                in_block.range_insertion += 1;
+            }
             SIRInstruction::Binary(_, _, BinaryOp::And | BinaryOp::Shl | BinaryOp::Shr, _) => {
                 counts.mask_generation += 1;
+                in_block.mask_generation += 1;
             }
-            SIRInstruction::Mux(..) => counts.mux_lowering += 1,
+            SIRInstruction::Mux(..) => {
+                counts.mux_lowering += 1;
+                in_block.mux_lowering += 1;
+            }
             SIRInstruction::Imm(..) | SIRInstruction::Binary(..) | SIRInstruction::Unary(..) => {
-                counts.unrelated_arithmetic += 1
+                counts.unrelated_arithmetic += 1;
+                in_block.unrelated_arithmetic += 1;
             }
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
@@ -959,7 +1292,7 @@ fn classify_candidate_origins(
         }
         work.extend(instruction_operands(inst));
     }
-    counts
+    (counts, block_counts)
 }
 
 fn instruction_operands(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
@@ -1191,6 +1524,95 @@ mod tests {
         assert_eq!(report.candidate_removable_loads, 1);
         assert_eq!(report.candidate_backing_stores, 2);
         assert_eq!(report.memory_phi_operands, 2);
+    }
+
+    #[test]
+    fn verifies_loop_phi_with_an_unchanged_range() {
+        let stable = address(STABLE_REGION);
+        let working = address(WORKING_REGION);
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(0), SIRValue::new(0x12u64)),
+                            SIRInstruction::Store(
+                                stable,
+                                SIROffset::Static(8),
+                                8,
+                                RegisterId(0),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(1), SIRValue::new(0x34u64)),
+                            SIRInstruction::Store(
+                                stable,
+                                SIROffset::Static(0),
+                                8,
+                                RegisterId(1),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                            SIRInstruction::Imm(RegisterId(2), SIRValue::new(0u64)),
+                        ],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(2),
+                            true_block: (BlockId(1), Vec::new()),
+                            false_block: (BlockId(2), Vec::new()),
+                        },
+                    },
+                ),
+                (
+                    BlockId(2),
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Load(RegisterId(3), stable, SIROffset::Static(0), 16),
+                            SIRInstruction::Store(
+                                working,
+                                SIROffset::Static(0),
+                                16,
+                                RegisterId(3),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (RegisterId(0), bit(8)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(1)),
+                (RegisterId(3), bit(16)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, BlockId(2)).unwrap();
+        assert_eq!(report.candidate_removable_loads, 1);
+        assert_eq!(report.candidate_backing_stores, 2);
+        assert_eq!(report.memory_phi_operands, 2);
+        assert!(report.verifier_passed);
     }
 
     #[test]
