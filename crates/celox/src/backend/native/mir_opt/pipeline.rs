@@ -85,6 +85,7 @@ fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("dead_code_eliminate", dead_code_eliminate);
     runner.run("sink_loads", sink_loads);
     runner.run("eliminate_redundant_or_terms", eliminate_redundant_or_terms);
+    runner.run("fold_contiguous_load_packs", fold_contiguous_load_packs);
     runner.run("dead_code_eliminate", dead_code_eliminate);
     run_target_bit_folds(runner);
     runner.run("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt);
@@ -105,6 +106,7 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("redundant_mask_eliminate", redundant_mask_eliminate);
     runner.run("fold_bit_toggle_insert", fold_bit_toggle_insert);
     runner.run("eliminate_redundant_or_terms", eliminate_redundant_or_terms);
+    runner.run("fold_contiguous_load_packs", fold_contiguous_load_packs);
     run_target_bit_folds(runner);
     runner.run("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt);
     runner.run("dead_code_eliminate", dead_code_eliminate);

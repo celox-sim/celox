@@ -3450,6 +3450,156 @@ fn algebraic_simplify(func: &mut MFunction) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ContiguousLoadPack {
+    base: BaseReg,
+    memory_bytes: [Option<i64>; 8],
+    earliest_instruction: usize,
+}
+
+impl ContiguousLoadPack {
+    fn from_load(base: BaseReg, offset: i32, size: OpSize, instruction: usize) -> Self {
+        let mut memory_bytes = [None; 8];
+        for (byte, slot) in memory_bytes
+            .iter_mut()
+            .enumerate()
+            .take(size.bytes() as usize)
+        {
+            *slot = Some(i64::from(offset) + byte as i64);
+        }
+        Self {
+            base,
+            memory_bytes,
+            earliest_instruction: instruction,
+        }
+    }
+
+    fn shifted_left(self, bits: u8) -> Option<Self> {
+        if !bits.is_multiple_of(8) || bits >= 64 {
+            return None;
+        }
+        let bytes = usize::from(bits / 8);
+        if self.memory_bytes[8 - bytes..].iter().any(Option::is_some) {
+            return None;
+        }
+        let mut memory_bytes = [None; 8];
+        memory_bytes[bytes..].copy_from_slice(&self.memory_bytes[..8 - bytes]);
+        Some(Self {
+            memory_bytes,
+            ..self
+        })
+    }
+
+    fn merged(self, other: Self) -> Option<Self> {
+        if self.base != other.base {
+            return None;
+        }
+        let mut memory_bytes = self.memory_bytes;
+        for (destination, source) in memory_bytes.iter_mut().zip(other.memory_bytes) {
+            if destination.is_some() && source.is_some() {
+                return None;
+            }
+            if destination.is_none() {
+                *destination = source;
+            }
+        }
+        Some(Self {
+            base: self.base,
+            memory_bytes,
+            earliest_instruction: self.earliest_instruction.min(other.earliest_instruction),
+        })
+    }
+
+    fn native_load(self) -> Option<(i32, OpSize)> {
+        for (byte_len, size) in [
+            (8usize, OpSize::S64),
+            (4usize, OpSize::S32),
+            (2usize, OpSize::S16),
+        ] {
+            if self.memory_bytes[byte_len..].iter().any(Option::is_some) {
+                continue;
+            }
+            let start = self.memory_bytes[0]?;
+            if self.memory_bytes[..byte_len]
+                .iter()
+                .enumerate()
+                .all(|(byte, address)| *address == Some(start + byte as i64))
+            {
+                return Some((i32::try_from(start).ok()?, size));
+            }
+        }
+        None
+    }
+}
+
+/// Replace little-endian packs of adjacent scalar loads with one native load.
+///
+/// Frontend Concat lowering commonly produces:
+///
+///     load.i8 [p+0] | (load.i8 [p+1] << 8) | ...
+///
+/// Keeping those as separate SSA values creates seven unnecessary ALU
+/// definitions and eight memory operations for one 64-bit value.  Summaries
+/// are propagated forward once per instruction, so discovery is linear.  A
+/// pack is materialized only if no memory write of any kind occurred between
+/// its earliest scalar load and the root; this preserves the common memory
+/// version without moving a read across an effect.
+fn fold_contiguous_load_packs(func: &mut MFunction) {
+    for block in &mut func.blocks {
+        let mut summaries = HashMap::<VReg, ContiguousLoadPack>::new();
+        let mut last_write = None::<usize>;
+
+        for instruction_index in 0..block.insts.len() {
+            let original = block.insts[instruction_index].clone();
+            let summary = match original {
+                MInst::Load {
+                    base, offset, size, ..
+                } => Some(ContiguousLoadPack::from_load(
+                    base,
+                    offset,
+                    size,
+                    instruction_index,
+                )),
+                MInst::ShlImm { src, imm, .. } => summaries
+                    .get(&src)
+                    .copied()
+                    .and_then(|summary| summary.shifted_left(imm)),
+                MInst::Or { lhs, rhs, .. } => summaries
+                    .get(&lhs)
+                    .copied()
+                    .zip(summaries.get(&rhs).copied())
+                    .and_then(|(lhs, rhs)| lhs.merged(rhs)),
+                MInst::Mov { src, .. } => summaries.get(&src).copied(),
+                MInst::Mov32 { src, .. } => summaries
+                    .get(&src)
+                    .copied()
+                    .filter(|summary| summary.memory_bytes[4..].iter().all(Option::is_none)),
+                MInst::OrImm { src, imm: 0, .. } => summaries.get(&src).copied(),
+                _ => None,
+            };
+
+            if let (Some(dst), Some(summary)) = (original.def(), summary) {
+                if matches!(original, MInst::Or { .. })
+                    && last_write.is_none_or(|write| write < summary.earliest_instruction)
+                    && let Some((offset, size)) = summary.native_load()
+                {
+                    block.insts[instruction_index] = MInst::Load {
+                        dst,
+                        base: summary.base,
+                        offset,
+                        size,
+                    };
+                }
+                summaries.insert(dst, summary);
+            }
+
+            if memory_effect::writes(&original).has_effect() {
+                last_write = Some(instruction_index);
+            }
+        }
+    }
+}
+
 /// Select flag-consuming branch forms before allocation.
 ///
 /// A compare or direct load whose only use is the immediately following
@@ -5515,6 +5665,95 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    fn byte_load_pack(with_write_barrier: bool) -> MFunction {
+        let mut insts = (0..8)
+            .map(|byte| MInst::Load {
+                dst: VReg(byte),
+                base: BaseReg::SimState,
+                offset: 32 + byte as i32,
+                size: OpSize::S8,
+            })
+            .collect::<Vec<_>>();
+        if with_write_barrier {
+            insts.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 200,
+                src: VReg(0),
+                size: OpSize::S8,
+            });
+        }
+        let mut accumulated = VReg(0);
+        for byte in 1..8 {
+            let shifted = VReg(7 + byte);
+            insts.push(MInst::ShlImm {
+                dst: shifted,
+                src: VReg(byte),
+                imm: byte as u8 * 8,
+            });
+            let merged = VReg(14 + byte);
+            insts.push(MInst::Or {
+                dst: merged,
+                lhs: accumulated,
+                rhs: shifted,
+            });
+            accumulated = merged;
+        }
+        insts.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 100,
+            src: accumulated,
+            size: OpSize::S64,
+        });
+        make_func(insts, 22)
+    }
+
+    #[test]
+    fn folds_little_endian_byte_load_pack_into_one_native_load() {
+        let mut func = byte_load_pack(false);
+        fold_contiguous_load_packs(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [
+                MInst::Load {
+                    dst: VReg(21),
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 100,
+                    src: VReg(21),
+                    size: OpSize::S64,
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn contiguous_load_pack_does_not_cross_a_memory_write() {
+        let mut func = byte_load_pack(true);
+        fold_contiguous_load_packs(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert!(!func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Load {
+                offset: 32,
+                size: OpSize::S64,
+                ..
+            }
+        )));
+        assert!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(instruction, MInst::Or { dst: VReg(21), .. }))
+        );
     }
 
     #[test]
