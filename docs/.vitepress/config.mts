@@ -149,6 +149,10 @@ export default defineConfig({
               text: "Native Register Allocation",
               link: "/internals/native-register-allocation",
             },
+            {
+              text: "Fused State SSA and Placement",
+              link: "/internals/fused-state-ssa-placement",
+            },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",

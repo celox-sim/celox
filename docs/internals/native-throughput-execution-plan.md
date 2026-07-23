@@ -6787,6 +6787,7 @@ the library suite 1,057/1,057. All three complete SIR stages and the
 
 - [Simulator architecture](./architecture.md)
 - [Native register allocation](./native-register-allocation.md)
+- [Fused StateSSA and code placement](./fused-state-ssa-placement.md)
 - [Branch-aware mux lowering](./branch-aware-mux-lowering.md)
 - [JIT roadmap](./jit-roadmap.md)
 - [Heliodor macro benchmark](../benchmarks/heliodor.md)
