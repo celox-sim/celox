@@ -108,6 +108,7 @@ struct PayloadField {
 struct LastPayloadScanPlan {
     preheader: BlockId,
     loop_blocks: Vec<BlockId>,
+    hoisted_instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
     exit: BlockId,
     exit_arguments: Vec<RegisterId>,
     exit_found_position: usize,
@@ -760,6 +761,7 @@ fn recognize_linear_bitmap_scan(
         lanes,
         bit_array_elements,
         array_shapes,
+        &HashSet::default(),
     )?;
     if predicate.dynamic_loads == 0 {
         return None;
@@ -814,20 +816,6 @@ fn recognize_last_payload_scan(
     if loop_blocks.len() != 4 || !loop_is_pure(eu, loop_blocks) {
         return None;
     }
-    if loop_blocks.iter().any(|block| {
-        eu.blocks[block]
-            .params
-            .iter()
-            .copied()
-            .chain(eu.blocks[block].instructions.iter().filter_map(def_reg))
-            .any(|value| {
-                use_blocks
-                    .get(&value)
-                    .is_some_and(|users| users.iter().any(|user| !loop_blocks.contains(user)))
-            })
-    }) {
-        return None;
-    }
     let header_index = cfg.block_index(header)?;
     let outside_predecessors = cfg.predecessors[header_index]
         .iter()
@@ -838,6 +826,29 @@ fn recognize_last_payload_scan(
         return None;
     };
     let preheader = *preheader;
+    let escaping_roots = loop_blocks
+        .iter()
+        .flat_map(|block| {
+            eu.blocks[block]
+                .params
+                .iter()
+                .copied()
+                .chain(eu.blocks[block].instructions.iter().filter_map(def_reg))
+        })
+        .filter(|value| {
+            use_blocks
+                .get(value)
+                .is_some_and(|users| users.iter().any(|user| !loop_blocks.contains(user)))
+        })
+        .collect::<HashSet<_>>();
+    let hoisted_instructions = hoist_escaping_definitions(
+        eu,
+        cfg,
+        preheader,
+        loop_blocks,
+        definitions,
+        &escaping_roots,
+    )?;
     let header_block = &eu.blocks[&header];
     let SIRTerminator::Jump(target, entry_arguments) = &eu.blocks[&preheader].terminator else {
         return None;
@@ -977,6 +988,10 @@ fn recognize_last_payload_scan(
         return None;
     }
 
+    let hoisted_values = hoisted_instructions
+        .iter()
+        .filter_map(def_reg)
+        .collect::<HashSet<_>>();
     let predicate = build_packed_expression(
         eu,
         cfg,
@@ -990,6 +1005,7 @@ fn recognize_last_payload_scan(
         lanes,
         bit_array_elements,
         array_shapes,
+        &hoisted_values,
     )?;
     if predicate.dynamic_loads == 0
         || eu.register_map[&header_block.params[found_position]].width() != 1
@@ -1001,6 +1017,7 @@ fn recognize_last_payload_scan(
     Some(LastPayloadScanPlan {
         preheader,
         loop_blocks,
+        hoisted_instructions,
         exit,
         exit_arguments: exit_arguments.to_vec(),
         exit_found_position,
@@ -1165,6 +1182,7 @@ fn recognize_sparse_bitmap_loop(
             lanes,
             bit_array_elements,
             array_shapes,
+            &HashSet::default(),
         ) else {
             continue;
         };
@@ -1871,6 +1889,7 @@ fn recognize_orientation(
             lanes,
             bit_array_elements,
             array_shapes,
+            &HashSet::default(),
         ) else {
             continue;
         };
@@ -2269,6 +2288,7 @@ fn build_packed_expression(
     lanes: usize,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
     array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
+    hoisted_values: &HashSet<RegisterId>,
 ) -> Option<PackedExpression> {
     let root = strip_boolean_identity(eu, definitions, root);
     let mut nodes = Vec::new();
@@ -2354,6 +2374,7 @@ fn build_packed_expression(
                         index,
                         lanes,
                         array_shapes,
+                        hoisted_values,
                         *lhs,
                         *rhs,
                     )
@@ -2368,6 +2389,7 @@ fn build_packed_expression(
                         index,
                         lanes,
                         array_shapes,
+                        hoisted_values,
                         *lhs,
                         *rhs,
                     )?;
@@ -2472,6 +2494,7 @@ fn match_lane_eq(
     index: RegisterId,
     lanes: usize,
     array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
+    hoisted_values: &HashSet<RegisterId>,
     lhs: RegisterId,
     rhs: RegisterId,
 ) -> Option<PackedNode> {
@@ -2509,8 +2532,9 @@ fn match_lane_eq(
             continue;
         }
         let value_definition = definitions.get(&value).copied()?;
-        if loop_blocks.contains(&value_definition.block())
-            || !cfg.dominates(value_definition.block(), preheader)
+        let defined_in_loop = loop_blocks.contains(&value_definition.block());
+        if defined_in_loop && !hoisted_values.contains(&value)
+            || !defined_in_loop && !cfg.dominates(value_definition.block(), preheader)
         {
             continue;
         }
@@ -3604,6 +3628,7 @@ fn apply_last_payload_scan(
     let (mask, predicate_instructions) = emitter.emit(&plan.predicate);
     let nonempty = fresh_register(eu, next_register, unsigned_type(1));
     let preheader = eu.blocks.get_mut(&plan.preheader).unwrap();
+    preheader.instructions.extend(plan.hoisted_instructions);
     preheader.instructions.extend(predicate_instructions);
     preheader
         .instructions
@@ -4534,24 +4559,26 @@ mod tests {
         let lane = builder.bit(3);
         let predicate = builder.bit(1);
         let next_found = builder.bit(1);
+        let mut header_instructions = vec![
+            SIRInstruction::Load(
+                lane,
+                address(0),
+                SIROffset::Element {
+                    index,
+                    element_width: 3,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                3,
+            ),
+            SIRInstruction::Binary(predicate, lane, BinaryOp::Eq, query),
+            SIRInstruction::Mux(next_found, predicate, one1, found),
+        ];
+        let escaped_zero = builder.imm(&mut header_instructions, 5, 0);
         let header = BasicBlock {
             id: BlockId(1),
             params: vec![remaining, index, found, payload],
-            instructions: vec![
-                SIRInstruction::Load(
-                    lane,
-                    address(0),
-                    SIROffset::Element {
-                        index,
-                        element_width: 3,
-                        bit_offset: 0,
-                        dynamic_bit_offset: None,
-                    },
-                    3,
-                ),
-                SIRInstruction::Binary(predicate, lane, BinaryOp::Eq, query),
-                SIRInstruction::Mux(next_found, predicate, one1, found),
-            ],
+            instructions: header_instructions,
             terminator: SIRTerminator::Branch {
                 cond: predicate,
                 true_block: (BlockId(2), Vec::new()),
@@ -4608,10 +4635,17 @@ mod tests {
         };
         let result_found = builder.bit(1);
         let result_payload = builder.bit(5);
+        let normalized_payload = builder.bit(5);
         let exit = BasicBlock {
             id: BlockId(5),
             params: vec![result_found, result_payload],
             instructions: vec![
+                SIRInstruction::Binary(
+                    normalized_payload,
+                    result_payload,
+                    BinaryOp::Add,
+                    escaped_zero,
+                ),
                 SIRInstruction::Store(
                     address(2),
                     SIROffset::Static(0),
@@ -4624,7 +4658,7 @@ mod tests {
                     address(3),
                     SIROffset::Static(0),
                     5,
-                    result_payload,
+                    normalized_payload,
                     Vec::new(),
                     Vec::new(),
                 ),
