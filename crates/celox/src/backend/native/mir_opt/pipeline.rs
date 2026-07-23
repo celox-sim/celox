@@ -131,6 +131,10 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
 
 fn run_target_bit_folds(runner: &mut PassRunner<'_>) {
     if runner.has_bmi2() {
+        runner.run(
+            "fold_byte_enable_spread_to_pdep",
+            fold_byte_enable_spread_to_pdep,
+        );
         runner.run("fold_deposit_chain_to_pdep", fold_deposit_chain_to_pdep);
         runner.run("fold_extract_chain_to_pext", fold_extract_chain_to_pext);
         runner.run("fold_xor_chain_to_pext", fold_xor_chain_to_pext);

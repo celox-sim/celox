@@ -381,6 +381,15 @@ enum Replacement {
         bit: RegisterId,
         width: usize,
     },
+    /// Replace eight byte-wide Mux lanes controlled by the corresponding
+    /// bits of one byte-enable value with one word-wide masked blend.
+    ByteMuxBlend {
+        inst_idx: usize,
+        dst: RegisterId,
+        enable: RegisterId,
+        then_value: RegisterId,
+        else_value: RegisterId,
+    },
     /// Replace a recursively isomorphic lane DAG with a bottom-up vector DAG.
     /// The sequence is already in SSA dominance order.
     LaneDag {
@@ -1202,6 +1211,91 @@ fn contiguous_concat_source(
     .then_some((source, source_base))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ByteMuxBlend {
+    enable: RegisterId,
+    then_value: RegisterId,
+    else_value: RegisterId,
+}
+
+/// Recognize a byte-enable update represented as eight scalar lane Muxes:
+///
+/// ```text
+/// concat(
+///   enable[7] ? then[63:56] : else[63:56],
+///   ...
+///   enable[0] ? then[7:0]   : else[7:0])
+/// ```
+///
+/// This shape is common in byte-write memories. Keeping it scalar makes
+/// native ISel emit eight shifts, masks and selects followed by a Concat.
+/// The replacement expands the eight enable bits to byte masks and performs
+/// one word-wide blend.
+fn byte_mux_blend(
+    args: &[RegisterId],
+    register_map: &HashMap<RegisterId, RegisterType>,
+    defs: &HashMap<RegisterId, SIRInstruction<RegionedAbsoluteAddr>>,
+) -> Option<ByteMuxBlend> {
+    if args.len() != 8
+        || !args
+            .iter()
+            .all(|argument| register_map.get(argument).is_some_and(|ty| ty.width() == 8))
+    {
+        return None;
+    }
+
+    let mut enable = None;
+    let mut then_value = None;
+    let mut else_value = None;
+    for (argument_index, argument) in args.iter().copied().enumerate() {
+        let lane = 7usize.checked_sub(argument_index)?;
+        let SIRInstruction::Mux(_, condition, then_lane, else_lane) = defs.get(&argument)? else {
+            return None;
+        };
+        let BitSource::Register {
+            source: lane_enable,
+            bit_position,
+        } = resolve_bit_source(*condition, defs)?
+        else {
+            return None;
+        };
+        if bit_position != lane
+            || register_map
+                .get(&lane_enable)
+                .is_none_or(|ty| ty.width() > 8)
+        {
+            return None;
+        }
+        let then_lane = resolve_contiguous_slice(*then_lane, register_map, defs)?;
+        let else_lane = resolve_contiguous_slice(*else_lane, register_map, defs)?;
+        if then_lane.start != lane * 8
+            || then_lane.width != 8
+            || else_lane.start != lane * 8
+            || else_lane.width != 8
+            || register_map
+                .get(&then_lane.source)
+                .is_none_or(|ty| ty.width() < 64)
+            || register_map
+                .get(&else_lane.source)
+                .is_none_or(|ty| ty.width() < 64)
+            || enable.is_some_and(|known| known != lane_enable)
+            || then_value.is_some_and(|known| known != then_lane.source)
+            || else_value.is_some_and(|known| known != else_lane.source)
+        {
+            return None;
+        }
+        enable.get_or_insert(lane_enable);
+        then_value.get_or_insert(then_lane.source);
+        else_value.get_or_insert(else_lane.source);
+    }
+
+    Some(ByteMuxBlend {
+        enable: enable?,
+        then_value: then_value?,
+        else_value: else_value?,
+    })
+}
+
 /// Find contiguous shift groups in a non-in-place Concat.
 /// Returns groups as (src_start, dest_start, length).
 fn find_shift_groups(
@@ -1440,6 +1534,20 @@ fn vectorize_concats(
                     prefix_width,
                 });
             }
+            packed_vectors.insert(key, *dst);
+            continue;
+        }
+
+        if concat_width == 64
+            && let Some(blend) = byte_mux_blend(args, register_map, defs)
+        {
+            replacements.push(Replacement::ByteMuxBlend {
+                inst_idx: idx,
+                dst: *dst,
+                enable: blend.enable,
+                then_value: blend.then_value,
+                else_value: blend.else_value,
+            });
             packed_vectors.insert(key, *dst);
             continue;
         }
@@ -1797,6 +1905,66 @@ fn vectorize_concats(
                     ],
                 );
             }
+            Replacement::ByteMuxBlend {
+                inst_idx,
+                dst,
+                enable,
+                then_value,
+                else_value,
+            } => {
+                // Spread bit i of the byte enable to bit 8*i, then multiply
+                // those isolated bits by 0xff. The masks after every spread
+                // step prevent carries between lanes.
+                let shift28 = alloc_unsigned_reg(next_reg, register_map, 5);
+                let shifted28 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let spread28 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let mask28 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let masked28 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let shift14 = alloc_unsigned_reg(next_reg, register_map, 4);
+                let shifted14 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let spread14 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let mask14 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let masked14 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let shift7 = alloc_unsigned_reg(next_reg, register_map, 3);
+                let shifted7 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let spread7 = alloc_unsigned_reg(next_reg, register_map, 64);
+                let lane_bits = alloc_unsigned_reg(next_reg, register_map, 64);
+                let isolated_lanes = alloc_unsigned_reg(next_reg, register_map, 64);
+                let ff = alloc_unsigned_reg(next_reg, register_map, 8);
+                let byte_mask = alloc_unsigned_reg(next_reg, register_map, 64);
+                let difference = alloc_unsigned_reg(next_reg, register_map, 64);
+                let selected_difference = alloc_unsigned_reg(next_reg, register_map, 64);
+                instructions.splice(
+                    inst_idx..=inst_idx,
+                    [
+                        SIRInstruction::Imm(shift28, SIRValue::new(28u8)),
+                        SIRInstruction::Binary(shifted28, enable, BinaryOp::Shl, shift28),
+                        SIRInstruction::Binary(spread28, enable, BinaryOp::Or, shifted28),
+                        SIRInstruction::Imm(mask28, SIRValue::new(0x0000_000f_0000_000f_u64)),
+                        SIRInstruction::Binary(masked28, spread28, BinaryOp::And, mask28),
+                        SIRInstruction::Imm(shift14, SIRValue::new(14u8)),
+                        SIRInstruction::Binary(shifted14, masked28, BinaryOp::Shl, shift14),
+                        SIRInstruction::Binary(spread14, masked28, BinaryOp::Or, shifted14),
+                        SIRInstruction::Imm(mask14, SIRValue::new(0x0003_0003_0003_0003_u64)),
+                        SIRInstruction::Binary(masked14, spread14, BinaryOp::And, mask14),
+                        SIRInstruction::Imm(shift7, SIRValue::new(7u8)),
+                        SIRInstruction::Binary(shifted7, masked14, BinaryOp::Shl, shift7),
+                        SIRInstruction::Binary(spread7, masked14, BinaryOp::Or, shifted7),
+                        SIRInstruction::Imm(lane_bits, SIRValue::new(0x0101_0101_0101_0101_u64)),
+                        SIRInstruction::Binary(isolated_lanes, spread7, BinaryOp::And, lane_bits),
+                        SIRInstruction::Imm(ff, SIRValue::new(0xff_u8)),
+                        SIRInstruction::Binary(byte_mask, isolated_lanes, BinaryOp::Mul, ff),
+                        SIRInstruction::Binary(difference, then_value, BinaryOp::Xor, else_value),
+                        SIRInstruction::Binary(
+                            selected_difference,
+                            difference,
+                            BinaryOp::And,
+                            byte_mask,
+                        ),
+                        SIRInstruction::Binary(dst, else_value, BinaryOp::Xor, selected_difference),
+                    ],
+                );
+            }
             Replacement::LaneDag {
                 inst_idx,
                 instructions: new_instructions,
@@ -1841,6 +2009,95 @@ mod tests {
             entry_block_id: BlockId(0),
             blocks,
             register_map,
+        }
+    }
+
+    #[test]
+    fn packs_byte_enable_mux_lanes_into_one_word_blend() {
+        let unsigned = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut register_map = [
+            (RegisterId(0), unsigned(8)),
+            (RegisterId(1), unsigned(64)),
+            (RegisterId(2), unsigned(64)),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+        let mut instructions = Vec::new();
+        let mut lanes = Vec::new();
+        let mut next = 3usize;
+        for lane in 0..8 {
+            let condition = RegisterId(next);
+            let then_lane = RegisterId(next + 1);
+            let else_lane = RegisterId(next + 2);
+            let result = RegisterId(next + 3);
+            next += 4;
+            register_map.insert(condition, unsigned(1));
+            register_map.insert(then_lane, unsigned(8));
+            register_map.insert(else_lane, unsigned(8));
+            register_map.insert(result, unsigned(8));
+            instructions.push(SIRInstruction::Slice(condition, RegisterId(0), lane, 1));
+            instructions.push(SIRInstruction::Slice(then_lane, RegisterId(1), lane * 8, 8));
+            instructions.push(SIRInstruction::Slice(else_lane, RegisterId(2), lane * 8, 8));
+            instructions.push(SIRInstruction::Mux(result, condition, then_lane, else_lane));
+            lanes.push(result);
+        }
+        lanes.reverse();
+        let output = RegisterId(next);
+        register_map.insert(output, unsigned(64));
+        instructions.push(SIRInstruction::Concat(output, lanes));
+        instructions.push(SIRInstruction::RuntimeEvent {
+            site_id: 0,
+            args: vec![output],
+        });
+
+        let mut eu = make_eu(instructions, register_map);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().params =
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)];
+        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        eu.verify();
+
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Concat(..) | SIRInstruction::Slice(..) | SIRInstruction::Mux(..)
+        )));
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(_, _, BinaryOp::Mul, _)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(_, _, BinaryOp::Xor, _)
+                ))
+                .count(),
+            2
+        );
+
+        for enable in 0u64..=u8::MAX.into() {
+            let spread28 = (enable | (enable << 28)) & 0x0000_000f_0000_000f;
+            let spread14 = (spread28 | (spread28 << 14)) & 0x0003_0003_0003_0003;
+            let spread7 = (spread14 | (spread14 << 7)) & 0x0101_0101_0101_0101;
+            let actual = spread7 * 0xff;
+            let expected = (0..8).fold(0u64, |mask, lane| {
+                mask | if enable & (1 << lane) != 0 {
+                    0xff << (lane * 8)
+                } else {
+                    0
+                }
+            });
+            assert_eq!(actual, expected);
         }
     }
 

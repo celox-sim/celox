@@ -310,6 +310,14 @@ Use clusters are formed from exact ordinary and phi-edge uses using CFG
 dominance, loop membership, and block proximity. Clustering does not create
 one mandatory VReg spanning the clusters.
 
+### Normative Milestone 1 source contract
+
+Availability of a `StateVersion` at a frontier is necessary but not
+sufficient. Every frontier leaf must name an executable, phase-correct
+materialization source at the target use cluster. A frontier is therefore a
+proved cut at which code generation can obtain a value, not merely a point at
+which the backwards purity walk stops.
+
 Every rematerialization frontier leaf is exactly one of:
 
 ```text
@@ -325,6 +333,10 @@ names the exact Store site and StateVersion, and that version must reach the
 reload point. A persistent-state read names the FF/input snapshot phase.
 `ControlMerge` reproduces branch priority and control dependence. No recipe
 may contain an effectful operation or an unhandled loop-carried cycle.
+Several reaching definitions represented by one valid `MemoryPhi` are not an
+ambiguous StateSSA version. A plan which cannot yet lower that merge is
+classified as `UnsupportedMemoryPhiMaterialization` or
+`UnsupportedControlMergeRecipe`, never `MultipleReachingDefinitions`.
 
 The explicit plan has this shape:
 
@@ -366,6 +378,10 @@ KeepPackedReload {
 ```
 
 Store invalidation follows these identities and versions, not just an address.
+The `extract_merge_recipe` must reconstruct the exact requested range,
+including partial-range priority. Each named preserved Store has a reverse
+dependency to the plan; deleting or relocating it invalidates the plan unless
+the same Store identity and StateVersion contract is re-established.
 
 The materialization planner runs before global placement. It chooses an
 initial plan from:
@@ -397,6 +413,10 @@ The initial source-action order is
 edge also allowed. Cluster repair only refines the partition of the finite
 original use-site set and never rejoins split clusters. The lexicographic rank
 `(unsplit use pairs, direct plans, rematerialize plans)` strictly decreases.
+Here `unsplit use pairs` is the sum of unordered use pairs still sharing a
+cluster. An action downgrade never moves in the reverse direction, and a
+partition repair only splits existing clusters. Consequently each source
+action is downgraded at most twice and each use pair is split at most once.
 
 ## Global code placement
 
@@ -1054,6 +1074,36 @@ generation takes 52.738 seconds and generated execution takes 64.973 seconds.
 The structural allocation reduction is established, but this single runtime
 sample does not establish a throughput improvement over the noisy 61.9--64.7
 second range measured immediately before it.
+
+A fresh profile after removing late forwarding identified a different
+HDL-specific loss in the hottest generated blocks. A 64-bit byte-write update
+arrived in optimized SIR as eight byte slices, eight one-bit Muxes, and a
+Concat. Scalar lowering expanded each lane independently and then rebuilt the
+word, producing large groups of shifts, masks, selects, and ORs. One
+representative 944-instruction optimized MIR block contained 177 shifts, 187
+ANDs, 138 ORs, and 70 selects; post-allocation it also required 161 stack
+references in 1,526 emitted x86 instructions.
+
+The retained optimization recognizes only the exact eight-lane byte-enable
+shape in two-state SIR. It replaces the scalar lanes with one 64-bit blend and
+expands the eight enable bits into byte masks with target-independent SWAR
+operations. On BMI2 targets, MIR recognizes that complete constant sequence
+and selects one `PDEP`; SIR does not acquire a target-specific operation. The
+rewrite changes the complete fused function as follows:
+
+| Stage | No late forwarding | Byte blend plus BMI2 fold | Delta |
+|---|---:|---:|---:|
+| x86 instructions | 148,370 | 147,496 | -874 |
+| spill frame | 4,336 bytes | 4,312 bytes | -24 bytes |
+
+All eight enable values in the Heliodor hot path select `PDEP`. The old hot
+block identities cannot be reused after this CFG/code-layout change, so any
+further attribution requires a fresh JIT map and profile. Exhaustively testing
+all 256 byte-enable masks establishes the mask expansion, while the complete
+Linux workload reaches the exact `cy=9ae070 x3=aa pass=1` marker with 67.374
+seconds of code generation and 65.914 seconds of generated execution. The
+structural reduction alone is not a runtime-speedup claim; this sample remains
+inside the recent timing variation.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,

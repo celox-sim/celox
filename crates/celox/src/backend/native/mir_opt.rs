@@ -4178,6 +4178,108 @@ fn is_const_one(reg: VReg, defs: &HashMap<VReg, MInst>) -> bool {
     matches!(defs.get(&reg), Some(MInst::LoadImm { value: 1, .. }))
 }
 
+/// Fold the exact SWAR expansion of an 8-bit byte enable into BMI2 PDEP.
+///
+/// The SIR byte-lane blend deliberately expresses the expansion with ordinary
+/// arithmetic so its semantics remain target-independent:
+///
+/// ```text
+/// x = (x | x << 28) & 0x0000000f0000000f
+/// x = (x | x << 14) & 0x0003000300030003
+/// x = (x | x <<  7) & 0x0101010101010101
+/// ```
+///
+/// On BMI2 this is exactly `pdep(enable, 0x0101010101010101)`. Matching the
+/// complete constant sequence prevents this target fold from becoming a
+/// speculative known-bits rewrite.
+fn fold_byte_enable_spread_to_pdep(func: &mut MFunction) {
+    let defs = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|instruction| {
+            instruction
+                .def()
+                .map(|definition| (definition, instruction.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for block in &mut func.blocks {
+        for instruction in &mut block.insts {
+            let Some(dst) = instruction.def() else {
+                continue;
+            };
+            let Some((enable, lane_mask)) = match_byte_enable_spread(dst, &defs) else {
+                continue;
+            };
+            *instruction = MInst::Pdep {
+                dst,
+                src: enable,
+                mask: lane_mask,
+            };
+        }
+    }
+}
+
+fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, VReg)> {
+    let (spread7, lane_mask) = and_with_constant(result, 0x0101_0101_0101_0101, defs)?;
+    let masked14 = or_with_shifted_self(spread7, 7, defs)?;
+    let (spread14, _) = and_with_constant(masked14, 0x0003_0003_0003_0003, defs)?;
+    let masked28 = or_with_shifted_self(spread14, 14, defs)?;
+    let (spread28, _) = and_with_constant(masked28, 0x0000_000f_0000_000f, defs)?;
+    let enable = or_with_shifted_self(spread28, 28, defs)?;
+    Some((enable, lane_mask))
+}
+
+fn and_with_constant(
+    result: VReg,
+    expected: u64,
+    defs: &HashMap<VReg, MInst>,
+) -> Option<(VReg, VReg)> {
+    let MInst::And { lhs, rhs, .. } = defs.get(&result)? else {
+        return None;
+    };
+    if matches!(defs.get(rhs), Some(MInst::LoadImm { value, .. }) if *value == expected) {
+        Some((*lhs, *rhs))
+    } else if matches!(defs.get(lhs), Some(MInst::LoadImm { value, .. }) if *value == expected) {
+        Some((*rhs, *lhs))
+    } else {
+        None
+    }
+}
+
+fn or_with_shifted_self(
+    result: VReg,
+    expected_shift: u8,
+    defs: &HashMap<VReg, MInst>,
+) -> Option<VReg> {
+    let MInst::Or { lhs, rhs, .. } = defs.get(&result)? else {
+        return None;
+    };
+    if shifted_source(*rhs, expected_shift, defs) == Some(*lhs) {
+        Some(*lhs)
+    } else if shifted_source(*lhs, expected_shift, defs) == Some(*rhs) {
+        Some(*rhs)
+    } else {
+        None
+    }
+}
+
+fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>) -> Option<VReg> {
+    match defs.get(&result)? {
+        MInst::ShlImm { src, imm, .. } if *imm == expected_shift => Some(*src),
+        MInst::Shl { lhs, rhs, .. }
+            if matches!(
+                defs.get(rhs),
+                Some(MInst::LoadImm { value, .. }) if *value == u64::from(expected_shift)
+            ) =>
+        {
+            Some(*lhs)
+        }
+        _ => None,
+    }
+}
+
 /// Fold a bit-deposit OR chain into BMI2 PDEP.
 ///
 /// Pattern:
@@ -9896,6 +9998,96 @@ mod tests {
             )),
             "{insts:#?}"
         );
+    }
+
+    #[test]
+    fn folds_exact_byte_enable_spread_to_pdep() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S8,
+                },
+                MInst::ShlImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 28,
+                },
+                MInst::Or {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 0x0000_000f_0000_000f,
+                },
+                MInst::And {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(3),
+                },
+                MInst::ShlImm {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 14,
+                },
+                MInst::Or {
+                    dst: VReg(6),
+                    lhs: VReg(4),
+                    rhs: VReg(5),
+                },
+                MInst::LoadImm {
+                    dst: VReg(7),
+                    value: 0x0003_0003_0003_0003,
+                },
+                MInst::And {
+                    dst: VReg(8),
+                    lhs: VReg(6),
+                    rhs: VReg(7),
+                },
+                MInst::ShlImm {
+                    dst: VReg(9),
+                    src: VReg(8),
+                    imm: 7,
+                },
+                MInst::Or {
+                    dst: VReg(10),
+                    lhs: VReg(8),
+                    rhs: VReg(9),
+                },
+                MInst::LoadImm {
+                    dst: VReg(11),
+                    value: 0x0101_0101_0101_0101,
+                },
+                MInst::And {
+                    dst: VReg(12),
+                    lhs: VReg(10),
+                    rhs: VReg(11),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(12),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            13,
+        );
+
+        fold_byte_enable_spread_to_pdep(&mut func);
+
+        assert!(matches!(
+            func.blocks[0].insts[12],
+            MInst::Pdep {
+                dst: VReg(12),
+                src: VReg(0),
+                mask: VReg(11),
+            }
+        ));
     }
 
     #[test]
