@@ -1,10 +1,10 @@
 # Fused state SSA and code placement
 
-> **Status:** Milestone 0 feasibility analysis is approved. Later milestones
-> require the measured coverage result and a reviewed materialization/staging
-> specification before implementation. This document does not authorize a
-> production switch. Each code-generating milestone has an independent
-> semantic, generated-code, and Linux execution gate.
+> **Status:** Milestone 0 is complete. Its measured coverage passes the stop
+> conditions, so the analysis-only Milestone 1 model is authorized. This
+> document does not authorize a production switch. Each code-generating
+> milestone has an independent semantic, generated-code, and Linux execution
+> gate.
 
 ## Objective
 
@@ -566,6 +566,56 @@ Stop if:
   the measured packed-work gap.
 
 This milestone must leave generated SIR and MIR byte-identical.
+
+#### Milestone 0 result
+
+The complete Heliodor fused function was analyzed with semantic exit and load
+roots. A representative run produced:
+
+| Measure | Result |
+|---|---:|
+| SIR blocks / instructions | 14,138 / 103,336 |
+| Static accesses / logical segments | 32,476 / 22,978 |
+| MemoryDef fragments / overlap edges | 26,618 / 37,734 |
+| MemoryPhi operands | 7,281 |
+| Largest access fragmentation | 38 |
+| Largest object version set | 475 |
+| FF demands / admitted FF loads | 3,666 / 2,485 |
+| Candidate backing stores | 1,282 |
+| Immediately removable backing stores | 0 |
+| Materialized range fragments | 330,172 |
+| Admitted / partial / rejected objects | 942 / 2 / 261 |
+| Analysis time | 1.79 s |
+
+All 3,666 demands and 3,187 noncandidate/exit roots were independently
+resolved and verified. The candidate backing stores remain required by the
+final public state, so the result specifically supports forwarding promoted
+values to FF uses while retaining final stores; it rejects a store-deletion
+only implementation.
+
+Instruction sampling used 10,219 samples in `eval_comb_apply_ff`. Mapping each
+sample to the final emitted instruction and to the candidate producer block
+gave:
+
+| Emitted operation | All samples | Candidate-block samples | Share |
+|---|---:|---:|---:|
+| zero-extending memory load | 346 | 217 | 62.7% |
+| shift | 1,062 | 587 | 55.3% |
+| mask `and` | 1,628 | 676 | 41.5% |
+| memory store | 855 | 443 | 51.8% |
+| all emitted operations | 10,219 | 3,638 | 35.6% |
+
+Block attribution is deliberately conservative when a block contains both a
+candidate cone and unrelated work. It is nevertheless large enough to pass
+the coverage stop condition. Later rewriting gates compare the removed
+instructions directly, rather than treating these percentages as predicted
+speedup.
+
+With analysis disabled and enabled, SHA-256 hashes were identical for all
+four complete outputs: pre-optimized SIR, post-optimized SIR,
+native-optimized SIR, and final MIR. The persistent range representation was
+also exercised by adversarial overlap fixtures and did not eagerly construct
+the quadratic overlap graph.
 
 ### Milestone 1: materialization and FF phase model
 
