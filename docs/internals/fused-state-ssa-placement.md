@@ -787,6 +787,25 @@ explain the native/Veryl gap while all public backing Stores remain. The
 earlier 35.6% producer-block attribution measured where candidate values were
 computed, not work removable by this plan.
 
+Two code-generation probes independently confirmed this gate. They are
+negative experiments and are not retained:
+
+| Probe | final Loads | final Concats | fused x86 instructions | hot `b4212` x86 instructions |
+|---|---:|---:|---:|---:|
+| baseline after mixed-width Concat canonicalization | 21,421 | 5,783 | 152,590 | 1,765 |
+| forward every locally contained Load as a Slice | 20,917 | 5,759 | 152,230 | 1,776 |
+| fold only adjacent Store/split-Load/Concat round trips | 21,371 | 5,757 | 152,609 | 1,777 |
+
+The broad probe reduced total static code slightly but made the hottest large
+block worse. Restricting the rewrite to a complete adjacent round trip still
+made both total code and the hot block worse. A native narrow packed Load is
+often cheaper than a shift/mask, and retaining the public Store while carrying
+its source to the later use converts a memory home into a longer live range
+and reload pressure. Static Load or Concat deletion is therefore not evidence
+of profitability. The Store and its packed reload may be removed together
+only under a plan which proves the Store unobservable; otherwise
+`KeepPackedReload` is an intentional materialization choice.
+
 Milestone 1 therefore fails the profitability gate. Milestone 2 must not start
 from this plan. A future restart requires either:
 
