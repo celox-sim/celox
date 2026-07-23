@@ -289,6 +289,7 @@ struct ResolverStats {
     materialized_fragments: usize,
     phi_operands: usize,
     phi_versions: BTreeSet<(RegionedAbsoluteAddr, usize, usize, usize)>,
+    phi_sources: BTreeMap<LogicalSource, Vec<LogicalSource>>,
     maximum_versions_per_object: BTreeMap<RegionedAbsoluteAddr, BTreeSet<LogicalSource>>,
 }
 
@@ -494,12 +495,14 @@ impl<'a> DemandResolver<'a> {
                             if self.stats.phi_versions.insert(identity) {
                                 self.stats.phi_operands += sources.len();
                             }
-                            LogicalSource::Phi {
+                            let phi = LogicalSource::Phi {
                                 object: key.range.object,
                                 block,
                                 start,
                                 end,
-                            }
+                            };
+                            self.stats.phi_sources.insert(phi, sources);
+                            phi
                         };
                         result.push(Piece { start, end, source });
                     }
@@ -791,31 +794,16 @@ pub(crate) fn analyze(
         })?;
         let mut candidate = true;
         let mut load_stores = BTreeSet::<ProgramPoint>::new();
+        let mut visited_sources = BTreeSet::new();
         for piece in &pieces {
-            match piece.source {
-                LogicalSource::Definition(definition) => {
-                    let definition = definitions[&definition];
-                    if definition.in_ff_suffix {
-                        report.rejected_ff_definition += 1;
-                        candidate = false;
-                    }
-                    if definition.effectful {
-                        report.rejected_effectful_definition += 1;
-                        candidate = false;
-                    }
-                    if !definition.in_ff_suffix && !definition.effectful {
-                        load_stores.insert(definition.point);
-                    }
-                }
-                LogicalSource::LiveOnEntry => {
-                    report.rejected_live_on_entry += 1;
-                    candidate = false;
-                }
-                LogicalSource::Unknown(_) | LogicalSource::Phi { .. } => {
-                    report.rejected_unknown += 1;
-                    candidate = false;
-                }
-            }
+            candidate &= classify_candidate_source(
+                piece.source,
+                &resolver.stats.phi_sources,
+                &definitions,
+                &mut load_stores,
+                &mut visited_sources,
+                &mut report,
+            );
         }
         if candidate {
             report.candidate_removable_loads += 1;
@@ -834,6 +822,55 @@ pub(crate) fn analyze(
         .unwrap_or(0);
     report.origins = classify_candidate_origins(eu, &candidate_stores, &store_sources);
     Ok(report)
+}
+
+fn classify_candidate_source(
+    source: LogicalSource,
+    phi_sources: &BTreeMap<LogicalSource, Vec<LogicalSource>>,
+    definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
+    stores: &mut BTreeSet<ProgramPoint>,
+    visited: &mut BTreeSet<LogicalSource>,
+    report: &mut FeasibilityReport,
+) -> bool {
+    if !visited.insert(source) {
+        return true;
+    }
+    match source {
+        LogicalSource::Definition(point) => {
+            let definition = definitions[&point];
+            let mut admissible = true;
+            if definition.in_ff_suffix {
+                report.rejected_ff_definition += 1;
+                admissible = false;
+            }
+            if definition.effectful {
+                report.rejected_effectful_definition += 1;
+                admissible = false;
+            }
+            if admissible {
+                stores.insert(point);
+            }
+            admissible
+        }
+        LogicalSource::LiveOnEntry => {
+            report.rejected_live_on_entry += 1;
+            false
+        }
+        LogicalSource::Unknown(_) => {
+            report.rejected_unknown += 1;
+            false
+        }
+        phi @ LogicalSource::Phi { .. } => {
+            let Some(inputs) = phi_sources.get(&phi) else {
+                report.rejected_unknown += 1;
+                return false;
+            };
+            inputs.iter().copied().fold(true, |admissible, input| {
+                classify_candidate_source(input, phi_sources, definitions, stores, visited, report)
+                    && admissible
+            })
+        }
+    }
 }
 
 fn range_endpoints(accesses: &[(BitRange, bool)]) -> BTreeMap<RegionedAbsoluteAddr, Vec<usize>> {
@@ -1049,6 +1086,111 @@ mod tests {
         assert_eq!(report.maximum_fragments_per_access, NARROW);
         assert!(report.overlap_edges >= NARROW * NARROW);
         assert_eq!(report.materialized_range_fragments, 0);
+    }
+
+    #[test]
+    fn admits_diamond_memory_phi_with_two_comb_definitions() {
+        let stable = address(STABLE_REGION);
+        let working = address(WORKING_REGION);
+        let blocks = [
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u64))],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(0x12u64)),
+                        SIRInstruction::Store(
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(1),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+            ),
+            (
+                BlockId(2),
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(RegisterId(2), SIRValue::new(0x34u64)),
+                        SIRInstruction::Store(
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(2),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+            ),
+            (
+                BlockId(3),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(4), Vec::new()),
+                },
+            ),
+            (
+                BlockId(4),
+                BasicBlock {
+                    id: BlockId(4),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Load(RegisterId(3), stable, SIROffset::Static(0), 8),
+                        SIRInstruction::Store(
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(3),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ];
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().collect(),
+            register_map: [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+                (RegisterId(3), bit(8)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, BlockId(4)).unwrap();
+        assert_eq!(report.demanded_ff_loads, 1);
+        assert_eq!(report.candidate_removable_loads, 1);
+        assert_eq!(report.candidate_backing_stores, 2);
+        assert_eq!(report.memory_phi_operands, 2);
     }
 
     #[test]
