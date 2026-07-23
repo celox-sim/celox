@@ -589,6 +589,10 @@ pub enum ChainedEmitError {
         phase: &'static str,
         error: crate::backend::native::mir_verify::MirVerifyError,
     },
+    Analysis {
+        phase: &'static str,
+        message: String,
+    },
     Regalloc(crate::backend::native::regalloc::RegallocError),
     Input(EmitInputError),
     SsaDestruction(SsaDestructionError),
@@ -600,6 +604,7 @@ impl fmt::Display for ChainedEmitError {
         match self {
             Self::Sir { phase, error } => write!(f, "{phase}: {error}"),
             Self::Mir { phase, error } => write!(f, "{phase}: {error}"),
+            Self::Analysis { phase, message } => write!(f, "{phase}: {message}"),
             Self::Regalloc(error) => error.fmt(f),
             Self::Input(error) => error.fmt(f),
             Self::SsaDestruction(error) => error.fmt(f),
@@ -613,6 +618,7 @@ impl std::error::Error for ChainedEmitError {
         match self {
             Self::Sir { error, .. } => Some(error),
             Self::Mir { error, .. } => Some(error),
+            Self::Analysis { .. } => None,
             Self::Regalloc(error) => Some(error),
             Self::Input(error) => Some(error),
             Self::SsaDestruction(error) => Some(error),
@@ -4131,6 +4137,21 @@ fn emit_chained_eu_groups(
             crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
             verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
         }
+    }
+    if std::env::var_os("CELOX_FUSED_STATE_SSA_FEASIBILITY").is_some()
+        && let Some(suffix_entry) = stable_suffix_entry
+    {
+        let start = crate::timing::now();
+        let report =
+            crate::optimizer::coalescing::analyze_fused_state_feasibility(&sir_eu, suffix_entry)
+                .map_err(|message| ChainedEmitError::Analysis {
+                    phase: "fused StateSSA feasibility",
+                    message,
+                })?;
+        eprintln!(
+            "[fused-state-ssa-feasibility] label={label} {report} elapsed={:?}",
+            start.elapsed()
+        );
     }
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;

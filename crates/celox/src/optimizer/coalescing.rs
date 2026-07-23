@@ -7,6 +7,8 @@ mod block_opt;
 pub(crate) mod commit_ops;
 pub mod cost_model;
 mod dead_working_stores;
+#[cfg(target_arch = "x86_64")]
+mod fused_state_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
@@ -78,6 +80,14 @@ pub(crate) fn forward_stable_static_slots_from(
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     pass_vectorize_concat::remove_dead_definitions(eu);
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn analyze_fused_state_feasibility(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    ff_entry: BlockId,
+) -> Result<fused_state_feasibility::FeasibilityReport, String> {
+    fused_state_feasibility::analyze(eu, ff_entry).map_err(|error| error.to_string())
 }
 
 #[cfg(target_arch = "x86_64")]
