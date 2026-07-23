@@ -14,7 +14,7 @@ use super::state_ssa::StatePhaseMap;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
-    STABLE_REGION,
+    SIRTerminator, STABLE_REGION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -56,7 +56,8 @@ type ObjectVersion = Version<RegionedAbsoluteAddr, ProgramPoint>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Usage {
     DefinitionInput(ProgramPoint),
-    FfLoad(ProgramPoint),
+    Load(ProgramPoint),
+    Exit(BlockId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -775,6 +776,8 @@ pub(crate) fn analyze(
     let mut definitions = BTreeMap::<ProgramPoint, MemoryDefinition>::new();
     let mut accesses = Vec::<(BitRange, bool)>::new();
     let mut demanded_loads = Vec::<(ProgramPoint, BitRange)>::new();
+    let mut object_loads =
+        BTreeMap::<RegionedAbsoluteAddr, Vec<(ProgramPoint, Option<BitRange>)>>::new();
     let mut store_sources = BTreeMap::<ProgramPoint, RegisterId>::new();
 
     for (block, &block_id) in cfg.block_ids.iter().enumerate() {
@@ -787,21 +790,27 @@ pub(crate) fn analyze(
                 SIRInstruction::Load(_, address, offset, width)
                     if address.region == STABLE_REGION =>
                 {
-                    if let SIROffset::Static(start) = offset
-                        && let Some(range) = BitRange::new(*address, *start, *width)
-                    {
+                    let range = match offset {
+                        SIROffset::Static(start) => BitRange::new(*address, *start, *width),
+                        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                    };
+                    if let Some(range) = range {
                         accesses.push((range, false));
                         if ff_blocks.contains(&block_id) {
                             demanded_loads.push((point, range));
-                            object_events.entry(*address).or_default().push((
-                                block,
-                                Event::Use {
-                                    variable: *address,
-                                    usage: Usage::FfLoad(point),
-                                },
-                            ));
                         }
                     }
+                    object_loads
+                        .entry(*address)
+                        .or_default()
+                        .push((point, range));
+                    object_events.entry(*address).or_default().push((
+                        block,
+                        Event::Use {
+                            variable: *address,
+                            usage: Usage::Load(point),
+                        },
+                    ));
                 }
                 SIRInstruction::Store(address, offset, width, source, triggers, captures)
                     if address.region == STABLE_REGION =>
@@ -904,6 +913,19 @@ pub(crate) fn analyze(
     }
     let mut candidate_stores = BTreeSet::<ProgramPoint>::new();
     let mut candidate_loads = BTreeSet::<ProgramPoint>::new();
+    let mut required_stores = BTreeSet::<ProgramPoint>::new();
+    let exit_blocks = cfg
+        .block_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(block, block_id)| {
+            matches!(
+                eu.blocks[block_id].terminator,
+                SIRTerminator::Return | SIRTerminator::Error(_)
+            )
+            .then_some((block, *block_id))
+        })
+        .collect::<Vec<_>>();
     for (object, demanded_loads) in demanded_by_object {
         let sparse_events =
             object_events
@@ -925,6 +947,12 @@ pub(crate) fn analyze(
         for (block, event) in sparse_events {
             events[block].push(event);
         }
+        for &(block, block_id) in &exit_blocks {
+            events[block].push(Event::Use {
+                variable: object,
+                usage: Usage::Exit(block_id),
+            });
+        }
         let state_ssa = ssa::build(&cfg, &events).map_err(FeasibilityError::StateSsa)?;
         let definition_inputs = definition_points
             .into_iter()
@@ -942,7 +970,7 @@ pub(crate) fn analyze(
         let mut resolver =
             DemandResolver::new(&state_ssa, &endpoints, &definitions, &definition_inputs);
         for (point, range) in demanded_loads {
-            let start = state_ssa.uses.get(&Usage::FfLoad(point)).copied().ok_or(
+            let start = state_ssa.uses.get(&Usage::Load(point)).copied().ok_or(
                 FeasibilityError::InvalidMemoryGraph("FF load has no reaching object version"),
             )?;
             let pieces = resolver.resolve(DemandKey {
@@ -977,6 +1005,42 @@ pub(crate) fn analyze(
                 candidate_stores.extend(load_stores);
             }
         }
+        let points = &endpoints[&object];
+        let full_range = BitRange {
+            object,
+            start: points[0],
+            end: *points.last().unwrap(),
+        };
+        for (point, range) in object_loads.remove(&object).unwrap_or_default() {
+            if candidate_loads.contains(&point) {
+                continue;
+            }
+            let version = state_ssa.uses.get(&Usage::Load(point)).copied().ok_or(
+                FeasibilityError::InvalidMemoryGraph("root load has no reaching object version"),
+            )?;
+            let range = range.unwrap_or(full_range);
+            let pieces = resolver.resolve(DemandKey { version, range })?;
+            verify_resolved_pieces(range, &pieces, &definitions, &resolver.stats.phi_sources)?;
+            collect_required_sources(&pieces, &resolver.stats.phi_sources, &mut required_stores)?;
+            report.verified_roots += 1;
+        }
+        for &(_, block_id) in &exit_blocks {
+            let version = state_ssa.uses.get(&Usage::Exit(block_id)).copied().ok_or(
+                FeasibilityError::InvalidMemoryGraph("exit root has no reaching object version"),
+            )?;
+            let pieces = resolver.resolve(DemandKey {
+                version,
+                range: full_range,
+            })?;
+            verify_resolved_pieces(
+                full_range,
+                &pieces,
+                &definitions,
+                &resolver.stats.phi_sources,
+            )?;
+            collect_required_sources(&pieces, &resolver.stats.phi_sources, &mut required_stores)?;
+            report.verified_roots += 1;
+        }
         report.memory_phi_operands += resolver.stats.phi_operands;
         report.materialized_range_fragments += resolver.stats.materialized_fragments;
         report.maximum_versions_per_object = report.maximum_versions_per_object.max(
@@ -990,7 +1054,7 @@ pub(crate) fn analyze(
         );
     }
     report.candidate_backing_stores = candidate_stores.len();
-    report.verified_roots = candidate_stores.len();
+    report.candidate_removable_stores = candidate_stores.difference(&required_stores).count();
     (report.origins, report.block_origins) =
         classify_candidate_origins(eu, &candidate_loads, &candidate_stores, &store_sources);
     report.candidate_extract_merge_instructions =
@@ -1072,6 +1136,35 @@ fn classify_candidate_source(
             })
         }
     }
+}
+
+fn collect_required_sources(
+    pieces: &[Piece],
+    phi_sources: &BTreeMap<LogicalSource, Vec<LogicalSource>>,
+    stores: &mut BTreeSet<ProgramPoint>,
+) -> Result<(), FeasibilityError> {
+    let mut work = pieces.iter().map(|piece| piece.source).collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(source) = work.pop() {
+        if !visited.insert(source) {
+            continue;
+        }
+        match source {
+            LogicalSource::Definition(point) | LogicalSource::Unknown(point) => {
+                stores.insert(point);
+            }
+            LogicalSource::LiveOnEntry => {}
+            phi @ LogicalSource::Phi { .. } => {
+                let Some(inputs) = phi_sources.get(&phi) else {
+                    return Err(FeasibilityError::InvalidMemoryGraph(
+                        "semantic root reaches an unresolved phi",
+                    ));
+                };
+                work.extend(inputs.iter().copied());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_resolved_pieces(
@@ -1404,6 +1497,56 @@ mod tests {
     }
 
     #[test]
+    fn marks_a_comb_store_dead_when_ff_publication_replaces_its_home() {
+        let stable = address(STABLE_REGION);
+        let comb = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0x12u64)),
+                SIRInstruction::Store(
+                    stable,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let ff = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    stable,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), comb), (BlockId(1), ff)].into_iter().collect(),
+            register_map: [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))]
+                .into_iter()
+                .collect(),
+        };
+
+        let report = analyze(&eu, BlockId(1)).unwrap();
+        assert_eq!(report.candidate_removable_loads, 1);
+        assert_eq!(report.candidate_backing_stores, 1);
+        assert_eq!(report.candidate_removable_stores, 1);
+        assert!(report.verifier_passed);
+    }
+
+    #[test]
     fn reports_quadratic_eager_overlap_without_materializing_edges() {
         const NARROW: usize = 128;
         let object = address(STABLE_REGION);
@@ -1686,6 +1829,7 @@ mod tests {
         assert_eq!(report.demanded_ff_loads, RANGES);
         assert_eq!(report.candidate_removable_loads, RANGES);
         assert_eq!(report.candidate_backing_stores, RANGES);
-        assert_eq!(report.materialized_range_fragments, RANGES);
+        // One fragment per FF demand plus one complete exit-root partition.
+        assert_eq!(report.materialized_range_fragments, RANGES * 2);
     }
 }
