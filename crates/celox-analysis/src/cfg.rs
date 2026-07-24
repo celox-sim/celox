@@ -344,18 +344,38 @@ impl ControlFlowGraph {
     /// Analyze a graph without changing the caller's block numbering.
     pub fn analyze(successors: Vec<Vec<usize>>, root: usize) -> Result<Self, CfgError> {
         let forward = ForwardControlFlowGraph::analyze(successors, root)?;
-        let (postdominators, postdominance_frontier) =
-            build_postdominators(&forward.predecessors, &forward.successors)?;
+        Self::finish(forward, true)
+    }
+
+    /// Analyze dominance, post-dominance, loops, and SCCs without constructing
+    /// either dominance frontier or the potentially dense control-dependence
+    /// relation.
+    ///
+    /// Placement clients which only need legal region boundaries should use
+    /// this mode. Its graph tables remain linear in the input CFG size.
+    pub fn analyze_structure(successors: Vec<Vec<usize>>, root: usize) -> Result<Self, CfgError> {
+        let forward = ForwardControlFlowGraph::analyze_structure(successors, root)?;
+        Self::finish(forward, false)
+    }
+
+    fn finish(forward: ForwardControlFlowGraph, include_frontiers: bool) -> Result<Self, CfgError> {
+        let (postdominators, postdominance_frontier) = build_postdominators(
+            &forward.predecessors,
+            &forward.successors,
+            include_frontiers,
+        )?;
         let controllers = postdominance_frontier.clone();
         let mut control_dependents = vec![Vec::new(); forward.successors.len()];
-        for (dependent, dependent_controllers) in controllers.iter().enumerate() {
-            for &controller in dependent_controllers {
-                control_dependents[controller].push(dependent);
+        if include_frontiers {
+            for (dependent, dependent_controllers) in controllers.iter().enumerate() {
+                for &controller in dependent_controllers {
+                    control_dependents[controller].push(dependent);
+                }
             }
-        }
-        for dependents in &mut control_dependents {
-            dependents.sort_unstable();
-            dependents.dedup();
+            for dependents in &mut control_dependents {
+                dependents.sort_unstable();
+                dependents.dedup();
+            }
         }
         Ok(Self {
             root: forward.root,
@@ -578,6 +598,7 @@ fn dominance_frontiers(
 fn build_postdominators(
     predecessors: &[Vec<usize>],
     successors: &[Vec<usize>],
+    include_frontier: bool,
 ) -> Result<(PostDominatorTree, Vec<Vec<usize>>), CfgError> {
     let original_blocks = successors.len();
     let virtual_exit = original_blocks;
@@ -591,11 +612,16 @@ fn build_postdominators(
         reverse_successors[block] = incoming.clone();
     }
     let tree = DominatorTree::compute(&reverse_successors, virtual_exit)?;
-    let mut frontiers = dominance_frontiers(&reverse_successors, &tree, virtual_exit);
-    frontiers.truncate(original_blocks);
-    for frontier in &mut frontiers {
-        frontier.retain(|block| *block < original_blocks);
-    }
+    let frontiers = if include_frontier {
+        let mut frontiers = dominance_frontiers(&reverse_successors, &tree, virtual_exit);
+        frontiers.truncate(original_blocks);
+        for frontier in &mut frontiers {
+            frontier.retain(|block| *block < original_blocks);
+        }
+        frontiers
+    } else {
+        vec![Vec::new(); original_blocks]
+    };
     Ok((
         PostDominatorTree {
             tree,
@@ -807,6 +833,20 @@ mod tests {
         assert_eq!(structure.dominators, full.dominators);
         assert_eq!(structure.sccs, full.sccs);
         assert!(structure.dominance_frontier.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn bidirectional_structure_retains_postdominators_without_control_dependence() {
+        let successors = vec![vec![1, 2], vec![3], vec![3], vec![]];
+        let full = ControlFlowGraph::analyze(successors.clone(), 0).unwrap();
+        let structure = ControlFlowGraph::analyze_structure(successors, 0).unwrap();
+        assert_eq!(structure.dominators, full.dominators);
+        assert_eq!(structure.postdominators, full.postdominators);
+        assert_eq!(structure.sccs, full.sccs);
+        assert!(structure.dominance_frontier.iter().all(Vec::is_empty));
+        assert!(structure.postdominance_frontier.iter().all(Vec::is_empty));
+        assert!(structure.controllers.iter().all(Vec::is_empty));
+        assert!(structure.control_dependents.iter().all(Vec::is_empty));
     }
 
     #[test]

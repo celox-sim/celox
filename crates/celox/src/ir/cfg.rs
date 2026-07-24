@@ -132,6 +132,35 @@ impl SirCfg {
         })
     }
 
+    /// Analyze forward and reverse structural properties without materializing
+    /// dominance frontiers or control-dependence tables.
+    pub(crate) fn analyze_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+        let IndexedSirGraph {
+            block_ids,
+            index,
+            successors,
+        } = index_sir_graph(eu)?;
+        let analysis =
+            ControlFlowGraph::analyze_structure(successors, 0).map_err(map_analysis_error)?;
+        let dom_children = analysis.dominators.children.clone();
+        Ok(Self {
+            block_ids,
+            index,
+            predecessors: analysis.predecessors,
+            successors: analysis.successors,
+            dominators: analysis.dominators,
+            dom_children,
+            dominance_frontier: analysis.dominance_frontier,
+            postdominators: Some(analysis.postdominators),
+            postdominance_frontier: analysis.postdominance_frontier,
+            controllers: analysis.controllers,
+            control_dependents: analysis.control_dependents,
+            sccs: analysis.sccs,
+            scc_for_block: analysis.scc_for_block,
+            loops: analysis.loops,
+        })
+    }
+
     pub(crate) fn block_index(&self, block: BlockId) -> Option<usize> {
         self.index.get(&block).copied()
     }
