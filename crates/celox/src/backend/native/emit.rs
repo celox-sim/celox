@@ -4736,6 +4736,25 @@ fn emit_chained_eu_groups(
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
+    if let Some(control_region_mode) = std::env::var_os("CELOX_CONTROL_REGION_FEASIBILITY")
+        && let Some((_, profile_blocks)) = state_layout_profile
+        && !profile_blocks.is_empty()
+    {
+        let start = crate::timing::now();
+        let report = crate::optimizer::coalescing::analyze_control_region_feasibility(
+            &sir_eu,
+            profile_blocks,
+        );
+        eprintln!(
+            "[control-region-feasibility] label={label} {report} elapsed={:?}",
+            start.elapsed()
+        );
+        if control_region_mode != "summary" {
+            for detail in report.detail_lines() {
+                eprintln!("[control-region-feasibility-detail] label={label} {detail}");
+            }
+        }
+    }
     let mut lane_aggregate_coverage = None;
     let mut lane_aggregate_codegen_plan = None;
     let lane_aggregate_codegen =

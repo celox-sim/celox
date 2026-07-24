@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 mod block_opt;
 pub(crate) mod commit_ops;
+#[cfg(target_arch = "x86_64")]
+mod control_region_feasibility;
 pub mod cost_model;
 mod dead_working_stores;
 #[cfg(target_arch = "x86_64")]
@@ -59,6 +61,14 @@ pub use pass_tail_call_split::TailCallChunk;
 pub(crate) use native_state_layout_feasibility::{
     ProgramStateAccessSummary, analyze_native_state_layout,
 };
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn analyze_control_region_feasibility(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    profile_blocks: &[(BlockId, u64)],
+) -> control_region_feasibility::ControlRegionFeasibilityReport {
+    control_region_feasibility::analyze(eu, profile_blocks)
+}
 
 #[cfg(target_arch = "x86_64")]
 fn resident_memory_kib() -> Option<(usize, usize)> {

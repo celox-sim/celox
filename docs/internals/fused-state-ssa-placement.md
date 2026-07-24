@@ -1965,6 +1965,58 @@ mechanism, while Veryl's 31 chunks may also alter optimization and allocation.
 The current profile does not establish instruction-cache/front-end stalls as
 the dominant cost.
 
+#### Profile-selected selector-region gate
+
+The next residual inspection found a distinct reverse-if-conversion problem.
+Several hot fused blocks compare one RTL selector against many exact constants,
+compute every case payload, and select observable values only afterwards. The
+largest example, block 8501, contains 76 exact `EqWildcard` cases for the same
+seven-bit selector. It is the flattened form of a source case decoder, not a
+collection of independent binary Muxes.
+
+An analysis-only probe specializes each profile-selected block for every
+explicit selector value and one default value. It propagates exact Boolean
+facts, chooses only the selected arm of a known Mux, and constructs the closed
+backward slice from effects, terminator operands, and values used outside the
+block. The probe accepts only two-state exact constants; wildcard masks,
+implicit alias assumptions, and code generation are rejected. For a block
+with `I` instructions and `C` observed exact cases, it uses `O(I * (C + 1))`
+time and `O(I + V)` working memory. It runs only on explicitly profile-selected
+blocks, so it does not construct a whole-function scheduling graph.
+
+Using the same 14-sample threshold as the physical-layout analysis produced:
+
+```text
+selected SIR blocks                         534
+selected samples                         49,575
+blocks containing exact selector groups     211
+locally profitable selector regions           96
+profile-weighted selected SIR cost      36,709,829
+profile-weighted worst-case saving        1,134,206
+optimistic selected-cost fraction             3.09%
+analysis time                                25.6 ms
+```
+
+The exact optimized native SIR and final MIR hashes remain
+`59a5182365fc78932dafb6097e67a55b26c963255898982e35e8d4060b717515`
+and
+`03afc3d31129c7d73f5c0f4de239d8e65ba453768259778ee2cb7cfa501bf20f`.
+
+The main result is structural rather than the 3.09% upper bound. In block 8501
+the local specialization reduces the estimated cost from 1,729 to 1,318, but
+167 values leave the block. Even after fixing the selector, only 116 of 531
+instructions become locally dead. The selector decision and its final state
+effects have been separated by CFG scheduling; a block-local Switch would
+replace neither the escaping case payloads nor their downstream selection.
+
+Consequently the existing block/layer unit is again the wrong lowering unit.
+The next control plan must start at one exact selector version, follow its
+case-owned SSA values across block parameters and existing branches, and stop
+only at a closed set of state/effect sinks or a verified materialization
+frontier. It must report the cross-block region size, effect order, boundary
+values, and worst-case dynamic work before code generation. Replaying the
+source-EU branchification pass or switching block 8501 alone is not authorized.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
