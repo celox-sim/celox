@@ -17,7 +17,7 @@ use super::sir_analysis::{UseSite, collect_uses, instruction_uses};
 use super::state_ssa::{StatePhaseMap, StateSsa};
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
-    BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
+    BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
     SIRTerminator, SIRValue, UnaryOp,
 };
 use crate::{HashMap, HashSet};
@@ -396,6 +396,9 @@ struct SinkRecipe {
     control_merges: BTreeSet<RegisterId>,
     non_dominating_control_merges: BTreeSet<RegisterId>,
     loop_cutoffs: BTreeSet<RegisterId>,
+    clone_order: Vec<(BlockId, usize)>,
+    aliases: BTreeMap<RegisterId, RegisterId>,
+    known_values: BTreeMap<RegisterId, bool>,
 }
 
 #[derive(Debug)]
@@ -412,6 +415,41 @@ struct SelectorCaseContext {
     selected_case: Option<BigUint>,
     known: HashMap<RegisterId, bool>,
     reachable: BTreeSet<BlockId>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutableCaseRecipe {
+    pub selected_case: Option<BigUint>,
+    pub source: RegisterId,
+    pub clone_order: Vec<(BlockId, usize)>,
+    pub aliases: BTreeMap<RegisterId, RegisterId>,
+    pub known_values: BTreeMap<RegisterId, bool>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EffectSinkDispatchPlan {
+    pub sink: (BlockId, usize),
+    pub continuation: BlockId,
+    pub cases: Vec<ExecutableCaseRecipe>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PathLocalEffectExitPlan {
+    pub sink: (BlockId, usize),
+    pub continuation: BlockId,
+    pub insertion_block: BlockId,
+    pub guard: RegisterId,
+    pub recipe: ExecutableCaseRecipe,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EffectCaseRewritePlan {
+    pub origin: BlockId,
+    pub selector: RegisterId,
+    pub explicit_cases: Vec<BigUint>,
+    pub sinks: Vec<EffectSinkDispatchPlan>,
+    pub path_local_exits: Vec<PathLocalEffectExitPlan>,
+    pub estimated_saving: usize,
 }
 
 pub(crate) fn analyze(
@@ -1498,12 +1536,16 @@ fn analyze_case_sink_recipe(
     recipe.blocks.insert(sink.0);
     let mut active = BTreeSet::<RegisterId>::new();
     let mut complete = BTreeSet::<RegisterId>::new();
+    let mut pending_clone = BTreeMap::<RegisterId, (BlockId, usize)>::new();
     let mut work = vec![RecipeWalk::Enter(*source)];
     while let Some(item) = work.pop() {
         let register = match item {
             RecipeWalk::Exit(register) => {
                 active.remove(&register);
                 complete.insert(register);
+                if let Some(site) = pending_clone.remove(&register) {
+                    recipe.clone_order.push(site);
+                }
                 continue;
             }
             RecipeWalk::Enter(register) => register,
@@ -1519,6 +1561,9 @@ fn analyze_case_sink_recipe(
 
         if context.known.contains_key(&register) {
             recipe.constant_frontier.insert(register);
+            recipe
+                .known_values
+                .insert(register, context.known[&register]);
             continue;
         }
 
@@ -1557,6 +1602,7 @@ fn analyze_case_sink_recipe(
                         recipe.non_dominating_control_merges.insert(register);
                     }
                 } else {
+                    recipe.aliases.insert(register, feasible[0].value);
                     work.push(RecipeWalk::Enter(feasible[0].value));
                 }
             }
@@ -1580,6 +1626,10 @@ fn analyze_case_sink_recipe(
             }
             SIRInstruction::Load(..) => {
                 recipe.load_frontier.insert(register);
+                pending_clone.insert(register, (site.block, site.index));
+                for operand in instruction_uses(definition).into_iter().rev() {
+                    work.push(RecipeWalk::Enter(operand));
+                }
             }
             _ if is_recipe_pure(definition)
                 && selector_closure.blocks.contains(&site.block)
@@ -1594,6 +1644,9 @@ fn analyze_case_sink_recipe(
                 if !selected_mux {
                     recipe.instructions.insert((site.block, site.index));
                     recipe.blocks.insert(site.block);
+                    pending_clone.insert(register, (site.block, site.index));
+                } else if let Some(&operand) = operands.first() {
+                    recipe.aliases.insert(register, operand);
                 }
                 for operand in operands.into_iter().rev() {
                     work.push(RecipeWalk::Enter(operand));
@@ -2032,6 +2085,448 @@ fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
     }
 }
 
+pub(crate) fn plan_best_effect_case_dispatch(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Option<EffectCaseRewritePlan> {
+    let constants = collect_exact_constants(eu);
+    let uses = collect_uses(eu);
+    let edge_param_uses = collect_edge_param_uses(eu);
+    let definitions = collect_definition_sites(eu);
+    let parameter_blocks = collect_parameter_blocks(eu);
+    let incoming_values = collect_incoming_values(eu);
+    let predecessors = collect_predecessors(eu);
+    let cfg = SirCfg::analyze_structure(eu).ok()?;
+
+    let mut candidates = Vec::new();
+    for (&block, body) in &eu.blocks {
+        let baseline = body
+            .instructions
+            .iter()
+            .map(|instruction| estimate_clif_cost(instruction, &eu.register_map, false))
+            .sum::<usize>();
+        for group in selector_groups(body, &constants) {
+            let Some(selector_width) = eu.register_map.get(&group.selector).map(|ty| ty.width())
+            else {
+                continue;
+            };
+            if group.cases.len() < 2 || !(1..=8).contains(&selector_width) {
+                continue;
+            }
+            let specializations = group
+                .cases
+                .iter()
+                .map(Some)
+                .chain(std::iter::once(None))
+                .map(|selected| {
+                    specialize_block(eu, block, group.selector, selected, &constants, &uses)
+                })
+                .collect::<Vec<_>>();
+            let Some(worst) = specializations
+                .iter()
+                .map(|specialization| specialization.cost)
+                .max()
+            else {
+                continue;
+            };
+            let Some(minimum_skipped) = specializations
+                .iter()
+                .map(|specialization| {
+                    body.instructions
+                        .len()
+                        .saturating_sub(specialization.needed_instructions)
+                })
+                .min()
+            else {
+                continue;
+            };
+            let saving = baseline.saturating_sub(worst);
+            // A dispatch must remove a substantial dynamic region, not merely
+            // win by a few static instructions. This also keeps expensive
+            // cross-block closure construction sparse.
+            if saving >= 64 && minimum_skipped > group.cases.len() {
+                candidates.push((saving, minimum_skipped, block, group));
+            }
+        }
+    }
+    candidates.sort_unstable_by(|left, right| {
+        (right.0, right.1, right.3.cases.len(), right.2).cmp(&(
+            left.0,
+            left.1,
+            left.3.cases.len(),
+            left.2,
+        ))
+    });
+
+    candidates
+        .into_iter()
+        .find_map(|(saving, _, origin, group)| {
+            build_effect_case_rewrite_plan(
+                eu,
+                origin,
+                group,
+                saving,
+                &constants,
+                &uses,
+                &edge_param_uses,
+                &definitions,
+                &parameter_blocks,
+                &incoming_values,
+                &predecessors,
+                &cfg,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_effect_case_rewrite_plan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    origin: BlockId,
+    group: SelectorGroup,
+    estimated_saving: usize,
+    constants: &HashMap<RegisterId, SIRValue>,
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+    edge_param_uses: &HashMap<RegisterId, Vec<RegisterId>>,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
+    incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+    cfg: &SirCfg,
+) -> Option<EffectCaseRewritePlan> {
+    let cross_block = cross_block_selector_closure(
+        eu,
+        origin,
+        group.selector,
+        &group.cases,
+        constants,
+        uses,
+        edge_param_uses,
+    );
+    if cross_block.effect_sinks.is_empty() {
+        return None;
+    }
+    let contexts = build_selector_case_contexts(
+        eu,
+        origin,
+        group.selector,
+        &group.cases,
+        constants,
+        &cross_block.effect_sinks,
+    );
+    let mut sinks = Vec::new();
+    let mut path_local_exits = Vec::new();
+    let mut publication = None;
+    let mut shared_continuation = None;
+    for &sink in &cross_block.effect_sinks {
+        let block = eu.blocks.get(&sink.0)?;
+        if sink.1 + 1 != block.instructions.len()
+            || block.instructions[..sink.1]
+                .iter()
+                .any(|instruction| def_reg(instruction).is_none())
+        {
+            return None;
+        }
+        let SIRInstruction::Store(address, offset, width, source, triggers, capture_sites) =
+            &block.instructions[sink.1]
+        else {
+            return None;
+        };
+        if !matches!(offset, SIROffset::Static(_))
+            || !triggers.is_empty()
+            || !capture_sites.is_empty()
+        {
+            return None;
+        }
+        let SIRTerminator::Jump(continuation, arguments) = &block.terminator else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let identity = format!(
+            "addr={address},offset={offset},bits={width},triggers={triggers:?},\
+             comb_capture_sites={capture_sites:?}"
+        );
+        if publication.as_ref().is_some_and(|old| old != &identity) {
+            return None;
+        }
+        publication = Some(identity);
+        if shared_continuation.is_some_and(|old| old != *continuation) {
+            return None;
+        }
+        shared_continuation = Some(*continuation);
+
+        let recipes = contexts
+            .iter()
+            .filter_map(|context| {
+                analyze_case_sink_recipe(
+                    eu,
+                    context,
+                    sink,
+                    &cross_block,
+                    definitions,
+                    parameter_blocks,
+                    incoming_values,
+                    predecessors,
+                    Some(cfg),
+                )
+                .map(|(recipe, _)| (context, recipe))
+            })
+            .collect::<Vec<_>>();
+        if recipes.len() != contexts.len() {
+            return None;
+        }
+        let mut sink_cases = Vec::new();
+        for (context, recipe) in recipes {
+            if !recipe.external_frontier.is_empty()
+                || !recipe.loop_cutoffs.is_empty()
+                || recipe.clone_order.len()
+                    != recipe.instructions.len() + recipe.load_frontier.len()
+            {
+                return None;
+            }
+            let executable = ExecutableCaseRecipe {
+                selected_case: context.selected_case.clone(),
+                source: *source,
+                clone_order: recipe.clone_order.clone(),
+                aliases: recipe.aliases.clone(),
+                known_values: recipe.known_values.clone(),
+            };
+            if recipe.non_dominating_control_merges.is_empty() {
+                if !loads_are_stable_at(eu, cfg, definitions, sink.0, &recipe.load_frontier) {
+                    return None;
+                }
+                sink_cases.push(executable);
+                continue;
+            }
+            if context.selected_case.is_none() || recipe.non_dominating_control_merges.len() != 1 {
+                return None;
+            }
+            let merge = *recipe.non_dominating_control_merges.first()?;
+            let insertion_block = *parameter_blocks.get(&merge)?;
+            if !recipe_is_available_at_entry(
+                eu,
+                &recipe,
+                merge,
+                insertion_block,
+                definitions,
+                parameter_blocks,
+                cfg,
+            ) || !loads_are_stable_at(
+                eu,
+                cfg,
+                definitions,
+                insertion_block,
+                &recipe.load_frontier,
+            ) {
+                return None;
+            }
+            let guard = exact_case_guard(
+                eu,
+                origin,
+                group.selector,
+                context.selected_case.as_ref()?,
+                constants,
+            )?;
+            if !value_available_at_block_entry(
+                eu,
+                guard,
+                insertion_block,
+                definitions,
+                parameter_blocks,
+                cfg,
+            ) {
+                return None;
+            }
+            path_local_exits.push(PathLocalEffectExitPlan {
+                sink,
+                continuation: *continuation,
+                insertion_block,
+                guard,
+                recipe: executable,
+            });
+        }
+        if !sink_cases.iter().any(|case| case.selected_case.is_none()) {
+            return None;
+        }
+        sinks.push(EffectSinkDispatchPlan {
+            sink,
+            continuation: *continuation,
+            cases: sink_cases,
+        });
+    }
+    path_local_exits.sort_unstable_by_key(|exit| {
+        (
+            exit.insertion_block,
+            exit.recipe.selected_case.clone(),
+            exit.sink,
+        )
+    });
+    if path_local_exits
+        .windows(2)
+        .any(|pair| pair[0].insertion_block == pair[1].insertion_block)
+    {
+        return None;
+    }
+    Some(EffectCaseRewritePlan {
+        origin,
+        selector: group.selector,
+        explicit_cases: group.cases.into_iter().collect(),
+        sinks,
+        path_local_exits,
+        estimated_saving,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recipe_is_available_at_entry(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    recipe: &SinkRecipe,
+    merge: RegisterId,
+    insertion_block: BlockId,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
+    cfg: &SirCfg,
+) -> bool {
+    parameter_blocks.get(&merge) == Some(&insertion_block)
+        && recipe
+            .non_dominating_control_merges
+            .iter()
+            .all(|candidate| *candidate == merge)
+        && recipe
+            .dominating_ssa_frontier
+            .iter()
+            .chain(&recipe.control_merges)
+            .chain(&recipe.external_frontier)
+            .all(|&register| {
+                value_available_at_block_entry(
+                    eu,
+                    register,
+                    insertion_block,
+                    definitions,
+                    parameter_blocks,
+                    cfg,
+                )
+            })
+        && recipe.load_frontier.iter().all(|load| {
+            let Some(site) = definitions.get(load) else {
+                return false;
+            };
+            instruction_uses(&eu.blocks[&site.block].instructions[site.index])
+                .into_iter()
+                .all(|register| {
+                    value_available_at_block_entry(
+                        eu,
+                        register,
+                        insertion_block,
+                        definitions,
+                        parameter_blocks,
+                        cfg,
+                    )
+                })
+        })
+}
+
+fn loads_are_stable_at(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    target: BlockId,
+    loads: &BTreeSet<RegisterId>,
+) -> bool {
+    let mut by_region = BTreeMap::<u32, HashSet<RegisterId>>::new();
+    for &register in loads {
+        let Some(site) = definitions.get(&register) else {
+            return false;
+        };
+        let SIRInstruction::Load(_, address, ..) = &eu.blocks[&site.block].instructions[site.index]
+        else {
+            return false;
+        };
+        by_region
+            .entry(address.region)
+            .or_default()
+            .insert(register);
+    }
+    let states = by_region
+        .iter()
+        .map(|(&region, selected)| {
+            StateSsa::analyze_selected_loads_two_state(
+                eu,
+                cfg,
+                region,
+                selected,
+                &StatePhaseMap::default(),
+            )
+            .ok()
+            .map(|state| (region, state))
+        })
+        .collect::<Option<BTreeMap<_, _>>>();
+    let Some(states) = states else {
+        return false;
+    };
+    loads.iter().all(|&register| {
+        load_frontier_version(eu, definitions, &states, register, target)
+            == LoadFrontierVersion::Stable
+    })
+}
+
+fn exact_case_guard(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    origin: BlockId,
+    selector: RegisterId,
+    selected: &BigUint,
+    constants: &HashMap<RegisterId, SIRValue>,
+) -> Option<RegisterId> {
+    let block = eu.blocks.get(&origin)?;
+    let (mut current, mut index) =
+        block
+            .instructions
+            .iter()
+            .enumerate()
+            .find_map(|(index, instruction)| {
+                let SIRInstruction::Binary(
+                    destination,
+                    lhs,
+                    BinaryOp::Eq | BinaryOp::EqWildcard,
+                    rhs,
+                ) = instruction
+                else {
+                    return None;
+                };
+                let constant = if *lhs == selector {
+                    constants.get(rhs)
+                } else if *rhs == selector {
+                    constants.get(lhs)
+                } else {
+                    None
+                }?;
+                (constant.mask.is_zero() && &constant.payload == selected)
+                    .then_some((*destination, index + 1))
+            })?;
+    if eu.register_map.get(&current).map(|ty| ty.width()) != Some(1) {
+        return None;
+    }
+    while let Some(SIRInstruction::Unary(destination, operation, source)) =
+        block.instructions.get(index)
+    {
+        if *source != current
+            || !matches!(
+                operation,
+                UnaryOp::Ident | UnaryOp::Or | UnaryOp::ToTwoState
+            )
+            || eu.register_map.get(destination).map(|ty| ty.width()) != Some(1)
+        {
+            break;
+        }
+        current = *destination;
+        index += 1;
+        if *operation == UnaryOp::ToTwoState {
+            return Some(*destination);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2045,6 +2540,10 @@ mod tests {
         }
     }
 
+    fn logic(width: usize) -> RegisterType {
+        RegisterType::Logic { width }
+    }
+
     fn address(variable: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr::from_absolute_addr(
             STABLE_REGION,
@@ -2053,6 +2552,68 @@ mod tests {
                 var_id: VarId::from_raw(variable),
             },
         )
+    }
+
+    #[test]
+    fn exact_case_guard_requires_the_adjacent_one_bit_normalization_chain() {
+        let selector = RegisterId(0);
+        let selected = RegisterId(1);
+        let comparison = RegisterId(2);
+        let reduction = RegisterId(3);
+        let normalized = RegisterId(4);
+        let unrelated = RegisterId(5);
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: vec![selector],
+            instructions: vec![
+                SIRInstruction::Imm(selected, SIRValue::new(3u8)),
+                SIRInstruction::Binary(comparison, selector, BinaryOp::EqWildcard, selected),
+                SIRInstruction::Unary(reduction, UnaryOp::Or, comparison),
+                SIRInstruction::Unary(normalized, UnaryOp::ToTwoState, reduction),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: [
+                (selector, logic(7)),
+                (selected, logic(7)),
+                (comparison, logic(1)),
+                (reduction, logic(1)),
+                (normalized, bit(1)),
+                (unrelated, logic(1)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let constants = collect_exact_constants(&eu);
+
+        assert_eq!(
+            exact_case_guard(&eu, BlockId(0), selector, &BigUint::from(3u8), &constants,),
+            Some(normalized)
+        );
+
+        eu.blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .insert(2, SIRInstruction::Imm(unrelated, SIRValue::new(0u8)));
+        assert_eq!(
+            exact_case_guard(&eu, BlockId(0), selector, &BigUint::from(3u8), &constants,),
+            None
+        );
+
+        eu.blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .remove(2);
+        eu.register_map.insert(comparison, logic(7));
+        assert_eq!(
+            exact_case_guard(&eu, BlockId(0), selector, &BigUint::from(3u8), &constants,),
+            None
+        );
     }
 
     #[test]

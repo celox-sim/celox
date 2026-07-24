@@ -25,6 +25,8 @@ mod pass_commit_sinking;
 mod pass_concat_folding;
 mod pass_control_flow_simplify;
 pub(crate) mod pass_dead_store_elimination;
+#[cfg(target_arch = "x86_64")]
+mod pass_effect_case_dispatch;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
 #[cfg(target_arch = "x86_64")]
@@ -199,6 +201,41 @@ pub(crate) fn optimize_native_merged_chain(
         GvnPass.run(eu, &PassOptions::default());
         eu.verify_result()
             .map_err(|error| ("after native fixed bit-map recovery", error))?;
+    }
+    if !four_state
+        && std::env::var_os("CELOX_EFFECT_CASE_DISPATCH").is_some()
+        && let Some(result) = pass_effect_case_dispatch::run(eu)
+    {
+        changed = true;
+        let dead_control_start = crate::timing::now();
+        pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
+        let dead_control_ns = dead_control_start.elapsed().as_nanos();
+        let cfg_cleanup_start = crate::timing::now();
+        ControlFlowSimplifyPass.run(
+            eu,
+            &PassOptions {
+                four_state,
+                ..PassOptions::default()
+            },
+        );
+        let cfg_cleanup_ns = cfg_cleanup_start.elapsed().as_nanos();
+        eprintln!(
+            "[effect-case-dispatch] origin=b{} selector=r{} cases={} sinks={} \
+             path_local_exits={} estimated_saving={} planning_ms={:.3} rewrite_ms={:.3} \
+             dead_control_ms={:.3} cfg_cleanup_ms={:.3}",
+            result.origin.0,
+            result.selector.0,
+            result.explicit_cases,
+            result.sinks,
+            result.path_local_exits,
+            result.estimated_saving,
+            result.planning_ns as f64 / 1_000_000.0,
+            result.rewrite_ns as f64 / 1_000_000.0,
+            dead_control_ns as f64 / 1_000_000.0,
+            cfg_cleanup_ns as f64 / 1_000_000.0,
+        );
+        eu.verify_result()
+            .map_err(|error| ("after native effect-case dispatch", error))?;
     }
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);

@@ -5,6 +5,10 @@
 > A later shared lane-aggregate plan passed a post-allocation static gate, and
 > its opt-in scalar reference lowering reaches the exact Linux marker without
 > improving execution time. SIMD/bit-plane lowering remains experimental.
+> The profile-selected effect-case prototype now has an executable,
+> dominance-checked lowering and reaches the exact Linux completion marker.
+> Its performance signal is positive in some adjacent runs but not yet larger
+> than the observed host drift, so it remains opt-in.
 > Each code-generating milestone still requires an independent semantic,
 > generated-code, and Linux execution gate.
 
@@ -2245,6 +2249,159 @@ This remains a focused result for the structurally remapped hot block, not yet
 a profile-wide profitability result. Replaying source-EU branchification,
 switching block 8674 alone, cloning the 83-block forward closure once per case,
 or hoisting its whole frontier is not authorized.
+
+#### Executable profile-selected effect-case result
+
+The executable prototype now consumes the complete sink recipe rather than
+scanning for an arbitrary same-block Mux. It selects the current
+`b8674/r20333` region, revalidates every Load version and SSA frontier at its
+actual insertion point, and applies one plan to a cloned execution unit. The
+clone is published only after dead-definition cleanup and complete SIR
+verification succeed.
+
+The generated CFG has four placement sites:
+
+```text
+b6032 entry, case 57:
+    exact-case branch
+      taken    -> materialize r59008 recipe, Store, jump b4412
+      fallback -> original b6032 body
+
+b6266 entry, case 71:
+    exact-case branch
+      taken    -> materialize r59001 recipe, Store, jump b4412
+      fallback -> original b6266 body
+
+b5834:
+    Switch r20333 for the remaining first-sink alternatives
+
+b5942:
+    Switch r20333 for the complete second-sink alternatives
+```
+
+The two path-local cases therefore use their merge parameters only where those
+parameters are available. They are not carried to either final Store. Every
+case block materializes only its verified partial recipe, performs the
+original trigger-free Store to `inst56/var350[0..64)`, and jumps to the
+original continuation `b4412`. The native SIR verifier accepts the complete
+rewritten function.
+
+The initial executable run completed the exact Linux workload twice with
+`cy=9ae070 x3=aa pass=1` and kernel power-down. Adjacent measurements showed
+an execution reduction from 61.303 seconds to 59.461/59.470 seconds, but
+compile time increased from 55.833 seconds to 60.222/60.060 seconds. Complete
+SIR and MIR inspection showed that the rewrite was not spending this time in
+register allocation:
+
+```text
+                                     baseline       initial candidate
+native backend total                  21.081 s          24.537 s
+eval_comb regalloc total              10.366 s          10.390 s
+eval_comb_apply_ff regalloc total     10.169 s           9.812 s
+eval_comb merged-SIR phase             0.273 s           2.602 s
+fused merged-SIR phase                 7.561 s          11.466 s
+```
+
+The planner and atomic rewrite themselves took 623.5 ms and 74.7 ms across
+the two generated functions. Instrumenting the post-rewrite cleanup identified
+the actual compile-time defect: re-running the whole correlated-CFG fixed
+point took 1.877 seconds in `eval_comb` and 2.775 seconds in the fused
+function. Dead-control elimination took only 64/104 ms and final DCE less than
+5 ms. The compile regression was therefore not caused by the new Switch in
+regalloc and was not fixed by weakening allocation.
+
+Two existing CFG utilities were made scalable without changing their proof
+conditions:
+
+- dead block parameters are removed per target with one edge scan instead of
+  rescanning every block for every removed parameter;
+- one CFG/use analysis removes a maximal non-overlapping batch of proven pure
+  SESE regions, preferring an enclosing region when candidates nest.
+
+The correlated case analysis also carried far more state than its transfer
+function could consume. Its original `CorrelatedFacts` copied every unrelated
+branch predicate over every CFG edge. For case threading, a Boolean fact can
+affect a later transfer only when the same canonical predicate occurs in
+another branch. The implementation now indexes those repeated predicates
+before dataflow, carries exact selector equalities plus only that sparse
+Boolean subset, and shares unchanged fact environments. Jump edges and
+unrelated branches retain one shared environment; only a fact-producing edge
+copies it, and merges construct the intersection required by the original
+all-incoming-edge proof.
+
+The 4096-case non-recursive fixture and all focused CFG tests retain their
+results. On the full workload, the correlated phase changed as follows while
+retaining the original Boolean-correlation capability:
+
+```text
+                                     original facts    sparse/shared facts
+eval_comb correlated cleanup              1.799 s             1.041 s
+fused correlated cleanup                  2.625 s             1.389 s
+```
+
+The runtime contribution was also separated from the effect rewrite. All
+three runs reached the same Linux marker and power-down:
+
+```text
+                                     compile       execute
+current env-free baseline             53.303 s      63.270 s
+correlated cleanup only               52.602 s      61.433 s
+cleanup plus effect-case dispatch     54.502 s      60.302 s
+later sparse-Boolean candidate        56.353 s      58.642 s
+```
+
+These are diagnostic sequential runs rather than a final noise-qualified
+benchmark. They establish two narrower facts: correlated cleanup explains a
+real part of the gain, and it does not explain all of it; the executable
+effect-case rewrite provides an additional reduction. The latest
+compile-only sparse/shared-fact run took 55.298 seconds, so the original
+four-second compile regression is removed.
+
+The final generated-code review also corrected an invalid width hypothesis.
+The optimized SIR declares the selector `r20333` as `logic<7>`, but every
+`EqWildcard` destination used by this decoder is `logic<1>`:
+
+```text
+r20333: logic<7>
+r26942: logic<1>
+r26942 = r20333 EqWildcard r9058
+r26943 = Or r26942
+r26944 = ToTwoState r26943
+```
+
+The reduction `Or` is therefore a one-bit identity here. The executable
+planner now accepts only this adjacent, one-bit normalization chain; it does
+not search forward and accidentally attach an unrelated Boolean use.
+
+The final optimized native SIR and MIR are byte-identical to the initially
+validated fast candidate:
+
+```text
+native SIR sha256
+fe5dd0b804fbd537f8ded4f273d37a5fe132e964544859d41bc7a37199561081
+
+native MIR sha256
+df580ecdf9685e3a53ee870caed41adb3dcddea0e452adac481d99dfe9a161f8
+```
+
+A later candidate/baseline/candidate sequence measured execution at
+59.020/64.387/65.095 seconds. Because identical candidate code moved by more
+than six seconds across that sequence, it cannot prove a retained speedup.
+The post-review candidate run completed normally at
+`cy=9ae070 x3=aa pass=1` and kernel power-down with 55.531 seconds of code
+generation and 60.139 seconds of generated execution. It selected the same
+76-case, two-sink plan; planning/rewrite/dead-control/CFG-cleanup took
+209/23/65/1074 ms in `eval_comb` and 391/37/109/1496 ms in the fused function.
+
+The regression gate now passes 1,112 library tests, 60 native-testbench tests
+(one upstream fixture ignored), and all nine enabled counter-backend tests.
+Strict Clippy, formatting, and the VitePress documentation build also pass.
+The pass remains guarded by `CELOX_EFFECT_CASE_DISPATCH`: semantic validation
+is complete for this prototype, but production enablement still requires a
+noise-qualified execution gate. The next structural step is not another
+whole-function selector scan; it is to admit additional profile-selected
+effect recipes under the same executable frontier, StateVersion, path-local
+merge, and atomic-verification contracts.
 
 ### Milestone 2: use-local FF forwarding
 

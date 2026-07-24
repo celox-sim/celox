@@ -21,6 +21,7 @@ use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 pub(super) struct ControlFlowSimplifyPass;
 pub(super) struct PostGvnCfgCleanupPass;
@@ -526,8 +527,9 @@ fn thread_correlated_case_edges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
         return false;
     };
     let definitions = instruction_definition_locations(eu);
+    let repeated_booleans = repeated_branch_predicates(eu, &definitions);
     let edges = correlated_edges(eu, &cfg);
-    let edge_facts = analyze_correlated_facts(eu, &cfg, &definitions, &edges);
+    let edge_facts = analyze_correlated_facts(eu, &cfg, &definitions, &repeated_booleans, &edges);
     let transparent_targets = transparent_jump_targets(eu, &cfg);
     let uses = register_use_blocks(eu);
     let definition_blocks = register_definition_blocks(eu);
@@ -956,8 +958,9 @@ fn analyze_correlated_facts(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
     definitions: &HashMap<RegisterId, (BlockId, usize)>,
+    repeated_booleans: &HashSet<RegisterId>,
     edges: &[Vec<CorrelatedEdge>],
-) -> Vec<Vec<Option<CorrelatedFacts>>> {
+) -> Vec<Vec<Option<Arc<CorrelatedFacts>>>> {
     let mut incoming = vec![Vec::<(usize, usize)>::new(); cfg.block_ids.len()];
     for (source, outgoing) in edges.iter().enumerate() {
         for (edge, target) in outgoing.iter().enumerate() {
@@ -966,7 +969,7 @@ fn analyze_correlated_facts(
     }
 
     let mut entries = vec![None; cfg.block_ids.len()];
-    entries[0] = Some(CorrelatedFacts::default());
+    entries[0] = Some(Arc::new(CorrelatedFacts::default()));
     let mut edge_facts = edges
         .iter()
         .map(|outgoing| vec![None; outgoing.len()])
@@ -982,6 +985,7 @@ fn analyze_correlated_facts(
                 facts_on_correlated_edge(
                     eu,
                     definitions,
+                    repeated_booleans,
                     cfg.block_ids[source],
                     outgoing.truth,
                     facts,
@@ -995,15 +999,19 @@ fn analyze_correlated_facts(
             if target == 0 {
                 continue;
             }
-            let mut next_entry = None::<CorrelatedFacts>;
+            let mut next_entry = None::<Arc<CorrelatedFacts>>;
             for &(predecessor, incoming_edge) in &incoming[target] {
                 let Some(facts) = edge_facts[predecessor][incoming_edge].as_ref() else {
                     continue;
                 };
                 if let Some(intersection) = next_entry.as_mut() {
-                    intersection.meet_with(facts);
+                    if !Arc::ptr_eq(intersection, facts) {
+                        let mut narrowed = (**intersection).clone();
+                        narrowed.meet_with(facts);
+                        *intersection = Arc::new(narrowed);
+                    }
                 } else {
-                    next_entry = Some(facts.clone());
+                    next_entry = Some(Arc::clone(facts));
                 }
             }
             if entries[target] != next_entry {
@@ -1021,12 +1029,13 @@ fn analyze_correlated_facts(
 fn facts_on_correlated_edge(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     definitions: &HashMap<RegisterId, (BlockId, usize)>,
+    repeated_booleans: &HashSet<RegisterId>,
     source: BlockId,
     truth: Option<bool>,
-    facts: &CorrelatedFacts,
-) -> Option<CorrelatedFacts> {
+    facts: &Arc<CorrelatedFacts>,
+) -> Option<Arc<CorrelatedFacts>> {
     let Some(truth) = truth else {
-        return Some(facts.clone());
+        return Some(Arc::clone(facts));
     };
     let SIRTerminator::Branch { cond, .. } = &eu.blocks[&source].terminator else {
         return None;
@@ -1036,33 +1045,39 @@ fn facts_on_correlated_edge(
         return None;
     }
 
-    let mut result = facts.clone();
+    let mut result = None;
     if let Some((selector, constant, equal_when_true)) =
         exact_equality_predicate(eu, definitions, *cond)
     {
         if truth == equal_when_true {
-            if result
+            if facts
                 .equalities
                 .get(&selector)
                 .is_some_and(|known| known != &constant)
             {
                 return None;
             }
-            result.equalities.insert(selector, constant);
+            let mut updated = (**facts).clone();
+            updated.equalities.insert(selector, constant);
+            result = Some(updated);
         }
     } else {
         let (root, inverted) = resolve_thread_condition(eu, definitions, *cond);
-        let root_truth = truth ^ inverted;
-        if result
-            .booleans
-            .get(&root)
-            .is_some_and(|known| *known != root_truth)
-        {
-            return None;
+        if repeated_booleans.contains(&root) {
+            let root_truth = truth ^ inverted;
+            if facts
+                .booleans
+                .get(&root)
+                .is_some_and(|known| *known != root_truth)
+            {
+                return None;
+            }
+            let mut updated = (**facts).clone();
+            updated.booleans.insert(root, root_truth);
+            result = Some(updated);
         }
-        result.booleans.insert(root, root_truth);
     }
-    Some(result)
+    Some(result.map_or_else(|| Arc::clone(facts), Arc::new))
 }
 
 fn known_correlated_condition(
@@ -1080,6 +1095,27 @@ fn known_correlated_condition(
     }
     let (root, inverted) = resolve_thread_condition(eu, definitions, condition);
     facts.booleans.get(&root).map(|truth| *truth ^ inverted)
+}
+
+fn repeated_branch_predicates(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, (BlockId, usize)>,
+) -> HashSet<RegisterId> {
+    let mut counts = HashMap::<RegisterId, usize>::default();
+    for block in eu.blocks.values() {
+        let SIRTerminator::Branch { cond, .. } = &block.terminator else {
+            continue;
+        };
+        if exact_equality_predicate(eu, definitions, *cond).is_some() {
+            continue;
+        }
+        let (root, _) = resolve_thread_condition(eu, definitions, *cond);
+        *counts.entry(root).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(register, count)| (count > 1).then_some(register))
+        .collect()
 }
 
 /// Return `(selector, constant, condition_is_true_when_equal)` for an exact

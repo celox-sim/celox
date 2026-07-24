@@ -2059,8 +2059,11 @@ fn classify_candidate_source(
                 reasons.insert(RejectionReason::UnresolvedPhi);
                 return false;
             };
-            inputs.iter().copied().fold(true, |admissible, input| {
-                classify_candidate_source(
+            let mut admissible = true;
+            for &input in inputs {
+                // Visit every Phi input so the non-exclusive rejection
+                // diagnostics describe the whole frontier.
+                let input_admissible = classify_candidate_source(
                     input,
                     phi_sources,
                     definitions,
@@ -2068,8 +2071,10 @@ fn classify_candidate_source(
                     visited,
                     reasons,
                     report,
-                ) && admissible
-            })
+                );
+                admissible &= input_admissible;
+            }
+            admissible
         }
     }
 }

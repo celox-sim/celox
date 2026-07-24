@@ -854,7 +854,7 @@ pub(super) fn eliminate_dead_control_regions(eu: &mut ExecutionUnit<RegionedAbso
             return;
         };
         let uses = collect_uses(eu);
-        let mut eliminated = None;
+        let mut candidates = Vec::new();
         for &head_id in &cfg.block_ids {
             let SIRTerminator::Branch {
                 true_block,
@@ -932,16 +932,44 @@ pub(super) fn eliminate_dead_control_regions(eu: &mut ExecutionUnit<RegionedAbso
                 }
             }
             if valid {
-                eliminated = Some((head_id, merge_id, region));
-                break;
+                candidates.push((head_id, merge_id, region));
             }
         }
-        let Some((head, merge, region)) = eliminated else {
+        if candidates.is_empty() {
             break;
-        };
-        eu.blocks.get_mut(&head).unwrap().terminator = SIRTerminator::Jump(merge, Vec::new());
-        for block in region {
-            eu.blocks.remove(&block);
+        }
+
+        // One CFG/use analysis can prove several independent dead regions.
+        // Prefer the largest region when candidates nest, and reserve its
+        // head, body, and merge so no other rewrite in this batch can mutate
+        // or remove one of those blocks. Re-analyze only after the maximal
+        // non-overlapping batch has been removed.
+        candidates.sort_unstable_by(|lhs, rhs| {
+            rhs.2
+                .len()
+                .cmp(&lhs.2.len())
+                .then_with(|| lhs.0.0.cmp(&rhs.0.0))
+        });
+        let mut claimed = HashSet::default();
+        let mut selected = Vec::new();
+        for (head, merge, region) in candidates {
+            if claimed.contains(&head)
+                || claimed.contains(&merge)
+                || region.iter().any(|block| claimed.contains(block))
+            {
+                continue;
+            }
+            claimed.insert(head);
+            claimed.insert(merge);
+            claimed.extend(region.iter().copied());
+            selected.push((head, merge, region));
+        }
+        debug_assert!(!selected.is_empty());
+        for (head, merge, region) in selected {
+            eu.blocks.get_mut(&head).unwrap().terminator = SIRTerminator::Jump(merge, Vec::new());
+            for block in region {
+                eu.blocks.remove(&block);
+            }
         }
     }
     prune_dead_block_parameters(eu);
@@ -963,33 +991,40 @@ fn prune_dead_block_parameters(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         if dead.is_empty() {
             break;
         }
-        for (block, indices) in dead {
-            for index in indices.into_iter().rev() {
+        for (&block, indices) in &dead {
+            for &index in indices.iter().rev() {
                 eu.blocks.get_mut(&block).unwrap().params.remove(index);
-                for predecessor in eu.blocks.values_mut() {
-                    remove_edge_argument(&mut predecessor.terminator, block, index);
-                }
             }
+        }
+        for predecessor in eu.blocks.values_mut() {
+            remove_dead_edge_arguments(&mut predecessor.terminator, &dead);
         }
     }
 }
 
-fn remove_edge_argument(terminator: &mut SIRTerminator, target: BlockId, index: usize) {
-    match terminator {
-        SIRTerminator::Jump(actual, arguments) if *actual == target => {
+fn remove_dead_edge_arguments(
+    terminator: &mut SIRTerminator,
+    dead: &BTreeMap<BlockId, Vec<usize>>,
+) {
+    let remove = |target: BlockId, arguments: &mut Vec<RegisterId>| {
+        let Some(indices) = dead.get(&target) else {
+            return;
+        };
+        for &index in indices.iter().rev() {
             arguments.remove(index);
+        }
+    };
+    match terminator {
+        SIRTerminator::Jump(target, arguments) => {
+            remove(*target, arguments);
         }
         SIRTerminator::Branch {
             true_block,
             false_block,
             ..
         } => {
-            if true_block.0 == target {
-                true_block.1.remove(index);
-            }
-            if false_block.0 == target {
-                false_block.1.remove(index);
-            }
+            remove(true_block.0, &mut true_block.1);
+            remove(false_block.0, &mut false_block.1);
         }
         _ => {}
     }
