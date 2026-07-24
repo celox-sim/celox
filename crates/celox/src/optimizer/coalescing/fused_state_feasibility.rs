@@ -9,14 +9,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use celox_analysis::memory_ssa::{
-    self, ClobberWalker, MemoryAccessEvent, MemoryClobber, MemorySsaError,
+    self, ClobberWalker, MemoryAccess, MemoryAccessEvent, MemoryClobber, MemorySsaError,
 };
 use celox_analysis::ssa::{self, Event, SparseSsa, Version};
 
 use super::fused_state_plan::{
     self, BoundaryRegisterClass, DefinitionFact, DemandFact, DemandPlan, DirectForwardFact,
-    FailurePredicates, FragmentFact, KeepReason, MaterializationLeaf, PlanSummary, ProgramPoint,
-    PublicationFact, StateRange,
+    FailurePredicates, FragmentFact, KeepReason, MaterializationLeaf, PersistentStateVersion,
+    PlanSummary, ProgramPoint, PublicationFact, StateRange,
 };
 use super::placement_analysis::{PlacementAnalysis, PlacementAnalysisError, ValueId, ValueOrigin};
 use super::state_ssa::StatePhaseMap;
@@ -1814,7 +1814,7 @@ fn classify_demand_plans(
         if candidate
             .query_ids
             .iter()
-            .any(|query| !stable_queries[*query])
+            .any(|query| stable_queries[*query].is_none())
         {
             demand.materialization_leaves.clear();
             demand.keep_reason = Some(KeepReason::UnstableMemoryVersion);
@@ -1839,7 +1839,8 @@ fn classify_demand_plans(
                     original_load: query.original,
                     insertion_point: query.target,
                     range: query.range.into(),
-                    phase_version: query_id,
+                    phase_version: stable_queries[query_id]
+                        .expect("a rejected frontier query was handled above"),
                 });
         }
         if demand.producer_shared_uses != 0 {
@@ -1924,7 +1925,7 @@ fn verify_frontier_versions(
     cfg: &SirCfg,
     definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
     queries: &[FrontierQuery],
-) -> Result<Vec<bool>, FeasibilityError> {
+) -> Result<Vec<Option<PersistentStateVersion>>, FeasibilityError> {
     let queried_objects = queries
         .iter()
         .map(|query| query.range.object)
@@ -1955,7 +1956,7 @@ fn verify_frontier_versions(
     for (id, query) in queries.iter().enumerate() {
         queries_by_range.entry(query.range).or_default().push(id);
     }
-    let mut result = vec![false; queries.len()];
+    let mut result = vec![None; queries.len()];
     let mut walker = ClobberWalker::new();
     for (range, query_ids) in queries_by_range {
         let mut clobbers = walker.query(&graph, &range, &memory_definition_aliases_range);
@@ -1972,13 +1973,31 @@ fn verify_frontier_versions(
                 .ok_or(FeasibilityError::InvalidMemoryGraph(
                     "frontier target has no MemorySSA coordinate",
                 ))?;
-            result[id] = matches!(
-                (clobbers.clobber(original.before), clobbers.clobber(target.before)),
-                (
-                    Some(MemoryClobber::Access(original)),
-                    Some(MemoryClobber::Access(target))
-                ) if original == target
-            );
+            let (
+                Some(MemoryClobber::Access(original_clobber)),
+                Some(MemoryClobber::Access(target_clobber)),
+            ) = (
+                clobbers.clobber(original.before),
+                clobbers.clobber(target.before),
+            )
+            else {
+                continue;
+            };
+            if original_clobber != target_clobber {
+                continue;
+            }
+            result[id] = match graph.access(original_clobber) {
+                Some(MemoryAccess::LiveOnEntry) => Some(PersistentStateVersion::LiveOnEntry),
+                Some(MemoryAccess::Definition { definition, .. }) => {
+                    Some(PersistentStateVersion::Definition(definition.point))
+                }
+                Some(MemoryAccess::Phi { block, .. }) => cfg
+                    .block_ids
+                    .get(block)
+                    .copied()
+                    .map(PersistentStateVersion::MemoryPhi),
+                None => None,
+            };
         }
     }
     Ok(result)
@@ -2502,6 +2521,30 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
+
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        let frontier_versions = verify_frontier_versions(
+            &eu,
+            &cfg,
+            &BTreeMap::new(),
+            &[FrontierQuery {
+                register: RegisterId(0),
+                original: ProgramPoint {
+                    block: BlockId(0),
+                    instruction: 0,
+                },
+                target: ProgramPoint {
+                    block: BlockId(1),
+                    instruction: 0,
+                },
+                range: BitRange::new(input, 0, 8).unwrap(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            frontier_versions,
+            vec![Some(PersistentStateVersion::LiveOnEntry)]
+        );
 
         let report = analyze(&eu, BlockId(1)).unwrap();
         assert_eq!(report.plan.direct_forward, 1);

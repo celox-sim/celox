@@ -341,12 +341,21 @@ ControlMerge(recipe)
 `DominatingSSA` must dominate the insertion point. A preserved-home reload
 names the exact Store site and StateVersion, and that version must reach the
 reload point. A persistent-state read names the FF/input snapshot phase.
+Its `phase_version` is a stable client-level clobber identity:
+`LiveOnEntry`, `Definition(ProgramPoint)`, or `MemoryPhi(BlockId)`. A temporary
+MemorySSA access number or frontier-query array index is not a phase/version
+certificate. The original Load and target insertion point must resolve to the
+same identity for the exact requested range.
 `ControlMerge` is not a list of incoming versions. Its executable recipe names
 the target insertion point, a default version, and ordered arms containing the
 original guard, guarded block, and StateVersion. Arm priorities are explicit
 and contiguous, so lowering cannot silently reorder last-writer or branch
 priority. No recipe may contain an effectful operation or an unhandled
 loop-carried cycle.
+The current Milestone 1 verifier deliberately rejects every `ControlMerge`
+leaf because the analysis does not yet emit a closed list of arm-local
+operations and control-dependence edges. The type reserves the eventual
+contract; guard/value IDs alone are not accepted as proof.
 Several reaching definitions represented by one valid `MemoryPhi` are not an
 ambiguous StateSSA version. A plan which cannot yet lower that merge is
 classified as `UnsupportedMemoryPhiMaterialization` or
@@ -2061,6 +2070,24 @@ created long live ranges and spill regressions.
 Store priority, exit-value priority, and aggregate pressure scores do not
 perform dominance-safe code placement and do not represent allocator-selected
 split regions.
+
+### Re-running source-EU branchification after fusion
+
+A bounded probe applied only the existing whole-region/placement forms once
+after native EU fusion; it deliberately omitted the pass's repeated
+leaf-at-a-time whole-function rescans. The five merged functions reconstructed
+0, 174, 207, 198, and 373 regions respectively. Despite those nonzero counts,
+the complete native SIR changed by only 4,171 bytes
+(19,035,314 to 19,031,143), while MIR grew by 31,858 bytes
+(45,933,848 to 45,965,706). The probe was removed.
+
+This shows that the existing source-EU planner can recognize syntactic regions
+after fusion but does not identify enough of the hot fused control/dataflow to
+serve as the required global reconstruction. Enabling the complete existing
+pass would additionally reintroduce repeated whole-function analyses on a
+100k-instruction function. The next control transformation must therefore be
+sink/effect rooted and must construct closed control-pure regions from the
+fused StateSSA/CFG contract, rather than replay source-level mux patterns.
 
 ## Related documents
 

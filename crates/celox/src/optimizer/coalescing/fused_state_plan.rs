@@ -141,6 +141,18 @@ pub(super) struct UseClusterId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct MaterializationId(usize);
 
+/// Stable, client-level identity for the MemorySSA clobber which supplies a
+/// persistent-state frontier leaf.  This deliberately does not retain a
+/// `MemoryAccessId`: access IDs are coordinates in one temporary graph and
+/// are not an executable phase/version certificate after that graph is
+/// dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum PersistentStateVersion {
+    LiveOnEntry,
+    Definition(ProgramPoint),
+    MemoryPhi(BlockId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MaterializationLeaf {
     #[expect(dead_code, reason = "constants remain explicit in the initial cone")]
@@ -165,7 +177,7 @@ pub(super) enum MaterializationLeaf {
         original_load: ProgramPoint,
         insertion_point: ProgramPoint,
         range: StateRange,
-        phase_version: usize,
+        phase_version: PersistentStateVersion,
     },
     #[cfg_attr(
         not(test),
@@ -391,6 +403,7 @@ pub(super) enum PlanError {
     RangeMismatch(ProgramPoint),
     PreservedStoreDeleted(ProgramPoint),
     ImplicitHome(UseClusterId),
+    UnsupportedControlMergeRecipe(UseClusterId),
     InvalidPhaseEffect(ProgramPoint),
     RepairCycle,
 }
@@ -927,6 +940,26 @@ fn verify_model(
                 } if insertion_point.block != cluster.load.block => {
                     return Err(PlanError::ImplicitHome(cluster.id));
                 }
+                MaterializationLeaf::ReadPersistentState {
+                    original_load,
+                    range,
+                    phase_version,
+                    ..
+                } if range.start >= range.end
+                    || matches!(
+                        phase_version,
+                        PersistentStateVersion::Definition(point)
+                            if cfg.block_index(point.block).is_none()
+                    )
+                    || matches!(
+                        phase_version,
+                        PersistentStateVersion::MemoryPhi(block)
+                            if cfg.block_index(*block).is_none()
+                    )
+                    || cfg.block_index(original_load.block).is_none() =>
+                {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
                 MaterializationLeaf::ReloadPreservedHome {
                     site,
                     store,
@@ -953,21 +986,13 @@ fn verify_model(
                         return Err(PlanError::ImplicitHome(cluster.id));
                     }
                 }
-                MaterializationLeaf::ControlMerge { recipe }
-                    if recipe.insertion_point.block != cluster.load.block
-                        || recipe.arms.is_empty()
-                        || recipe.default.0 >= model.versions.len()
-                        || recipe.arms.iter().any(|arm| {
-                            arm.value.0 >= model.versions.len()
-                                || cfg.block_index(arm.guarded_block).is_none()
-                        })
-                        || recipe
-                            .arms
-                            .iter()
-                            .enumerate()
-                            .any(|(priority, arm)| arm.priority != priority) =>
-                {
-                    return Err(PlanError::ImplicitHome(cluster.id));
+                MaterializationLeaf::ControlMerge { .. } => {
+                    // The shape is reserved for the control-pure extension,
+                    // but Milestone 1 has no closed recipe for arm-local
+                    // operations and control-dependence edges yet.  Treating
+                    // guard/value IDs alone as executable would admit
+                    // speculation and effect reordering.
+                    return Err(PlanError::UnsupportedControlMergeRecipe(cluster.id));
                 }
                 MaterializationLeaf::Constant { words, width }
                     if *width == 0 || words.len() < width.div_ceil(64) =>
@@ -976,8 +1001,7 @@ fn verify_model(
                 }
                 MaterializationLeaf::Constant { .. }
                 | MaterializationLeaf::DominatingSsa { .. }
-                | MaterializationLeaf::ReadPersistentState { .. }
-                | MaterializationLeaf::ControlMerge { .. } => {}
+                | MaterializationLeaf::ReadPersistentState { .. } => {}
             }
         }
     }
@@ -1420,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn control_merge_leaf_names_ordered_executable_arms() {
+    fn control_merge_leaf_is_rejected_until_its_control_region_is_closed() {
         let definition = DefinitionFact {
             point: point(0),
             source: RegisterId(0),
@@ -1455,18 +1479,9 @@ mod tests {
             }],
             direct_forward: None,
         }];
-        let mut model = build_model(&definitions, &demands, &[]).unwrap();
-        assert!(verify_model(&one_block_cfg(), &model, &BTreeSet::new()).is_ok());
-
-        let MaterializationLeaf::ControlMerge { recipe } =
-            &mut model.clusters[0].materialization_leaves[0]
-        else {
-            unreachable!();
-        };
-        recipe.arms[0].priority = 1;
         assert_eq!(
-            verify_model(&one_block_cfg(), &model, &BTreeSet::new()),
-            Err(PlanError::ImplicitHome(UseClusterId(0)))
+            build_and_verify(&one_block_cfg(), &definitions, &demands, &[]),
+            Err(PlanError::UnsupportedControlMergeRecipe(UseClusterId(0)))
         );
     }
 
