@@ -2060,11 +2060,64 @@ common continuation
 worst-case dynamic work
 ```
 
-Only then can it decide whether one dispatch can be shared or must be placed
-once per preserved outer path. Code generation remains disabled until this
-sink-rooted recipe is closed and its worst-case profitability passes. Replaying
-source-EU branchification, switching block 8501 alone, or cloning the
-83-block forward closure once per case is not authorized.
+The sink-rooted analysis now constructs sparse whole-function definition,
+block-parameter, predecessor, dominator, and postdominator indices, then walks
+backward from each exact Store source. It includes selector-dependent
+definitions and path-local single-use pure definitions, but stops at concrete
+constants, Loads, shared SSA values, and external values. These are diagnostic
+frontiers, not yet authorization to materialize the values.
+
+CFG changes renumbered the previously measured block 8501 to block 8671. The
+mapping was established by matching its parameter list and complete
+instruction sequence rather than by reusing the stale block number. A focused
+non-LTO compile-only run on that block produced:
+
+```text
+forward closure                         387 instructions, 83 blocks
+effect sinks                            2
+
+sink b5831:3 recipe                     242 instructions, 20 blocks
+selector-control blocks                 10
+entering CFG edges                      24
+frontier                                72 constants, 10 Loads, 75 shared SSA
+control merges                          24
+
+sink b5936:10 recipe                    240 instructions, 24 blocks
+selector-control blocks                 13
+entering CFG edges                      17
+frontier                                71 constants, 10 Loads, 67 shared SSA
+control merges                          24
+
+same publication                        yes: inst56/var350[0..64)
+same continuation                       yes: b4412
+common dominator                        b8671
+common postdominator                    b4412
+common recipe instructions              139, all in one common block
+path-local recipe instructions          103 / 101
+common frontier values                  129
+analysis time                           19.2 ms
+```
+
+The reverse slice reduces the transformation boundary from 83 blocks to
+20/24 blocks per effect, and proves that both paths publish the same range and
+rejoin at the same block. It does not yet produce a closed code-generation
+recipe: each path still crosses many outer-control edges, names dozens of
+shared SSA frontier values, and contains 24 control merges. Cloning either
+242/240-instruction slice would duplicate shared work, while carrying all 129
+common frontier values would recreate the long-live-range problem.
+
+The next step is therefore to preserve the outer-control partition between the
+common dominator and postdominator, keep the 139-instruction common origin
+work shared, and form path-local materializations only for the 103/101
+non-common instructions. Every frontier value must then name an executable,
+phase-correct materialization source at its path insertion point. Only after
+that check can the planner decide whether one dispatch can be shared or must
+be placed once per preserved outer path.
+
+Code generation remains disabled until these sink-rooted recipes are closed
+and their worst-case profitability passes. Replaying source-EU branchification,
+switching block 8671 alone, cloning the 83-block forward closure once per case,
+or hoisting its whole frontier is not authorized.
 
 ### Milestone 2: use-local FF forwarding
 

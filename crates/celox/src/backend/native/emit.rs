@@ -4757,6 +4757,11 @@ fn emit_chained_eu_groups(
             {
                 eprintln!("[control-region-feasibility-detail] label={label} {detail}");
             }
+            if control_region_mode == "full" {
+                for detail in report.recipe_detail_lines() {
+                    eprintln!("[control-region-feasibility-recipe] label={label} {detail}");
+                }
+            }
         }
     }
     let mut lane_aggregate_coverage = None;

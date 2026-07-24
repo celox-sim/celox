@@ -173,6 +173,14 @@ impl SirCfg {
         self.dominators.dominates(dominator, block)
     }
 
+    pub(crate) fn common_dominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
+        let left = self.block_index(left)?;
+        let right = self.block_index(right)?;
+        self.dominators
+            .lca(left, right)
+            .map(|block| self.block_ids[block])
+    }
+
     pub(crate) fn postdominates(&self, postdominator: BlockId, block: BlockId) -> bool {
         let (Some(postdominator), Some(block)) =
             (self.block_index(postdominator), self.block_index(block))
@@ -385,6 +393,10 @@ mod tests {
         assert_eq!(cfg.block_ids, vec![BlockId(0), BlockId(1), BlockId(2)]);
         assert_eq!(cfg.dominators.idom, vec![None, Some(0), Some(1)]);
         assert!(cfg.dominates(BlockId(0), BlockId(2)));
+        assert_eq!(
+            cfg.common_dominator(BlockId(1), BlockId(2)),
+            Some(BlockId(1))
+        );
         assert!(cfg.postdominates(BlockId(2), BlockId(0)));
         assert_eq!(
             cfg.common_postdominator(BlockId(0), BlockId(1)),

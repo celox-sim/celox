@@ -15,6 +15,7 @@ use super::cost_model::estimate_clif_cost;
 use super::shared::def_reg;
 use super::sir_analysis::{UseSite, collect_uses, instruction_uses};
 use crate::HashMap;
+use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIRTerminator, SIRValue, UnaryOp,
@@ -39,6 +40,42 @@ pub(crate) struct SelectorRegionFact {
     pub cross_block_effect_sinks: usize,
     pub cross_block_branch_conditions: usize,
     pub cross_block_effect_sites: Vec<(BlockId, usize)>,
+    pub sink_recipes: Vec<SelectorSinkRecipeFact>,
+    pub sink_recipe_pairs: Vec<SelectorSinkRecipePairFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectorSinkRecipeFact {
+    pub sink: (BlockId, usize),
+    pub effect: String,
+    pub publication: String,
+    pub source: RegisterId,
+    pub recipe_instructions: Vec<(BlockId, usize)>,
+    pub recipe_blocks: Vec<BlockId>,
+    pub selector_control_blocks: Vec<BlockId>,
+    pub entering_edges: Vec<(BlockId, BlockId)>,
+    pub continuations: Vec<BlockId>,
+    pub constant_frontier: Vec<RegisterId>,
+    pub load_frontier: Vec<RegisterId>,
+    pub shared_ssa_frontier: Vec<RegisterId>,
+    pub external_frontier: Vec<RegisterId>,
+    pub control_merges: Vec<RegisterId>,
+    pub loop_cutoffs: Vec<RegisterId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectorSinkRecipePairFact {
+    pub left_sink: (BlockId, usize),
+    pub right_sink: (BlockId, usize),
+    pub same_publication: bool,
+    pub same_continuation: bool,
+    pub common_dominator: Option<BlockId>,
+    pub common_postdominator: Option<BlockId>,
+    pub common_instructions: usize,
+    pub left_only_instructions: usize,
+    pub right_only_instructions: usize,
+    pub common_blocks: usize,
+    pub common_frontier_values: usize,
 }
 
 impl SelectorRegionFact {
@@ -66,6 +103,18 @@ pub(crate) struct ControlRegionFeasibilityReport {
 impl ControlRegionFeasibilityReport {
     pub(crate) fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
         self.facts.iter().map(|fact| {
+            let sink_recipes = fact
+                .sink_recipes
+                .iter()
+                .map(SelectorSinkRecipeFact::summary)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let sink_recipe_pairs = fact
+                .sink_recipe_pairs
+                .iter()
+                .map(SelectorSinkRecipePairFact::summary)
+                .collect::<Vec<_>>()
+                .join(" | ");
             format!(
                 "block=b{} samples={} selector=r{} cases={} instructions={} \
                  baseline_cost={} worst_case_cost={} mean_case_cost={} \
@@ -73,6 +122,8 @@ impl ControlRegionFeasibilityReport {
                  live_outputs={} effects={} cross_block_affected_instructions={} \
                  cross_block_affected_blocks={} cross_block_effect_sinks={} \
                  cross_block_branch_conditions={} cross_block_effect_sites={:?} \
+                 sink_recipes=[{}] \
+                 sink_recipe_pairs=[{}] \
                  weighted_worst_saving={}",
                 fact.block.0,
                 fact.samples,
@@ -91,9 +142,75 @@ impl ControlRegionFeasibilityReport {
                 fact.cross_block_effect_sinks,
                 fact.cross_block_branch_conditions,
                 fact.cross_block_effect_sites,
+                sink_recipes,
+                sink_recipe_pairs,
                 fact.profile_weighted_worst_saving(),
             )
         })
+    }
+
+    pub(crate) fn recipe_detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.facts.iter().flat_map(|fact| {
+            fact.sink_recipes.iter().map(move |recipe| {
+                format!(
+                    "origin=b{} selector=r{} recipe={recipe:?}",
+                    fact.block.0, fact.selector.0
+                )
+            })
+        })
+    }
+}
+
+impl SelectorSinkRecipeFact {
+    fn summary(&self) -> String {
+        format!(
+            "sink=b{}:{} source=r{} effect={:?} publication={:?} recipe_instructions={} \
+             recipe_blocks={} selector_control_blocks={} entering_edges={} \
+             continuations={:?} frontier_constants={} frontier_loads={} \
+             frontier_shared_ssa={} frontier_external={} control_merges={} \
+             loop_cutoffs={}",
+            self.sink.0.0,
+            self.sink.1,
+            self.source.0,
+            self.effect,
+            self.publication,
+            self.recipe_instructions.len(),
+            self.recipe_blocks.len(),
+            self.selector_control_blocks.len(),
+            self.entering_edges.len(),
+            self.continuations,
+            self.constant_frontier.len(),
+            self.load_frontier.len(),
+            self.shared_ssa_frontier.len(),
+            self.external_frontier.len(),
+            self.control_merges.len(),
+            self.loop_cutoffs.len(),
+        )
+    }
+}
+
+impl SelectorSinkRecipePairFact {
+    fn summary(&self) -> String {
+        format!(
+            "sinks=b{}:{}/b{}:{} same_publication={} same_continuation={} \
+             common_instructions={} left_only_instructions={} \
+             right_only_instructions={} common_blocks={} \
+             common_frontier_values={} common_dominator={:?} \
+             common_postdominator={:?}",
+            self.left_sink.0.0,
+            self.left_sink.1,
+            self.right_sink.0.0,
+            self.right_sink.1,
+            self.same_publication,
+            self.same_continuation,
+            self.common_instructions,
+            self.left_only_instructions,
+            self.right_only_instructions,
+            self.common_blocks,
+            self.common_frontier_values,
+            self.common_dominator,
+            self.common_postdominator,
+        )
     }
 }
 
@@ -129,6 +246,18 @@ struct SelectorGroup {
     cases: BTreeSet<BigUint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DefinitionSite {
+    block: BlockId,
+    index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct IncomingValue {
+    predecessor: BlockId,
+    value: RegisterId,
+}
+
 #[derive(Debug)]
 struct SpecializedBlock {
     cost: usize,
@@ -143,6 +272,21 @@ struct CrossBlockClosure {
     branch_conditions: BTreeSet<BlockId>,
 }
 
+#[derive(Debug, Default)]
+struct SinkRecipe {
+    instructions: BTreeSet<(BlockId, usize)>,
+    blocks: BTreeSet<BlockId>,
+    selector_control_blocks: BTreeSet<BlockId>,
+    entering_edges: BTreeSet<(BlockId, BlockId)>,
+    continuations: BTreeSet<BlockId>,
+    constant_frontier: BTreeSet<RegisterId>,
+    load_frontier: BTreeSet<RegisterId>,
+    shared_ssa_frontier: BTreeSet<RegisterId>,
+    external_frontier: BTreeSet<RegisterId>,
+    control_merges: BTreeSet<RegisterId>,
+    loop_cutoffs: BTreeSet<RegisterId>,
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     profile_blocks: &[(BlockId, u64)],
@@ -150,6 +294,10 @@ pub(crate) fn analyze(
     let constants = collect_exact_constants(eu);
     let uses = collect_uses(eu);
     let edge_param_uses = collect_edge_param_uses(eu);
+    let definitions = collect_definition_sites(eu);
+    let incoming_values = collect_incoming_values(eu);
+    let predecessors = collect_predecessors(eu);
+    let cfg = SirCfg::analyze_structure(eu).ok();
     let mut selected = BTreeMap::<BlockId, u64>::new();
     for &(block, samples) in profile_blocks {
         if eu.blocks.contains_key(&block) {
@@ -206,6 +354,10 @@ pub(crate) fn analyze(
                     &constants,
                     &uses,
                     &edge_param_uses,
+                    &definitions,
+                    &incoming_values,
+                    &predecessors,
+                    cfg.as_ref(),
                     baseline_cost,
                     live_outputs,
                     effects,
@@ -251,6 +403,10 @@ fn analyze_group(
     constants: &HashMap<RegisterId, SIRValue>,
     uses: &HashMap<RegisterId, Vec<UseSite>>,
     edge_param_uses: &HashMap<RegisterId, Vec<RegisterId>>,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+    cfg: Option<&SirCfg>,
     baseline_cost: usize,
     live_outputs: usize,
     effects: usize,
@@ -268,6 +424,22 @@ fn analyze_group(
         uses,
         edge_param_uses,
     );
+    let sink_recipes = cross_block
+        .effect_sinks
+        .iter()
+        .filter_map(|&sink| {
+            analyze_sink_recipe(
+                eu,
+                sink,
+                &cross_block,
+                uses,
+                definitions,
+                incoming_values,
+                predecessors,
+            )
+        })
+        .collect::<Vec<_>>();
+    let sink_recipe_pairs = compare_sink_recipes(&sink_recipes, cfg);
     let mut specializations = group
         .cases
         .iter()
@@ -328,6 +500,8 @@ fn analyze_group(
         cross_block_effect_sinks: cross_block.effect_sinks.len(),
         cross_block_branch_conditions: cross_block.branch_conditions.len(),
         cross_block_effect_sites: cross_block.effect_sinks.into_iter().collect(),
+        sink_recipes,
+        sink_recipe_pairs,
     })
 }
 
@@ -412,6 +586,83 @@ fn collect_edge_param_uses(
     result
 }
 
+fn collect_definition_sites(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, DefinitionSite> {
+    eu.blocks
+        .values()
+        .flat_map(|block| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, instruction)| {
+                    def_reg(instruction).map(|register| {
+                        (
+                            register,
+                            DefinitionSite {
+                                block: block.id,
+                                index,
+                            },
+                        )
+                    })
+                })
+        })
+        .collect()
+}
+
+fn collect_incoming_values(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, Vec<IncomingValue>> {
+    let mut result = HashMap::<RegisterId, Vec<IncomingValue>>::default();
+    for block in eu.blocks.values() {
+        let mut add_edge = |target: BlockId, arguments: &[RegisterId]| {
+            let Some(target_block) = eu.blocks.get(&target) else {
+                return;
+            };
+            for (&value, &parameter) in arguments.iter().zip(&target_block.params) {
+                result.entry(parameter).or_default().push(IncomingValue {
+                    predecessor: block.id,
+                    value,
+                });
+            }
+        };
+        match &block.terminator {
+            SIRTerminator::Jump(target, arguments) => add_edge(*target, arguments),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                add_edge(true_block.0, &true_block.1);
+                add_edge(false_block.0, &false_block.1);
+            }
+            SIRTerminator::Switch { .. } | SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    for values in result.values_mut() {
+        values.sort_unstable_by_key(|incoming| (incoming.predecessor, incoming.value));
+        values.dedup();
+    }
+    result
+}
+
+fn collect_predecessors(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut result = HashMap::<BlockId, Vec<BlockId>>::default();
+    for block in eu.blocks.values() {
+        for successor in terminator_successors(&block.terminator) {
+            result.entry(successor).or_default().push(block.id);
+        }
+    }
+    for blocks in result.values_mut() {
+        blocks.sort_unstable();
+        blocks.dedup();
+    }
+    result
+}
+
 fn cross_block_selector_closure(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     origin: BlockId,
@@ -477,6 +728,217 @@ fn cross_block_selector_closure(
         }
     }
     closure
+}
+
+#[derive(Clone, Copy)]
+enum RecipeWalk {
+    Enter(RegisterId),
+    Exit(RegisterId),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_sink_recipe(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    sink: (BlockId, usize),
+    selector_closure: &CrossBlockClosure,
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+) -> Option<SelectorSinkRecipeFact> {
+    let instruction = eu.blocks.get(&sink.0)?.instructions.get(sink.1)?;
+    let SIRInstruction::Store(address, offset, width, source, triggers, comb_capture_sites) =
+        instruction
+    else {
+        return None;
+    };
+
+    let mut recipe = SinkRecipe::default();
+    recipe.blocks.insert(sink.0);
+    recipe
+        .continuations
+        .extend(terminator_successors(&eu.blocks[&sink.0].terminator));
+
+    let mut active = BTreeSet::<RegisterId>::new();
+    let mut complete = BTreeSet::<RegisterId>::new();
+    let mut work = vec![RecipeWalk::Enter(*source)];
+    while let Some(item) = work.pop() {
+        let register = match item {
+            RecipeWalk::Exit(register) => {
+                active.remove(&register);
+                complete.insert(register);
+                continue;
+            }
+            RecipeWalk::Enter(register) => register,
+        };
+        if complete.contains(&register) {
+            continue;
+        }
+        if !active.insert(register) {
+            recipe.loop_cutoffs.insert(register);
+            continue;
+        }
+        work.push(RecipeWalk::Exit(register));
+
+        if let Some(incoming) = incoming_values.get(&register) {
+            recipe.control_merges.insert(register);
+            for incoming in incoming.iter().rev() {
+                work.push(RecipeWalk::Enter(incoming.value));
+            }
+            continue;
+        }
+
+        let Some(site) = definitions.get(&register).copied() else {
+            recipe.external_frontier.insert(register);
+            continue;
+        };
+        let definition = &eu.blocks[&site.block].instructions[site.index];
+        match definition {
+            SIRInstruction::Imm(..) => {
+                recipe.constant_frontier.insert(register);
+            }
+            SIRInstruction::Load(..) => {
+                recipe.load_frontier.insert(register);
+            }
+            _ => {
+                let selector_dependent = selector_closure
+                    .instructions
+                    .contains(&(site.block, site.index));
+                let single_use = uses.get(&register).is_none_or(|sites| sites.len() <= 1);
+                if !is_recipe_pure(definition)
+                    || !selector_closure.blocks.contains(&site.block)
+                    || (!selector_dependent && !single_use)
+                {
+                    recipe.shared_ssa_frontier.insert(register);
+                    continue;
+                }
+                recipe.instructions.insert((site.block, site.index));
+                recipe.blocks.insert(site.block);
+                for operand in instruction_uses(definition).into_iter().rev() {
+                    work.push(RecipeWalk::Enter(operand));
+                }
+            }
+        }
+    }
+
+    let mut can_reach_sink = BTreeSet::new();
+    let mut block_work = vec![sink.0];
+    while let Some(block) = block_work.pop() {
+        if !can_reach_sink.insert(block) {
+            continue;
+        }
+        block_work.extend(
+            predecessors
+                .get(&block)
+                .into_iter()
+                .flatten()
+                .filter(|predecessor| selector_closure.blocks.contains(predecessor))
+                .copied(),
+        );
+    }
+    recipe.selector_control_blocks.extend(
+        selector_closure
+            .branch_conditions
+            .intersection(&can_reach_sink)
+            .copied(),
+    );
+    recipe
+        .blocks
+        .extend(recipe.selector_control_blocks.iter().copied());
+    for &block in &recipe.blocks {
+        for &predecessor in predecessors.get(&block).into_iter().flatten() {
+            if !recipe.blocks.contains(&predecessor) {
+                recipe.entering_edges.insert((predecessor, block));
+            }
+        }
+    }
+
+    Some(SelectorSinkRecipeFact {
+        sink,
+        effect: instruction.to_string(),
+        publication: format!(
+            "addr={address},offset={offset},bits={width},triggers={triggers:?},\
+             comb_capture_sites={comb_capture_sites:?}"
+        ),
+        source: *source,
+        recipe_instructions: recipe.instructions.into_iter().collect(),
+        recipe_blocks: recipe.blocks.into_iter().collect(),
+        selector_control_blocks: recipe.selector_control_blocks.into_iter().collect(),
+        entering_edges: recipe.entering_edges.into_iter().collect(),
+        continuations: recipe.continuations.into_iter().collect(),
+        constant_frontier: recipe.constant_frontier.into_iter().collect(),
+        load_frontier: recipe.load_frontier.into_iter().collect(),
+        shared_ssa_frontier: recipe.shared_ssa_frontier.into_iter().collect(),
+        external_frontier: recipe.external_frontier.into_iter().collect(),
+        control_merges: recipe.control_merges.into_iter().collect(),
+        loop_cutoffs: recipe.loop_cutoffs.into_iter().collect(),
+    })
+}
+
+fn compare_sink_recipes(
+    recipes: &[SelectorSinkRecipeFact],
+    cfg: Option<&SirCfg>,
+) -> Vec<SelectorSinkRecipePairFact> {
+    let mut result = Vec::new();
+    for (left_index, left) in recipes.iter().enumerate() {
+        for right in &recipes[left_index + 1..] {
+            let left_instructions = left
+                .recipe_instructions
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let right_instructions = right
+                .recipe_instructions
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let common_instructions = left_instructions.intersection(&right_instructions).count();
+            let left_blocks = left.recipe_blocks.iter().copied().collect::<BTreeSet<_>>();
+            let right_blocks = right.recipe_blocks.iter().copied().collect::<BTreeSet<_>>();
+            let left_frontier = sink_recipe_frontier(left);
+            let right_frontier = sink_recipe_frontier(right);
+            result.push(SelectorSinkRecipePairFact {
+                left_sink: left.sink,
+                right_sink: right.sink,
+                same_publication: left.publication == right.publication,
+                same_continuation: left.continuations == right.continuations,
+                common_dominator: cfg
+                    .and_then(|cfg| cfg.common_dominator(left.sink.0, right.sink.0)),
+                common_postdominator: cfg
+                    .and_then(|cfg| cfg.common_postdominator(left.sink.0, right.sink.0)),
+                common_instructions,
+                left_only_instructions: left_instructions.len() - common_instructions,
+                right_only_instructions: right_instructions.len() - common_instructions,
+                common_blocks: left_blocks.intersection(&right_blocks).count(),
+                common_frontier_values: left_frontier.intersection(&right_frontier).count(),
+            });
+        }
+    }
+    result
+}
+
+fn sink_recipe_frontier(recipe: &SelectorSinkRecipeFact) -> BTreeSet<RegisterId> {
+    recipe
+        .constant_frontier
+        .iter()
+        .chain(&recipe.load_frontier)
+        .chain(&recipe.shared_ssa_frontier)
+        .chain(&recipe.external_frontier)
+        .copied()
+        .collect()
+}
+
+fn is_recipe_pure(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Load(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+            | SIRInstruction::Mux(..)
+    )
 }
 
 fn specialize_block(
@@ -677,6 +1139,23 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
     }
 }
 
+fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
+    match terminator {
+        SIRTerminator::Jump(target, _) => vec![*target],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
+        SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +1307,170 @@ mod tests {
         assert_eq!(fact.cross_block_affected_blocks, 2);
         assert_eq!(fact.cross_block_effect_sinks, 1);
         assert_eq!(fact.cross_block_effect_sites, vec![(BlockId(1), 1)]);
+        assert_eq!(fact.sink_recipes.len(), 1);
+        let recipe = &fact.sink_recipes[0];
+        assert_eq!(recipe.sink, (BlockId(1), 1));
+        assert_eq!(recipe.source, result);
+        assert_eq!(recipe.recipe_instructions.len(), 4);
+        assert_eq!(recipe.recipe_blocks, vec![BlockId(0), BlockId(1)]);
+        assert_eq!(recipe.constant_frontier.len(), 2);
+        assert_eq!(recipe.external_frontier.len(), 2);
+        assert_eq!(recipe.control_merges, vec![parameter]);
+        assert!(recipe.loop_cutoffs.is_empty());
+    }
+
+    #[test]
+    fn sink_recipe_stops_at_executable_load_and_shared_ssa_frontiers() {
+        let selector = RegisterId(0);
+        let zero = RegisterId(1);
+        let one = RegisterId(2);
+        let guard_zero = RegisterId(3);
+        let guard_one = RegisterId(4);
+        let external = RegisterId(5);
+        let shared = RegisterId(6);
+        let loaded = RegisterId(7);
+        let selected = RegisterId(8);
+        let parameter = RegisterId(9);
+        let result = RegisterId(10);
+        let preheader = BasicBlock {
+            id: BlockId(2),
+            params: vec![selector, external],
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(0), Vec::new()),
+        };
+        let origin = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
+                SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+                SIRInstruction::Binary(shared, external, BinaryOp::Add, one),
+                SIRInstruction::Load(loaded, address(1), SIROffset::Static(0), 2),
+                SIRInstruction::Mux(selected, guard_zero, loaded, shared),
+                SIRInstruction::Store(
+                    address(2),
+                    SIROffset::Static(0),
+                    2,
+                    shared,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), vec![selected]),
+        };
+        let sink = BasicBlock {
+            id: BlockId(1),
+            params: vec![parameter],
+            instructions: vec![
+                SIRInstruction::Mux(result, guard_one, one, parameter),
+                SIRInstruction::Store(
+                    address(0),
+                    SIROffset::Static(0),
+                    2,
+                    result,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+        };
+        let continuation = BasicBlock {
+            id: BlockId(3),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(2),
+            blocks: [
+                (BlockId(0), origin),
+                (BlockId(1), sink),
+                (BlockId(2), preheader),
+                (BlockId(3), continuation),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (selector, bit(2)),
+                (zero, bit(2)),
+                (one, bit(2)),
+                (guard_zero, bit(1)),
+                (guard_one, bit(1)),
+                (external, bit(2)),
+                (shared, bit(2)),
+                (loaded, bit(2)),
+                (selected, bit(2)),
+                (parameter, bit(2)),
+                (result, bit(2)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, &[(BlockId(0), 10)]);
+        let recipe = &report.facts[0].sink_recipes[0];
+        assert_eq!(recipe.load_frontier, vec![loaded]);
+        assert_eq!(recipe.shared_ssa_frontier, vec![shared]);
+        assert_eq!(recipe.entering_edges, vec![(BlockId(2), BlockId(0))]);
+        assert_eq!(recipe.continuations, vec![BlockId(3)]);
+        assert!(recipe.effect.contains("src_reg = 10"));
+    }
+
+    #[test]
+    fn sink_recipe_pair_separates_shared_and_path_local_work() {
+        let recipe = |sink: (BlockId, usize),
+                      source: RegisterId,
+                      instructions: Vec<(BlockId, usize)>,
+                      frontier: RegisterId| SelectorSinkRecipeFact {
+            sink,
+            effect: format!("store from r{}", source.0),
+            publication: "same exact range".to_string(),
+            source,
+            recipe_instructions: instructions,
+            recipe_blocks: vec![BlockId(0), sink.0],
+            selector_control_blocks: vec![BlockId(0)],
+            entering_edges: Vec::new(),
+            continuations: vec![BlockId(3)],
+            constant_frontier: vec![frontier],
+            load_frontier: Vec::new(),
+            shared_ssa_frontier: Vec::new(),
+            external_frontier: Vec::new(),
+            control_merges: Vec::new(),
+            loop_cutoffs: Vec::new(),
+        };
+        let left = recipe(
+            (BlockId(1), 0),
+            RegisterId(10),
+            vec![(BlockId(0), 0), (BlockId(1), 0)],
+            RegisterId(20),
+        );
+        let mut right = recipe(
+            (BlockId(2), 0),
+            RegisterId(11),
+            vec![(BlockId(0), 0), (BlockId(2), 0), (BlockId(2), 1)],
+            RegisterId(20),
+        );
+        right.recipe_blocks = vec![BlockId(0), BlockId(2)];
+
+        let pairs = compare_sink_recipes(&[left, right], None);
+
+        assert_eq!(
+            pairs,
+            vec![SelectorSinkRecipePairFact {
+                left_sink: (BlockId(1), 0),
+                right_sink: (BlockId(2), 0),
+                same_publication: true,
+                same_continuation: true,
+                common_dominator: None,
+                common_postdominator: None,
+                common_instructions: 1,
+                left_only_instructions: 1,
+                right_only_instructions: 2,
+                common_blocks: 1,
+                common_frontier_values: 1,
+            }]
+        );
     }
 }
