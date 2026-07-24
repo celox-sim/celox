@@ -6,6 +6,8 @@ mod debug;
 mod display_format;
 mod flatting;
 mod ir;
+#[cfg(target_arch = "x86_64")]
+mod lane_aggregate_plan;
 mod logic_tree;
 mod optimizer;
 mod parser;
