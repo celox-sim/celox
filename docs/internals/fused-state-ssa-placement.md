@@ -1208,6 +1208,34 @@ problem: repeated lane arbitration needs a target-independent aggregate
 representation (candidate mask plus selected-index/value recipes) before
 allocation, rather than another scalar peephole or a longer carried VReg.
 
+A source-loop recovery experiment tested whether the same recurrence should
+instead be restored as a generic counted CFG loop. The investigation found and
+fixed an independent range defect: a loop-invariant destination such as
+`state[1]` was incorrectly represented as a whole-array carried state.
+Recovery now keeps the exact static element range, while a destination that
+varies with the induction variable still uses the whole object. This prevents
+unrelated array elements from becoming false loop-carried dependencies.
+
+The counted-loop production experiment itself was rejected by the execution
+gate. Recovering the two 31-iteration arbitration recurrences reduced the
+fused function as follows:
+
+| Stage | Proven shift guards | Counted recurrence | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 92,959 | 92,178 | -781 |
+| pressure-scheduled MIR | 99,570 | 98,784 | -786 |
+| post-RA MIR | 210,229 | 208,555 | -1,674 |
+| x86 instructions | 145,414 | 144,547 | -867 |
+
+Despite the static reduction, exact Linux execution regressed from the
+64.8--65.6 second range to 73.371 seconds. The dynamic element addressing,
+loop-carried phis, and latch branch cost more than the eliminated instruction
+footprint. Restoring the branchless expansion while retaining only the exact
+static-target analysis reaches `cy=9ae070 x3=aa pass=1` in 64.314 seconds.
+Therefore the next representation must preserve compile-time lane knowledge
+and shorten lane-local live ranges; a scalar runtime loop is not an acceptable
+substitute for aggregate priority selection.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

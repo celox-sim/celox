@@ -1576,13 +1576,8 @@ fn prove_group(
 
     let chunk_len = statements.len() / iterations.len();
     let chunks = statements.chunks_exact(chunk_len).collect::<Vec<_>>();
-    let targets = persistent_full_width_targets(module, chunks[0], &candidate.unrolled)?;
-    if targets.is_empty()
-        || chunks.iter().skip(1).any(|chunk| {
-            persistent_full_width_targets(module, chunk, &candidate.unrolled).as_ref()
-                != Some(&targets)
-        })
-    {
+    let targets = persistent_targets(module, &chunks, &candidate.unrolled)?;
+    if targets.is_empty() {
         return None;
     }
 
@@ -1785,15 +1780,28 @@ fn prove_group(
     })
 }
 
-fn persistent_full_width_targets(
+fn persistent_targets(
     module: &Module,
-    statements: &[Statement],
+    chunks: &[&[Statement]],
     candidate: &UnrolledLoopCandidate,
 ) -> Option<Vec<VarAtomBase<VarId>>> {
-    let mut destinations = Vec::new();
-    collect_destinations(statements, &mut destinations)?;
+    let mut destinations_by_iteration = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let mut destinations = Vec::new();
+        collect_destinations(chunk, &mut destinations)?;
+        destinations_by_iteration.push(destinations);
+    }
+    let first = destinations_by_iteration.first()?;
+    if destinations_by_iteration
+        .iter()
+        .any(|destinations| destinations.len() != first.len())
+    {
+        return None;
+    }
+
     let mut targets = BTreeSet::new();
-    for destination in destinations {
+    for position in 0..first.len() {
+        let destination = first[position];
         if iteration_owner(module, candidate, destination.id).is_some() {
             continue;
         }
@@ -1801,7 +1809,31 @@ fn persistent_full_width_targets(
         if width == 0 {
             return None;
         }
-        let access = BitAccess::new(0, width - 1);
+        let static_accesses = destinations_by_iteration
+            .iter()
+            .map(|destinations| {
+                let destination = destinations[position];
+                if destination.id != first[position].id
+                    || !crate::parser::bitaccess::is_static_access(
+                        &destination.index,
+                        &destination.select,
+                    )
+                {
+                    return None;
+                }
+                crate::parser::bitaccess::eval_var_select(
+                    module,
+                    destination.id,
+                    &destination.index,
+                    &destination.select,
+                )
+                .ok()
+            })
+            .collect::<Option<Vec<_>>>();
+        let access = static_accesses
+            .filter(|accesses| accesses.windows(2).all(|pair| pair[0] == pair[1]))
+            .and_then(|accesses| accesses.first().copied())
+            .unwrap_or_else(|| BitAccess::new(0, width - 1));
         targets.insert((destination.id, access.lsb, access.msb));
     }
     Some(
@@ -1930,11 +1962,7 @@ fn eval_chunk_outputs_with_initial_store(
     }
     let mut store = map_symbolic_store_roots(initial_store, &variables, source_arena, arena)?;
     for target in targets {
-        let width = target
-            .access
-            .msb
-            .checked_sub(target.access.lsb)?
-            .checked_add(1)?;
+        let width = resolve_total_width(module, module.variables.get(&target.id)?).ok()?;
         store.insert(target.id, RangeStore::new(None, width));
     }
     let loop_width = resolve_total_width(module, module.variables.get(&loop_var)?).ok()?;
@@ -4793,6 +4821,47 @@ mod tests {
         assert!(narrow_widths.contains(&1), "missing scalar dynamic load");
         assert!(narrow_widths.contains(&2), "missing size dynamic load");
         assert!(narrow_widths.contains(&64), "missing 64-bit dynamic load");
+    }
+
+    #[test]
+    fn keeps_a_loop_invariant_static_destination_as_a_narrow_state() {
+        let code = r#"
+            module Top (
+                bits : input  logic<4>,
+                value: output logic<16>,
+            ) {
+                var state: logic<8> [2];
+                always_comb {
+                    state[0] = 8'd0;
+                    state[1] = 8'd0;
+                    for i in 0..4 {
+                        if bits[i] {
+                            state[1] = state[1] ^ ((i + 1) as 8);
+                        }
+                    }
+                    value = {state[1], state[0]};
+                }
+            }
+        "#;
+        let (module, provenance) = analyze(code);
+        let candidates = provenance.candidates_for_module(&module);
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        let state = variable(&module, "state");
+        let target = arena
+            .iter()
+            .find_map(|node| match node {
+                SLTNode::ForFoldGroup { states, .. } => states
+                    .iter()
+                    .find(|entry| entry.target.id == state)
+                    .map(|entry| entry.target),
+                _ => None,
+            })
+            .expect("the fixed-destination recurrence must be recovered");
+        assert_eq!(
+            target.access,
+            BitAccess::new(8, 15),
+            "a fixed array element must not become a whole-array carried state"
+        );
     }
 
     #[test]
