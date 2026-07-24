@@ -2,6 +2,19 @@ use crate::HashMap;
 use crate::ir::{AbsoluteAddr, ExecutionUnit, ModuleId, RegionedAbsoluteAddr, SimModule};
 use crate::logic_tree::{LogicPath, SLTNodeArena};
 mod output;
+
+/// One native JIT block selected by an external profile.
+///
+/// Function names are the names used in the JIT perf map (for example
+/// `eval_comb_apply_ff`), not just a block number.  Block numbers are only
+/// unique within one emitted function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeProfileBlock {
+    pub function: String,
+    pub block: u32,
+    pub samples: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TraceOptions {
     pub sim_modules: bool,
@@ -16,6 +29,7 @@ pub struct TraceOptions {
     pub post_optimized_clif: bool,
     pub native: bool,
     pub mir: bool,
+    pub native_profile_blocks: Vec<NativeProfileBlock>,
     pub output_to_stdout: bool,
 }
 
@@ -38,6 +52,9 @@ pub struct CompilationTrace {
     pub post_optimized_clif: Option<String>,
     pub native: Option<String>,
     pub mir: Option<String>,
+    /// Analysis of profile-selected native state accesses captured from the
+    /// exact merged SIR used by instruction selection.
+    pub native_state_layout: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

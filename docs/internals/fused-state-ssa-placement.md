@@ -1871,44 +1871,90 @@ next-value locations and a write log. Its combinational evaluator is also
 split into 31 `noinline` chunks. These are observations about generated code,
 not yet an attribution of the speed difference.
 
-Celox already uses element-strided native storage for a bounded subset of
-eligible unpacked arrays. The remaining question is different: whether hot
-fields of packed structured objects need a compiler-private native
-representation across events while the exact packed public representation is
-materialized only at its required observation and commit boundaries.
+Celox already uses element-strided native storage for eligible unpacked arrays.
+The profile-selected analysis must therefore distinguish three cases instead
+of counting every non-static offset as one unsafe dynamic alias:
 
-The next gate is profile-selected and bounded. For hot blocks only, it must
-map every packed Load/extract and insert/Store chain to:
+- an arbitrary dynamic bit offset, which rejects static range scalarization;
+- a typed `Element` offset whose width agrees with the physical element
+  layout;
+- a typed `Element` offset for an object which could not use the strided
+  layout because another access violates its contract.
+
+This distinction is required for both safety and profitability. Treating
+`Element` as arbitrary dynamic rejects legal arrays; treating its current
+accesses as packed invents extraction and insertion work which code generation
+has already removed.
+
+The bounded analysis maps every profile-selected packed Load/extract and
+insert/Store chain to:
 
 - its logical object and exact range;
 - the persistent phase version read or published;
 - all observation sites requiring the packed representation;
 - dynamic execution weight;
-- machine instructions removable by a native shadow source;
-- synchronization cost at `CommitFFState` and external observation barriers.
+- estimated machine instructions removable by a scalarized physical layout;
+- physical memory expansion and every dynamic, effect, alias, and four-state
+  hazard which would prevent that layout.
 
-An admitted shadow range must have one native 32- or 64-bit slot, preserve
-the exact RTL width through typed MIR operations, and name the packed
-StateVersion with which it is synchronized. Ordinary comb reads cannot observe
-staging state before `CommitFFState`. Public reads, capture, trigger, dynamic
+This is an ordinary authoritative physical-layout/SROA question, not a shadow
+cache. Native signal reads and writes already gather and scatter an
+element-strided `SignalRef`, so no per-tick shadow synchronization is required
+for an admitted whole object. Any future range-scalarized object must likewise
+have exactly one authoritative representation and preserve RTL widths through
+typed MIR operations. Public reads, capture, trigger, arbitrary dynamic
 aliases, and four-state masks remain packed unless a separate proof covers
-them. Overlapping shadow ranges require one authoritative version and explicit
-range-order reconstruction; they may not be independently updated.
+them. Overlapping independently updated shadows are not an admissible
+implementation.
 
 The profitability test is:
 
 ```text
 profile-weighted removed extraction/insertion instructions
     >
-profile-weighted shadow synchronization and observation cost
+profile-weighted reconstruction cost
 ```
 
-It must first pass on the current profile-selected ranges without constructing
-whole-function per-range tables. Function splitting is evaluated separately:
-the existing Celox tail-call splitter is a compiler-limit mechanism, while
-Veryl's 31 chunks may also alter optimization and allocation. The current
-profile does not identify instruction-cache/front-end stalls as the dominant
-cost, so chunking alone is not treated as the physical-layout fix.
+The analysis was run on 548 blocks selected from the existing Heliodor
+`cycles:u` profile. Of 50,677 selected samples, 50,649 map to blocks in the
+current pre-RA SIR; the 16 missing post-RA synthetic blocks account for only
+28 samples. The exact optimized SIR and MIR hashes match the uninstrumented
+trace:
+
+```text
+optimized native SIR  59a5182365fc78932dafb6097e67a55b26c963255898982e35e8d4060b717515
+final MIR             03afc3d31129c7d73f5c0f4de239d8e65ba453768259778ee2cb7cfa501bf20f
+analysis time          6 ms
+current RSS increase   1,152 KiB
+```
+
+There are 64 semantically admissible and locally profitable objects:
+
+```text
+profile-weighted current estimate      627,734
+profile-weighted scalarized estimate   297,246
+optimistic reduction                   330,488
+selected-block final x86 total      14,297,777
+optimistic selected-block fraction       2.31%
+```
+
+The earlier apparent additional 471,078-instruction opportunity from
+element-indexed objects was a diagnostic error. In particular, the 32-element
+one- and three-bit arrays `inst51/var215`, `inst51/var217`, and
+`inst51/var218` are already element-strided; their hot static accesses are
+one direct native access each, and further scalarization has zero estimated
+benefit. Only two profitable element-indexed objects lack a compatible
+strided layout, with a combined optimistic saving of 4,149 weighted
+instructions (0.03% of selected-block x86).
+
+Static physical SROA therefore fails the large-gap profitability gate. It is
+useful infrastructure and identifies some locally poor packed accesses, but it
+cannot explain or close the remaining generated-execution gap by itself.
+Code generation is not enabled from this analysis. Function splitting remains
+a separate question: the existing Celox tail-call splitter is a compiler-limit
+mechanism, while Veryl's 31 chunks may also alter optimization and allocation.
+The current profile does not establish instruction-cache/front-end stalls as
+the dominant cost.
 
 ### Milestone 2: use-local FF forwarding
 

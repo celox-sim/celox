@@ -477,6 +477,26 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Add one profile-selected native JIT block to state-layout feasibility
+    /// analysis. The analysis is captured by [`Self::build_with_trace`] from
+    /// the exact merged SIR passed to native instruction selection.
+    pub fn trace_native_profile_block(
+        mut self,
+        function: impl Into<String>,
+        block: u32,
+        samples: u64,
+    ) -> Self {
+        self.options
+            .trace
+            .native_profile_blocks
+            .push(crate::debug::NativeProfileBlock {
+                function: function.into(),
+                block,
+                samples,
+            });
+        self
+    }
+
     pub fn trace_on_build(mut self) -> Self {
         self.options.trace.output_to_stdout = true;
         self
@@ -775,18 +795,20 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             }
 
             #[cfg(target_arch = "x86_64")]
-            let backend = if self.options.trace.mir {
-                let (backend, native_trace) =
-                    crate::backend::native::NativeBackend::new_with_codegen_trace(
-                        &program,
-                        &self.options,
-                    )?;
-                trace.native_optimized_sir = Some(native_trace.optimized_sir);
-                trace.mir = Some(native_trace.mir);
-                backend
-            } else {
-                crate::backend::native::NativeBackend::new(&program, &self.options)?
-            };
+            let backend =
+                if self.options.trace.mir || !self.options.trace.native_profile_blocks.is_empty() {
+                    let (backend, native_trace) =
+                        crate::backend::native::NativeBackend::new_with_codegen_trace(
+                            &program,
+                            &self.options,
+                        )?;
+                    trace.native_optimized_sir = Some(native_trace.optimized_sir);
+                    trace.mir = Some(native_trace.mir);
+                    trace.native_state_layout = Some(native_trace.state_layout);
+                    backend
+                } else {
+                    crate::backend::native::NativeBackend::new(&program, &self.options)?
+                };
             #[cfg(not(target_arch = "x86_64"))]
             let backend = JitBackend::new(&program, &self.options, None)?;
 

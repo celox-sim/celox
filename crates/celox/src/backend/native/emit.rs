@@ -490,6 +490,7 @@ pub struct EmitResult {
 #[derive(Default)]
 pub(crate) struct NativeFunctionTrace {
     pub optimized_sir: String,
+    pub state_layout: String,
     pub mir_before_regalloc: String,
     pub mir_after_scheduling: String,
     pub mir_after_regalloc: String,
@@ -4564,7 +4565,7 @@ pub fn emit_chained_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[units], layout, four_state, label, None, None)
+    emit_chained_eu_groups(&[units], layout, four_state, label, None, None, None)
 }
 
 pub(crate) fn emit_chained_eus_with_trace(
@@ -4574,7 +4575,7 @@ pub(crate) fn emit_chained_eus_with_trace(
     label: &str,
     trace: &mut NativeFunctionTrace,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[units], layout, four_state, label, None, Some(trace))
+    emit_chained_eu_groups(&[units], layout, four_state, label, None, Some(trace), None)
 }
 
 // Cross-phase stable forwarding deliberately stays staged until the allocator
@@ -4601,6 +4602,7 @@ pub fn emit_comb_eval_apply_eus(
         label,
         stable_load_suffix,
         None,
+        None,
     )
 }
 
@@ -4611,6 +4613,8 @@ pub(crate) fn emit_comb_eval_apply_eus_with_trace(
     four_state: bool,
     label: &str,
     trace: &mut NativeFunctionTrace,
+    program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
+    profile_blocks: &[(crate::ir::BlockId, u64)],
 ) -> Result<EmitResult, ChainedEmitError> {
     let stable_load_suffix = (!ff_units.is_empty()).then_some(comb_units.len());
     emit_chained_eu_groups(
@@ -4620,6 +4624,7 @@ pub(crate) fn emit_comb_eval_apply_eus_with_trace(
         label,
         stable_load_suffix,
         Some(trace),
+        Some((program_facts, profile_blocks)),
     )
 }
 
@@ -4630,6 +4635,10 @@ fn emit_chained_eu_groups(
     label: &str,
     stable_load_suffix: Option<usize>,
     mut trace: Option<&mut NativeFunctionTrace>,
+    state_layout_profile: Option<(
+        &crate::optimizer::coalescing::ProgramStateAccessSummary,
+        &[(crate::ir::BlockId, u64)],
+    )>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
     let units = groups
@@ -4771,6 +4780,17 @@ fn emit_chained_eu_groups(
     }
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
+        if let Some((program_facts, profile_blocks)) = state_layout_profile
+            && !profile_blocks.is_empty()
+        {
+            trace.state_layout = crate::optimizer::coalescing::analyze_native_state_layout(
+                &sir_eu,
+                layout,
+                program_facts,
+                profile_blocks,
+            )
+            .to_string();
+        }
     }
     if let Some(start) = merge_start {
         let sir_insts: usize = sir_eu

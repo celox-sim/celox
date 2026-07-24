@@ -105,6 +105,7 @@ struct CompiledNativeFunction {
 pub(crate) struct NativeCodegenTrace {
     pub optimized_sir: String,
     pub mir: String,
+    pub state_layout: String,
 }
 
 fn compile_units(
@@ -125,6 +126,7 @@ fn compile_units(
             .map_err(|e| codegen_err(format!("emit error: {e}")))?;
         let trace = capture_trace.then(|| emit::NativeFunctionTrace {
             optimized_sir: "<empty native function>\n".into(),
+            state_layout: String::new(),
             mir_before_regalloc: empty_func.to_string(),
             mir_after_scheduling: empty_func.to_string(),
             mir_after_regalloc: empty_func.to_string(),
@@ -172,11 +174,20 @@ fn compile_comb_eval_apply_units(
     four_state: bool,
     label: &str,
     capture_trace: bool,
+    program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
+    profile_blocks: &[(crate::ir::BlockId, u64)],
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
     let emit_result = if let Some(trace) = trace.as_mut() {
         emit::emit_comb_eval_apply_eus_with_trace(
-            comb_units, ff_units, layout, four_state, label, trace,
+            comb_units,
+            ff_units,
+            layout,
+            four_state,
+            label,
+            trace,
+            program_facts,
+            profile_blocks,
         )
     } else {
         emit::emit_comb_eval_apply_eus(comb_units, ff_units, layout, four_state, label)
@@ -306,6 +317,7 @@ fn collect_ff_compile_tasks_from<'a>(
 fn append_native_function_trace(
     optimized_sir: &mut String,
     mir: &mut String,
+    state_layout: &mut String,
     name: &str,
     bindings: &[String],
     trace: &emit::NativeFunctionTrace,
@@ -358,6 +370,21 @@ fn append_native_function_trace(
         mir.push('\n');
     }
     mir.push('\n');
+
+    if !trace.state_layout.is_empty() {
+        state_layout.push_str(&format!("=== Native function {name} ===\n"));
+        if !bindings.is_empty() {
+            state_layout.push_str("Bindings:\n");
+            for binding in &bindings {
+                state_layout.push_str(&format!("  {binding}\n"));
+            }
+        }
+        state_layout.push_str(&trace.state_layout);
+        if !trace.state_layout.ends_with('\n') {
+            state_layout.push('\n');
+        }
+        state_layout.push('\n');
+    }
 }
 
 fn format_native_codegen_trace(
@@ -368,9 +395,12 @@ fn format_native_codegen_trace(
 ) -> NativeCodegenTrace {
     let mut optimized_sir = String::from("=== Optimized SIR used by native emission ===\n");
     let mut mir = String::from("=== MIR used by native emission ===\n");
+    let mut state_layout =
+        String::from("=== Profile-selected native state-layout feasibility ===\n");
     append_native_function_trace(
         &mut optimized_sir,
         &mut mir,
+        &mut state_layout,
         "eval_comb",
         &[],
         comb.trace
@@ -399,6 +429,7 @@ fn format_native_codegen_trace(
         append_native_function_trace(
             &mut optimized_sir,
             &mut mir,
+            &mut state_layout,
             &name,
             &task.bindings,
             ff_codes[&fingerprint]
@@ -431,6 +462,7 @@ fn format_native_codegen_trace(
         append_native_function_trace(
             &mut optimized_sir,
             &mut mir,
+            &mut state_layout,
             &name,
             &bindings,
             comb_apply_codes[&fingerprint]
@@ -440,7 +472,11 @@ fn format_native_codegen_trace(
         );
     }
 
-    NativeCodegenTrace { optimized_sir, mir }
+    NativeCodegenTrace {
+        optimized_sir,
+        mir,
+        state_layout,
+    }
 }
 
 fn compile_program(
@@ -452,7 +488,27 @@ fn compile_program(
         .layout
         .as_ref()
         .expect("layout must be built before backend");
+    let fused_profile_blocks = options
+        .trace
+        .native_profile_blocks
+        .iter()
+        .filter(|block| {
+            block.function == "eval_comb_apply_ff"
+                || block.function.starts_with("eval_comb_apply_ff[")
+        })
+        .map(|block| (crate::ir::BlockId(block.block as usize), block.samples))
+        .collect::<Vec<_>>();
+    // This summary is an analysis-only input.  Do not scan the full program in
+    // ordinary production compilation when no state-layout profile was
+    // requested.
+    let program_state_accesses = if capture_trace && !fused_profile_blocks.is_empty() {
+        crate::optimizer::coalescing::ProgramStateAccessSummary::build(sir)
+    } else {
+        crate::optimizer::coalescing::ProgramStateAccessSummary::default()
+    };
     let compile_tasks = collect_ff_compile_tasks(sir);
+    let program_state_accesses_ref = &program_state_accesses;
+    let fused_profile_blocks_ref = fused_profile_blocks.as_slice();
     let (comb_jit, mut compiled_ff_codes, mut compiled_comb_apply_codes) = std::thread::scope(
         |scope| {
             let four_state = options.four_state;
@@ -488,6 +544,8 @@ fn compile_program(
                                 four_state,
                                 "eval_comb_apply_ff",
                                 capture_trace,
+                                program_state_accesses_ref,
+                                fused_profile_blocks_ref,
                             )
                         }),
                     ));

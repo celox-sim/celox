@@ -13,6 +13,8 @@ mod fused_state_feasibility;
 mod fused_state_plan;
 #[cfg(target_arch = "x86_64")]
 mod lane_aggregate_feasibility;
+#[cfg(target_arch = "x86_64")]
+mod native_state_layout_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
@@ -52,6 +54,23 @@ mod sir_analysis;
 mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) use native_state_layout_feasibility::{
+    ProgramStateAccessSummary, analyze_native_state_layout,
+};
+
+#[cfg(target_arch = "x86_64")]
+fn resident_memory_kib() -> Option<(usize, usize)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let value = |name: &str| {
+        status.lines().find_map(|line| {
+            let value = line.strip_prefix(name)?;
+            value.split_ascii_whitespace().next()?.parse::<usize>().ok()
+        })
+    };
+    Some((value("VmRSS:")?, value("VmHWM:")?))
+}
 
 /// Keep explicit scalar stores only for small register-like arrays. Large
 /// arrays must remain free to coalesce reset/initialization runs before the

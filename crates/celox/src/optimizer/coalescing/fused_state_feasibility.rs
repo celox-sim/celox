@@ -2176,14 +2176,7 @@ fn classify_object_coverage(report: &mut FeasibilityReport) {
 }
 
 pub(super) fn resident_memory_kib() -> Option<(usize, usize)> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let value = |name: &str| {
-        status.lines().find_map(|line| {
-            let value = line.strip_prefix(name)?;
-            value.split_ascii_whitespace().next()?.parse::<usize>().ok()
-        })
-    };
-    Some((value("VmRSS:")?, value("VmHWM:")?))
+    super::resident_memory_kib()
 }
 
 fn range_endpoints(accesses: &[(BitRange, bool)]) -> BTreeMap<RegionedAbsoluteAddr, Vec<usize>> {

@@ -19,6 +19,7 @@ struct Options {
     four_state: bool,
     compile_only: bool,
     dump_ir_dir: Option<PathBuf>,
+    native_profile_blocks: Vec<celox::NativeProfileBlock>,
     pass_overrides: Vec<(bool, SirPass)>,
 }
 
@@ -46,6 +47,9 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let opts = parse_args().map_err(|e| format!("{e}\n\n{}", usage()))?;
+    if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
+        return Err("--native-profile-block requires --dump-ir-dir".into());
+    }
     let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
     let source_refs: Vec<(&str, &Path)> = sources
         .iter()
@@ -65,6 +69,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
         .four_state(opts.four_state);
+    for block in &opts.native_profile_blocks {
+        builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);
+    }
     for (enable, pass) in opts.pass_overrides {
         builder = if enable {
             builder.enable_pass(pass)
@@ -94,14 +101,19 @@ fn run() -> Result<(), Box<dyn Error>> {
             .format_native_optimized_sir()
             .ok_or("native optimized SIR trace was not captured")?;
         let mir = trace.mir.ok_or("MIR trace was not captured")?;
+        let state_layout = trace
+            .native_state_layout
+            .ok_or("native state-layout analysis was not captured")?;
         let pre_sir_path = output_dir.join("pre_optimized.sir");
         let sir_path = output_dir.join("post_optimized.sir");
         let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
+        let state_layout_path = output_dir.join("native_state_layout.txt");
         fs::write(&pre_sir_path, &pre_optimized_sir)?;
         fs::write(&sir_path, &sir)?;
         fs::write(&native_sir_path, &native_sir)?;
         fs::write(&mir_path, &mir)?;
+        fs::write(&state_layout_path, &state_layout)?;
         eprintln!(
             "wrote pre-optimized SIR ({} bytes) to {}",
             pre_optimized_sir.len(),
@@ -121,6 +133,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             "wrote full native MIR ({} bytes) to {}",
             mir.len(),
             mir_path.display()
+        );
+        eprintln!(
+            "wrote native state-layout analysis ({} bytes) to {}",
+            state_layout.len(),
+            state_layout_path.display()
         );
         println!(
             "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
@@ -212,6 +229,7 @@ fn parse_args() -> Result<Options, String> {
     let mut four_state = false;
     let mut compile_only = false;
     let mut dump_ir_dir = None;
+    let mut native_profile_blocks = Vec::new();
     let mut pass_overrides = Vec::new();
     let mut args = env::args().skip(1);
 
@@ -262,6 +280,12 @@ fn parse_args() -> Result<Options, String> {
                         "--dump-ir-dir requires a directory".to_string()
                     })?));
             }
+            "--native-profile-block" => {
+                let value = args.next().ok_or_else(|| {
+                    "--native-profile-block requires FUNCTION:BLOCK:SAMPLES".to_string()
+                })?;
+                native_profile_blocks.push(parse_native_profile_block(&value)?);
+            }
             other if project.is_none() => project = Some(PathBuf::from(other)),
             other if test.is_none() => test = Some(other.to_string()),
             other => return Err(format!("unexpected argument: {other}")),
@@ -277,6 +301,7 @@ fn parse_args() -> Result<Options, String> {
         four_state,
         compile_only,
         dump_ir_dir,
+        native_profile_blocks,
         pass_overrides,
     })
 }
@@ -298,6 +323,30 @@ fn parse_backend(value: &str) -> Result<Backend, String> {
     }
 }
 
+fn parse_native_profile_block(value: &str) -> Result<celox::NativeProfileBlock, String> {
+    let (function_and_block, samples) = value
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid native profile block: {value}"))?;
+    let (function, block) = function_and_block
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid native profile block: {value}"))?;
+    let block = block.strip_prefix("bb").unwrap_or(block);
+    let block = block
+        .parse::<u32>()
+        .map_err(|_| format!("invalid block number in native profile block: {value}"))?;
+    let samples = samples
+        .parse::<u64>()
+        .map_err(|_| format!("invalid sample count in native profile block: {value}"))?;
+    if function.is_empty() || samples == 0 {
+        return Err(format!("invalid native profile block: {value}"));
+    }
+    Ok(celox::NativeProfileBlock {
+        function: function.to_string(),
+        block,
+        samples,
+    })
+}
+
 fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
     let (enable, name) = if let Some(name) = value.strip_prefix('+') {
         (true, name)
@@ -311,7 +360,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--dump-ir-dir <dir>]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--dump-ir-dir <dir>] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
 }
 
 fn load_sources(
