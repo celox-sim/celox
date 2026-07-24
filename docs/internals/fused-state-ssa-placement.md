@@ -1473,6 +1473,10 @@ structurally executable:
 | independently emitted recipe estimate | 1,423 | 1,423 |
 | shared-prefix unique recipe estimate | 844 | 844 |
 | exact shared recipe nodes | 57 | 57 |
+| shared prefix nodes | 57 | 57 |
+| prefix-to-suffix boundary values | 3 | 3 |
+| peak prefix local values | 7 GPR masks / 5 XMM | 7 / 5 |
+| peak suffix local values | 5 GPR masks / 4 XMM | 5 / 4 |
 | analysis time | 1.61 s | 1.47 s |
 
 The independent estimate is not profitable. It double-counts the common
@@ -1508,6 +1512,29 @@ identities all match. Each root names the resulting stable shared-node
 identity. Lowering therefore receives the 57 common Heliodor nodes as one
 planned prefix; ordinary GVN/CSE is neither expected nor permitted to infer
 that sharing after placement.
+
+The shared graph also passes the local-pressure gate. Only three recipe values
+cross from the 57-node common prefix to either branch suffix. Evaluating one
+128-bit lane chunk in topological order peaks at seven predicate-mask values
+and five XMM values in the prefix, then five and four respectively in either
+suffix. These are emitter-local temporaries, not global MIR VRegs.
+
+The first lowering should therefore be one control-pure aggregate region, not
+three global pseudos connected by vector live ranges. For each fixed lane
+chunk it:
+
+1. evaluates the common prefix with local scratch;
+2. tests the original branch condition and evaluates exactly one suffix;
+3. accumulates that chunk's predicate bits into the selected publication
+   mask;
+4. discards every prefix/suffix temporary before the next chunk.
+
+The internal branch may be duplicated once per unrolled chunk, or represented
+by a small fixed-count chunk loop if an execution A/B proves that form faster.
+It must not evaluate both suffixes, and it must not expose the three boundary
+values to global register allocation. Trigger-free packed publication remains
+the only external effect. This region shape directly enforces the measured
+pressure bound and preserves the original control dependence.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,

@@ -146,6 +146,12 @@ struct SharedRecipePlan {
     roots: Vec<(BlockId, RegisterId, usize)>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct LocalPressure {
+    gpr: usize,
+    xmm: usize,
+}
+
 #[derive(Debug, Clone)]
 struct RejectedCandidate {
     block: BlockId,
@@ -172,6 +178,12 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     summed_estimated_instructions: usize,
     unique_estimated_instructions: usize,
     shared_recipe_nodes: usize,
+    shared_prefix_nodes: usize,
+    shared_boundary_values: usize,
+    peak_prefix_gpr_values: usize,
+    peak_prefix_xmm_values: usize,
+    peak_suffix_gpr_values: usize,
+    peak_suffix_xmm_values: usize,
     kind_counts: HashMap<RecipeKind, usize>,
     reject_counts: HashMap<RejectReason, usize>,
 }
@@ -283,7 +295,7 @@ impl fmt::Display for LaneAggregateFeasibilityReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_sum={} estimated_unique={} shared_recipe_nodes={}",
+            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_sum={} estimated_unique={} shared_recipe_nodes={} shared_prefix_nodes={} shared_boundary_values={} peak_prefix_gpr={} peak_prefix_xmm={} peak_suffix_gpr={} peak_suffix_xmm={}",
             self.candidates,
             self.accepted.len(),
             self.rejected.len(),
@@ -292,6 +304,12 @@ impl fmt::Display for LaneAggregateFeasibilityReport {
             self.summed_estimated_instructions,
             self.unique_estimated_instructions,
             self.shared_recipe_nodes,
+            self.shared_prefix_nodes,
+            self.shared_boundary_values,
+            self.peak_prefix_gpr_values,
+            self.peak_prefix_xmm_values,
+            self.peak_suffix_gpr_values,
+            self.peak_suffix_xmm_values,
         )
     }
 }
@@ -1348,6 +1366,141 @@ fn build_shared_recipe_plan(candidates: &[Candidate]) -> Option<SharedRecipePlan
     Some(SharedRecipePlan { nodes, roots })
 }
 
+fn recipe_ancestors(nodes: &[RecipeNode], root: usize) -> Option<HashSet<usize>> {
+    let mut ancestors = HashSet::default();
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        if !ancestors.insert(node) {
+            continue;
+        }
+        work.extend(nodes.get(node)?.children.iter().copied());
+    }
+    Some(ancestors)
+}
+
+fn peak_local_pressure(
+    nodes: &[RecipeNode],
+    produced: &HashSet<usize>,
+    initial: &HashSet<usize>,
+    roots: &[usize],
+) -> Option<LocalPressure> {
+    let mut remaining = vec![0usize; nodes.len()];
+    for &node in produced {
+        for &child in &nodes.get(node)?.children {
+            if !produced.contains(&child) && !initial.contains(&child) {
+                return None;
+            }
+            remaining[child] = remaining[child].checked_add(1)?;
+        }
+    }
+    for &root in roots {
+        remaining[root] = remaining.get(root)?.checked_add(1)?;
+    }
+    let mut active = HashSet::default();
+    let mut current = LocalPressure::default();
+    let mut peak = LocalPressure::default();
+    let add = |node: usize, active: &mut HashSet<usize>, current: &mut LocalPressure| {
+        if active.insert(node) {
+            if nodes[node].lane_width == 1 {
+                current.gpr += 1;
+            } else {
+                current.xmm += 1;
+            }
+        }
+    };
+    let remove = |node: usize, active: &mut HashSet<usize>, current: &mut LocalPressure| {
+        if active.remove(&node) {
+            if nodes[node].lane_width == 1 {
+                current.gpr -= 1;
+            } else {
+                current.xmm -= 1;
+            }
+        }
+    };
+    for &node in initial {
+        if remaining[node] != 0 {
+            add(node, &mut active, &mut current);
+        }
+    }
+    peak.gpr = peak.gpr.max(current.gpr);
+    peak.xmm = peak.xmm.max(current.xmm);
+    for node in 0..nodes.len() {
+        if !produced.contains(&node) {
+            continue;
+        }
+        if remaining[node] != 0 {
+            add(node, &mut active, &mut current);
+        }
+        peak.gpr = peak.gpr.max(current.gpr);
+        peak.xmm = peak.xmm.max(current.xmm);
+        for &child in &nodes[node].children {
+            remaining[child] = remaining[child].checked_sub(1)?;
+            if remaining[child] == 0 {
+                remove(child, &mut active, &mut current);
+            }
+        }
+    }
+    for &root in roots {
+        remaining[root] = remaining[root].checked_sub(1)?;
+        if remaining[root] == 0 {
+            remove(root, &mut active, &mut current);
+        }
+    }
+    Some(peak)
+}
+
+fn shared_recipe_pressure(
+    plan: &SharedRecipePlan,
+) -> Option<(usize, usize, LocalPressure, LocalPressure)> {
+    let mut root_ancestors = plan
+        .roots
+        .iter()
+        .map(|(_, _, root)| recipe_ancestors(&plan.nodes, *root))
+        .collect::<Option<Vec<_>>>()?;
+    let mut common = root_ancestors.pop()?;
+    for ancestors in &root_ancestors {
+        common.retain(|node| ancestors.contains(node));
+    }
+    let mut users = vec![Vec::new(); plan.nodes.len()];
+    for (user, node) in plan.nodes.iter().enumerate() {
+        for &child in &node.children {
+            users.get_mut(child)?.push(user);
+        }
+    }
+    let boundary = common
+        .iter()
+        .copied()
+        .filter(|node| users[*node].iter().any(|user| !common.contains(user)))
+        .collect::<HashSet<_>>();
+    let prefix_peak = peak_local_pressure(
+        &plan.nodes,
+        &common,
+        &HashSet::default(),
+        &boundary.iter().copied().collect::<Vec<_>>(),
+    )?;
+    let mut suffix_peak = LocalPressure::default();
+    for (_, _, root) in &plan.roots {
+        let ancestors = recipe_ancestors(&plan.nodes, *root)?;
+        let suffix = ancestors
+            .difference(&common)
+            .copied()
+            .collect::<HashSet<_>>();
+        let inputs = boundary
+            .iter()
+            .copied()
+            .filter(|boundary| {
+                suffix
+                    .iter()
+                    .any(|node| plan.nodes[*node].children.contains(boundary))
+            })
+            .collect::<HashSet<_>>();
+        let peak = peak_local_pressure(&plan.nodes, &suffix, &inputs, &[*root])?;
+        suffix_peak.gpr = suffix_peak.gpr.max(peak.gpr);
+        suffix_peak.xmm = suffix_peak.xmm.max(peak.xmm);
+    }
+    Some((common.len(), boundary.len(), prefix_peak, suffix_peak))
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -1578,6 +1731,16 @@ pub(crate) fn analyze(
     report.unique_estimated_instructions = unique_node_cost + publication_cost;
     report.shared_recipe_nodes = total_nodes.saturating_sub(shared_plan.nodes.len());
     debug_assert_eq!(shared_plan.roots.len(), report.accepted.len());
+    if let Some((prefix_nodes, boundary_values, prefix_peak, suffix_peak)) =
+        shared_recipe_pressure(&shared_plan)
+    {
+        report.shared_prefix_nodes = prefix_nodes;
+        report.shared_boundary_values = boundary_values;
+        report.peak_prefix_gpr_values = prefix_peak.gpr;
+        report.peak_prefix_xmm_values = prefix_peak.xmm;
+        report.peak_suffix_gpr_values = suffix_peak.gpr;
+        report.peak_suffix_xmm_values = suffix_peak.xmm;
+    }
     Ok(report)
 }
 
@@ -1969,6 +2132,11 @@ mod tests {
         assert_eq!(plan.roots.len(), 3);
         assert_eq!(plan.roots[0].2, plan.roots[1].2);
         assert_ne!(plan.roots[0].2, plan.roots[2].2);
+        let (prefix, boundary, prefix_peak, suffix_peak) = shared_recipe_pressure(&plan).unwrap();
+        assert_eq!(prefix, 1);
+        assert_eq!(boundary, 1);
+        assert_eq!(prefix_peak.xmm, 1);
+        assert!(suffix_peak.xmm >= 1);
     }
 
     #[test]
