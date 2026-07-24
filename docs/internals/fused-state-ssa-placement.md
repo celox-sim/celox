@@ -1331,6 +1331,56 @@ executable packed implementation, or leave those producers scalar while
 changing their placement/allocation contract. In particular, an opaque
 Concat-per-frontier-node is not a viable representation for this region.
 
+#### Sink-local SIMD feasibility
+
+The native backend already has the required allocation boundary:
+`PackedLaneCompare` is one MIR operation whose emitter uses XMM registers
+outside the GPR allocator and returns only the final predicate mask in a GPR.
+The first aggregate implementation should generalize that indivisible pseudo,
+not add vector VRegs to global register allocation.
+
+An initial `PackedLaneRecipe` is legal only when all of the following hold:
+
+- the root is one complete 8..64-lane predicate mask consumed at one use
+  cluster;
+- every lane has the same typed operation shape;
+- operations are two-state `and/or/xor/not`, lane-width add/sub, constant
+  mask/shift, mux, or a typed signed/unsigned comparison;
+- every non-constant leaf is an executable materialization source:
+  an exact strided `ReadPersistentState` at the same StateVersion, or one
+  dominating scalar broadcast;
+- no arbitrary vector of scalar SSA leaves is accepted;
+- all memory versions are stable from the recipe's earliest read through its
+  sink, and the recipe contains no Store, Commit, trigger, capture, runtime
+  observation, or loop-carried cycle.
+
+The pseudo is emitted in fixed 128-bit chunks. Intermediate SIMD values live
+only while emitting one chunk, so they create neither CFG live-ins nor spill
+slots. The result of each chunk is converted to predicate bits and accumulated
+in the ordinary GPR destination. SSE2 operations cover 16-bit add/sub,
+boolean operations, mux, and comparison; any operation without an exact
+baseline implementation rejects the recipe and retains scalar SIR. Wider ISA
+paths may be added only as alternative emission for the same recipe.
+
+Planning traverses each `(recipe node, lane group)` once and interns identical
+nodes. Its time and memory are linear in covered operand edges. A predecessor
+definition may be removed only when all of its uses are covered by accepted
+sink recipes; otherwise the pseudo rematerializes its own StateVersion leaves
+without claiming the shared scalar producer.
+
+Before code generation, an analysis-only gate must report for blocks 8081,
+4425, and 4426:
+
+1. exact executable leaf kinds and StateVersions;
+2. supported and rejected recipe operations;
+3. scalar definitions proven dead, including cross-block use coverage;
+4. estimated emitted x86 instructions by 128-bit chunk;
+5. estimated stack-traffic removal.
+
+The recipe proceeds to MIR only if its estimated emitted instructions plus
+mandatory reads are lower than the covered post-allocation scalar work. The
+same scalar SIR remains the complete fallback.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
