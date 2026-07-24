@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use super::placement_analysis::{PlacementAnalysis, ValueSafety, ValueUse};
+use super::placement_analysis::{PlacementAnalysis, ValueOrigin, ValueSafety, ValueUse};
 use super::shared::sir_value_to_u64;
 use crate::backend::MemoryLayout;
 use crate::ir::{
@@ -30,6 +30,8 @@ enum RecipeKind {
     Binary,
     ShiftConstant,
     Mux,
+    ControlMux,
+    ScalarInsert,
     Slice,
     Concat,
 }
@@ -246,6 +248,14 @@ struct Analyzer<'a> {
     ssa_frontiers: HashSet<BlockId>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct NormalizedMux {
+    condition: RegisterId,
+    then_value: RegisterId,
+    else_value: RegisterId,
+    from_control_merge: bool,
+}
+
 impl<'a> Analyzer<'a> {
     fn instruction(&self, register: RegisterId) -> Option<&SIRInstruction<RegionedAbsoluteAddr>> {
         let &(block, index) = self.definitions.get(&register)?;
@@ -378,6 +388,17 @@ impl<'a> Analyzer<'a> {
                 ValueSafety::Pure if self.placement.can_sink_to_block(value.id, self.target) => {
                     self.insert_node(key, RecipeKind::BroadcastScalar, Vec::new(), lane_width, 4)
                 }
+                ValueSafety::Pure | ValueSafety::Pinned(_)
+                    if self
+                        .placement
+                        .cfg
+                        .dominates(value.origin.block(), self.target) =>
+                {
+                    // This is a concrete DominatingSSA frontier, not a
+                    // relocation proof.  Only one scalar crosses the
+                    // boundary regardless of the lane count.
+                    self.insert_node(key, RecipeKind::BroadcastScalar, Vec::new(), lane_width, 4)
+                }
                 ValueSafety::StateRead(_)
                     if self
                         .placement
@@ -421,6 +442,35 @@ impl<'a> Analyzer<'a> {
         if let Some(base) = self.affine_base(&key, lane_width) {
             let child = self.analyze(vec![base; key.len()])?;
             return self.insert_node(key, RecipeKind::Affine, vec![child], lane_width, 2);
+        }
+
+        let muxes = key
+            .iter()
+            .map(|register| self.normalized_mux(*register))
+            .collect::<Vec<_>>();
+        if muxes.iter().all(Option::is_some) {
+            let muxes = muxes.into_iter().flatten().collect::<Vec<_>>();
+            let from_control_merge = muxes.iter().any(|mux| mux.from_control_merge);
+            let conditions = muxes.iter().map(|mux| mux.condition).collect();
+            let then_values = muxes.iter().map(|mux| mux.then_value).collect();
+            let else_values = muxes.iter().map(|mux| mux.else_value).collect();
+            let condition = self.analyze(conditions)?;
+            let then_value = self.analyze(then_values)?;
+            let else_value = self.analyze(else_values)?;
+            return self.insert_node(
+                key,
+                if from_control_merge {
+                    RecipeKind::ControlMux
+                } else {
+                    RecipeKind::Mux
+                },
+                vec![condition, then_value, else_value],
+                lane_width,
+                3,
+            );
+        }
+        if let Some(result) = self.analyze_mux_with_scalar_inserts(&key, &muxes, lane_width) {
+            return result;
         }
 
         let first_instruction = self
@@ -498,34 +548,7 @@ impl<'a> Analyzer<'a> {
                     1 + usize::from(wrap_mask),
                 )
             }
-            SIRInstruction::Mux(_, condition, then_value, else_value) => {
-                let mut conditions = Vec::with_capacity(key.len());
-                let mut then_values = Vec::with_capacity(key.len());
-                let mut else_values = Vec::with_capacity(key.len());
-                conditions.push(condition);
-                then_values.push(then_value);
-                else_values.push(else_value);
-                for register in key.iter().skip(1) {
-                    let Some(SIRInstruction::Mux(_, condition, then_value, else_value)) =
-                        self.instruction(*register)
-                    else {
-                        return Err(RejectReason::HeterogeneousOperation);
-                    };
-                    conditions.push(*condition);
-                    then_values.push(*then_value);
-                    else_values.push(*else_value);
-                }
-                let condition = self.analyze(conditions)?;
-                let then_value = self.analyze(then_values)?;
-                let else_value = self.analyze(else_values)?;
-                self.insert_node(
-                    key,
-                    RecipeKind::Mux,
-                    vec![condition, then_value, else_value],
-                    lane_width,
-                    3,
-                )
-            }
+            SIRInstruction::Mux(..) => Err(RejectReason::HeterogeneousOperation),
             SIRInstruction::Slice(_, source, offset, width) => {
                 let mut sources = Vec::with_capacity(key.len());
                 sources.push(source);
@@ -669,11 +692,163 @@ impl<'a> Analyzer<'a> {
         sir_value_to_u64(value)
     }
 
+    fn normalized_mux(&self, register: RegisterId) -> Option<NormalizedMux> {
+        if let Some(SIRInstruction::Mux(_, condition, then_value, else_value)) =
+            self.instruction(register)
+        {
+            return Some(NormalizedMux {
+                condition: *condition,
+                then_value: *then_value,
+                else_value: *else_value,
+                from_control_merge: false,
+            });
+        }
+
+        let value = self
+            .placement
+            .value_for_register(register)
+            .and_then(|value| self.placement.value(value))?;
+        let ValueOrigin::Parameter {
+            block: merge,
+            index: parameter,
+        } = value.origin
+        else {
+            return None;
+        };
+        let merge_index = *self.placement.cfg.index.get(&merge)?;
+        let predecessors = self.placement.cfg.predecessors.get(merge_index)?;
+        if predecessors.len() != 2 {
+            return None;
+        }
+
+        let mut edges = Vec::with_capacity(2);
+        for &predecessor in predecessors {
+            let edge = self.placement.cfg.block_ids[predecessor];
+            let block = self.eu.blocks.get(&edge)?;
+            if !block.instructions.is_empty() {
+                return None;
+            }
+            let crate::ir::SIRTerminator::Jump(target, arguments) = &block.terminator else {
+                return None;
+            };
+            if *target != merge {
+                return None;
+            }
+            let argument = *arguments.get(parameter)?;
+            let edge_predecessors = self.placement.cfg.predecessors.get(predecessor)?;
+            if edge_predecessors.len() != 1 {
+                return None;
+            }
+            edges.push((edge, edge_predecessors[0], argument));
+        }
+        if edges[0].1 != edges[1].1 {
+            return None;
+        }
+        let head = self.placement.cfg.block_ids[edges[0].1];
+        let crate::ir::SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &self.eu.blocks.get(&head)?.terminator
+        else {
+            return None;
+        };
+        let edge_argument = |target: BlockId| {
+            edges
+                .iter()
+                .find_map(|(edge, _, argument)| (*edge == target).then_some(*argument))
+        };
+        let mut condition = *cond;
+        if let Some(SIRInstruction::Unary(_, UnaryOp::ToTwoState, source)) =
+            self.instruction(condition)
+        {
+            condition = *source;
+        }
+        Some(NormalizedMux {
+            condition,
+            then_value: edge_argument(true_block.0)?,
+            else_value: edge_argument(false_block.0)?,
+            from_control_merge: true,
+        })
+    }
+
+    fn analyze_mux_with_scalar_inserts(
+        &mut self,
+        key: &[RegisterId],
+        muxes: &[Option<NormalizedMux>],
+        lane_width: usize,
+    ) -> Option<Result<usize, RejectReason>> {
+        let mux_lanes = key
+            .iter()
+            .zip(muxes)
+            .filter_map(|(&register, mux)| mux.is_some().then_some(register))
+            .collect::<Vec<_>>();
+        let scalar_lanes = key
+            .iter()
+            .zip(muxes)
+            .filter_map(|(&register, mux)| mux.is_none().then_some(register))
+            .collect::<Vec<_>>();
+        if mux_lanes.len() < key.len().saturating_sub(2)
+            || scalar_lanes.is_empty()
+            || scalar_lanes.len() > 2
+        {
+            return None;
+        }
+        let scalar_values = scalar_lanes
+            .iter()
+            .map(|register| {
+                let value = self.placement.value_for_register(*register)?;
+                let occurrence = self.placement.value(value)?;
+                if !matches!(
+                    occurrence.safety,
+                    ValueSafety::Pure | ValueSafety::Pinned(_)
+                ) || !self
+                    .placement
+                    .cfg
+                    .dominates(occurrence.origin.block(), self.target)
+                {
+                    return None;
+                }
+                Some(value)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let all_values = key
+            .iter()
+            .map(|register| self.placement.value_for_register(*register))
+            .collect::<Option<Vec<_>>>()?;
+        let frontier = self
+            .placement
+            .earliest_common_dominating_value_block(&all_values, self.target)?;
+        if frontier == self.target {
+            return None;
+        }
+        self.ssa_frontiers.insert(frontier);
+
+        Some((|| {
+            let aggregate = self.analyze(mux_lanes)?;
+            let inserts = self.insert_node(
+                scalar_lanes.clone(),
+                RecipeKind::ScalarInsert,
+                Vec::new(),
+                lane_width,
+                scalar_values.len().saturating_mul(2),
+            )?;
+            self.insert_node(
+                key.to_vec(),
+                RecipeKind::ControlMux,
+                vec![aggregate, inserts],
+                lane_width,
+                1,
+            )
+        })())
+    }
+
     fn verify_state_leaf(&mut self, key: &[RegisterId]) -> Result<(), RejectReason> {
         let mut address = None;
         let mut width = None;
         let mut physical_offsets = Vec::with_capacity(key.len());
         let mut values = Vec::with_capacity(key.len());
+        let mut all_versioned_state_reads = true;
         for &register in key {
             let value_id = self
                 .placement
@@ -684,7 +859,15 @@ impl<'a> Analyzer<'a> {
                 .value(value_id)
                 .ok_or(RejectReason::MissingDefinition)?;
             if !matches!(value.safety, ValueSafety::StateRead(_)) {
-                return Err(RejectReason::UnstableStateVersion);
+                if !matches!(value.safety, ValueSafety::Pure | ValueSafety::Pinned(_))
+                    || !self
+                        .placement
+                        .cfg
+                        .dominates(value.origin.block(), self.target)
+                {
+                    return Err(RejectReason::UnstableStateVersion);
+                }
+                all_versioned_state_reads = false;
             }
             values.push(value_id);
             let Some(SIRInstruction::Load(
@@ -708,7 +891,15 @@ impl<'a> Analyzer<'a> {
                 .map_static_bit_offset(&current_address.absolute_addr(), *offset);
             physical_offsets.push((byte, bit));
         }
-        if !values.iter().all(|&value| {
+        if !all_versioned_state_reads {
+            let frontier = self
+                .placement
+                .earliest_common_dominating_value_block(&values, self.target)
+                .ok_or(RejectReason::UnstableStateVersion)?;
+            if frontier != self.target {
+                self.ssa_frontiers.insert(frontier);
+            }
+        } else if !values.iter().all(|&value| {
             self.placement
                 .can_materialize_state_read_at_block(value, self.target)
         }) {
@@ -1303,6 +1494,145 @@ mod tests {
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::SsaPack], 1);
         assert_eq!(report.accepted[0].ssa_frontiers, vec![BlockId(0)]);
+    }
+
+    #[test]
+    fn inserts_a_scalar_control_phi_into_an_aggregate_at_its_merge() {
+        let (mut eu, layout) = fixture(false);
+        let mut original = eu.blocks.remove(&BlockId(0)).unwrap();
+        let root_index = original
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Concat(..)))
+            .unwrap();
+        let mut sink = original.instructions.split_off(root_index);
+        let condition = RegisterId(40);
+        let then_value = RegisterId(41);
+        let else_value = RegisterId(42);
+        let parameter = RegisterId(43);
+        let false_copy = RegisterId(51);
+        eu.register_map.insert(
+            condition,
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        for register in [then_value, else_value, parameter, false_copy] {
+            eu.register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        original.instructions.extend([
+            SIRInstruction::Imm(condition, SIRValue::new(1u8)),
+            SIRInstruction::Imm(then_value, SIRValue::new(1u8)),
+            SIRInstruction::Imm(else_value, SIRValue::new(0u8)),
+        ]);
+        original.terminator = SIRTerminator::Branch {
+            cond: condition,
+            true_block: (BlockId(1), Vec::new()),
+            false_block: (BlockId(2), Vec::new()),
+        };
+        eu.blocks.insert(BlockId(0), original);
+        eu.blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), vec![then_value]),
+            },
+        );
+        eu.blocks.insert(
+            BlockId(2),
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: vec![SIRInstruction::Unary(
+                    false_copy,
+                    UnaryOp::Ident,
+                    else_value,
+                )],
+                terminator: SIRTerminator::Jump(BlockId(3), vec![false_copy]),
+            },
+        );
+        let mut mux_instructions = Vec::new();
+        let SIRInstruction::Concat(_, lanes) = &mut sink[0] else {
+            unreachable!();
+        };
+        let mut values = vec![parameter];
+        for lane in 1..lanes.len() {
+            let mux = RegisterId(43 + lane);
+            eu.register_map.insert(
+                mux,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+            mux_instructions.push(SIRInstruction::Mux(mux, condition, then_value, else_value));
+            values.push(mux);
+        }
+        let zero = RegisterId(52);
+        eu.register_map.insert(
+            zero,
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        mux_instructions.push(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        for (lane, (output, value)) in lanes.iter_mut().zip(values).enumerate() {
+            let predicate = RegisterId(53 + lane);
+            eu.register_map.insert(
+                predicate,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            mux_instructions.push(SIRInstruction::Binary(predicate, value, BinaryOp::Ne, zero));
+            *output = predicate;
+        }
+        eu.blocks.insert(
+            BlockId(3),
+            BasicBlock {
+                id: BlockId(3),
+                params: vec![parameter],
+                instructions: mux_instructions,
+                terminator: SIRTerminator::Jump(BlockId(4), Vec::new()),
+            },
+        );
+        eu.blocks.insert(
+            BlockId(4),
+            BasicBlock {
+                id: BlockId(4),
+                params: Vec::new(),
+                instructions: sink,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        eu.verify();
+
+        let report = analyze(&eu, &layout).unwrap();
+        assert_eq!(report.accepted.len(), 1);
+        assert_eq!(
+            report.kind_counts.get(&RecipeKind::ControlMux),
+            Some(&1),
+            "{:?}",
+            report.kind_counts
+        );
+        assert_eq!(
+            report.kind_counts.get(&RecipeKind::ScalarInsert),
+            Some(&1),
+            "{:?}",
+            report.kind_counts
+        );
+        assert_eq!(report.accepted[0].ssa_frontiers, vec![BlockId(3)]);
     }
 
     #[test]

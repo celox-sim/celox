@@ -1418,20 +1418,42 @@ The traversal established these representation boundaries:
    the sink would therefore be a miscompile.
 4. Those leaves occur under a control merge. In the standalone comb function
    the same frontier appears as 31 Mux definitions plus one EU-boundary
-   parameter. A single branchless sink expression cannot name all sources at
-   one legal point.
+   parameter. The parameter is not unknown: it is a binary control phi. One
+   phi arm is a dominating value and the other is produced by an arm-local
+   Load.
 
-Consequently the next recipe unit is a small `ControlPureAggregateRegion`.
-Each branch materializes its own legal mask/bit planes, and the aggregate
-values are merged with the original branch priority. This is not speculation:
-loads remain in their original StateVersion domains. Repair may stop at an
-already available dominating aggregate SSA value, but may not expose the
-original lane-wise scalar values as global live-ins.
+The analysis now normalizes an effect-free binary phi to its original guarded
+Mux recipe. If an arm contains code, it does not speculate that code. Instead,
+when the resulting scalar phi dominates a later aggregate frontier, the
+planner keeps that scalar materialization and inserts only that lane into the
+aggregate. This is a concrete `DominatingSSA` leaf at the merge block. The
+rule accepts at most two scalar holes in an otherwise homogeneous aggregate
+and records the earliest common dominating aggregate block.
 
-The current analysis intentionally rejects both roots until that
-`ControlMerge` recipe exists. Code generation remains unauthorized; treating
-the failed StateVersion check as a movable Load or accepting 32 arbitrary SSA
-leaves would reintroduce the exact long-live-range problem being removed.
+The 31 strided 64-bit Loads in the fused function are not rematerialized after
+the FF suffix. Their original SSA occurrences dominate the aggregate frontier,
+so the recipe consumes those occurrences there. This distinction makes the
+standalone and fused analyses reach the same next boundary without pretending
+that an obsolete StateVersion can be reloaded.
+
+On the release-equivalent Heliodor run, both publication roots now pass the
+two control merges and the load frontier. Both stop at the same 32-lane
+operation:
+
+```text
+one64 << two_bit_lane_index
+```
+
+The shift indices are masked two-bit values, so this is a four-way one-hot
+decoder, not an arbitrary 64-bit variable shift. The appropriate aggregate
+recipe converts the two predicate planes to four one-hot planes. Treating it
+as 32 scalar shifts or as 32 independent 64-bit SIMD lanes would discard the
+known range and overstate both register width and instruction cost.
+
+Code generation remains unauthorized until that decoder and the downstream
+bit-sliced add/compare costs are modeled. In particular, the current generic
+per-128-bit-chunk estimate understates a 13-bit lane-wise add; structural
+coverage is not yet a profitability result.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
