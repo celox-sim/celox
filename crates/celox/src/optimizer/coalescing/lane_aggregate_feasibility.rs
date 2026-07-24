@@ -7,7 +7,9 @@
 
 use std::fmt;
 
-use super::placement_analysis::{PlacementAnalysis, ValueOrigin, ValueSafety, ValueUse};
+use super::placement_analysis::{
+    PlacementAnalysis, StateToken, ValueId, ValueOrigin, ValueSafety, ValueUse,
+};
 use super::shared::sir_value_to_u64;
 use crate::backend::MemoryLayout;
 use crate::ir::{
@@ -39,7 +41,7 @@ enum RecipeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RecipeOp {
-    StateRead,
+    StateRead(StateReadSource),
     Constant,
     BroadcastScalar,
     Affine,
@@ -56,10 +58,33 @@ enum RecipeOp {
     Concat { operand_widths: Vec<usize> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StateReadSource {
+    ReloadAtSink {
+        loads: Vec<StateLoadLeaf>,
+    },
+    ReloadAtFrontier {
+        block: BlockId,
+        loads: Vec<StateLoadLeaf>,
+    },
+    DominatingSsa {
+        block: BlockId,
+        values: Vec<ValueId>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StateLoadLeaf {
+    value: ValueId,
+    register: RegisterId,
+    origin: ValueOrigin,
+    token: StateToken,
+}
+
 impl RecipeOp {
     fn kind(&self) -> RecipeKind {
         match self {
-            Self::StateRead => RecipeKind::StateRead,
+            Self::StateRead(_) => RecipeKind::StateRead,
             Self::Constant => RecipeKind::Constant,
             Self::BroadcastScalar => RecipeKind::BroadcastScalar,
             Self::Affine => RecipeKind::Affine,
@@ -184,6 +209,9 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     peak_prefix_xmm_values: usize,
     peak_suffix_gpr_values: usize,
     peak_suffix_xmm_values: usize,
+    state_sink_reload_nodes: usize,
+    state_frontier_reload_nodes: usize,
+    state_dominating_ssa_nodes: usize,
     kind_counts: HashMap<RecipeKind, usize>,
     reject_counts: HashMap<RejectReason, usize>,
 }
@@ -295,7 +323,7 @@ impl fmt::Display for LaneAggregateFeasibilityReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_sum={} estimated_unique={} shared_recipe_nodes={} shared_prefix_nodes={} shared_boundary_values={} peak_prefix_gpr={} peak_prefix_xmm={} peak_suffix_gpr={} peak_suffix_xmm={}",
+            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_sum={} estimated_unique={} shared_recipe_nodes={} shared_prefix_nodes={} shared_boundary_values={} peak_prefix_gpr={} peak_prefix_xmm={} peak_suffix_gpr={} peak_suffix_xmm={} state_sink_reload_nodes={} state_frontier_reload_nodes={} state_dominating_ssa_nodes={}",
             self.candidates,
             self.accepted.len(),
             self.rejected.len(),
@@ -310,6 +338,9 @@ impl fmt::Display for LaneAggregateFeasibilityReport {
             self.peak_prefix_xmm_values,
             self.peak_suffix_gpr_values,
             self.peak_suffix_xmm_values,
+            self.state_sink_reload_nodes,
+            self.state_frontier_reload_nodes,
+            self.state_dominating_ssa_nodes,
         )
     }
 }
@@ -480,27 +511,56 @@ impl<'a> Analyzer<'a> {
                     // boundary regardless of the lane count.
                     self.insert_node(key, RecipeOp::BroadcastScalar, Vec::new(), lane_width, 4)
                 }
-                ValueSafety::StateRead(_)
+                ValueSafety::StateRead(token)
                     if self
                         .placement
                         .can_materialize_state_read_at_block(value.id, self.target) =>
                 {
-                    self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 5)
+                    self.insert_node(
+                        key,
+                        RecipeOp::StateRead(StateReadSource::ReloadAtSink {
+                            loads: vec![StateLoadLeaf {
+                                value: value.id,
+                                register: value.register,
+                                origin: value.origin,
+                                token,
+                            }],
+                        }),
+                        Vec::new(),
+                        lane_width,
+                        5,
+                    )
                 }
                 ValueSafety::StateRead(_) => {
-                    if let Some(frontier) = self
+                    let source = if let Some(frontier) = self
                         .placement
                         .latest_common_state_materialization_block(&[value.id], self.target)
                     {
                         self.snapshot_frontiers.insert(frontier);
+                        let ValueSafety::StateRead(token) = value.safety else {
+                            unreachable!();
+                        };
+                        StateReadSource::ReloadAtFrontier {
+                            block: frontier,
+                            loads: vec![StateLoadLeaf {
+                                value: value.id,
+                                register: value.register,
+                                origin: value.origin,
+                                token,
+                            }],
+                        }
                     } else {
                         let frontier = self
                             .placement
                             .earliest_common_dominating_value_block(&[value.id], self.target)
                             .ok_or(RejectReason::UnstableStateVersion)?;
                         self.ssa_frontiers.insert(frontier);
-                    }
-                    self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 5)
+                        StateReadSource::DominatingSsa {
+                            block: frontier,
+                            values: vec![value.id],
+                        }
+                    };
+                    self.insert_node(key, RecipeOp::StateRead(source), Vec::new(), lane_width, 5)
                 }
                 ValueSafety::Pure => Err(RejectReason::UnstableStateVersion),
                 ValueSafety::Pinned(_) => Err(RejectReason::PinnedLeaf),
@@ -511,8 +571,8 @@ impl<'a> Analyzer<'a> {
             .iter()
             .all(|register| matches!(self.instruction(*register), Some(SIRInstruction::Load(..))))
         {
-            self.verify_state_leaf(&key)?;
-            return self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 1);
+            let source = self.verify_state_leaf(&key)?;
+            return self.insert_node(key, RecipeOp::StateRead(source), Vec::new(), lane_width, 1);
         }
 
         if let Some(source) = self.regular_shift_source(&key, lane_width) {
@@ -968,11 +1028,12 @@ impl<'a> Analyzer<'a> {
         })())
     }
 
-    fn verify_state_leaf(&mut self, key: &[RegisterId]) -> Result<(), RejectReason> {
+    fn verify_state_leaf(&mut self, key: &[RegisterId]) -> Result<StateReadSource, RejectReason> {
         let mut address = None;
         let mut width = None;
         let mut physical_offsets = Vec::with_capacity(key.len());
         let mut values = Vec::with_capacity(key.len());
+        let mut state_loads = Vec::with_capacity(key.len());
         let mut all_versioned_state_reads = true;
         for &register in key {
             let value_id = self
@@ -983,16 +1044,26 @@ impl<'a> Analyzer<'a> {
                 .placement
                 .value(value_id)
                 .ok_or(RejectReason::MissingDefinition)?;
-            if !matches!(value.safety, ValueSafety::StateRead(_)) {
-                if !matches!(value.safety, ValueSafety::Pure | ValueSafety::Pinned(_))
-                    || !self
+            match value.safety {
+                ValueSafety::StateRead(token) => {
+                    state_loads.push(StateLoadLeaf {
+                        value: value.id,
+                        register: value.register,
+                        origin: value.origin,
+                        token,
+                    });
+                }
+                ValueSafety::Pure | ValueSafety::Pinned(_)
+                    if self
                         .placement
                         .cfg
-                        .dominates(value.origin.block(), self.target)
+                        .dominates(value.origin.block(), self.target) =>
                 {
+                    all_versioned_state_reads = false;
+                }
+                ValueSafety::Pure | ValueSafety::Pinned(_) => {
                     return Err(RejectReason::UnstableStateVersion);
                 }
-                all_versioned_state_reads = false;
             }
             values.push(value_id);
             let Some(SIRInstruction::Load(
@@ -1016,13 +1087,17 @@ impl<'a> Analyzer<'a> {
                 .map_static_bit_offset(&current_address.absolute_addr(), *offset);
             physical_offsets.push((byte, bit));
         }
-        if !all_versioned_state_reads {
+        let source = if !all_versioned_state_reads {
             let frontier = self
                 .placement
                 .earliest_common_dominating_value_block(&values, self.target)
                 .ok_or(RejectReason::UnstableStateVersion)?;
             if frontier != self.target {
                 self.ssa_frontiers.insert(frontier);
+            }
+            StateReadSource::DominatingSsa {
+                block: frontier,
+                values,
             }
         } else if !values.iter().all(|&value| {
             self.placement
@@ -1033,14 +1108,24 @@ impl<'a> Analyzer<'a> {
                 .latest_common_state_materialization_block(&values, self.target)
             {
                 self.snapshot_frontiers.insert(frontier);
+                StateReadSource::ReloadAtFrontier {
+                    block: frontier,
+                    loads: state_loads,
+                }
             } else {
                 let frontier = self
                     .placement
                     .earliest_common_dominating_value_block(&values, self.target)
                     .ok_or(RejectReason::UnstableStateVersion)?;
                 self.ssa_frontiers.insert(frontier);
+                StateReadSource::DominatingSsa {
+                    block: frontier,
+                    values,
+                }
             }
-        }
+        } else {
+            StateReadSource::ReloadAtSink { loads: state_loads }
+        };
         if physical_offsets.len() > 1 {
             let first_stride = physical_offsets[1].0 as isize - physical_offsets[0].0 as isize;
             if first_stride == 0
@@ -1052,7 +1137,7 @@ impl<'a> Analyzer<'a> {
                 return Err(RejectReason::NonStridedStateLeaf);
             }
         }
-        Ok(())
+        Ok(source)
     }
 }
 
@@ -1248,7 +1333,7 @@ fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
         }
         let child = |slot: usize| node.children.get(slot).and_then(|child| nodes.get(*child));
         let valid = match &node.operation {
-            RecipeOp::StateRead
+            RecipeOp::StateRead(_)
             | RecipeOp::Constant
             | RecipeOp::BroadcastScalar
             | RecipeOp::SsaPack
@@ -1731,6 +1816,20 @@ pub(crate) fn analyze(
     report.unique_estimated_instructions = unique_node_cost + publication_cost;
     report.shared_recipe_nodes = total_nodes.saturating_sub(shared_plan.nodes.len());
     debug_assert_eq!(shared_plan.roots.len(), report.accepted.len());
+    for node in &shared_plan.nodes {
+        match node.operation {
+            RecipeOp::StateRead(StateReadSource::ReloadAtSink { .. }) => {
+                report.state_sink_reload_nodes += 1;
+            }
+            RecipeOp::StateRead(StateReadSource::ReloadAtFrontier { .. }) => {
+                report.state_frontier_reload_nodes += 1;
+            }
+            RecipeOp::StateRead(StateReadSource::DominatingSsa { .. }) => {
+                report.state_dominating_ssa_nodes += 1;
+            }
+            _ => {}
+        }
+    }
     if let Some((prefix_nodes, boundary_values, prefix_peak, suffix_peak)) =
         shared_recipe_pressure(&shared_plan)
     {
@@ -1927,6 +2026,28 @@ mod tests {
         assert!(report.rejected.is_empty());
         assert!(report.kind_counts[&RecipeKind::StateRead] >= 1);
         assert!(report.kind_counts[&RecipeKind::ShiftConstant] >= 1);
+        let source = report.accepted[0]
+            .nodes
+            .iter()
+            .find_map(|node| match &node.operation {
+                RecipeOp::StateRead(source) => Some(source),
+                _ => None,
+            })
+            .unwrap();
+        let StateReadSource::ReloadAtSink { loads } = source else {
+            panic!("expected an exact sink reload source, got {source:?}");
+        };
+        assert_eq!(loads.len(), 8);
+        assert!(loads.iter().all(|load| matches!(
+            load.origin,
+            ValueOrigin::Instruction {
+                block: BlockId(0),
+                ..
+            }
+        )));
+        assert_eq!(report.state_sink_reload_nodes, 1);
+        assert_eq!(report.state_frontier_reload_nodes, 0);
+        assert_eq!(report.state_dominating_ssa_nodes, 0);
     }
 
     #[test]

@@ -350,6 +350,31 @@ ambiguous StateSSA version. A plan which cannot yet lower that merge is
 classified as `UnsupportedMemoryPhiMaterialization` or
 `UnsupportedControlMergeRecipe`, never `MultipleReachingDefinitions`.
 
+Lane-aggregate recipes refine state leaves into executable sources rather than
+retaining only a `StateRead` kind:
+
+```text
+AggregateStateSource =
+    ReloadAtSink(loads: ExactStateLoad[])
+  | ReloadAtFrontier(block, loads: ExactStateLoad[])
+  | DominatingSSA(block, values: ValueId[])
+
+ExactStateLoad {
+    value_id
+    register
+    defining_instruction
+    StateToken(fragment, slot, MemoryVersionId)
+}
+```
+
+Every reload therefore identifies both the concrete original Load occurrence
+from which address/range/type are recovered and the exact MemorySSA version
+which must be available at the selected block. `DominatingSSA` instead names
+the existing values which must reach its block; lowering may not replace it
+with a reload. These source records participate in shared-recipe identity, so
+CSE cannot merge otherwise identical materializations from different versions
+or silently lengthen a cluster-local SSA lifetime.
+
 The explicit plan has this shape:
 
 ```text
@@ -1477,7 +1502,10 @@ structurally executable:
 | prefix-to-suffix boundary values | 3 | 3 |
 | peak prefix local values | 7 GPR masks / 5 XMM | 7 / 5 |
 | peak suffix local values | 5 GPR masks / 4 XMM | 5 / 4 |
-| analysis time | 1.61 s | 1.47 s |
+| state nodes reloadable at sink | 9 | 5 |
+| state nodes requiring an earlier reload frontier | 0 | 0 |
+| state nodes consuming existing dominating SSA | 0 | 4 |
+| analysis time | 1.53 s | 1.27 s |
 
 The independent estimate is not profitable. It double-counts the common
 recipe before the branch to blocks 4425 and 4426. Deduplicating only nodes
@@ -1495,6 +1523,17 @@ including removed reloads and spills. Until that comparison or an executable
 A/B exists, this result authorizes code-generation design but not enabling a
 rewrite.
 
+The source split is a semantic lowering constraint, not only a diagnostic.
+The standalone comb graph can reload all nine aggregate state nodes at their
+sinks. In the fused graph, four of those nodes denote versions superseded by
+FF staging before the publication sinks. Their original SSA values still
+dominate a valid aggregate frontier, but the same values cannot be recovered
+from memory at the sinks. Consequently, a terminal aggregate pseudo which
+reloads all inputs is invalid. The control-pure aggregate region must begin no
+later than the recorded `DominatingSSA` frontier and consume those exact
+values there, while the other five state nodes may use their proven sink
+reloads.
+
 The analysis plan now retains executable typed operations rather than only
 diagnostic kind names. A node records its exact unary/binary operation,
 constant shift operation and amount, one-hot input width, Slice range, or
@@ -1508,10 +1547,11 @@ a second time.
 Multi-root sharing is likewise explicit in the plan. Per-root postorder nodes
 are interned into one shared recipe graph only when the typed operation,
 ordered result-lane SSA identities, lane width, and already-interned child
-identities all match. Each root names the resulting stable shared-node
-identity. Lowering therefore receives the 57 common Heliodor nodes as one
-planned prefix; ordinary GVN/CSE is neither expected nor permitted to infer
-that sharing after placement.
+identities all match. For a state node, the exact source kind, source block,
+ValueIds, Load occurrences, and StateTokens must also match. Each root names
+the resulting stable shared-node identity. Lowering therefore receives the 57
+common Heliodor nodes as one planned prefix; ordinary GVN/CSE is neither
+expected nor permitted to infer that sharing after placement.
 
 The shared graph also passes the local-pressure gate. Only three recipe values
 cross from the 57-node common prefix to either branch suffix. Evaluating one
