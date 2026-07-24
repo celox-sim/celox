@@ -4750,7 +4750,11 @@ fn emit_chained_eu_groups(
             start.elapsed()
         );
         if control_region_mode != "summary" {
-            for detail in report.detail_lines() {
+            let maximum_details = (control_region_mode == "top").then_some(10);
+            for detail in report
+                .detail_lines()
+                .take(maximum_details.unwrap_or(usize::MAX))
+            {
                 eprintln!("[control-region-feasibility-detail] label={label} {detail}");
             }
         }

@@ -34,6 +34,11 @@ pub(crate) struct SelectorRegionFact {
     pub maximum_skipped_instructions: usize,
     pub live_outputs: usize,
     pub effects: usize,
+    pub cross_block_affected_instructions: usize,
+    pub cross_block_affected_blocks: usize,
+    pub cross_block_effect_sinks: usize,
+    pub cross_block_branch_conditions: usize,
+    pub cross_block_effect_sites: Vec<(BlockId, usize)>,
 }
 
 impl SelectorRegionFact {
@@ -65,7 +70,10 @@ impl ControlRegionFeasibilityReport {
                 "block=b{} samples={} selector=r{} cases={} instructions={} \
                  baseline_cost={} worst_case_cost={} mean_case_cost={} \
                  minimum_skipped_instructions={} maximum_skipped_instructions={} \
-                 live_outputs={} effects={} weighted_worst_saving={}",
+                 live_outputs={} effects={} cross_block_affected_instructions={} \
+                 cross_block_affected_blocks={} cross_block_effect_sinks={} \
+                 cross_block_branch_conditions={} cross_block_effect_sites={:?} \
+                 weighted_worst_saving={}",
                 fact.block.0,
                 fact.samples,
                 fact.selector.0,
@@ -78,6 +86,11 @@ impl ControlRegionFeasibilityReport {
                 fact.maximum_skipped_instructions,
                 fact.live_outputs,
                 fact.effects,
+                fact.cross_block_affected_instructions,
+                fact.cross_block_affected_blocks,
+                fact.cross_block_effect_sinks,
+                fact.cross_block_branch_conditions,
+                fact.cross_block_effect_sites,
                 fact.profile_weighted_worst_saving(),
             )
         })
@@ -122,12 +135,21 @@ struct SpecializedBlock {
     needed_instructions: usize,
 }
 
+#[derive(Debug, Default)]
+struct CrossBlockClosure {
+    instructions: BTreeSet<(BlockId, usize)>,
+    blocks: BTreeSet<BlockId>,
+    effect_sinks: BTreeSet<(BlockId, usize)>,
+    branch_conditions: BTreeSet<BlockId>,
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     profile_blocks: &[(BlockId, u64)],
 ) -> ControlRegionFeasibilityReport {
     let constants = collect_exact_constants(eu);
     let uses = collect_uses(eu);
+    let edge_param_uses = collect_edge_param_uses(eu);
     let mut selected = BTreeMap::<BlockId, u64>::new();
     for &(block, samples) in profile_blocks {
         if eu.blocks.contains_key(&block) {
@@ -183,6 +205,7 @@ pub(crate) fn analyze(
                     group,
                     &constants,
                     &uses,
+                    &edge_param_uses,
                     baseline_cost,
                     live_outputs,
                     effects,
@@ -227,6 +250,7 @@ fn analyze_group(
     group: SelectorGroup,
     constants: &HashMap<RegisterId, SIRValue>,
     uses: &HashMap<RegisterId, Vec<UseSite>>,
+    edge_param_uses: &HashMap<RegisterId, Vec<RegisterId>>,
     baseline_cost: usize,
     live_outputs: usize,
     effects: usize,
@@ -235,6 +259,15 @@ fn analyze_group(
     if group.cases.len() < 2 {
         return None;
     }
+    let cross_block = cross_block_selector_closure(
+        eu,
+        block_id,
+        group.selector,
+        &group.cases,
+        constants,
+        uses,
+        edge_param_uses,
+    );
     let mut specializations = group
         .cases
         .iter()
@@ -290,6 +323,11 @@ fn analyze_group(
             .unwrap_or(0),
         live_outputs,
         effects,
+        cross_block_affected_instructions: cross_block.instructions.len(),
+        cross_block_affected_blocks: cross_block.blocks.len(),
+        cross_block_effect_sinks: cross_block.effect_sinks.len(),
+        cross_block_branch_conditions: cross_block.branch_conditions.len(),
+        cross_block_effect_sites: cross_block.effect_sinks.into_iter().collect(),
     })
 }
 
@@ -339,6 +377,106 @@ fn selector_groups(
         .into_iter()
         .map(|(selector, cases)| SelectorGroup { selector, cases })
         .collect()
+}
+
+fn collect_edge_param_uses(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, Vec<RegisterId>> {
+    let mut result = HashMap::<RegisterId, Vec<RegisterId>>::default();
+    for block in eu.blocks.values() {
+        let mut add_edge = |target: BlockId, arguments: &[RegisterId]| {
+            let Some(target) = eu.blocks.get(&target) else {
+                return;
+            };
+            for (&argument, &parameter) in arguments.iter().zip(&target.params) {
+                result.entry(argument).or_default().push(parameter);
+            }
+        };
+        match &block.terminator {
+            SIRTerminator::Jump(target, arguments) => add_edge(*target, arguments),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                add_edge(true_block.0, &true_block.1);
+                add_edge(false_block.0, &false_block.1);
+            }
+            SIRTerminator::Switch { .. } | SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    for parameters in result.values_mut() {
+        parameters.sort_unstable();
+        parameters.dedup();
+    }
+    result
+}
+
+fn cross_block_selector_closure(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    origin: BlockId,
+    selector: RegisterId,
+    cases: &BTreeSet<BigUint>,
+    constants: &HashMap<RegisterId, SIRValue>,
+    uses: &HashMap<RegisterId, Vec<UseSite>>,
+    edge_param_uses: &HashMap<RegisterId, Vec<RegisterId>>,
+) -> CrossBlockClosure {
+    let mut closure = CrossBlockClosure::default();
+    let mut values = BTreeSet::<RegisterId>::new();
+    let mut work = VecDeque::<RegisterId>::new();
+    for (index, instruction) in eu.blocks[&origin].instructions.iter().enumerate() {
+        let SIRInstruction::Binary(destination, lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs) =
+            instruction
+        else {
+            continue;
+        };
+        let constant = if *lhs == selector {
+            constants.get(rhs)
+        } else if *rhs == selector {
+            constants.get(lhs)
+        } else {
+            None
+        };
+        if constant.is_some_and(|constant| cases.contains(&constant.payload))
+            && values.insert(*destination)
+        {
+            closure.instructions.insert((origin, index));
+            closure.blocks.insert(origin);
+            work.push_back(*destination);
+        }
+    }
+
+    while let Some(value) = work.pop_front() {
+        for &parameter in edge_param_uses.get(&value).into_iter().flatten() {
+            if values.insert(parameter) {
+                work.push_back(parameter);
+            }
+        }
+        for site in uses.get(&value).into_iter().flatten() {
+            match *site {
+                UseSite::Instruction { block, index } => {
+                    let instruction = &eu.blocks[&block].instructions[index];
+                    closure.blocks.insert(block);
+                    if let Some(destination) = def_reg(instruction) {
+                        if closure.instructions.insert((block, index)) && values.insert(destination)
+                        {
+                            work.push_back(destination);
+                        }
+                    } else {
+                        closure.effect_sinks.insert((block, index));
+                    }
+                }
+                UseSite::BranchCondition { block } => {
+                    closure.blocks.insert(block);
+                    closure.branch_conditions.insert(block);
+                }
+                UseSite::TrueEdgeArgument { .. }
+                | UseSite::FalseEdgeArgument { .. }
+                | UseSite::JumpArgument { .. } => {}
+            }
+        }
+    }
+    closure
 }
 
 fn specialize_block(
@@ -542,13 +680,24 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BasicBlock, RegisterType};
+    use crate::ir::{AbsoluteAddr, BasicBlock, InstanceId, RegisterType, SIROffset, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {
             width,
             signed: false,
         }
+    }
+
+    fn address(variable: u32) -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: VarId::from_raw(variable),
+            },
+        )
     }
 
     #[test]
@@ -613,5 +762,71 @@ mod tests {
         assert!(
             report.profile_weighted_selected_cost > (fact.baseline_cost as u128).saturating_mul(10)
         );
+    }
+
+    #[test]
+    fn selector_closure_crosses_block_parameters_and_names_exact_effect_sinks() {
+        let selector = RegisterId(0);
+        let zero = RegisterId(1);
+        let one = RegisterId(2);
+        let guard_zero = RegisterId(3);
+        let guard_one = RegisterId(4);
+        let first_value = RegisterId(5);
+        let selected = RegisterId(6);
+        let parameter = RegisterId(7);
+        let result = RegisterId(8);
+        let origin = BasicBlock {
+            id: BlockId(0),
+            params: vec![selector, first_value],
+            instructions: vec![
+                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
+                SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+                SIRInstruction::Mux(selected, guard_zero, first_value, zero),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), vec![selected]),
+        };
+        let sink = BasicBlock {
+            id: BlockId(1),
+            params: vec![parameter],
+            instructions: vec![
+                SIRInstruction::Mux(result, guard_one, one, parameter),
+                SIRInstruction::Store(
+                    address(0),
+                    SIROffset::Static(0),
+                    2,
+                    result,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), origin), (BlockId(1), sink)]
+                .into_iter()
+                .collect(),
+            register_map: [
+                (selector, bit(2)),
+                (zero, bit(2)),
+                (one, bit(2)),
+                (guard_zero, bit(1)),
+                (guard_one, bit(1)),
+                (first_value, bit(2)),
+                (selected, bit(2)),
+                (parameter, bit(2)),
+                (result, bit(2)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, &[(BlockId(0), 10)]);
+        let fact = &report.facts[0];
+        assert_eq!(fact.cross_block_affected_blocks, 2);
+        assert_eq!(fact.cross_block_effect_sinks, 1);
+        assert_eq!(fact.cross_block_effect_sites, vec![(BlockId(1), 1)]);
     }
 }

@@ -1981,8 +1981,11 @@ backward slice from effects, terminator operands, and values used outside the
 block. The probe accepts only two-state exact constants; wildcard masks,
 implicit alias assumptions, and code generation are rejected. For a block
 with `I` instructions and `C` observed exact cases, it uses `O(I * (C + 1))`
-time and `O(I + V)` working memory. It runs only on explicitly profile-selected
-blocks, so it does not construct a whole-function scheduling graph.
+time for local specialization. The additional sparse forward closure is linear
+in the selector-reachable SSA-use edges and block-parameter edges; it does not
+clone case payloads. Working memory is linear in the visited instructions,
+values, and edges. The probe runs only on explicitly profile-selected blocks,
+so it does not construct a whole-function scheduling graph.
 
 Using the same 14-sample threshold as the physical-layout analysis produced:
 
@@ -1994,7 +1997,7 @@ locally profitable selector regions           96
 profile-weighted selected SIR cost      36,709,829
 profile-weighted worst-case saving        1,134,206
 optimistic selected-cost fraction             3.09%
-analysis time                                25.6 ms
+analysis time (cold measured run)             95.7 ms
 ```
 
 The exact optimized native SIR and final MIR hashes remain
@@ -2009,13 +2012,59 @@ instructions become locally dead. The selector decision and its final state
 effects have been separated by CFG scheduling; a block-local Switch would
 replace neither the escaping case payloads nor their downstream selection.
 
-Consequently the existing block/layer unit is again the wrong lowering unit.
-The next control plan must start at one exact selector version, follow its
-case-owned SSA values across block parameters and existing branches, and stop
-only at a closed set of state/effect sinks or a verified materialization
-frontier. It must report the cross-block region size, effect order, boundary
-values, and worst-case dynamic work before code generation. Replaying the
-source-EU branchification pass or switching block 8501 alone is not authorized.
+A sparse forward closure follows the exact selector predicates through SSA
+uses and block parameters without copying payload cones. For block 8501 it
+finds:
+
+```text
+selector-dependent instructions       387
+blocks reached                         83
+selector-dependent branch conditions  63
+effect sinks                            2
+```
+
+Both sinks are trigger-free 64-bit Stores to the exact same
+`inst56/var350[0..64)` range. They occur in blocks 5834 and 5942, and both
+immediately rejoin block 4412. The first path is already partly expressed as a
+branch chain; the second still ends in a Mux chain. Thus this is not 83
+independent effects or an unstructured whole-function dependence cone: a
+large shared decoder feeds two alternative recipes for one exact state
+publication.
+
+The existing `SparseCaseDispatchPass` cannot recover this shape. It recognizes
+one same-block result whose Mux false arms form a linear, single-use spine,
+sinks only definitions local to that block, and inserts a value phi after the
+dispatch. Block 8501 instead exports 167 values and the final Mux spines are
+distributed across block parameters. Re-running that pass, or applying it to
+larger prefixes, cannot make the two Store recipes one closed unit.
+
+Selector-rooted closure is nevertheless too broad as a transformation unit.
+Other hot selectors reach 373 and 392 blocks before finding a useful closed
+boundary. The implementation must therefore reverse the direction after
+discovering exact effects: start from each Store source and walk backward only
+through selector-dependent decisions, stopping at executable
+materialization-frontier leaves. Unaffected outer control remains in place.
+For the block-8501 shape, the candidate region is the two Store recipes and
+their common continuation, not every instruction transitively touched by the
+selector.
+
+The next analysis must produce, for each sink recipe:
+
+```text
+exact effect identity and order
+selector case priority
+preserved outer-control predecessors
+case-local payload slice
+executable boundary leaves and their StateVersions
+common continuation
+worst-case dynamic work
+```
+
+Only then can it decide whether one dispatch can be shared or must be placed
+once per preserved outer path. Code generation remains disabled until this
+sink-rooted recipe is closed and its worst-case profitability passes. Replaying
+source-EU branchification, switching block 8501 alone, or cloning the
+83-block forward closure once per case is not authorized.
 
 ### Milestone 2: use-local FF forwarding
 
