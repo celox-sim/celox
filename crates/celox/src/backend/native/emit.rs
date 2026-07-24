@@ -2890,6 +2890,10 @@ fn emit_inst(
             asm.movq(d64, xmm2)?;
         }
 
+        MInst::LaneAggregate { .. } => {
+            unreachable!("lane aggregate emission requires the opt-in lowering path")
+        }
+
         MInst::LoadPtrIndexed {
             dst,
             ptr,
@@ -4260,7 +4264,11 @@ fn emit_chained_eu_groups(
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     let mut lane_aggregate_coverage = None;
-    if let Some(mode) = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY") {
+    let mut lane_aggregate_codegen_plan = None;
+    let lane_aggregate_codegen =
+        std::env::var_os("CELOX_LANE_AGGREGATE_CODEGEN").is_some_and(|value| value != "0");
+    let lane_aggregate_mode = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY");
+    if lane_aggregate_mode.is_some() || lane_aggregate_codegen {
         let start = crate::timing::now();
         let report = crate::optimizer::coalescing::analyze_lane_aggregate_feasibility(
             &sir_eu, layout, four_state,
@@ -4281,11 +4289,17 @@ fn emit_chained_eu_groups(
                 plan.dead_scalar_registers.len(),
             );
         }
+        if lane_aggregate_codegen {
+            lane_aggregate_codegen_plan = report.plan().cloned();
+        }
         lane_aggregate_coverage = Some((
             report.dead_scalar_registers().len(),
             report.replaced_scalar_registers().clone(),
         ));
-        if mode != "summary" {
+        if lane_aggregate_mode
+            .as_deref()
+            .is_some_and(|mode| mode != "summary")
+        {
             for detail in report.detail_lines() {
                 eprintln!("[lane-aggregate-feasibility-detail] label={label} {detail}");
             }
@@ -4314,7 +4328,12 @@ fn emit_chained_eu_groups(
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
-    let mut mfunc = isel::lower_execution_unit(&sir_eu, layout, four_state);
+    let mut mfunc = isel::lower_execution_unit_with_lane_aggregate(
+        &sir_eu,
+        layout,
+        four_state,
+        lane_aggregate_codegen_plan,
+    );
     if let Some(start) = isel_start {
         eprintln!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -4735,6 +4754,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     }
                 }
                 MInst::JumpTable { .. } => jump += 1,
+                MInst::LaneAggregate { .. } => memcopy += 1,
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
             }

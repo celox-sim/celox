@@ -399,6 +399,42 @@ fn verify_instruction_constraints(
                 ))
             }
         }
+        MInst::LaneAggregate {
+            plan: plan_id,
+            root,
+            read_ranges,
+            ..
+        } => {
+            let Some(plan) = func.lane_aggregate_plan(*plan_id) else {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.PLAN_EXISTS",
+                    block,
+                    index,
+                    format!("aggregate plan {} does not exist", plan_id.0),
+                ));
+            };
+            let Some(root_plan) = plan.roots.get(usize::from(*root)) else {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.ROOT_EXISTS",
+                    block,
+                    index,
+                    format!("aggregate root {root} is outside 0..{}", plan.roots.len()),
+                ));
+            };
+            let _ = root_plan.block;
+            if read_ranges.len() > 16 {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.EXACT_READ_EFFECTS",
+                    block,
+                    index,
+                    format!(
+                        "aggregate root has {} read ranges, maximum is 16",
+                        read_ranges.len()
+                    ),
+                ));
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

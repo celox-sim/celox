@@ -149,6 +149,11 @@ impl fmt::Display for ConstantTableId {
     }
 }
 
+/// Stable identity of one verified lane-aggregate plan owned by an
+/// [`MFunction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LaneAggregatePlanId(pub usize);
+
 /// Allocator for virtual registers.
 #[derive(Debug, Clone)]
 pub struct VRegAllocator {
@@ -720,6 +725,17 @@ pub enum MInst {
         field_width: u8,
         alias_range: Option<MemoryAliasRange>,
     },
+    /// Execute one sink-local root of a verified lane-aggregate plan.
+    ///
+    /// The operation owns all allocatable GPRs while it emits its internal
+    /// bit-plane/SIMD schedule. Exact direct-memory effects remain on the MIR
+    /// instruction so scheduling never has to inspect the side table.
+    LaneAggregate {
+        plan: LaneAggregatePlanId,
+        root: u16,
+        read_ranges: Vec<MemoryAliasRange>,
+        write_range: MemoryAliasRange,
+    },
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
         base: BaseReg,
@@ -1276,6 +1292,19 @@ impl fmt::Display for MInst {
                 }
                 write!(f, "]")
             }
+            MInst::LaneAggregate {
+                plan,
+                root,
+                read_ranges,
+                write_range,
+            } => write!(
+                f,
+                "lane_aggregate plan{} root{} reads={} write={:?}",
+                plan.0,
+                root,
+                read_ranges.len(),
+                write_range,
+            ),
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
             MInst::ReturnError { code } => write!(f, "ret_error {code}"),
@@ -1408,6 +1437,7 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
+            | MInst::LaneAggregate { .. }
             | MInst::Branch { .. }
             | MInst::BranchPred { .. }
             | MInst::JumpTable { .. }
@@ -1432,7 +1462,8 @@ impl MInst {
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
-            | MInst::SparseCommitWorklist { .. } => Uses::none(),
+            | MInst::SparseCommitWorklist { .. }
+            | MInst::LaneAggregate { .. } => Uses::none(),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1819,6 +1850,7 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
+            | MInst::LaneAggregate { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
@@ -1944,6 +1976,8 @@ pub struct MFunction {
     pub vregs: VRegAllocator,
     /// Immutable u64 lookup tables embedded in the emitted function body.
     constant_tables: Vec<Vec<u64>>,
+    /// Verified aggregate recipes, referenced by compact MIR identities.
+    lane_aggregate_plans: Vec<crate::lane_aggregate_plan::LaneAggregatePlan>,
     /// Target facts shared by optimization, register allocation, and emission.
     pub(crate) target_features: super::features::X86Features,
 }
@@ -1955,6 +1989,7 @@ impl MFunction {
             spill_descs,
             vregs,
             constant_tables: Vec::new(),
+            lane_aggregate_plans: Vec::new(),
             target_features: super::features::X86Features::detect(),
         }
     }
@@ -1981,6 +2016,22 @@ impl MFunction {
     /// Resolve a constant-table identity without panicking on malformed MIR.
     pub fn constant_table(&self, id: ConstantTableId) -> Option<&[u64]> {
         self.constant_tables.get(id.0).map(Vec::as_slice)
+    }
+
+    pub(crate) fn add_lane_aggregate_plan(
+        &mut self,
+        plan: crate::lane_aggregate_plan::LaneAggregatePlan,
+    ) -> LaneAggregatePlanId {
+        let id = LaneAggregatePlanId(self.lane_aggregate_plans.len());
+        self.lane_aggregate_plans.push(plan);
+        id
+    }
+
+    pub(crate) fn lane_aggregate_plan(
+        &self,
+        id: LaneAggregatePlanId,
+    ) -> Option<&crate::lane_aggregate_plan::LaneAggregatePlan> {
+        self.lane_aggregate_plans.get(id.0)
     }
 
     pub fn push_block(&mut self, block: MBlock) {
@@ -2027,6 +2078,27 @@ mod tests {
 
         assert_eq!(allocator.try_alloc(), Err(VRegAllocError));
         assert_eq!(allocator.count(), u32::MAX);
+    }
+
+    #[test]
+    fn lane_aggregate_plans_have_function_local_stable_identities() {
+        let mut function = MFunction::new(VRegAllocator::new(), Vec::new());
+        let plan = crate::lane_aggregate_plan::LaneAggregatePlan {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            dead_scalar_registers: crate::HashSet::default(),
+        };
+        let first = function.add_lane_aggregate_plan(plan.clone());
+        let second = function.add_lane_aggregate_plan(plan);
+
+        assert_eq!(first, LaneAggregatePlanId(0));
+        assert_eq!(second, LaneAggregatePlanId(1));
+        assert!(function.lane_aggregate_plan(first).is_some());
+        assert!(
+            function
+                .lane_aggregate_plan(LaneAggregatePlanId(2))
+                .is_none()
+        );
     }
 
     struct UseCase {

@@ -8,7 +8,9 @@ use celox_analysis::memory::{MemoryEffect, MemoryLocation};
 
 use super::mir::{BaseReg, BranchPredicate, MInst};
 
-const MAX_STATIC_RANGES: usize = 3;
+// Lane-aggregate pseudos name each independently versioned source range. This
+// remains an inline, allocation-free value; Heliodor currently needs nine.
+const MAX_STATIC_RANGES: usize = 16;
 const EMPTY_RANGE: MemoryRange = MemoryRange {
     base: BaseReg::SimState,
     offset: 0,
@@ -98,6 +100,21 @@ impl MemoryEffects {
     pub(crate) fn has_effect(self) -> bool {
         self.unknown.is_some() || self.range_count != 0
     }
+}
+
+fn direct_alias_ranges(base: BaseReg, aliases: &[super::mir::MemoryAliasRange]) -> MemoryEffects {
+    if aliases.len() > MAX_STATIC_RANGES {
+        return MemoryEffects::unknown(UnknownMemory::Direct(base));
+    }
+    let mut result = MemoryEffects::NONE;
+    for (index, alias) in aliases.iter().enumerate() {
+        let Some(range) = checked_range(base, alias.offset(), alias.byte_len()) else {
+            return MemoryEffects::unknown(UnknownMemory::Direct(base));
+        };
+        result.ranges[index] = range;
+    }
+    result.range_count = aliases.len() as u8;
+    result
 }
 
 /// Translate the compact MIR effect record without coupling celox-analysis to
@@ -269,6 +286,9 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
                 }
             }
         }
+        MInst::LaneAggregate { read_ranges, .. } => {
+            direct_alias_ranges(BaseReg::SimState, read_ranges)
+        }
         MInst::OrStoreIndexed {
             base, alias_range, ..
         } => alias_range
@@ -329,6 +349,9 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
         } => checked_range(BaseReg::SimState, *dst_offset, *byte_len)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
+        MInst::LaneAggregate { write_range, .. } => {
+            direct_alias_ranges(BaseReg::SimState, std::slice::from_ref(write_range))
+        }
         MInst::SparseCommit { .. } => sparse_commit_ranges(inst)
             .map(|ranges| MemoryEffects::static_ranges(&ranges))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
@@ -362,7 +385,8 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
 mod tests {
     use super::*;
     use crate::backend::native::mir::{
-        BlockId, BranchPredicate, CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
+        BlockId, BranchPredicate, CmpKind, LaneAggregatePlanId, MemoryAliasRange, OpSize,
+        PackedLaneCompareRhs, VReg,
     };
 
     #[test]
@@ -431,6 +455,38 @@ mod tests {
         assert_eq!(
             reads(&inst).unknown_memory(),
             Some(UnknownMemory::Direct(BaseReg::SimState))
+        );
+    }
+
+    #[test]
+    fn lane_aggregate_preserves_all_exact_read_and_write_ranges() {
+        let read_ranges = (0..9)
+            .map(|index| MemoryAliasRange::new(index * 16, 8).unwrap())
+            .collect::<Vec<_>>();
+        let write_range = MemoryAliasRange::new(256, 32).unwrap();
+        let inst = MInst::LaneAggregate {
+            plan: LaneAggregatePlanId(0),
+            root: 0,
+            read_ranges: read_ranges.clone(),
+            write_range,
+        };
+
+        assert_eq!(
+            reads(&inst)
+                .ranges()
+                .map(|range| (range.offset, range.byte_len))
+                .collect::<Vec<_>>(),
+            read_ranges
+                .iter()
+                .map(|range| (i64::from(range.offset()), range.byte_len()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            writes(&inst)
+                .ranges()
+                .map(|range| (range.offset, range.byte_len))
+                .collect::<Vec<_>>(),
+            vec![(256, 32)]
         );
     }
 

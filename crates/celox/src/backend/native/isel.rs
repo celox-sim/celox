@@ -635,6 +635,15 @@ pub fn lower_execution_unit(
     layout: &MemoryLayout,
     four_state: bool,
 ) -> MFunction {
+    lower_execution_unit_with_lane_aggregate(eu, layout, four_state, None)
+}
+
+pub(crate) fn lower_execution_unit_with_lane_aggregate(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    lane_aggregate_plan: Option<crate::lane_aggregate_plan::LaneAggregatePlan>,
+) -> MFunction {
     if cfg!(debug_assertions) || std::env::var_os("CELOX_SIR_VERIFY").is_some() {
         if let Err(error) = eu.verify_result() {
             panic!("before native ISel: {error}");
@@ -661,6 +670,10 @@ pub fn lower_execution_unit(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
+    if let Some(plan) = lane_aggregate_plan {
+        let plan_id = func.add_lane_aggregate_plan(plan);
+        debug_assert!(func.lane_aggregate_plan(plan_id).is_some());
+    }
     let native_packed_bit_stores = !four_state && func.target_features.bmi2();
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);

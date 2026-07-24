@@ -166,6 +166,10 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // Return.  Model the clobber at the allocation boundary instead so
         // only genuinely live-through values are moved to their homes.
         MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
+        // The aggregate recipe is internally scheduled after allocation and
+        // may use every GPR for bit planes. Values live across the sink are
+        // therefore relocated by the allocator rather than hidden saves.
+        MInst::LaneAggregate { .. } => ALLOCATABLE_REGS,
         _ => &[],
     }
 }
