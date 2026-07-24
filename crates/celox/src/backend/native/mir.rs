@@ -13,11 +13,13 @@ use crate::ir::RegionedAbsoluteAddr;
 // Uses: stack-allocated list of VReg operands (no heap allocation)
 // ────────────────────────────────────────────────────────────────
 
-/// Stack-allocated list of up to 5 VReg uses. Avoids Vec heap allocation
+const MAX_USES: usize = 16;
+
+/// Stack-allocated list of up to 16 VReg uses. Avoids Vec heap allocation
 /// in the regalloc inner loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Uses {
-    buf: [VReg; 5],
+    buf: [VReg; MAX_USES],
     len: u8,
 }
 
@@ -25,44 +27,37 @@ impl Uses {
     #[inline]
     pub fn none() -> Self {
         Self {
-            buf: [VReg(0); 5],
+            buf: [VReg(0); MAX_USES],
             len: 0,
         }
     }
     #[inline]
+    pub fn from_slice(values: &[VReg]) -> Self {
+        assert!(values.len() <= MAX_USES, "MIR operand capacity exceeded");
+        let mut result = Self::none();
+        result.buf[..values.len()].copy_from_slice(values);
+        result.len = values.len() as u8;
+        result
+    }
+    #[inline]
     pub fn one(a: VReg) -> Self {
-        Self {
-            buf: [a, VReg(0), VReg(0), VReg(0), VReg(0)],
-            len: 1,
-        }
+        Self::from_slice(&[a])
     }
     #[inline]
     pub fn two(a: VReg, b: VReg) -> Self {
-        Self {
-            buf: [a, b, VReg(0), VReg(0), VReg(0)],
-            len: 2,
-        }
+        Self::from_slice(&[a, b])
     }
     #[inline]
     pub fn three(a: VReg, b: VReg, c: VReg) -> Self {
-        Self {
-            buf: [a, b, c, VReg(0), VReg(0)],
-            len: 3,
-        }
+        Self::from_slice(&[a, b, c])
     }
     #[inline]
     pub fn four(a: VReg, b: VReg, c: VReg, d: VReg) -> Self {
-        Self {
-            buf: [a, b, c, d, VReg(0)],
-            len: 4,
-        }
+        Self::from_slice(&[a, b, c, d])
     }
     #[inline]
     pub fn five(a: VReg, b: VReg, c: VReg, d: VReg, e: VReg) -> Self {
-        Self {
-            buf: [a, b, c, d, e],
-            len: 5,
-        }
+        Self::from_slice(&[a, b, c, d, e])
     }
     #[inline]
     pub fn len(&self) -> usize {
@@ -110,7 +105,7 @@ impl<'a> IntoIterator for &'a Uses {
 
 impl IntoIterator for Uses {
     type Item = VReg;
-    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 5>>;
+    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, MAX_USES>>;
     fn into_iter(self) -> Self::IntoIter {
         self.buf.into_iter().take(self.len as usize)
     }
@@ -731,10 +726,13 @@ pub enum MInst {
     /// bit-plane/SIMD schedule. Exact direct-memory effects remain on the MIR
     /// instruction so scheduling never has to inspect the side table.
     LaneAggregate {
+        dst: VReg,
         plan: LaneAggregatePlanId,
         root: u16,
+        source_block: crate::ir::BlockId,
+        inputs: Vec<VReg>,
         read_ranges: Vec<MemoryAliasRange>,
-        write_range: MemoryAliasRange,
+        write_ranges: Vec<MemoryAliasRange>,
     },
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
@@ -1293,17 +1291,22 @@ impl fmt::Display for MInst {
                 write!(f, "]")
             }
             MInst::LaneAggregate {
+                dst,
                 plan,
                 root,
+                source_block,
+                inputs,
                 read_ranges,
-                write_range,
+                write_ranges,
             } => write!(
                 f,
-                "lane_aggregate plan{} root{} reads={} write={:?}",
+                "{dst} = lane_aggregate plan{} root{} source=b{} inputs={} reads={} writes={}",
                 plan.0,
                 root,
+                source_block.0,
+                inputs.len(),
                 read_ranges.len(),
-                write_range,
+                write_ranges.len(),
             ),
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
@@ -1379,6 +1382,7 @@ impl MInst {
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
             | MInst::PackedLaneCompare { dst, .. }
+            | MInst::LaneAggregate { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Add32 { dst, .. }
@@ -1437,7 +1441,6 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
-            | MInst::LaneAggregate { .. }
             | MInst::Branch { .. }
             | MInst::BranchPred { .. }
             | MInst::JumpTable { .. }
@@ -1462,8 +1465,8 @@ impl MInst {
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
-            | MInst::SparseCommitWorklist { .. }
-            | MInst::LaneAggregate { .. } => Uses::none(),
+            | MInst::SparseCommitWorklist { .. } => Uses::none(),
+            MInst::LaneAggregate { inputs, .. } => Uses::from_slice(inputs),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
@@ -1850,10 +1853,16 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
-            | MInst::LaneAggregate { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
+            MInst::LaneAggregate { inputs, .. } => {
+                for input in inputs {
+                    if *input == old {
+                        *input = new;
+                    }
+                }
+            }
         }
     }
 

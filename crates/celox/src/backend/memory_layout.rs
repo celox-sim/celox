@@ -1,6 +1,7 @@
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, Program, RegisterId, SIRInstruction, SIROffset, collect_exact_zero_registers,
+    AbsoluteAddr, Program, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
+    STABLE_REGION, collect_exact_zero_registers,
 };
 
 type LayoutVariable = (AbsoluteAddr, usize, bool, usize, usize);
@@ -362,6 +363,23 @@ impl MemoryLayout {
             element * array.element_stride + intra_element / 8,
             intra_element % 8,
         )
+    }
+
+    pub(crate) fn regioned_static_byte_and_intra(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+    ) -> Option<(i32, usize)> {
+        let absolute = addr.absolute_addr();
+        let base = match addr.region {
+            STABLE_REGION => *self.offsets.get(&absolute).unwrap_or(&0),
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.sparse_base_offset + *self.sparse_offsets.get(&absolute).unwrap_or(&0)
+            }
+            _ => self.working_base_offset + *self.working_offsets.get(&absolute).unwrap_or(&0),
+        };
+        let (byte, intra) = self.map_static_bit_offset(&absolute, bit_offset);
+        Some((i32::try_from(base.checked_add(byte)?).ok()?, intra))
     }
 }
 

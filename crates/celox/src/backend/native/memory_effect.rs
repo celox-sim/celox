@@ -349,8 +349,8 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
         } => checked_range(BaseReg::SimState, *dst_offset, *byte_len)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(BaseReg::SimState))),
-        MInst::LaneAggregate { write_range, .. } => {
-            direct_alias_ranges(BaseReg::SimState, std::slice::from_ref(write_range))
+        MInst::LaneAggregate { write_ranges, .. } => {
+            direct_alias_ranges(BaseReg::SimState, write_ranges)
         }
         MInst::SparseCommit { .. } => sparse_commit_ranges(inst)
             .map(|ranges| MemoryEffects::static_ranges(&ranges))
@@ -463,12 +463,15 @@ mod tests {
         let read_ranges = (0..9)
             .map(|index| MemoryAliasRange::new(index * 16, 8).unwrap())
             .collect::<Vec<_>>();
-        let write_range = MemoryAliasRange::new(256, 32).unwrap();
+        let write_ranges = vec![MemoryAliasRange::new(256, 32).unwrap()];
         let inst = MInst::LaneAggregate {
+            dst: VReg(0),
             plan: LaneAggregatePlanId(0),
             root: 0,
+            source_block: crate::ir::BlockId(0),
+            inputs: Vec::new(),
             read_ranges: read_ranges.clone(),
-            write_range,
+            write_ranges,
         };
 
         assert_eq!(

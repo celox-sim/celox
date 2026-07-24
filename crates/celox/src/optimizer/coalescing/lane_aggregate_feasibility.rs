@@ -17,8 +17,8 @@ use crate::ir::{
     UnaryOp,
 };
 use crate::lane_aggregate_plan::{
-    LaneAggregateMaterialization, LaneAggregatePlan, LaneAggregatePlanNode, LaneAggregatePlanOp,
-    LaneAggregatePlanRoot, LaneAggregateStateLoad,
+    LaneAggregateBitLocation, LaneAggregateMaterialization, LaneAggregatePlan,
+    LaneAggregatePlanNode, LaneAggregatePlanOp, LaneAggregatePlanRoot, LaneAggregateStateLoad,
 };
 use crate::{HashMap, HashSet};
 
@@ -96,6 +96,7 @@ struct StateLoadLeaf {
     width: usize,
     physical_byte: usize,
     physical_bit: usize,
+    native_byte_offset: i32,
 }
 
 impl RecipeOp {
@@ -175,11 +176,12 @@ struct Candidate {
     publication: Publication,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Publication {
     address: RegionedAbsoluteAddr,
     first_bit_offset: usize,
     lane_count: usize,
+    instruction_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -506,6 +508,13 @@ impl<'a> Analyzer<'a> {
         let (physical_byte, physical_bit) = self
             .layout
             .map_static_bit_offset(&address.absolute_addr(), *bit_offset);
+        let (native_byte_offset, native_bit) = self
+            .layout
+            .regioned_static_byte_and_intra(address, *bit_offset)
+            .ok_or(RejectReason::NonStridedStateLeaf)?;
+        if native_bit != physical_bit {
+            return Err(RejectReason::InvalidRecipe);
+        }
         Ok(StateLoadLeaf {
             value: value.id,
             register: value.register,
@@ -516,6 +525,7 @@ impl<'a> Analyzer<'a> {
             width: *width,
             physical_byte,
             physical_bit,
+            native_byte_offset,
         })
     }
 
@@ -1430,6 +1440,7 @@ fn complete_publication_root(
     }
     let mut destination = None;
     let mut first_offset = None;
+    let mut instruction_indices = Vec::with_capacity(lane_count * 2);
     for lane in 0..lane_count {
         let slice_index = index + 1 + lane * 2;
         let store_index = slice_index + 1;
@@ -1459,12 +1470,14 @@ fn complete_publication_root(
         if destination.is_some_and(|known| known != address) || store_offset != start + lane {
             return None;
         }
+        instruction_indices.extend([slice_index, store_index]);
         destination.get_or_insert(address);
     }
     Some(Publication {
         address: destination?,
         first_bit_offset: first_offset?,
         lane_count,
+        instruction_indices,
     })
 }
 
@@ -1642,7 +1655,7 @@ fn build_shared_recipe_plan(candidates: &[Candidate]) -> Option<SharedRecipePlan
             candidate.block,
             candidate.root,
             *local_to_shared.get(candidate.recipe_root)?,
-            candidate.publication,
+            candidate.publication.clone(),
         ));
     }
     Some(SharedRecipePlan { nodes, roots })
@@ -1656,6 +1669,7 @@ fn lower_state_load(load: &StateLoadLeaf) -> LaneAggregateStateLoad {
         width: load.width,
         physical_byte: load.physical_byte,
         physical_bit: load.physical_bit,
+        native_byte_offset: load.native_byte_offset,
         state_slot: load.token.slot,
         state_version: load.token.version.0,
     }
@@ -1722,75 +1736,113 @@ fn lower_plan_operation(node: &RecipeNode) -> LaneAggregatePlanOp {
 fn executable_plan(
     shared: &SharedRecipePlan,
     dead_scalar_registers: HashSet<RegisterId>,
-) -> LaneAggregatePlan {
-    LaneAggregatePlan {
+    layout: &MemoryLayout,
+) -> Result<LaneAggregatePlan, String> {
+    let roots = shared
+        .roots
+        .iter()
+        .map(
+            |(block, original_root, recipe_root, publication)| -> Result<_, String> {
+                let publication_locations = (0..publication.lane_count)
+                    .map(|lane| {
+                        let bit_offset = publication.first_bit_offset.checked_add(lane)?;
+                        let (native_byte_offset, bit) = layout
+                            .regioned_static_byte_and_intra(&publication.address, bit_offset)?;
+                        Some(LaneAggregateBitLocation {
+                            native_byte_offset,
+                            bit: u8::try_from(bit).ok()?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        format!(
+                            "publication for r{} does not fit the native memory layout",
+                            original_root.0
+                        )
+                    })?;
+                Ok(LaneAggregatePlanRoot {
+                    block: *block,
+                    original_root: *original_root,
+                    recipe_root: *recipe_root,
+                    publication_instruction_indices: publication.instruction_indices.clone(),
+                    publication_address: publication.address,
+                    publication_bit_offset: publication.first_bit_offset,
+                    publication_locations,
+                    lane_count: publication.lane_count,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LaneAggregatePlan {
         nodes: shared
             .nodes
             .iter()
             .map(|node| LaneAggregatePlanNode {
                 operation: lower_plan_operation(node),
                 children: node.children.clone(),
+                lanes: node.lanes.clone(),
                 lane_width: node.lane_width,
                 lane_count: node.lanes.len(),
             })
             .collect(),
-        roots: shared
-            .roots
-            .iter()
-            .map(
-                |(block, original_root, recipe_root, publication)| LaneAggregatePlanRoot {
-                    block: *block,
-                    original_root: *original_root,
-                    recipe_root: *recipe_root,
-                    publication_address: publication.address,
-                    publication_bit_offset: publication.first_bit_offset,
-                    lane_count: publication.lane_count,
-                },
-            )
-            .collect(),
+        roots,
         dead_scalar_registers,
-    }
+    })
 }
 
 fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
     for (index, node) in plan.nodes.iter().enumerate() {
         if node.lane_width == 0
             || node.lane_count == 0
+            || node.lanes.len() != node.lane_count
             || node.children.iter().any(|child| *child >= index)
         {
             return Err(format!("invalid executable aggregate node {index}"));
         }
         let operand_count = node.children.len();
+        let child = |slot: usize| {
+            node.children
+                .get(slot)
+                .and_then(|child| plan.nodes.get(*child))
+        };
+        let aligned_child = |slot: usize| {
+            child(slot).is_some_and(|input| {
+                input.lane_count == node.lane_count
+                    || input
+                        .lanes
+                        .first()
+                        .is_some_and(|first| input.lanes.iter().all(|lane| lane == first))
+            })
+        };
         let executable = match &node.operation {
             LaneAggregatePlanOp::StateRead(source) => {
-                let loads = match source {
-                    LaneAggregateMaterialization::ReloadAtSink(loads) => loads,
+                let valid_loads = |loads: &[LaneAggregateStateLoad]| {
+                    operand_count == 0
+                        && (loads.len() == 1 || loads.len() == node.lane_count)
+                        && loads.iter().all(|load| {
+                            let _ = (
+                                load.register,
+                                load.address,
+                                load.bit_offset,
+                                load.physical_byte,
+                                load.native_byte_offset,
+                                load.state_slot,
+                                load.state_version,
+                            );
+                            load.width == node.lane_width && load.physical_bit < 8
+                        })
+                };
+                match source {
+                    LaneAggregateMaterialization::ReloadAtSink(loads) => valid_loads(loads),
                     LaneAggregateMaterialization::ReloadAtFrontier { block, loads } => {
                         let _ = block;
-                        loads
+                        valid_loads(loads)
                     }
                     LaneAggregateMaterialization::DominatingSsa { block, values } => {
                         let _ = block;
-                        if values.len() != node.lane_count {
-                            return Err(format!(
-                                "aggregate node {index} has incomplete SSA materialization"
-                            ));
-                        }
-                        continue;
+                        operand_count == 0 && values.len() == node.lane_count
                     }
-                };
-                (loads.len() == 1 || loads.len() == node.lane_count)
-                    && loads.iter().all(|load| {
-                        let _ = (
-                            load.register,
-                            load.address,
-                            load.bit_offset,
-                            load.physical_byte,
-                            load.state_slot,
-                            load.state_version,
-                        );
-                        load.width == node.lane_width && load.physical_bit < 8
-                    })
+                }
             }
             LaneAggregatePlanOp::Constant(values) => {
                 operand_count == 0 && values.len() == node.lane_count
@@ -1800,10 +1852,10 @@ fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
                 operand_count == 0
             }
             LaneAggregatePlanOp::Affine(offsets) => {
-                operand_count == 1 && offsets.len() == node.lane_count
+                operand_count == 1 && aligned_child(0) && offsets.len() == node.lane_count
             }
             LaneAggregatePlanOp::PackedExtract(offsets) => {
-                operand_count == 1 && offsets.len() == node.lane_count
+                operand_count == 1 && aligned_child(0) && offsets.len() == node.lane_count
             }
             LaneAggregatePlanOp::SsaPack { block, values }
             | LaneAggregatePlanOp::ScalarInsert { block, values } => {
@@ -1811,29 +1863,96 @@ fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
                 operand_count == 0 && values.len() == node.lane_count
             }
             LaneAggregatePlanOp::Unary(operation) => {
-                let _ = operation;
                 operand_count == 1
+                    && aligned_child(0)
+                    && matches!(
+                        operation,
+                        UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
+                    )
+                    && child(0).is_some_and(|input| {
+                        operation.result_width(input.lane_width) == node.lane_width
+                    })
             }
             LaneAggregatePlanOp::Binary(operation) => {
-                let _ = operation;
                 operand_count == 2
+                    && aligned_child(0)
+                    && aligned_child(1)
+                    && matches!(
+                        operation,
+                        BinaryOp::And
+                            | BinaryOp::Or
+                            | BinaryOp::Xor
+                            | BinaryOp::LogicAnd
+                            | BinaryOp::LogicOr
+                            | BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Eq
+                            | BinaryOp::Ne
+                            | BinaryOp::LtU
+                            | BinaryOp::LeU
+                            | BinaryOp::GtU
+                            | BinaryOp::GeU
+                            | BinaryOp::LtS
+                            | BinaryOp::LeS
+                            | BinaryOp::GtS
+                            | BinaryOp::GeS
+                    )
             }
             LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
-                let _ = (operation, amount);
                 operand_count == 1
+                    && aligned_child(0)
+                    && matches!(operation, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar)
+                    && child(0).is_some_and(|input| *amount < input.lane_width)
             }
             LaneAggregatePlanOp::OneHotDecode { shift_width } => {
-                let _ = shift_width;
                 operand_count == 1
+                    && aligned_child(0)
+                    && *shift_width < usize::BITS as usize
+                    && (1usize << shift_width).saturating_sub(1) < node.lane_width
+                    && child(0).is_some_and(|input| input.lane_width == *shift_width)
             }
-            LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => operand_count >= 2,
+            LaneAggregatePlanOp::Mux => {
+                operand_count == 3 && aligned_child(0) && aligned_child(1) && aligned_child(2)
+            }
+            LaneAggregatePlanOp::ControlMux if operand_count == 3 => {
+                aligned_child(0) && aligned_child(1) && aligned_child(2)
+            }
+            LaneAggregatePlanOp::ControlMux if operand_count == 2 => {
+                let aggregate = child(0).expect("child index was checked above");
+                let inserts = child(1).expect("child index was checked above");
+                aggregate.lanes.len() + inserts.lanes.len() == node.lanes.len()
+                    && matches!(inserts.operation, LaneAggregatePlanOp::ScalarInsert { .. })
+                    && node
+                        .lanes
+                        .iter()
+                        .all(|lane| aggregate.lanes.contains(lane) ^ inserts.lanes.contains(lane))
+            }
+            LaneAggregatePlanOp::ControlMux => false,
             LaneAggregatePlanOp::Slice { offset, width } => {
-                let _ = offset;
-                operand_count == 1 && *width == node.lane_width
+                operand_count == 1
+                    && aligned_child(0)
+                    && *width == node.lane_width
+                    && child(0).is_some_and(|input| {
+                        offset
+                            .checked_add(*width)
+                            .is_some_and(|end| end <= input.lane_width)
+                    })
             }
             LaneAggregatePlanOp::Concat { operand_widths } => {
                 operand_count == operand_widths.len()
                     && operand_widths.iter().sum::<usize>() == node.lane_width
+                    && node
+                        .children
+                        .iter()
+                        .zip(operand_widths)
+                        .all(|(child, width)| {
+                            let child = &plan.nodes[*child];
+                            child.lane_width == *width
+                                && (child.lane_count == node.lane_count
+                                    || child.lanes.first().is_some_and(|first| {
+                                        child.lanes.iter().all(|lane| lane == first)
+                                    }))
+                        })
             }
         };
         if !executable {
@@ -1850,6 +1969,12 @@ fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
             root.publication_bit_offset,
         );
         if root.lane_count == 0
+            || root.publication_locations.len() != root.lane_count
+            || root.publication_instruction_indices.len() != root.lane_count * 2
+            || !root
+                .publication_instruction_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
             || plan
                 .nodes
                 .get(root.recipe_root)
@@ -2269,7 +2394,7 @@ pub(crate) fn analyze(
         report.peak_suffix_xmm_values = suffix_peak.xmm;
     }
     if !shared_plan.roots.is_empty() {
-        let plan = executable_plan(&shared_plan, report.dead_scalar_registers.clone());
+        let plan = executable_plan(&shared_plan, report.dead_scalar_registers.clone(), layout)?;
         verify_executable_plan(&plan)?;
         report.plan = Some(plan);
     }
@@ -2510,6 +2635,44 @@ mod tests {
     }
 
     #[test]
+    fn executable_plan_lowers_atomically_without_scalar_publication() {
+        let (eu, layout) = fixture(false);
+        let report = analyze(&eu, &layout, false).unwrap();
+        let plan = report.plan().cloned().expect("fixture must produce a plan");
+        let function = crate::backend::native::isel::lower_execution_unit_with_lane_aggregate(
+            &eu,
+            &layout,
+            false,
+            Some(plan),
+        );
+
+        let aggregates = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|instruction| match instruction {
+                crate::backend::native::mir::MInst::LaneAggregate {
+                    read_ranges,
+                    write_ranges,
+                    ..
+                } => Some((read_ranges.len(), write_ranges.len())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(aggregates, vec![(1, 1)]);
+        assert!(function.blocks.iter().flat_map(|block| &block.insts).all(
+            |instruction| !matches!(
+                instruction,
+                crate::backend::native::mir::MInst::Store {
+                    base: crate::backend::native::mir::BaseReg::SimState,
+                    ..
+                }
+            )
+        ));
+        function.verify();
+    }
+
+    #[test]
     fn four_state_mode_does_not_plan_two_state_aggregate_recipes() {
         let (eu, layout) = fixture(false);
         eu.verify();
@@ -2721,6 +2884,7 @@ mod tests {
                 ),
                 first_bit_offset: 0,
                 lane_count: 8,
+                instruction_indices: (1..=16).collect(),
             },
         };
         let mut distinct = nodes.clone();

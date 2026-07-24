@@ -402,7 +402,10 @@ fn verify_instruction_constraints(
         MInst::LaneAggregate {
             plan: plan_id,
             root,
+            source_block,
+            inputs,
             read_ranges,
+            write_ranges,
             ..
         } => {
             let Some(plan) = func.lane_aggregate_plan(*plan_id) else {
@@ -421,15 +424,46 @@ fn verify_instruction_constraints(
                     format!("aggregate root {root} is outside 0..{}", plan.roots.len()),
                 ));
             };
-            let _ = root_plan.block;
-            if read_ranges.len() > 16 {
+            if root_plan.block != *source_block {
                 return Err(MirVerifyError::instruction(
-                    "AGGREGATE.EXACT_READ_EFFECTS",
+                    "AGGREGATE.ROOT_BLOCK",
                     block,
                     index,
                     format!(
-                        "aggregate root has {} read ranges, maximum is 16",
-                        read_ranges.len()
+                        "aggregate root belongs to block {} but is emitted in block {}",
+                        root_plan.block.0, source_block.0
+                    ),
+                ));
+            }
+            let Some(expected_inputs) = plan.scalar_inputs_for_root(usize::from(*root)) else {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.EXECUTABLE_INPUTS",
+                    block,
+                    index,
+                    "aggregate root has a non-executable frontier or more than 16 scalar inputs",
+                ));
+            };
+            if inputs.len() != expected_inputs.len() {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.INPUT_ARITY",
+                    block,
+                    index,
+                    format!(
+                        "aggregate root requires {} scalar inputs but MIR carries {}",
+                        expected_inputs.len(),
+                        inputs.len()
+                    ),
+                ));
+            }
+            if read_ranges.len() > 16 || write_ranges.is_empty() || write_ranges.len() > 16 {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.EXACT_MEMORY_EFFECTS",
+                    block,
+                    index,
+                    format!(
+                        "aggregate root has {} read and {} write ranges; each must be in 1..=16",
+                        read_ranges.len(),
+                        write_ranges.len()
                     ),
                 ));
             }

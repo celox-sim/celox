@@ -8,6 +8,9 @@ use crate::ir::{
     SIRTerminator, UnaryOp,
 };
 use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
+use crate::lane_aggregate_plan::{
+    LaneAggregateMaterialization, LaneAggregatePlan, LaneAggregatePlanOp,
+};
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -627,6 +630,197 @@ fn find_packed_lane_compare_plans(
     result
 }
 
+#[derive(Default)]
+struct LaneAggregateBlockRoots {
+    roots: HashMap<usize, LaneAggregateRootLowering>,
+    skip_indices: HashSet<usize>,
+}
+
+struct LaneAggregateRootLowering {
+    dst: VReg,
+    plan: LaneAggregatePlanId,
+    root: u16,
+    source_block: crate::ir::BlockId,
+    inputs: Vec<VReg>,
+    read_ranges: Vec<MemoryAliasRange>,
+    write_ranges: Vec<MemoryAliasRange>,
+}
+
+fn coalesce_aggregate_ranges(mut ranges: Vec<(i32, usize)>) -> Option<Vec<MemoryAliasRange>> {
+    ranges.sort_unstable();
+    let mut merged = Vec::<(i32, usize)>::new();
+    for (offset, byte_len) in ranges {
+        let end = i64::from(offset).checked_add(i64::try_from(byte_len).ok()?)?;
+        if let Some((previous_offset, previous_len)) = merged.last_mut() {
+            let previous_end =
+                i64::from(*previous_offset).checked_add(i64::try_from(*previous_len).ok()?)?;
+            if i64::from(offset) <= previous_end {
+                *previous_len =
+                    usize::try_from(end.max(previous_end) - i64::from(*previous_offset)).ok()?;
+                continue;
+            }
+        }
+        merged.push((offset, byte_len));
+    }
+    let aliases = merged
+        .into_iter()
+        .map(|(offset, byte_len)| MemoryAliasRange::new(offset, byte_len))
+        .collect::<Option<Vec<_>>>()?;
+    (aliases.len() <= 16).then_some(aliases)
+}
+
+fn lane_aggregate_root_effects(
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+) -> Option<(Vec<MemoryAliasRange>, Vec<MemoryAliasRange>)> {
+    let root = plan.roots.get(root_index)?;
+    let mut ancestors = HashSet::default();
+    let mut work = vec![root.recipe_root];
+    let mut reads = Vec::new();
+    while let Some(index) = work.pop() {
+        if !ancestors.insert(index) {
+            continue;
+        }
+        let node = plan.nodes.get(index)?;
+        work.extend(node.children.iter().copied());
+        match &node.operation {
+            LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+                for load in loads {
+                    let covered_bits = load.physical_bit.checked_add(load.width)?;
+                    if covered_bits == 0 || covered_bits > 64 {
+                        return None;
+                    }
+                    let read_bytes = match covered_bits.div_ceil(8) {
+                        1 => 1,
+                        2 => 2,
+                        3..=4 => 4,
+                        5..=8 => 8,
+                        _ => return None,
+                    };
+                    reads.push((load.native_byte_offset, read_bytes));
+                }
+            }
+            LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtFrontier {
+                ..
+            }) => return None,
+            _ => {}
+        }
+    }
+    let mut writes = Vec::with_capacity(root.lane_count);
+    for location in &root.publication_locations {
+        writes.push((
+            location.native_byte_offset,
+            usize::from(location.bit).checked_add(1)?.div_ceil(8),
+        ));
+    }
+    Some((
+        coalesce_aggregate_ranges(reads)?,
+        coalesce_aggregate_ranges(writes)?,
+    ))
+}
+
+fn lane_aggregate_roots_for_block(
+    ctx: &ISelContext<'_>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    plan_id: LaneAggregatePlanId,
+    plan: &LaneAggregatePlan,
+) -> LaneAggregateBlockRoots {
+    let mut result = LaneAggregateBlockRoots::default();
+    for (root_index, root) in plan.roots.iter().enumerate() {
+        if root.block != block.id {
+            continue;
+        }
+        let Some((instruction_index, _)) = block
+            .instructions
+            .iter()
+            .enumerate()
+            .find(|(_, instruction)| sir_def_reg(instruction) == Some(root.original_root))
+        else {
+            eprintln!(
+                "[lane-aggregate-codegen-fallback] block={} root=r{} reason=root-definition-not-found",
+                block.id.0, root.original_root.0
+            );
+            continue;
+        };
+        let Some((read_ranges, write_ranges)) = lane_aggregate_root_effects(plan, root_index)
+        else {
+            let blockers = plan
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, node)| match &node.operation {
+                    LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(
+                        loads,
+                    )) if loads.iter().any(|load| load.physical_bit + load.width > 64) => {
+                        Some(format!("node{index}=cross-word-state-read"))
+                    }
+                    LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(
+                        _,
+                    )) => None,
+                    LaneAggregatePlanOp::StateRead(_) => {
+                        Some(format!("node{index}=non-sink-state-read"))
+                    }
+                    LaneAggregatePlanOp::BroadcastScalar(_) => {
+                        Some(format!("node{index}=scalar-broadcast"))
+                    }
+                    LaneAggregatePlanOp::SsaPack { .. } => Some(format!("node{index}=ssa-pack")),
+                    LaneAggregatePlanOp::ScalarInsert { .. } => {
+                        Some(format!("node{index}=scalar-insert"))
+                    }
+                    _ => None,
+                })
+                .take(8)
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[lane-aggregate-codegen-fallback] block={} root=r{} reason=non-local-or-unencodable-recipe blockers={blockers:?}",
+                block.id.0, root.original_root.0
+            );
+            continue;
+        };
+        let Some(input_registers) = plan.scalar_inputs_for_root(root_index) else {
+            continue;
+        };
+        let inputs = input_registers
+            .iter()
+            .map(|register| ctx.reg_map.get(*register))
+            .collect::<Vec<_>>();
+        let Ok(root_id) = u16::try_from(root_index) else {
+            continue;
+        };
+        if root
+            .publication_instruction_indices
+            .iter()
+            .any(|index| *index >= block.instructions.len() || *index <= instruction_index)
+        {
+            continue;
+        }
+        result
+            .skip_indices
+            .extend(root.publication_instruction_indices.iter().copied());
+        result.roots.insert(
+            instruction_index,
+            LaneAggregateRootLowering {
+                dst: ctx.reg_map.get(root.original_root),
+                plan: plan_id,
+                root: root_id,
+                source_block: block.id,
+                inputs,
+                read_ranges,
+                write_ranges,
+            },
+        );
+        eprintln!(
+            "[lane-aggregate-codegen] block={} root=r{} plan_root={} read_ranges={} write_ranges={}",
+            block.id.0,
+            root.original_root.0,
+            root_index,
+            result.roots[&instruction_index].read_ranges.len(),
+            result.roots[&instruction_index].write_ranges.len(),
+        );
+    }
+    result
+}
+
 /// Lower a single SIR execution unit to a MIR function.
 ///
 /// Only handles 2-state values ≤64 bits for now.
@@ -669,11 +863,15 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         spill_descs.push(SpillDesc::transient());
     }
 
+    let lane_aggregate_lowering_plan = lane_aggregate_plan.clone();
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-    if let Some(plan) = lane_aggregate_plan {
+    let lane_aggregate_plan_id = if let Some(plan) = lane_aggregate_plan {
         let plan_id = func.add_lane_aggregate_plan(plan);
         debug_assert!(func.lane_aggregate_plan(plan_id).is_some());
-    }
+        Some(plan_id)
+    } else {
+        None
+    };
     let native_packed_bit_stores = !four_state && func.target_features.bmi2();
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
@@ -852,11 +1050,35 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         } else {
             PackedLaneComparePlans::default()
         };
+        let aggregate_roots = match (
+            lane_aggregate_plan_id,
+            lane_aggregate_lowering_plan.as_ref(),
+        ) {
+            (Some(plan_id), Some(plan)) => {
+                lane_aggregate_roots_for_block(&ctx, sir_block, plan_id, plan)
+            }
+            _ => LaneAggregateBlockRoots::default(),
+        };
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            if let Some(root) = aggregate_roots.roots.get(&inst_idx) {
+                mblock.push(MInst::LaneAggregate {
+                    dst: root.dst,
+                    plan: root.plan,
+                    root: root.root,
+                    source_block: root.source_block,
+                    inputs: root.inputs.clone(),
+                    read_ranges: root.read_ranges.clone(),
+                    write_ranges: root.write_ranges.clone(),
+                });
+                continue;
+            }
+            if aggregate_roots.skip_indices.contains(&inst_idx) {
+                continue;
+            }
             if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
                 continue;
             }
@@ -1492,20 +1714,9 @@ impl<'a> ISelContext<'a> {
         addr: &RegionedAbsoluteAddr,
         bit_offset: usize,
     ) -> (i32, usize) {
-        let abs_addr = addr.absolute_addr();
-        let base = match addr.region {
-            STABLE_REGION => *self.layout.offsets.get(&abs_addr).unwrap_or(&0),
-            crate::ir::SPARSE_WORKING_REGION => {
-                self.layout.sparse_base_offset
-                    + *self.layout.sparse_offsets.get(&abs_addr).unwrap_or(&0)
-            }
-            _ => {
-                self.layout.working_base_offset
-                    + *self.layout.working_offsets.get(&abs_addr).unwrap_or(&0)
-            }
-        };
-        let (byte_offset, intra) = self.layout.map_static_bit_offset(&abs_addr, bit_offset);
-        ((base + byte_offset) as i32, intra)
+        self.layout
+            .regioned_static_byte_and_intra(addr, bit_offset)
+            .expect("native static state offset must fit i32")
     }
 
     /// Choose OpSize for a given bit width, clamping to the smallest

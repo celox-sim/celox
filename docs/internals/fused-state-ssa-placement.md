@@ -1,10 +1,12 @@
 # Fused state SSA and code placement
 
 > **Status:** Milestone 0 and the analysis-only Milestone 1 contract are
-> complete. Milestone 1 fails its profile-weighted profitability gate, so
-> Milestone 2 code generation is not authorized. Each future code-generating
-> milestone still requires an independent semantic, generated-code, and Linux
-> execution gate.
+> complete. Demand-local forwarding alone failed its profile-weighted gate.
+> A later shared lane-aggregate plan passed a post-allocation static gate, and
+> its opt-in scalar reference lowering reaches the exact Linux marker without
+> improving execution time. SIMD/bit-plane lowering remains experimental.
+> Each code-generating milestone still requires an independent semantic,
+> generated-code, and Linux execution gate.
 
 ## Objective
 
@@ -1708,8 +1710,58 @@ RSS by about 1.7 GiB, while resetting the primary demand resolver for every
 query increased both resolved fragments and RSS. Processing the largest
 object event sets first and sharing one sparse query graph are retained.
 
-The semantic/type contract passes, but the profile-weighted profitability gate
-above fails. Code-generating Milestone 2 is stopped.
+The semantic/type contract passes, but the demand-local profile-weighted
+profitability gate above fails. Code generation must not implement those 552
+plans indiscriminately.
+
+The independently measured shared lane-aggregate region is a narrower restart
+condition. It groups the actually expensive producer/publication slice rather
+than counting FF demand sites. Its post-allocation estimate passes the static
+gate described above, so only this aggregate path is authorized for opt-in
+code generation.
+
+#### Executable aggregate lowering result
+
+The first aggregate lowering is deliberately a scalar semantic reference, not
+the intended performance implementation. One atomic MIR instruction names:
+
+- its function-local verified plan and root identity;
+- every scalar SSA frontier input as an explicit MIR use;
+- the original root-mask result as an explicit MIR definition;
+- every exact state read and publication write range;
+- the exact verified SIR Slice/Store site identities replaced by the root.
+
+Publication sites are part of the immutable plan. ISel does not infer a
+contiguous instruction span from lane count, and the MIR verifier checks the
+root block, scalar-input arity, plan/root existence, and bounded exact memory
+effects. The emitter consumes the typed recipe and concrete native memory
+locations without consulting SIR.
+
+Cutting the scalar graph at the two aggregate roots lets ordinary MIR DCE
+remove the superseded producer graph. On the complete Heliodor functions, the
+attributed region changes from 1,333 pre-allocation MIR instructions to 14,
+and from roughly 1,956 post-allocation instructions with 580 stack accesses to
+10 post-allocation MIR instructions with no stack accesses. These counts treat
+the aggregate operation as atomic and therefore do not predict the scalar
+reference emitter's final machine instruction count.
+
+The opt-in scalar emitter snapshots explicit SSA leaves, evaluates each lane's
+verified recipe with emitter-local temporaries, publishes the exact lane
+locations, and reconstructs the original packed root result. Focused JIT tests
+cover strided sink reload/publication and narrow signed arithmetic shift.
+The unchanged Heliodor workload reaches:
+
+```text
+v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1
+compile_ns=79160012340
+execute_ns=64328780039
+```
+
+The approximately 64.3-second execution is equal to the recent scalar
+baseline within run-to-run noise. This establishes the reference lowering's
+semantic feasibility, not profitability. The next implementation must replace
+the scalar lane loop with the planned bit-plane/SIMD chunk schedule and then
+repeat generated-code, execution-time, RTL, and Linux gates.
 
 ### Milestone 2: use-local FF forwarding
 
