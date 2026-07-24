@@ -36,7 +36,7 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         }
 
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-        let mut any_changed = false;
+        let mut any_changed = expose_packed_bit_store_sinks_with_counter(eu, &mut max_reg);
 
         // A load-based pack is materialized at the Concat, after the scalar
         // loads it replaces.  That is only the same memory version when this
@@ -120,6 +120,215 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         // depth.
         remove_dead_definitions(eu);
     }
+}
+
+#[derive(Clone)]
+struct PackedBitStoreSink {
+    first_index: usize,
+    concat_index: usize,
+    store_indices: Vec<usize>,
+    destination: RegionedAbsoluteAddr,
+    destination_start: usize,
+    packed: RegisterId,
+    width: usize,
+}
+
+/// Make a complete set of scalar one-bit publications consume the packed
+/// value which already represents those bits.
+///
+/// Analyzer lowering may publish every unpacked one-bit element before
+/// concatenating the same predicates for a summary output. Those Stores keep
+/// the complete scalar lane DAG live and prevent recursive lane packing.
+/// Delaying disjoint Stores across pure instructions to the existing Concat
+/// preserves their observable order while giving the vectorizer one real
+/// packed sink. Native ISel may subsequently combine the exact Slice/Store
+/// pairs when the physical element layout permits it.
+pub(super) fn expose_packed_bit_store_sinks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let mut next_register = eu
+        .register_map
+        .keys()
+        .map(|register| register.0)
+        .max()
+        .unwrap_or(0);
+    expose_packed_bit_store_sinks_with_counter(eu, &mut next_register)
+}
+
+fn expose_packed_bit_store_sinks_with_counter(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    next_reg: &mut usize,
+) -> bool {
+    let mut changed = false;
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable();
+    for block_id in block_ids {
+        let Some(block) = eu.blocks.get(&block_id) else {
+            continue;
+        };
+        let mut plans = Vec::new();
+        let mut occupied = HashSet::default();
+        for (concat_index, instruction) in block.instructions.iter().enumerate() {
+            let SIRInstruction::Concat(packed, arguments) = instruction else {
+                continue;
+            };
+            let width = arguments.len();
+            if !(3..=64).contains(&width)
+                || arguments.iter().any(|argument| {
+                    eu.register_map
+                        .get(argument)
+                        .is_none_or(|register| register.width() != 1)
+                })
+            {
+                continue;
+            }
+
+            let argument_set = arguments.iter().copied().collect::<HashSet<_>>();
+            let mut stores_by_address =
+                HashMap::<RegionedAbsoluteAddr, HashMap<usize, (usize, RegisterId)>>::default();
+            for (index, candidate) in block.instructions[..concat_index].iter().enumerate() {
+                let SIRInstruction::Store(
+                    destination,
+                    SIROffset::Static(offset),
+                    1,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) = candidate
+                else {
+                    continue;
+                };
+                if triggers.is_empty() && capture_sites.is_empty() && argument_set.contains(source)
+                {
+                    stores_by_address
+                        .entry(*destination)
+                        .or_default()
+                        .insert(*offset, (index, *source));
+                }
+            }
+
+            let mut accepted = None;
+            for (destination, stores) in stores_by_address {
+                for (&destination_start, &(_, low_source)) in &stores {
+                    if low_source != *arguments.last().expect("nonempty Concat") {
+                        continue;
+                    }
+                    let mut store_indices = Vec::with_capacity(width);
+                    let complete = arguments.iter().rev().enumerate().all(|(lane, source)| {
+                        let Some(offset) = destination_start.checked_add(lane) else {
+                            return false;
+                        };
+                        let Some(&(index, stored)) = stores.get(&offset) else {
+                            return false;
+                        };
+                        store_indices.push(index);
+                        stored == *source
+                    });
+                    if !complete {
+                        continue;
+                    }
+                    store_indices.sort_unstable();
+                    store_indices.dedup();
+                    if store_indices.len() != width
+                        || store_indices.iter().any(|index| occupied.contains(index))
+                    {
+                        continue;
+                    }
+                    let first = store_indices[0];
+                    if (first..=concat_index).any(|index| occupied.contains(&index)) {
+                        continue;
+                    }
+                    let selected = store_indices.iter().copied().collect::<HashSet<_>>();
+                    let closed = block.instructions[first..concat_index]
+                        .iter()
+                        .enumerate()
+                        .all(|(relative, instruction)| {
+                            let index = first + relative;
+                            selected.contains(&index)
+                                || matches!(
+                                    instruction,
+                                    SIRInstruction::Imm(..)
+                                        | SIRInstruction::Binary(..)
+                                        | SIRInstruction::Unary(..)
+                                        | SIRInstruction::Concat(..)
+                                        | SIRInstruction::Slice(..)
+                                        | SIRInstruction::Mux(..)
+                                )
+                        });
+                    if !closed {
+                        continue;
+                    }
+                    accepted = Some(PackedBitStoreSink {
+                        first_index: first,
+                        concat_index,
+                        store_indices,
+                        destination,
+                        destination_start,
+                        packed: *packed,
+                        width,
+                    });
+                    break;
+                }
+                if accepted.is_some() {
+                    break;
+                }
+            }
+            if let Some(plan) = accepted {
+                occupied.extend(plan.first_index..=plan.concat_index);
+                plans.push(plan);
+            }
+        }
+        if plans.is_empty() {
+            continue;
+        }
+
+        let block = eu
+            .blocks
+            .get_mut(&block_id)
+            .expect("planned block remains present");
+        plans.sort_unstable_by_key(|plan| plan.concat_index);
+        for plan in plans.into_iter().rev() {
+            let selected = plan.store_indices.iter().copied().collect::<HashSet<_>>();
+            let concat = block.instructions[plan.concat_index].clone();
+            let mut replacement = Vec::with_capacity(1 + plan.width * 2);
+            replacement.push(concat);
+            for lane in 0..plan.width {
+                *next_reg += 1;
+                while eu.register_map.contains_key(&RegisterId(*next_reg)) {
+                    *next_reg += 1;
+                }
+                let slice = RegisterId(*next_reg);
+                eu.register_map.insert(
+                    slice,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                );
+                replacement.push(SIRInstruction::Slice(slice, plan.packed, lane, 1));
+                replacement.push(SIRInstruction::Store(
+                    plan.destination,
+                    SIROffset::Static(plan.destination_start + lane),
+                    1,
+                    slice,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+
+            let old = std::mem::take(&mut block.instructions);
+            let mut rebuilt =
+                Vec::with_capacity(old.len() + replacement.len().saturating_sub(plan.width + 1));
+            for (index, instruction) in old.into_iter().enumerate() {
+                if index == plan.concat_index {
+                    rebuilt.append(&mut replacement);
+                } else if !selected.contains(&index) {
+                    rebuilt.push(instruction);
+                }
+            }
+            block.instructions = rebuilt;
+        }
+        changed = true;
+    }
+    changed
 }
 
 fn push_instruction_uses(
@@ -3101,6 +3310,158 @@ mod tests {
                 .instructions
                 .iter()
                 .any(|inst| matches!(inst, SIRInstruction::Concat(RegisterId(3), _)))
+        );
+    }
+
+    #[test]
+    fn exposes_a_complete_scalar_bit_store_group_as_one_packed_sink() {
+        let address = test_addr();
+        let bit = RegisterType::Bit {
+            width: 1,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        for lane in 0..4 {
+            register_map.insert(RegisterId(lane), bit.clone());
+            instructions.push(SIRInstruction::Imm(
+                RegisterId(lane),
+                SIRValue::new((lane & 1) as u8),
+            ));
+            instructions.push(SIRInstruction::Store(
+                address,
+                SIROffset::Static(lane),
+                1,
+                RegisterId(lane),
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        register_map.insert(
+            RegisterId(4),
+            RegisterType::Bit {
+                width: 4,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(
+            RegisterId(4),
+            vec![RegisterId(3), RegisterId(2), RegisterId(1), RegisterId(0)],
+        ));
+
+        let mut eu = make_eu(instructions, register_map);
+        let mut next_register = 4;
+        assert!(expose_packed_bit_store_sinks_with_counter(
+            &mut eu,
+            &mut next_register
+        ));
+        eu.verify();
+
+        let block = &eu.blocks[&BlockId(0)];
+        let concat = block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Concat(RegisterId(4), _)))
+            .unwrap();
+        assert_eq!(
+            block.instructions[..concat]
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+                .count(),
+            0
+        );
+        for lane in 0..4 {
+            let slice = RegisterId(5 + lane);
+            assert!(matches!(
+                &block.instructions[concat + 1 + lane * 2],
+                SIRInstruction::Slice(dst, RegisterId(4), offset, 1)
+                    if *dst == slice && *offset == lane
+            ));
+            assert!(matches!(
+                &block.instructions[concat + 2 + lane * 2],
+                SIRInstruction::Store(
+                    stored,
+                    SIROffset::Static(offset),
+                    1,
+                    source,
+                    triggers,
+                    captures,
+                ) if *stored == address
+                    && *offset == lane
+                    && *source == slice
+                    && triggers.is_empty()
+                    && captures.is_empty()
+            ));
+        }
+    }
+
+    #[test]
+    fn packed_bit_store_sink_stops_at_an_intervening_load() {
+        let address = test_addr();
+        let other = RegionedAbsoluteAddr {
+            var_id: veryl_analyzer::ir::VarId::from_raw(1),
+            ..address
+        };
+        let bit = RegisterType::Bit {
+            width: 1,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        for register in 0..3 {
+            register_map.insert(RegisterId(register), bit.clone());
+        }
+        register_map.insert(RegisterId(3), bit);
+        register_map.insert(
+            RegisterId(4),
+            RegisterType::Bit {
+                width: 3,
+                signed: false,
+            },
+        );
+        let instructions = vec![
+            SIRInstruction::Store(
+                address,
+                SIROffset::Static(0),
+                1,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Load(RegisterId(3), other, SIROffset::Static(0), 1),
+            SIRInstruction::Store(
+                address,
+                SIROffset::Static(1),
+                1,
+                RegisterId(1),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Store(
+                address,
+                SIROffset::Static(2),
+                1,
+                RegisterId(2),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Concat(
+                RegisterId(4),
+                vec![RegisterId(2), RegisterId(1), RegisterId(0)],
+            ),
+        ];
+        let mut eu = make_eu(instructions, register_map);
+        let mut next_register = 4;
+        assert!(!expose_packed_bit_store_sinks_with_counter(
+            &mut eu,
+            &mut next_register
+        ));
+        assert_eq!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Store(..)))
+                .count(),
+            3
         );
     }
 

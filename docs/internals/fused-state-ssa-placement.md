@@ -1300,6 +1300,37 @@ instructions. The second gate is the complete native suite and exact Linux
 marker. Only after both pass is a fresh perf map meaningful; old block
 identities cannot be reused after this CFG/code-layout change.
 
+#### Aggregate-mask implementation result
+
+The packed publication part of the contract is implemented. The SIR rewrite
+recognizes the complete Store group, moves publication to the existing Concat,
+and exposes exact Slice/Store pairs. On the release-equivalent Heliodor
+workload, native ISel recognizes both successor blocks as 32 one-bit elements
+with one-byte stride. After allocation, block 4425 ends in four
+`pdep + store.i64` groups instead of 32 scalar byte Stores; the block contains
+522 MIR instructions after allocation.
+
+The recursive lane-DAG part does not pass the structural gate. Block 8081
+remains 517 optimized MIR instructions and 1,003 instructions after
+allocation, including 275 stack Loads and 132 stack Stores. For the block 4425
+predicate root, the current recursive packer proves that 225 scalar
+definitions become dead and replaces a 63-instruction narrow Concat, but its
+frontier would require 573 final instructions. Most arithmetic and comparison
+tuples become opaque 32-lane Concats. Rejecting that plan is therefore correct;
+relaxing its cost test would increase code size and pressure.
+
+The same generated-code run reached the exact
+`cy=9ae070 x3=aa pass=1` marker with 79.689 seconds of code generation and
+65.990 seconds of generated execution. This is in the existing timing band
+and does not establish a throughput improvement. The publication scatter is a
+valid local reduction, but the first aggregate-mask gate remains failed.
+
+The next design must not merely enlarge recursive boolean lane packing. It
+must choose a frontier where lane-varying arithmetic and comparisons have an
+executable packed implementation, or leave those producers scalar while
+changing their placement/allocation contract. In particular, an opaque
+Concat-per-frontier-node is not a viable representation for this region.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

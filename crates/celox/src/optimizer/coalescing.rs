@@ -135,6 +135,13 @@ pub(crate) fn optimize_native_merged_chain(
     .run(eu, &PassOptions::default());
     eu.verify_result()
         .map_err(|error| ("after native block optimization", error))?;
+    if !four_state && pass_vectorize_concat::expose_packed_bit_store_sinks(eu) {
+        changed = true;
+        VectorizeConcatPass.run(eu, &PassOptions::default());
+        GvnPass.run(eu, &PassOptions::default());
+        eu.verify_result()
+            .map_err(|error| ("after native packed bit-store vectorization", error))?;
+    }
     let recovered_bit_maps = if four_state {
         0
     } else {
