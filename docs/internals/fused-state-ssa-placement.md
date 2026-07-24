@@ -2068,35 +2068,36 @@ but stops at concrete constants, Loads, shared SSA values, and external
 values. These are diagnostic frontiers, not yet authorization to materialize
 the values.
 
-CFG changes renumbered the previously measured block 8501 to block 8671. The
+CFG changes renumbered the previously measured block 8501 to block 8674. The
 mapping was established by matching its parameter list and complete
-instruction sequence rather than by reusing the stale block number. A focused
-non-LTO compile-only run on that block produced:
+instruction sequence and by counting its 76 comparisons of `r20333`, rather
+than by reusing the stale block number. The current emitted type of `r20333`
+is `logic<7>`. A focused non-LTO compile-only run on that block produced:
 
 ```text
 forward closure                         387 instructions, 83 blocks
 effect sinks                            2
 
-sink b5831:3 recipe                     242 instructions, 20 blocks
+sink b5834:3 recipe                     242 instructions, 20 blocks
 selector-control blocks                 10
 entering CFG edges                      24
-frontier                                72 constants, 10 Loads, 75 shared SSA
+frontier                                72 constants, 11 Loads, 74 shared SSA
 control merges                          24
 
-sink b5936:10 recipe                    240 instructions, 24 blocks
+sink b5942:10 recipe                    240 instructions, 24 blocks
 selector-control blocks                 13
 entering CFG edges                      17
-frontier                                71 constants, 10 Loads, 67 shared SSA
+frontier                                71 constants, 11 Loads, 66 shared SSA
 control merges                          24
 
 same publication                        yes: inst56/var350[0..64)
 same continuation                       yes: b4412
-common dominator                        b8671
+common dominator                        b8674
 common postdominator                    b4412
 common recipe instructions              139, all in one common block
 path-local recipe instructions          103 / 101
 common frontier values                  129
-analysis time                           19.2 ms
+analysis time including sparse StateSSA 28.2 ms
 ```
 
 The reverse slice reduces the transformation boundary from 83 blocks to
@@ -2120,62 +2121,109 @@ For the same focused block, all 76 explicit cases plus default were resolved
 for both sinks:
 
 ```text
-                                           b5831:3       b5936:10
+                                           b5834:3       b5942:10
 reachable alternatives                         77              77
-case recipe instructions min/mean/max        0/6/23          0/6/23
-estimated recipe cost min/mean/max          0/28/102        0/27/102
+case recipe instructions min/mean/max        0/7/29          0/6/29
+estimated recipe cost min/mean/max          0/30/102        0/30/102
 maximum blocks in one case                       16              16
 maximum Loads in one case                         6               6
 maximum DominatingSSA leaves                     11              11
-maximum ControlMerge leaves                       1               0
+maximum globally available ControlMerge leaves    0               0
+maximum non-dominating merge recipes               1               0
 external leaves                                   0               0
 loop cutoffs                                      0               0
 ```
 
-The 23-instruction maximum is selector value 6. Its exact slice is entirely in
-block 8671 and ends at four Loads and five `DominatingSSA` leaves; it has no
-external value or control merge. The estimated-cost maximum is selector value
-19. It consists of one repeated-bit `Concat`, one Load, and one
+The 29-instruction maximum has several tied selector values (the current
+deterministic report chooses value 7). The estimated-cost maximum is selector
+value 19. It consists of one repeated-bit `Concat`, one Load, and one
 `DominatingSSA` leaf. The cost 102 is therefore a cost-model result for that
 wide `Concat`, not a claim that the recipe contains 102 SIR instructions.
 
-Across all alternatives, the first and second sink refer to 30 distinct Load
-leaves and 55/54 distinct `DominatingSSA` leaves. The first sink additionally
-uses two distinct outer-control merge leaves across all alternatives; the
-second uses none. Sparse two-state StateSSA was built only for those selected
-Loads. At each Store block, all 30 original Load versions equal the target
-entry version:
+Across all alternatives, the first and second sink refer to 31 distinct Load
+leaves and 52/51 distinct `DominatingSSA` leaves. Sparse two-state StateSSA
+was built only for those selected Loads. At each Store block, all 31 original
+Load versions equal the target entry version:
 
 ```text
-stable StateRead leaves                 30 / 30
+stable StateRead leaves                 31 / 31
 unstable StateRead leaves                0 / 0
 unversioned StateRead leaves             0 / 0
 maximum unstable Loads in one case       0 / 0
-analysis time including sparse StateSSA  30.4 ms
+analysis time including sparse StateSSA  28.2 ms
 ```
 
-This passes the focused legality and profitability gate. The 242/240-
-instruction union was misleadingly coarse: one dynamic case needs at most 23
-pure instructions, while every leaf has a concrete source kind:
-`Constant`, `DominatingSSA`, phase-correct `StateRead`, or preserved
-`ControlMerge`. It remains a focused result for the structurally remapped hot
-block, not yet a profile-wide profitability result.
+The payload-size, StateRead, external-value, and loop gates pass. The placement
+gate does **not** yet pass for the first sink. Its alternatives collectively
+name two path-local merge parameters. Case 57 needs `r59008`, the parameter of
+block 6032; case 71 needs `r59001`, the parameter of block 6266. No other case
+needs either value, and at most one is needed by any one case. Their defining
+merge blocks do not globally dominate block 5834. They are valid values only
+after the original outer-control merges which produced them. Calling these
+values executable sink-local `ControlMerge` leaves was incorrect.
 
-The first code-generation slice should therefore replace each final Store
-block with a selector `Switch` whose case blocks materialize only that
-case-local recipe, perform the same exact Store, and jump to block 4412.
-There are two dispatches because the existing outer branch chooses only one
-Store path dynamically. The rewrite must retain explicit value substitutions
-for eliminated known Muxes, rematerialize each admitted StateRead from its
-proved target-entry StateVersion, use each `ControlMerge` only after its
-original merge, and atomically roll back unless all 77 case recipes verify.
-Subsequent DCE may then remove the now-unused payload work from block 8671 and
-the old selector chains.
+An atomic sink-local `Switch` prototype made this error observable rather than
+silently carrying it into code generation. The SIR verifier rejected the
+first generated case block with:
 
-Code generation remains disabled until that executable recipe representation
-and atomic verifier exist. Replaying source-EU branchification, switching
-block 8671 alone, cloning the 83-block forward closure once per case, or
-hoisting its whole frontier is not authorized.
+```text
+SSA.DEFINITION_DOMINATES_USE:
+definition of r59008 does not dominate this use
+```
+
+The second sink has no such merge recipe and is closed with respect to its
+payload dependencies. Its seven-bit selector is representable by the current
+SIR `Switch`. Rewriting only it would nevertheless leave the 139 common origin
+instructions live for the first sink and therefore would not establish the
+large expected benefit.
+
+The executable placement model must consequently distinguish:
+
+```text
+ControlMerge:
+    the merged SSA value dominates the selected insertion point
+
+PathLocalMergeRecipe:
+    the value is available only after preserving a particular outer-control
+    merge and must be materialized on a selector-specific edge below it
+```
+
+For the first Store path, the two exceptional cases need local conditional
+exits after their merge parameters become available: case 57 at block 6032
+and case 71 at block 6266. Before code generation, the remaining frontier and
+StateRead versions must be revalidated at those earlier insertion blocks, not
+only at sink block 5834. The other 75 alternatives and the complete second
+Store path can then use sink-local dispatch. A generated case block must never
+refer directly to `r59001` or `r59008` from block 5834.
+
+The first whole-function sink-local prototype was rejected and removed. It
+required every case to be closed at the final Store and therefore failed
+dominance on `r59008`; it also selected candidates without profile guidance.
+
+The rejection was also measured rather than inferred from IR size. Before
+removal, the opt-in prototype selected two unrelated instances of an
+eight-bit candidate at `b5618/r2101` (20 cases, two sinks, an estimated eight
+avoided instructions). Both candidate and baseline completed the exact Linux
+workload through `cy=9ae070` and kernel power-down. The adjacent non-LTO
+measurements were:
+
+```text
+                               compile       execute
+baseline                       57.425 s      59.937 s
+sink-local prototype           60.116 s      61.411 s
+delta                           +4.687%        +2.460%
+```
+
+Thus a whole-function scan ranked a cold, statically small candidate while
+leaving the profile-selected hot selector unchanged, and made both phases
+slower. Neither that scan nor its environment-variable production hook is
+retained. Candidate discovery for the executable pass must begin from the
+profile-selected effect region and its existing selector CFG.
+
+This remains a focused result for the structurally remapped hot block, not yet
+a profile-wide profitability result. Replaying source-EU branchification,
+switching block 8674 alone, cloning the 83-block forward closure once per case,
+or hoisting its whole frontier is not authorized.
 
 ### Milestone 2: use-local FF forwarding
 

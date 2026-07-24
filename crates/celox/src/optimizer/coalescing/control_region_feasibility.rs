@@ -80,11 +80,14 @@ pub(crate) struct SelectorSinkCaseSummaryFact {
     pub maximum_dominating_ssa_frontier: usize,
     pub maximum_external_frontier: usize,
     pub maximum_control_merges: usize,
+    pub maximum_non_dominating_control_merges: usize,
     pub maximum_loop_cutoffs: usize,
     pub all_load_frontier: Vec<RegisterId>,
     pub all_dominating_ssa_frontier: Vec<RegisterId>,
     pub all_external_frontier: Vec<RegisterId>,
     pub all_control_merges: Vec<RegisterId>,
+    pub all_non_dominating_control_merges: Vec<RegisterId>,
+    pub non_dominating_control_merge_cases: Vec<(String, Vec<RegisterId>)>,
     pub all_loop_cutoffs: Vec<RegisterId>,
     pub stable_load_frontier: Vec<RegisterId>,
     pub unstable_load_frontier: Vec<RegisterId>,
@@ -219,10 +222,13 @@ impl SelectorSinkRecipeFact {
              case_maximum_blocks={} case_maximum_load_frontier={} \
              case_maximum_dominating_ssa_frontier={} \
              case_maximum_external_frontier={} case_maximum_control_merges={} \
+             case_maximum_non_dominating_control_merges={} \
              case_maximum_loop_cutoffs={} case_maximum_instructions={} \
              case_maximum_cost={} case_maximum_cost_instructions={} \
              case_unique_load_frontier={} case_unique_dominating_ssa_frontier={} \
              case_unique_external_frontier={} case_unique_control_merges={} \
+             case_unique_non_dominating_control_merges={} \
+             case_non_dominating_control_merge_cases={:?} \
              case_unique_loop_cutoffs={} case_stable_load_frontier={} \
              case_unstable_load_frontier={} case_unversioned_load_frontier={} \
              case_maximum_unstable_loads={} case_maximum_unversioned_loads={}",
@@ -255,6 +261,7 @@ impl SelectorSinkRecipeFact {
             self.case_summary.maximum_dominating_ssa_frontier,
             self.case_summary.maximum_external_frontier,
             self.case_summary.maximum_control_merges,
+            self.case_summary.maximum_non_dominating_control_merges,
             self.case_summary.maximum_loop_cutoffs,
             self.case_summary.maximum_instruction_case,
             self.case_summary.maximum_cost_case,
@@ -263,6 +270,8 @@ impl SelectorSinkRecipeFact {
             self.case_summary.all_dominating_ssa_frontier.len(),
             self.case_summary.all_external_frontier.len(),
             self.case_summary.all_control_merges.len(),
+            self.case_summary.all_non_dominating_control_merges.len(),
+            self.case_summary.non_dominating_control_merge_cases,
             self.case_summary.all_loop_cutoffs.len(),
             self.case_summary.stable_load_frontier.len(),
             self.case_summary.unstable_load_frontier.len(),
@@ -370,12 +379,14 @@ struct SinkRecipe {
     dominating_ssa_frontier: BTreeSet<RegisterId>,
     external_frontier: BTreeSet<RegisterId>,
     control_merges: BTreeSet<RegisterId>,
+    non_dominating_control_merges: BTreeSet<RegisterId>,
     loop_cutoffs: BTreeSet<RegisterId>,
 }
 
 #[derive(Debug)]
 struct CaseSinkRecipe {
     label: String,
+    selected_case: Option<BigUint>,
     recipe: SinkRecipe,
     cost: usize,
 }
@@ -383,6 +394,7 @@ struct CaseSinkRecipe {
 #[derive(Debug)]
 struct SelectorCaseContext {
     label: String,
+    selected_case: Option<BigUint>,
     known: HashMap<RegisterId, bool>,
     reachable: BTreeSet<BlockId>,
 }
@@ -1171,12 +1183,18 @@ fn analyze_case_sink_recipes(
             )
             .map(|(recipe, cost)| CaseSinkRecipe {
                 label: context.label.clone(),
+                selected_case: context.selected_case.clone(),
                 recipe,
                 cost,
             })
         })
         .collect::<Vec<_>>();
-    recipes.sort_unstable_by_key(|recipe| recipe.recipe.instructions.len());
+    recipes.sort_unstable_by_key(|recipe| {
+        (
+            recipe.recipe.instructions.len(),
+            recipe.selected_case.clone(),
+        )
+    });
 
     let alternatives = case_contexts.len();
     let reachable_alternatives = recipes.len();
@@ -1235,6 +1253,11 @@ fn analyze_case_sink_recipes(
             .map(|recipe| recipe.recipe.control_merges.len())
             .max()
             .unwrap_or(0),
+        maximum_non_dominating_control_merges: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.non_dominating_control_merges.len())
+            .max()
+            .unwrap_or(0),
         maximum_loop_cutoffs: recipes
             .iter()
             .map(|recipe| recipe.recipe.loop_cutoffs.len())
@@ -1244,6 +1267,21 @@ fn analyze_case_sink_recipes(
         all_dominating_ssa_frontier: union(|recipe| &recipe.dominating_ssa_frontier),
         all_external_frontier: union(|recipe| &recipe.external_frontier),
         all_control_merges: union(|recipe| &recipe.control_merges),
+        all_non_dominating_control_merges: union(|recipe| &recipe.non_dominating_control_merges),
+        non_dominating_control_merge_cases: recipes
+            .iter()
+            .filter(|case| !case.recipe.non_dominating_control_merges.is_empty())
+            .map(|case| {
+                (
+                    case.label.clone(),
+                    case.recipe
+                        .non_dominating_control_merges
+                        .iter()
+                        .copied()
+                        .collect(),
+                )
+            })
+            .collect(),
         all_loop_cutoffs: union(|recipe| &recipe.loop_cutoffs),
         stable_load_frontier: Vec::new(),
         unstable_load_frontier: Vec::new(),
@@ -1409,7 +1447,15 @@ fn analyze_case_sink_recipe(
                 );
             } else {
                 if feasible.len() > 1 {
-                    recipe.control_merges.insert(register);
+                    if parameter_blocks
+                        .get(&register)
+                        .zip(cfg)
+                        .is_some_and(|(definition, cfg)| cfg.dominates(*definition, sink.0))
+                    {
+                        recipe.control_merges.insert(register);
+                    } else {
+                        recipe.non_dominating_control_merges.insert(register);
+                    }
                 } else {
                     work.push(RecipeWalk::Enter(feasible[0].value));
                 }
@@ -1531,6 +1577,7 @@ fn build_selector_case_contexts(
             let reachable = selector_reachable_blocks_until_sinks(eu, origin, &known, sinks);
             SelectorCaseContext {
                 label,
+                selected_case: selected.cloned(),
                 known,
                 reachable,
             }
@@ -2221,6 +2268,126 @@ mod tests {
         let summary = &report.facts[0].sink_recipes[0].case_summary;
         assert_eq!(summary.all_control_merges, vec![parameter]);
         assert!(summary.all_external_frontier.is_empty());
+    }
+
+    #[test]
+    fn case_recipe_does_not_treat_a_path_local_merge_as_a_sink_leaf() {
+        let selector = RegisterId(0);
+        let outer = RegisterId(1);
+        let true_value = RegisterId(2);
+        let false_value = RegisterId(3);
+        let fallback = RegisterId(4);
+        let zero = RegisterId(5);
+        let one = RegisterId(6);
+        let guard_zero = RegisterId(7);
+        let guard_one = RegisterId(8);
+        let path_local = RegisterId(9);
+        let joined = RegisterId(10);
+        let result = RegisterId(11);
+        let origin = BasicBlock {
+            id: BlockId(0),
+            params: vec![selector, outer, true_value, false_value, fallback],
+            instructions: vec![
+                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
+                SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: guard_zero,
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let selected_path = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Branch {
+                cond: outer,
+                true_block: (BlockId(3), Vec::new()),
+                false_block: (BlockId(4), Vec::new()),
+            },
+        };
+        let default_path = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(6), vec![fallback]),
+        };
+        let true_path = BasicBlock {
+            id: BlockId(3),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(5), vec![true_value]),
+        };
+        let false_path = BasicBlock {
+            id: BlockId(4),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(5), vec![false_value]),
+        };
+        let path_merge = BasicBlock {
+            id: BlockId(5),
+            params: vec![path_local],
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(6), vec![path_local]),
+        };
+        let sink = BasicBlock {
+            id: BlockId(6),
+            params: vec![joined],
+            instructions: vec![
+                SIRInstruction::Mux(result, guard_one, one, joined),
+                SIRInstruction::Store(
+                    address(0),
+                    SIROffset::Static(0),
+                    2,
+                    result,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (BlockId(0), origin),
+                (BlockId(1), selected_path),
+                (BlockId(2), default_path),
+                (BlockId(3), true_path),
+                (BlockId(4), false_path),
+                (BlockId(5), path_merge),
+                (BlockId(6), sink),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (selector, bit(2)),
+                (outer, bit(1)),
+                (true_value, bit(2)),
+                (false_value, bit(2)),
+                (fallback, bit(2)),
+                (zero, bit(2)),
+                (one, bit(2)),
+                (guard_zero, bit(1)),
+                (guard_one, bit(1)),
+                (path_local, bit(2)),
+                (joined, bit(2)),
+                (result, bit(2)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, &[(BlockId(0), 10)]);
+        let summary = &report.facts[0].sink_recipes[0].case_summary;
+        assert_eq!(summary.all_non_dominating_control_merges, vec![path_local]);
+        assert_eq!(
+            summary.non_dominating_control_merge_cases,
+            vec![("0".to_owned(), vec![path_local])]
+        );
+        assert!(summary.all_control_merges.is_empty());
     }
 
     #[test]
