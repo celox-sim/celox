@@ -167,11 +167,33 @@ pub(super) enum MaterializationLeaf {
         range: StateRange,
         phase_version: usize,
     },
-    #[expect(
-        dead_code,
-        reason = "control-pure regions are a later coverage extension"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "control-pure regions are a later coverage extension"
+        )
     )]
-    ControlMerge { inputs: Vec<StateVersionId> },
+    ControlMerge { recipe: ControlMergeRecipe },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ControlMergeRecipe {
+    insertion_point: ProgramPoint,
+    arms: Vec<ControlMergeArm>,
+    default: StateVersionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ControlMergeArm {
+    /// The original branch predicate.  Materialization must not speculate the
+    /// arm value before this predicate is resolved.
+    guard: RegisterId,
+    value: StateVersionId,
+    /// Lower values execute first.  Reconstructing the merge in any other
+    /// order would change last-writer/branch priority.
+    priority: usize,
+    guarded_block: BlockId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -931,11 +953,19 @@ fn verify_model(
                         return Err(PlanError::ImplicitHome(cluster.id));
                     }
                 }
-                MaterializationLeaf::ControlMerge { inputs }
-                    if inputs.is_empty()
-                        || inputs
+                MaterializationLeaf::ControlMerge { recipe }
+                    if recipe.insertion_point.block != cluster.load.block
+                        || recipe.arms.is_empty()
+                        || recipe.default.0 >= model.versions.len()
+                        || recipe.arms.iter().any(|arm| {
+                            arm.value.0 >= model.versions.len()
+                                || cfg.block_index(arm.guarded_block).is_none()
+                        })
+                        || recipe
+                            .arms
                             .iter()
-                            .any(|version| version.0 >= model.versions.len()) =>
+                            .enumerate()
+                            .any(|(priority, arm)| arm.priority != priority) =>
                 {
                     return Err(PlanError::ImplicitHome(cluster.id));
                 }
@@ -1387,6 +1417,57 @@ mod tests {
             verify_store_deletion(&model, point(1)),
             Err(PlanError::PreservedStoreDeleted(deleted)) if deleted == point(1)
         ));
+    }
+
+    #[test]
+    fn control_merge_leaf_names_ordered_executable_arms() {
+        let definition = DefinitionFact {
+            point: point(0),
+            source: RegisterId(0),
+            stored_range: range(),
+        };
+        let definitions = BTreeMap::from([(definition.point, definition)]);
+        let demands = [DemandFact {
+            load: point(2),
+            range: range(),
+            fragments: vec![FragmentFact {
+                range: range(),
+                reaching_definitions: BTreeSet::from([point(0)]),
+            }],
+            plan: DemandPlan::Rematerialize,
+            producer_block_distance: 0,
+            loop_depth_delta: 0,
+            rematerialization_cone_instructions: 1,
+            producer_shared_uses: 1,
+            keep_reason: None,
+            failure_predicates: FailurePredicates::default(),
+            materialization_leaves: vec![MaterializationLeaf::ControlMerge {
+                recipe: ControlMergeRecipe {
+                    insertion_point: point(2),
+                    arms: vec![ControlMergeArm {
+                        guard: RegisterId(1),
+                        value: StateVersionId(0),
+                        priority: 0,
+                        guarded_block: BlockId(0),
+                    }],
+                    default: StateVersionId(0),
+                },
+            }],
+            direct_forward: None,
+        }];
+        let mut model = build_model(&definitions, &demands, &[]).unwrap();
+        assert!(verify_model(&one_block_cfg(), &model, &BTreeSet::new()).is_ok());
+
+        let MaterializationLeaf::ControlMerge { recipe } =
+            &mut model.clusters[0].materialization_leaves[0]
+        else {
+            unreachable!();
+        };
+        recipe.arms[0].priority = 1;
+        assert_eq!(
+            verify_model(&one_block_cfg(), &model, &BTreeSet::new()),
+            Err(PlanError::ImplicitHome(UseClusterId(0)))
+        );
     }
 
     #[test]

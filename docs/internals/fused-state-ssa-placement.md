@@ -182,6 +182,14 @@ observations, and the final range StateSSA edge. `CommitFFState` is one fixed
 phase barrier which atomically publishes each FF range's final StateVersion.
 Normal FF reads cannot observe staging storage before that barrier.
 
+The analysis-only Milestone 1 implementation currently uses the original
+staging instruction as both ends of this placement window. This is a legal
+but immovable subset of the contract, not evidence that staging is generally
+fixed. Widening the window requires extraction and verification of the value,
+guard, overlapping-range, observation, and final-StateVersion dependencies
+listed above. Code generation must not infer a wider window from block order
+alone.
+
 The root builder must also verify that no runtime callback, capture, trigger,
 cascade boundary, or phase bypass observes the candidate state range.
 
@@ -331,8 +339,12 @@ ControlMerge(recipe)
 `DominatingSSA` must dominate the insertion point. A preserved-home reload
 names the exact Store site and StateVersion, and that version must reach the
 reload point. A persistent-state read names the FF/input snapshot phase.
-`ControlMerge` reproduces branch priority and control dependence. No recipe
-may contain an effectful operation or an unhandled loop-carried cycle.
+`ControlMerge` is not a list of incoming versions. Its executable recipe names
+the target insertion point, a default version, and ordered arms containing the
+original guard, guarded block, and StateVersion. Arm priorities are explicit
+and contiguous, so lowering cannot silently reorder last-writer or branch
+priority. No recipe may contain an effectful operation or an unhandled
+loop-carried cycle.
 Several reaching definitions represented by one valid `MemoryPhi` are not an
 ambiguous StateSSA version. A plan which cannot yet lower that merge is
 classified as `UnsupportedMemoryPhiMaterialization` or

@@ -25,6 +25,7 @@ enum RecipeKind {
     BroadcastScalar,
     Affine,
     PackedExtract,
+    SsaPack,
     Unary,
     Binary,
     ShiftConstant,
@@ -95,7 +96,9 @@ struct RejectedCandidate {
     sample_instruction: &'static str,
     sample_shapes: Vec<(&'static str, usize)>,
     sample_examples: Vec<String>,
+    sample_operand_examples: Vec<String>,
     missing_registers: Vec<RegisterId>,
+    failure_path: Vec<(Vec<usize>, Vec<(&'static str, usize)>, String)>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -172,6 +175,12 @@ impl LaneAggregateFeasibilityReport {
                         candidate.block.0, candidate.root.0,
                     ));
                 }
+                for example in &candidate.sample_operand_examples {
+                    lines.push(format!(
+                        "status=rejected-operand block={} root=r{} {example}",
+                        candidate.block.0, candidate.root.0,
+                    ));
+                }
                 if !candidate.missing_registers.is_empty() {
                     lines.push(format!(
                         "status=rejected-missing block={} root=r{} registers={:?}",
@@ -182,6 +191,13 @@ impl LaneAggregateFeasibilityReport {
                             .iter()
                             .map(|register| register.0)
                             .collect::<Vec<_>>(),
+                    ));
+                }
+                for (depth, (widths, shapes, example)) in candidate.failure_path.iter().enumerate()
+                {
+                    lines.push(format!(
+                        "status=rejected-path block={} root=r{} depth={} widths={widths:?} shapes={shapes:?} example={example}",
+                        candidate.block.0, candidate.root.0, depth
                     ));
                 }
             }
@@ -225,6 +241,7 @@ struct Analyzer<'a> {
     nodes: Vec<RecipeNode>,
     target: BlockId,
     failure_key: Option<Vec<RegisterId>>,
+    failure_path: Vec<(Vec<usize>, Vec<(&'static str, usize)>, String)>,
     snapshot_frontiers: HashSet<BlockId>,
     ssa_frontiers: HashSet<BlockId>,
 }
@@ -269,12 +286,65 @@ impl<'a> Analyzer<'a> {
         if key.is_empty() || !self.active.insert(key.clone()) {
             return Err(RejectReason::Cycle);
         }
-        let result = self.analyze_uncached(key.clone());
-        if result.is_err() && self.failure_key.is_none() {
-            self.failure_key = Some(key.clone());
+        let mut result = self.analyze_uncached(key.clone());
+        if result.is_err()
+            && let Some(frontier) = self.ssa_pack_frontier(&key)
+        {
+            self.ssa_frontiers.insert(frontier);
+            result = self.insert_node(
+                key.clone(),
+                RecipeKind::SsaPack,
+                Vec::new(),
+                1,
+                key.len().saturating_mul(2).saturating_sub(1),
+            );
+        }
+        if result.is_err() {
+            if self.failure_key.is_none() {
+                self.failure_key = Some(key.clone());
+            }
+            if self.failure_path.len() < 16 {
+                let mut widths = key
+                    .iter()
+                    .filter_map(|register| self.value_width(*register))
+                    .collect::<Vec<_>>();
+                widths.sort_unstable();
+                widths.dedup();
+                let mut shapes = HashMap::<&'static str, usize>::default();
+                for &register in &key {
+                    *shapes
+                        .entry(instruction_name(self.instruction(register)))
+                        .or_default() += 1;
+                }
+                let mut shapes = shapes.into_iter().collect::<Vec<_>>();
+                shapes.sort_unstable();
+                let example = key
+                    .first()
+                    .map(|register| format!("r{}={:?}", register.0, self.instruction(*register)))
+                    .unwrap_or_else(|| "<empty>".into());
+                self.failure_path.push((widths, shapes, example));
+            }
         }
         self.active.remove(&key);
         result
+    }
+
+    fn ssa_pack_frontier(&self, key: &[RegisterId]) -> Option<BlockId> {
+        if key.len() < 8
+            || key
+                .iter()
+                .any(|register| self.value_width(*register) != Some(1))
+        {
+            return None;
+        }
+        let values = key
+            .iter()
+            .map(|register| self.placement.value_for_register(*register))
+            .collect::<Option<Vec<_>>>()?;
+        let frontier = self
+            .placement
+            .earliest_common_dominating_value_block(&values, self.target)?;
+        (frontier != self.target).then_some(frontier)
     }
 
     fn analyze_uncached(&mut self, key: Vec<RegisterId>) -> Result<usize, RejectReason> {
@@ -847,6 +917,7 @@ pub(crate) fn analyze(
                 nodes: Vec::new(),
                 target: block_id,
                 failure_key: None,
+                failure_path: Vec::new(),
                 snapshot_frontiers: HashSet::default(),
                 ssa_frontiers: HashSet::default(),
             };
@@ -930,6 +1001,34 @@ pub(crate) fn analyze(
                             format!("r{}={:?}", register.0, analyzer.instruction(*register))
                         })
                         .collect();
+                    let sample_operand_examples = sample_register
+                        .and_then(|register| analyzer.instruction(register))
+                        .map(|instruction| match instruction {
+                            SIRInstruction::Mux(_, condition, then_value, else_value) => {
+                                vec![*condition, *then_value, *else_value]
+                            }
+                            SIRInstruction::Binary(_, lhs, _, rhs) => vec![*lhs, *rhs],
+                            SIRInstruction::Unary(_, _, source)
+                            | SIRInstruction::Slice(_, source, ..) => vec![*source],
+                            SIRInstruction::Concat(_, arguments) => arguments.clone(),
+                            _ => Vec::new(),
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|register| {
+                            let origin = analyzer
+                                .placement
+                                .value_for_register(register)
+                                .and_then(|value| analyzer.placement.value(value))
+                                .map(|value| format!("{:?}", value.origin))
+                                .unwrap_or_else(|| "unknown".into());
+                            format!(
+                                "r{}={:?} origin={origin}",
+                                register.0,
+                                analyzer.instruction(register)
+                            )
+                        })
+                        .collect();
                     let missing_registers = failure_key
                         .iter()
                         .copied()
@@ -946,7 +1045,9 @@ pub(crate) fn analyze(
                         sample_instruction,
                         sample_shapes,
                         sample_examples,
+                        sample_operand_examples,
                         missing_registers,
+                        failure_path: analyzer.failure_path,
                     });
                 }
             }
@@ -1173,6 +1274,35 @@ mod tests {
         assert_eq!(report.candidates, 1);
         assert!(report.accepted.is_empty());
         assert_eq!(report.reject_counts[&RejectReason::UnsupportedOperation], 1);
+    }
+
+    #[test]
+    fn packs_one_bit_ssa_frontier_before_a_distant_sink() {
+        let (mut eu, layout) = fixture(true);
+        let mut original = eu.blocks.remove(&BlockId(0)).unwrap();
+        let root_index = original
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Concat(..)))
+            .unwrap();
+        let sink_instructions = original.instructions.split_off(root_index);
+        original.terminator = SIRTerminator::Jump(BlockId(1), vec![]);
+        eu.blocks.insert(BlockId(0), original);
+        eu.blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: sink_instructions,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        eu.verify();
+
+        let report = analyze(&eu, &layout).unwrap();
+        assert_eq!(report.accepted.len(), 1);
+        assert_eq!(report.kind_counts[&RecipeKind::SsaPack], 1);
+        assert_eq!(report.accepted[0].ssa_frontiers, vec![BlockId(0)]);
     }
 
     #[test]
