@@ -1246,6 +1246,60 @@ second run. Lane-local scalar expansion therefore does not address the
 arithmetic volume; the selected-index/value recurrence must be reduced to an
 aggregate candidate representation instead of merely rescheduled.
 
+#### Current aggregate-mask target
+
+A release-equivalent rerun after the Milestone 1 contract hardening identified
+a more precise target than the earlier selected-index description. In
+`eval_comb_apply_ff`, block 8081 grows from 517 optimized MIR instructions to
+1,003 after allocation, including 275 stack Loads and 132 stack Stores. Its
+SIR computes 32 isomorphic lanes. Each lane contains:
+
+```text
+eligibility_i
+circular_priority_i =
+    ((lane_i - pivot) & 31) > ((reference - pivot) & 31)
+payload_i = 1 << selected_2_bit_value_i
+candidate_i = eligibility_i & circular_priority_i
+```
+
+The two successor blocks then apply one of two interval-overlap formulas and
+publish all 32 predicate bits. This region does not select one winning lane:
+its observable result is a complete 32-bit predicate mask stored into 32
+one-bit unpacked elements. The aggregate representation for this region is
+therefore a packed lane mask, not an index followed by one payload reload.
+
+The scalar Stores currently prevent the existing lane-DAG vectorizer from
+removing the lane computations. Every predicate remains live through its
+individual Store even though the same 32 values are immediately concatenated.
+The next implementation slice has this closed contract:
+
+1. Recognize a complete group of static, disjoint one-bit Stores to one
+   address, with empty trigger/capture sets and a matching 3..64-bit Concat.
+   There may be only pure instructions and members of that Store group between
+   the first Store and the Concat. Delay the Stores to the Concat point and
+   rewrite their sources as exact slices of the packed value.
+2. Run the existing recursive lane-DAG packing after that rewrite. The scalar
+   predicates then have only the packed root as a use, so ordinary mark/sweep
+   DCE can remove the replaced lane DAG.
+3. In native ISel, combine exact slice/Store pairs only when memory layout
+   proves one-bit unpacked elements with one-byte physical stride. On BMI2,
+   deposit each group of eight mask bits into
+   `0x0101_0101_0101_0101` and issue one 64-bit Store. Otherwise retain the
+   scalar Stores.
+4. Treat a Load, Commit, dynamic access, runtime/capture effect, trigger, or
+   incomplete range as a hard barrier. The packed Store is a sink operation;
+   it does not create a cross-block VReg or alter branch execution.
+
+Discovery and rewriting must be linear in block instructions plus operand
+edges. A group is keyed by exact address and static range; it must not scan all
+Stores for every Concat.
+
+The first gate is structural and local: blocks 8081, 4425, and 4426 together
+must lose scalar lane work and post-allocation stack traffic, not merely SIR
+instructions. The second gate is the complete native suite and exact Linux
+marker. Only after both pass is a fresh perf map meaningful; old block
+identities cannot be reused after this CFG/code-layout change.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
