@@ -20,7 +20,7 @@ veryl-parser      = { workspace = true }
 num-bigint        = "0.4"
 
 [dev-dependencies]
-prettyplease = "0.2.37"
+prettyplease = "0.3.0"
 insta        = "1.39.0"
 
 [lints]
