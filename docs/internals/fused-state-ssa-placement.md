@@ -2062,10 +2062,11 @@ worst-case dynamic work
 
 The sink-rooted analysis now constructs sparse whole-function definition,
 block-parameter, predecessor, dominator, and postdominator indices, then walks
-backward from each exact Store source. It includes selector-dependent
-definitions and path-local single-use pure definitions, but stops at concrete
-constants, Loads, shared SSA values, and external values. These are diagnostic
-frontiers, not yet authorization to materialize the values.
+backward from each exact Store source. Its first pass includes
+selector-dependent definitions and path-local single-use pure definitions,
+but stops at concrete constants, Loads, shared SSA values, and external
+values. These are diagnostic frontiers, not yet authorization to materialize
+the values.
 
 CFG changes renumbered the previously measured block 8501 to block 8671. The
 mapping was established by matching its parameter list and complete
@@ -2106,18 +2107,75 @@ shared SSA frontier values, and contains 24 control merges. Cloning either
 242/240-instruction slice would duplicate shared work, while carrying all 129
 common frontier values would recreate the long-live-range problem.
 
-The next step is therefore to preserve the outer-control partition between the
-common dominator and postdominator, keep the 139-instruction common origin
-work shared, and form path-local materializations only for the 103/101
-non-common instructions. Every frontier value must then name an executable,
-phase-correct materialization source at its path insertion point. Only after
-that check can the planner decide whether one dispatch can be shared or must
-be placed once per preserved outer path.
+The second pass specializes the reverse walk for each exact selector
+alternative. Known selector branches retain only their taken edge and known
+Muxes become value aliases rather than cloned instructions. Multi-use pure
+payloads are expanded when they belong to the affected region. Unknown outer
+control is not speculated or duplicated: a block parameter with multiple
+remaining incoming edges becomes an explicit `ControlMerge` frontier leaf.
+An ordinary SSA frontier is accepted as `DominatingSSA` only when its
+definition block dominates the target Store block.
 
-Code generation remains disabled until these sink-rooted recipes are closed
-and their worst-case profitability passes. Replaying source-EU branchification,
-switching block 8671 alone, cloning the 83-block forward closure once per case,
-or hoisting its whole frontier is not authorized.
+For the same focused block, all 76 explicit cases plus default were resolved
+for both sinks:
+
+```text
+                                           b5831:3       b5936:10
+reachable alternatives                         77              77
+case recipe instructions min/mean/max        0/6/23          0/6/23
+estimated recipe cost min/mean/max          0/28/102        0/27/102
+maximum blocks in one case                       16              16
+maximum Loads in one case                         6               6
+maximum DominatingSSA leaves                     11              11
+maximum ControlMerge leaves                       1               0
+external leaves                                   0               0
+loop cutoffs                                      0               0
+```
+
+The 23-instruction maximum is selector value 6. Its exact slice is entirely in
+block 8671 and ends at four Loads and five `DominatingSSA` leaves; it has no
+external value or control merge. The estimated-cost maximum is selector value
+19. It consists of one repeated-bit `Concat`, one Load, and one
+`DominatingSSA` leaf. The cost 102 is therefore a cost-model result for that
+wide `Concat`, not a claim that the recipe contains 102 SIR instructions.
+
+Across all alternatives, the first and second sink refer to 30 distinct Load
+leaves and 55/54 distinct `DominatingSSA` leaves. The first sink additionally
+uses two distinct outer-control merge leaves across all alternatives; the
+second uses none. Sparse two-state StateSSA was built only for those selected
+Loads. At each Store block, all 30 original Load versions equal the target
+entry version:
+
+```text
+stable StateRead leaves                 30 / 30
+unstable StateRead leaves                0 / 0
+unversioned StateRead leaves             0 / 0
+maximum unstable Loads in one case       0 / 0
+analysis time including sparse StateSSA  30.4 ms
+```
+
+This passes the focused legality and profitability gate. The 242/240-
+instruction union was misleadingly coarse: one dynamic case needs at most 23
+pure instructions, while every leaf has a concrete source kind:
+`Constant`, `DominatingSSA`, phase-correct `StateRead`, or preserved
+`ControlMerge`. It remains a focused result for the structurally remapped hot
+block, not yet a profile-wide profitability result.
+
+The first code-generation slice should therefore replace each final Store
+block with a selector `Switch` whose case blocks materialize only that
+case-local recipe, perform the same exact Store, and jump to block 4412.
+There are two dispatches because the existing outer branch chooses only one
+Store path dynamically. The rewrite must retain explicit value substitutions
+for eliminated known Muxes, rematerialize each admitted StateRead from its
+proved target-entry StateVersion, use each `ControlMerge` only after its
+original merge, and atomically roll back unless all 77 case recipes verify.
+Subsequent DCE may then remove the now-unused payload work from block 8671 and
+the old selector chains.
+
+Code generation remains disabled until that executable recipe representation
+and atomic verifier exist. Replaying source-EU branchification, switching
+block 8671 alone, cloning the 83-block forward closure once per case, or
+hoisting its whole frontier is not authorized.
 
 ### Milestone 2: use-local FF forwarding
 

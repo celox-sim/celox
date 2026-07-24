@@ -506,6 +506,29 @@ impl StateSsa {
         )
     }
 
+    /// Sparse selected-load analysis using the native two-state storage
+    /// contract. This is the placement counterpart of
+    /// `analyze_all_loads_two_state`: source `bit`/`logic` distinctions do not
+    /// split one physical state version.
+    pub fn analyze_selected_loads_two_state(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        eligible_loads: &HashSet<RegisterId>,
+        phases: &StatePhaseMap,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(
+            eu,
+            cfg,
+            region,
+            None,
+            Some(eligible_loads),
+            phases,
+            true,
+            true,
+        )
+    }
+
     fn analyze_selected(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,

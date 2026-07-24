@@ -14,12 +14,13 @@ use num_traits::Zero;
 use super::cost_model::estimate_clif_cost;
 use super::shared::def_reg;
 use super::sir_analysis::{UseSite, collect_uses, instruction_uses};
-use crate::HashMap;
+use super::state_ssa::{StatePhaseMap, StateSsa};
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIRTerminator, SIRValue, UnaryOp,
 };
+use crate::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectorRegionFact {
@@ -61,6 +62,51 @@ pub(crate) struct SelectorSinkRecipeFact {
     pub external_frontier: Vec<RegisterId>,
     pub control_merges: Vec<RegisterId>,
     pub loop_cutoffs: Vec<RegisterId>,
+    pub case_summary: SelectorSinkCaseSummaryFact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SelectorSinkCaseSummaryFact {
+    pub alternatives: usize,
+    pub reachable_alternatives: usize,
+    pub minimum_instructions: usize,
+    pub maximum_instructions: usize,
+    pub mean_instructions: usize,
+    pub minimum_cost: usize,
+    pub maximum_cost: usize,
+    pub mean_cost: usize,
+    pub maximum_blocks: usize,
+    pub maximum_load_frontier: usize,
+    pub maximum_dominating_ssa_frontier: usize,
+    pub maximum_external_frontier: usize,
+    pub maximum_control_merges: usize,
+    pub maximum_loop_cutoffs: usize,
+    pub all_load_frontier: Vec<RegisterId>,
+    pub all_dominating_ssa_frontier: Vec<RegisterId>,
+    pub all_external_frontier: Vec<RegisterId>,
+    pub all_control_merges: Vec<RegisterId>,
+    pub all_loop_cutoffs: Vec<RegisterId>,
+    pub stable_load_frontier: Vec<RegisterId>,
+    pub unstable_load_frontier: Vec<RegisterId>,
+    pub unversioned_load_frontier: Vec<RegisterId>,
+    pub maximum_unstable_loads_per_case: usize,
+    pub maximum_unversioned_loads_per_case: usize,
+    pub case_load_frontiers: Vec<Vec<RegisterId>>,
+    pub maximum_instruction_case: String,
+    pub maximum_instruction_recipe: Vec<(BlockId, usize)>,
+    pub maximum_instruction_load_frontier: Vec<RegisterId>,
+    pub maximum_instruction_dominating_ssa_frontier: Vec<RegisterId>,
+    pub maximum_instruction_external_frontier: Vec<RegisterId>,
+    pub maximum_instruction_control_merges: Vec<RegisterId>,
+    pub maximum_instruction_loop_cutoffs: Vec<RegisterId>,
+    pub maximum_cost_case: String,
+    pub maximum_cost_instructions: usize,
+    pub maximum_cost_recipe: Vec<(BlockId, usize)>,
+    pub maximum_cost_load_frontier: Vec<RegisterId>,
+    pub maximum_cost_dominating_ssa_frontier: Vec<RegisterId>,
+    pub maximum_cost_external_frontier: Vec<RegisterId>,
+    pub maximum_cost_control_merges: Vec<RegisterId>,
+    pub maximum_cost_loop_cutoffs: Vec<RegisterId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +214,18 @@ impl SelectorSinkRecipeFact {
              recipe_blocks={} selector_control_blocks={} entering_edges={} \
              continuations={:?} frontier_constants={} frontier_loads={} \
              frontier_shared_ssa={} frontier_external={} control_merges={} \
-             loop_cutoffs={}",
+             loop_cutoffs={} case_alternatives={} case_reachable={} \
+             case_instructions={}/{}/{} case_cost={}/{}/{} \
+             case_maximum_blocks={} case_maximum_load_frontier={} \
+             case_maximum_dominating_ssa_frontier={} \
+             case_maximum_external_frontier={} case_maximum_control_merges={} \
+             case_maximum_loop_cutoffs={} case_maximum_instructions={} \
+             case_maximum_cost={} case_maximum_cost_instructions={} \
+             case_unique_load_frontier={} case_unique_dominating_ssa_frontier={} \
+             case_unique_external_frontier={} case_unique_control_merges={} \
+             case_unique_loop_cutoffs={} case_stable_load_frontier={} \
+             case_unstable_load_frontier={} case_unversioned_load_frontier={} \
+             case_maximum_unstable_loads={} case_maximum_unversioned_loads={}",
             self.sink.0.0,
             self.sink.1,
             self.source.0,
@@ -185,6 +242,33 @@ impl SelectorSinkRecipeFact {
             self.external_frontier.len(),
             self.control_merges.len(),
             self.loop_cutoffs.len(),
+            self.case_summary.alternatives,
+            self.case_summary.reachable_alternatives,
+            self.case_summary.minimum_instructions,
+            self.case_summary.mean_instructions,
+            self.case_summary.maximum_instructions,
+            self.case_summary.minimum_cost,
+            self.case_summary.mean_cost,
+            self.case_summary.maximum_cost,
+            self.case_summary.maximum_blocks,
+            self.case_summary.maximum_load_frontier,
+            self.case_summary.maximum_dominating_ssa_frontier,
+            self.case_summary.maximum_external_frontier,
+            self.case_summary.maximum_control_merges,
+            self.case_summary.maximum_loop_cutoffs,
+            self.case_summary.maximum_instruction_case,
+            self.case_summary.maximum_cost_case,
+            self.case_summary.maximum_cost_instructions,
+            self.case_summary.all_load_frontier.len(),
+            self.case_summary.all_dominating_ssa_frontier.len(),
+            self.case_summary.all_external_frontier.len(),
+            self.case_summary.all_control_merges.len(),
+            self.case_summary.all_loop_cutoffs.len(),
+            self.case_summary.stable_load_frontier.len(),
+            self.case_summary.unstable_load_frontier.len(),
+            self.case_summary.unversioned_load_frontier.len(),
+            self.case_summary.maximum_unstable_loads_per_case,
+            self.case_summary.maximum_unversioned_loads_per_case,
         )
     }
 }
@@ -255,6 +339,7 @@ struct DefinitionSite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct IncomingValue {
     predecessor: BlockId,
+    target: BlockId,
     value: RegisterId,
 }
 
@@ -282,9 +367,24 @@ struct SinkRecipe {
     constant_frontier: BTreeSet<RegisterId>,
     load_frontier: BTreeSet<RegisterId>,
     shared_ssa_frontier: BTreeSet<RegisterId>,
+    dominating_ssa_frontier: BTreeSet<RegisterId>,
     external_frontier: BTreeSet<RegisterId>,
     control_merges: BTreeSet<RegisterId>,
     loop_cutoffs: BTreeSet<RegisterId>,
+}
+
+#[derive(Debug)]
+struct CaseSinkRecipe {
+    label: String,
+    recipe: SinkRecipe,
+    cost: usize,
+}
+
+#[derive(Debug)]
+struct SelectorCaseContext {
+    label: String,
+    known: HashMap<RegisterId, bool>,
+    reachable: BTreeSet<BlockId>,
 }
 
 pub(crate) fn analyze(
@@ -295,6 +395,7 @@ pub(crate) fn analyze(
     let uses = collect_uses(eu);
     let edge_param_uses = collect_edge_param_uses(eu);
     let definitions = collect_definition_sites(eu);
+    let parameter_blocks = collect_parameter_blocks(eu);
     let incoming_values = collect_incoming_values(eu);
     let predecessors = collect_predecessors(eu);
     let cfg = SirCfg::analyze_structure(eu).ok();
@@ -355,6 +456,7 @@ pub(crate) fn analyze(
                     &uses,
                     &edge_param_uses,
                     &definitions,
+                    &parameter_blocks,
                     &incoming_values,
                     &predecessors,
                     cfg.as_ref(),
@@ -391,7 +493,131 @@ pub(crate) fn analyze(
             fact.block,
         )
     });
+    if let Some(cfg) = cfg.as_ref() {
+        annotate_load_frontier_versions(eu, cfg, &definitions, &mut report.facts);
+    }
     report
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadFrontierVersion {
+    Stable,
+    Unstable,
+    Unversioned,
+}
+
+fn annotate_load_frontier_versions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    facts: &mut [SelectorRegionFact],
+) {
+    let mut loads_by_region = BTreeMap::<u32, HashSet<RegisterId>>::new();
+    for register in facts
+        .iter()
+        .flat_map(|fact| &fact.sink_recipes)
+        .flat_map(|recipe| &recipe.case_summary.all_load_frontier)
+    {
+        let Some(site) = definitions.get(register) else {
+            continue;
+        };
+        let SIRInstruction::Load(_, address, ..) = &eu.blocks[&site.block].instructions[site.index]
+        else {
+            continue;
+        };
+        loads_by_region
+            .entry(address.region)
+            .or_default()
+            .insert(*register);
+    }
+    let states = loads_by_region
+        .into_iter()
+        .filter_map(|(region, loads)| {
+            StateSsa::analyze_selected_loads_two_state(
+                eu,
+                cfg,
+                region,
+                &loads,
+                &StatePhaseMap::default(),
+            )
+            .ok()
+            .map(|state| (region, state))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for recipe in facts.iter_mut().flat_map(|fact| &mut fact.sink_recipes) {
+        let target = recipe.sink.0;
+        let status = |register: RegisterId| {
+            load_frontier_version(eu, definitions, &states, register, target)
+        };
+        recipe.case_summary.stable_load_frontier.clear();
+        recipe.case_summary.unstable_load_frontier.clear();
+        recipe.case_summary.unversioned_load_frontier.clear();
+        for &register in &recipe.case_summary.all_load_frontier {
+            match status(register) {
+                LoadFrontierVersion::Stable => {
+                    recipe.case_summary.stable_load_frontier.push(register);
+                }
+                LoadFrontierVersion::Unstable => {
+                    recipe.case_summary.unstable_load_frontier.push(register);
+                }
+                LoadFrontierVersion::Unversioned => {
+                    recipe.case_summary.unversioned_load_frontier.push(register);
+                }
+            }
+        }
+        recipe.case_summary.maximum_unstable_loads_per_case = recipe
+            .case_summary
+            .case_load_frontiers
+            .iter()
+            .map(|loads| {
+                loads
+                    .iter()
+                    .filter(|&&register| status(register) == LoadFrontierVersion::Unstable)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        recipe.case_summary.maximum_unversioned_loads_per_case = recipe
+            .case_summary
+            .case_load_frontiers
+            .iter()
+            .map(|loads| {
+                loads
+                    .iter()
+                    .filter(|&&register| status(register) == LoadFrontierVersion::Unversioned)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+    }
+}
+
+fn load_frontier_version(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    states: &BTreeMap<u32, StateSsa>,
+    register: RegisterId,
+    target: BlockId,
+) -> LoadFrontierVersion {
+    let Some(site) = definitions.get(&register) else {
+        return LoadFrontierVersion::Unversioned;
+    };
+    let SIRInstruction::Load(_, address, ..) = &eu.blocks[&site.block].instructions[site.index]
+    else {
+        return LoadFrontierVersion::Unversioned;
+    };
+    let Some(state) = states.get(&address.region) else {
+        return LoadFrontierVersion::Unversioned;
+    };
+    let Some((slot, original)) = state.read_version(site.block, site.index, register) else {
+        return LoadFrontierVersion::Unversioned;
+    };
+    if state.entry_version(target, slot) == Some(original) {
+        LoadFrontierVersion::Stable
+    } else {
+        LoadFrontierVersion::Unstable
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -404,6 +630,7 @@ fn analyze_group(
     uses: &HashMap<RegisterId, Vec<UseSite>>,
     edge_param_uses: &HashMap<RegisterId, Vec<RegisterId>>,
     definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
     incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
     predecessors: &HashMap<BlockId, Vec<BlockId>>,
     cfg: Option<&SirCfg>,
@@ -424,18 +651,29 @@ fn analyze_group(
         uses,
         edge_param_uses,
     );
+    let case_contexts = build_selector_case_contexts(
+        eu,
+        block_id,
+        group.selector,
+        &group.cases,
+        constants,
+        &cross_block.effect_sinks,
+    );
     let sink_recipes = cross_block
         .effect_sinks
         .iter()
         .filter_map(|&sink| {
             analyze_sink_recipe(
                 eu,
+                &case_contexts,
                 sink,
                 &cross_block,
                 uses,
                 definitions,
+                parameter_blocks,
                 incoming_values,
                 predecessors,
+                cfg,
             )
         })
         .collect::<Vec<_>>();
@@ -611,6 +849,21 @@ fn collect_definition_sites(
         .collect()
 }
 
+fn collect_parameter_blocks(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, BlockId> {
+    eu.blocks
+        .values()
+        .flat_map(|block| {
+            block
+                .params
+                .iter()
+                .copied()
+                .map(move |parameter| (parameter, block.id))
+        })
+        .collect()
+}
+
 fn collect_incoming_values(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, Vec<IncomingValue>> {
@@ -623,6 +876,7 @@ fn collect_incoming_values(
             for (&value, &parameter) in arguments.iter().zip(&target_block.params) {
                 result.entry(parameter).or_default().push(IncomingValue {
                     predecessor: block.id,
+                    target,
                     value,
                 });
             }
@@ -739,12 +993,15 @@ enum RecipeWalk {
 #[allow(clippy::too_many_arguments)]
 fn analyze_sink_recipe(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    case_contexts: &[SelectorCaseContext],
     sink: (BlockId, usize),
     selector_closure: &CrossBlockClosure,
     uses: &HashMap<RegisterId, Vec<UseSite>>,
     definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
     incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
     predecessors: &HashMap<BlockId, Vec<BlockId>>,
+    cfg: Option<&SirCfg>,
 ) -> Option<SelectorSinkRecipeFact> {
     let instruction = eu.blocks.get(&sink.0)?.instructions.get(sink.1)?;
     let SIRInstruction::Store(address, offset, width, source, triggers, comb_capture_sites) =
@@ -872,7 +1129,455 @@ fn analyze_sink_recipe(
         external_frontier: recipe.external_frontier.into_iter().collect(),
         control_merges: recipe.control_merges.into_iter().collect(),
         loop_cutoffs: recipe.loop_cutoffs.into_iter().collect(),
+        case_summary: analyze_case_sink_recipes(
+            eu,
+            case_contexts,
+            sink,
+            selector_closure,
+            definitions,
+            parameter_blocks,
+            incoming_values,
+            predecessors,
+            cfg,
+        ),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_case_sink_recipes(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    case_contexts: &[SelectorCaseContext],
+    sink: (BlockId, usize),
+    selector_closure: &CrossBlockClosure,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
+    incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+    cfg: Option<&SirCfg>,
+) -> SelectorSinkCaseSummaryFact {
+    let mut recipes = case_contexts
+        .iter()
+        .filter_map(|context| {
+            analyze_case_sink_recipe(
+                eu,
+                context,
+                sink,
+                selector_closure,
+                definitions,
+                parameter_blocks,
+                incoming_values,
+                predecessors,
+                cfg,
+            )
+            .map(|(recipe, cost)| CaseSinkRecipe {
+                label: context.label.clone(),
+                recipe,
+                cost,
+            })
+        })
+        .collect::<Vec<_>>();
+    recipes.sort_unstable_by_key(|recipe| recipe.recipe.instructions.len());
+
+    let alternatives = case_contexts.len();
+    let reachable_alternatives = recipes.len();
+    let minimum = recipes.first();
+    let maximum = recipes.last();
+    let instruction_sum = recipes
+        .iter()
+        .map(|recipe| recipe.recipe.instructions.len())
+        .sum::<usize>();
+    let cost_sum = recipes.iter().map(|recipe| recipe.cost).sum::<usize>();
+    let maximum_cost_recipe = recipes
+        .iter()
+        .max_by_key(|recipe| (recipe.cost, recipe.recipe.instructions.len()));
+    let union = |select: fn(&SinkRecipe) -> &BTreeSet<RegisterId>| {
+        recipes
+            .iter()
+            .flat_map(|recipe| select(&recipe.recipe))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    SelectorSinkCaseSummaryFact {
+        alternatives,
+        reachable_alternatives,
+        minimum_instructions: minimum.map_or(0, |recipe| recipe.recipe.instructions.len()),
+        maximum_instructions: maximum.map_or(0, |recipe| recipe.recipe.instructions.len()),
+        mean_instructions: instruction_sum
+            .checked_div(reachable_alternatives)
+            .unwrap_or(0),
+        minimum_cost: recipes.iter().map(|recipe| recipe.cost).min().unwrap_or(0),
+        maximum_cost: recipes.iter().map(|recipe| recipe.cost).max().unwrap_or(0),
+        mean_cost: cost_sum.checked_div(reachable_alternatives).unwrap_or(0),
+        maximum_blocks: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.blocks.len())
+            .max()
+            .unwrap_or(0),
+        maximum_load_frontier: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.load_frontier.len())
+            .max()
+            .unwrap_or(0),
+        maximum_dominating_ssa_frontier: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.dominating_ssa_frontier.len())
+            .max()
+            .unwrap_or(0),
+        maximum_external_frontier: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.external_frontier.len())
+            .max()
+            .unwrap_or(0),
+        maximum_control_merges: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.control_merges.len())
+            .max()
+            .unwrap_or(0),
+        maximum_loop_cutoffs: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.loop_cutoffs.len())
+            .max()
+            .unwrap_or(0),
+        all_load_frontier: union(|recipe| &recipe.load_frontier),
+        all_dominating_ssa_frontier: union(|recipe| &recipe.dominating_ssa_frontier),
+        all_external_frontier: union(|recipe| &recipe.external_frontier),
+        all_control_merges: union(|recipe| &recipe.control_merges),
+        all_loop_cutoffs: union(|recipe| &recipe.loop_cutoffs),
+        stable_load_frontier: Vec::new(),
+        unstable_load_frontier: Vec::new(),
+        unversioned_load_frontier: Vec::new(),
+        maximum_unstable_loads_per_case: 0,
+        maximum_unversioned_loads_per_case: 0,
+        case_load_frontiers: recipes
+            .iter()
+            .map(|recipe| recipe.recipe.load_frontier.iter().copied().collect())
+            .collect(),
+        maximum_instruction_case: maximum
+            .map_or_else(|| "unreachable".to_owned(), |recipe| recipe.label.clone()),
+        maximum_instruction_recipe: maximum
+            .map(|recipe| recipe.recipe.instructions.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_instruction_load_frontier: maximum
+            .map(|recipe| recipe.recipe.load_frontier.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_instruction_dominating_ssa_frontier: maximum
+            .map(|recipe| {
+                recipe
+                    .recipe
+                    .dominating_ssa_frontier
+                    .iter()
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        maximum_instruction_external_frontier: maximum
+            .map(|recipe| recipe.recipe.external_frontier.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_instruction_control_merges: maximum
+            .map(|recipe| recipe.recipe.control_merges.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_instruction_loop_cutoffs: maximum
+            .map(|recipe| recipe.recipe.loop_cutoffs.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_cost_case: maximum_cost_recipe
+            .map_or_else(|| "unreachable".to_owned(), |recipe| recipe.label.clone()),
+        maximum_cost_instructions: maximum_cost_recipe
+            .map_or(0, |recipe| recipe.recipe.instructions.len()),
+        maximum_cost_recipe: maximum_cost_recipe
+            .map(|recipe| recipe.recipe.instructions.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_cost_load_frontier: maximum_cost_recipe
+            .map(|recipe| recipe.recipe.load_frontier.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_cost_dominating_ssa_frontier: maximum_cost_recipe
+            .map(|recipe| {
+                recipe
+                    .recipe
+                    .dominating_ssa_frontier
+                    .iter()
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        maximum_cost_external_frontier: maximum_cost_recipe
+            .map(|recipe| recipe.recipe.external_frontier.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_cost_control_merges: maximum_cost_recipe
+            .map(|recipe| recipe.recipe.control_merges.iter().copied().collect())
+            .unwrap_or_default(),
+        maximum_cost_loop_cutoffs: maximum_cost_recipe
+            .map(|recipe| recipe.recipe.loop_cutoffs.iter().copied().collect())
+            .unwrap_or_default(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_case_sink_recipe(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    context: &SelectorCaseContext,
+    sink: (BlockId, usize),
+    selector_closure: &CrossBlockClosure,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
+    incoming_values: &HashMap<RegisterId, Vec<IncomingValue>>,
+    predecessors: &HashMap<BlockId, Vec<BlockId>>,
+    cfg: Option<&SirCfg>,
+) -> Option<(SinkRecipe, usize)> {
+    let instruction = eu.blocks.get(&sink.0)?.instructions.get(sink.1)?;
+    let SIRInstruction::Store(_, _, _, source, _, _) = instruction else {
+        return None;
+    };
+    if !context.reachable.contains(&sink.0) {
+        return None;
+    }
+
+    let mut can_reach_sink = BTreeSet::new();
+    let mut block_work = vec![sink.0];
+    while let Some(block) = block_work.pop() {
+        if !can_reach_sink.insert(block) {
+            continue;
+        }
+        block_work.extend(
+            predecessors
+                .get(&block)
+                .into_iter()
+                .flatten()
+                .filter(|predecessor| {
+                    context.reachable.contains(predecessor)
+                        && specialized_successors(
+                            &eu.blocks[predecessor].terminator,
+                            &context.known,
+                        )
+                        .contains(&block)
+                })
+                .copied(),
+        );
+    }
+
+    let mut recipe = SinkRecipe::default();
+    recipe.blocks.insert(sink.0);
+    let mut active = BTreeSet::<RegisterId>::new();
+    let mut complete = BTreeSet::<RegisterId>::new();
+    let mut work = vec![RecipeWalk::Enter(*source)];
+    while let Some(item) = work.pop() {
+        let register = match item {
+            RecipeWalk::Exit(register) => {
+                active.remove(&register);
+                complete.insert(register);
+                continue;
+            }
+            RecipeWalk::Enter(register) => register,
+        };
+        if complete.contains(&register) {
+            continue;
+        }
+        if !active.insert(register) {
+            recipe.loop_cutoffs.insert(register);
+            continue;
+        }
+        work.push(RecipeWalk::Exit(register));
+
+        if context.known.contains_key(&register) {
+            recipe.constant_frontier.insert(register);
+            continue;
+        }
+
+        if let Some(incoming) = incoming_values.get(&register) {
+            let feasible = incoming
+                .iter()
+                .filter(|incoming| {
+                    context.reachable.contains(&incoming.predecessor)
+                        && context.reachable.contains(&incoming.target)
+                        && can_reach_sink.contains(&incoming.predecessor)
+                        && can_reach_sink.contains(&incoming.target)
+                        && specialized_successors(
+                            &eu.blocks[&incoming.predecessor].terminator,
+                            &context.known,
+                        )
+                        .contains(&incoming.target)
+                })
+                .collect::<Vec<_>>();
+            if feasible.is_empty() {
+                classify_ssa_frontier(
+                    &mut recipe,
+                    register,
+                    parameter_blocks.get(&register).copied(),
+                    sink.0,
+                    cfg,
+                );
+            } else {
+                if feasible.len() > 1 {
+                    recipe.control_merges.insert(register);
+                } else {
+                    work.push(RecipeWalk::Enter(feasible[0].value));
+                }
+            }
+            continue;
+        }
+
+        let Some(site) = definitions.get(&register).copied() else {
+            classify_ssa_frontier(
+                &mut recipe,
+                register,
+                parameter_blocks.get(&register).copied(),
+                sink.0,
+                cfg,
+            );
+            continue;
+        };
+        let definition = &eu.blocks[&site.block].instructions[site.index];
+        match definition {
+            SIRInstruction::Imm(..) => {
+                recipe.constant_frontier.insert(register);
+            }
+            SIRInstruction::Load(..) => {
+                recipe.load_frontier.insert(register);
+            }
+            _ if is_recipe_pure(definition)
+                && selector_closure.blocks.contains(&site.block)
+                && context.reachable.contains(&site.block) =>
+            {
+                let operands = specialized_uses(definition, &context.known);
+                let selected_mux = matches!(
+                    definition,
+                    SIRInstruction::Mux(_, condition, _, _)
+                        if context.known.contains_key(condition)
+                );
+                if !selected_mux {
+                    recipe.instructions.insert((site.block, site.index));
+                    recipe.blocks.insert(site.block);
+                }
+                for operand in operands.into_iter().rev() {
+                    work.push(RecipeWalk::Enter(operand));
+                }
+            }
+            _ => {
+                classify_ssa_frontier(&mut recipe, register, Some(site.block), sink.0, cfg);
+            }
+        }
+    }
+
+    recipe.selector_control_blocks.extend(
+        selector_closure
+            .branch_conditions
+            .intersection(&can_reach_sink)
+            .filter(|block| context.reachable.contains(block))
+            .copied(),
+    );
+    recipe
+        .blocks
+        .extend(recipe.selector_control_blocks.iter().copied());
+
+    let instruction_cost = recipe
+        .instructions
+        .iter()
+        .map(|&(block, index)| {
+            estimate_clif_cost(
+                &eu.blocks[&block].instructions[index],
+                &eu.register_map,
+                false,
+            )
+        })
+        .sum::<usize>();
+    let load_cost = recipe
+        .load_frontier
+        .iter()
+        .filter_map(|register| definitions.get(register))
+        .map(|site| {
+            estimate_clif_cost(
+                &eu.blocks[&site.block].instructions[site.index],
+                &eu.register_map,
+                false,
+            )
+        })
+        .sum::<usize>();
+    Some((recipe, instruction_cost.saturating_add(load_cost)))
+}
+
+fn classify_ssa_frontier(
+    recipe: &mut SinkRecipe,
+    register: RegisterId,
+    definition_block: Option<BlockId>,
+    insertion_block: BlockId,
+    cfg: Option<&SirCfg>,
+) {
+    if definition_block
+        .zip(cfg)
+        .is_some_and(|(definition, cfg)| cfg.dominates(definition, insertion_block))
+    {
+        recipe.dominating_ssa_frontier.insert(register);
+    } else {
+        recipe.external_frontier.insert(register);
+    }
+}
+
+fn build_selector_case_contexts(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    origin: BlockId,
+    selector: RegisterId,
+    cases: &BTreeSet<BigUint>,
+    constants: &HashMap<RegisterId, SIRValue>,
+    sinks: &BTreeSet<(BlockId, usize)>,
+) -> Vec<SelectorCaseContext> {
+    cases
+        .iter()
+        .map(|selected| (selected.to_string(), Some(selected)))
+        .chain(std::iter::once(("default".to_owned(), None)))
+        .map(|(label, selected)| {
+            let known =
+                propagate_selector_facts(eu, &eu.blocks[&origin], selector, selected, constants);
+            let reachable = selector_reachable_blocks_until_sinks(eu, origin, &known, sinks);
+            SelectorCaseContext {
+                label,
+                known,
+                reachable,
+            }
+        })
+        .collect()
+}
+
+fn selector_reachable_blocks_until_sinks(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    origin: BlockId,
+    known: &HashMap<RegisterId, bool>,
+    sinks: &BTreeSet<(BlockId, usize)>,
+) -> BTreeSet<BlockId> {
+    let sink_blocks = sinks
+        .iter()
+        .map(|(block, _)| *block)
+        .collect::<BTreeSet<_>>();
+    let mut reachable = BTreeSet::new();
+    let mut work = vec![origin];
+    while let Some(block) = work.pop() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        if sink_blocks.contains(&block) {
+            continue;
+        }
+        work.extend(specialized_successors(&eu.blocks[&block].terminator, known));
+    }
+    reachable
+}
+
+fn specialized_successors(
+    terminator: &SIRTerminator,
+    known: &HashMap<RegisterId, bool>,
+) -> Vec<BlockId> {
+    match terminator {
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => match known.get(cond).copied() {
+            Some(true) => vec![true_block.0],
+            Some(false) => vec![false_block.0],
+            None => vec![true_block.0, false_block.0],
+        },
+        _ => terminator_successors(terminator),
+    }
 }
 
 fn compare_sink_recipes(
@@ -1317,6 +2022,11 @@ mod tests {
         assert_eq!(recipe.external_frontier.len(), 2);
         assert_eq!(recipe.control_merges, vec![parameter]);
         assert!(recipe.loop_cutoffs.is_empty());
+        assert_eq!(recipe.case_summary.alternatives, 3);
+        assert_eq!(recipe.case_summary.reachable_alternatives, 3);
+        assert_eq!(recipe.case_summary.maximum_instructions, 0);
+        assert_eq!(recipe.case_summary.maximum_dominating_ssa_frontier, 1);
+        assert_eq!(recipe.case_summary.maximum_external_frontier, 0);
     }
 
     #[test]
@@ -1416,6 +2126,179 @@ mod tests {
         assert_eq!(recipe.entering_edges, vec![(BlockId(2), BlockId(0))]);
         assert_eq!(recipe.continuations, vec![BlockId(3)]);
         assert!(recipe.effect.contains("src_reg = 10"));
+        assert_eq!(recipe.case_summary.alternatives, 3);
+        assert_eq!(recipe.case_summary.maximum_instructions, 1);
+        assert_eq!(recipe.case_summary.maximum_load_frontier, 1);
+        assert_eq!(recipe.case_summary.maximum_dominating_ssa_frontier, 1);
+        assert_eq!(recipe.case_summary.maximum_external_frontier, 0);
+        assert_eq!(recipe.case_summary.stable_load_frontier, vec![loaded]);
+        assert!(recipe.case_summary.unstable_load_frontier.is_empty());
+        assert_eq!(recipe.case_summary.maximum_unstable_loads_per_case, 0);
+    }
+
+    #[test]
+    fn case_recipe_preserves_unknown_outer_control_as_a_merge_leaf() {
+        let selector = RegisterId(0);
+        let outer = RegisterId(1);
+        let true_value = RegisterId(2);
+        let false_value = RegisterId(3);
+        let zero = RegisterId(4);
+        let one = RegisterId(5);
+        let guard_zero = RegisterId(6);
+        let guard_one = RegisterId(7);
+        let parameter = RegisterId(8);
+        let result = RegisterId(9);
+        let origin = BasicBlock {
+            id: BlockId(0),
+            params: vec![selector, outer, true_value, false_value],
+            instructions: vec![
+                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
+                SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: outer,
+                true_block: (BlockId(1), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let true_path = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(3), vec![true_value]),
+        };
+        let false_path = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Jump(BlockId(3), vec![false_value]),
+        };
+        let sink = BasicBlock {
+            id: BlockId(3),
+            params: vec![parameter],
+            instructions: vec![
+                SIRInstruction::Mux(result, guard_zero, parameter, zero),
+                SIRInstruction::Store(
+                    address(0),
+                    SIROffset::Static(0),
+                    2,
+                    result,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (BlockId(0), origin),
+                (BlockId(1), true_path),
+                (BlockId(2), false_path),
+                (BlockId(3), sink),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (selector, bit(2)),
+                (outer, bit(1)),
+                (true_value, bit(2)),
+                (false_value, bit(2)),
+                (zero, bit(2)),
+                (one, bit(2)),
+                (guard_zero, bit(1)),
+                (guard_one, bit(1)),
+                (parameter, bit(2)),
+                (result, bit(2)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, &[(BlockId(0), 10)]);
+        let summary = &report.facts[0].sink_recipes[0].case_summary;
+        assert_eq!(summary.all_control_merges, vec![parameter]);
+        assert!(summary.all_external_frontier.is_empty());
+    }
+
+    #[test]
+    fn case_recipe_rejects_reloading_a_changed_state_version() {
+        let selector = RegisterId(0);
+        let replacement = RegisterId(1);
+        let zero = RegisterId(2);
+        let one = RegisterId(3);
+        let guard_zero = RegisterId(4);
+        let guard_one = RegisterId(5);
+        let loaded = RegisterId(6);
+        let selected = RegisterId(7);
+        let parameter = RegisterId(8);
+        let result = RegisterId(9);
+        let origin = BasicBlock {
+            id: BlockId(0),
+            params: vec![selector, replacement],
+            instructions: vec![
+                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
+                SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+                SIRInstruction::Load(loaded, address(1), SIROffset::Static(0), 2),
+                SIRInstruction::Mux(selected, guard_zero, loaded, zero),
+                SIRInstruction::Store(
+                    address(1),
+                    SIROffset::Static(0),
+                    2,
+                    replacement,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), vec![selected]),
+        };
+        let sink = BasicBlock {
+            id: BlockId(1),
+            params: vec![parameter],
+            instructions: vec![
+                SIRInstruction::Mux(result, guard_one, one, parameter),
+                SIRInstruction::Store(
+                    address(0),
+                    SIROffset::Static(0),
+                    2,
+                    result,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), origin), (BlockId(1), sink)]
+                .into_iter()
+                .collect(),
+            register_map: [
+                (selector, bit(2)),
+                (replacement, bit(2)),
+                (zero, bit(2)),
+                (one, bit(2)),
+                (guard_zero, bit(1)),
+                (guard_one, bit(1)),
+                (loaded, bit(2)),
+                (selected, bit(2)),
+                (parameter, bit(2)),
+                (result, bit(2)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let report = analyze(&eu, &[(BlockId(0), 10)]);
+        let summary = &report.facts[0].sink_recipes[0].case_summary;
+        assert!(summary.stable_load_frontier.is_empty());
+        assert_eq!(summary.unstable_load_frontier, vec![loaded]);
+        assert_eq!(summary.maximum_unstable_loads_per_case, 1);
+        assert!(summary.unversioned_load_frontier.is_empty());
     }
 
     #[test]
@@ -1439,6 +2322,7 @@ mod tests {
             external_frontier: Vec::new(),
             control_merges: Vec::new(),
             loop_cutoffs: Vec::new(),
+            case_summary: SelectorSinkCaseSummaryFact::default(),
         };
         let left = recipe(
             (BlockId(1), 0),
