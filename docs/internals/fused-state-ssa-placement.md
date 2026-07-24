@@ -1157,6 +1157,57 @@ A fresh complete profile attributes 62,480 samples to generated instructions,
 semantically; their timing remains a measured improvement candidate rather
 than proof that all host variance has been removed.
 
+The next profile exposed a separate, general MIR range-proof failure. A
+32-lane arbitration block contained the repeated legalized form:
+
+```text
+count = value & 3
+shifted = 1 << count
+result = count < 64 ? shifted : 0
+```
+
+The shift guard is provably true, but `fold_proven_comparisons` handled only
+an immediate compare. ISel still represented the `64` as a constant VReg at
+the first invocation, and immediate lowering happened after that invocation.
+The range proof now handles the constant-VReg comparison directly and is
+rerun after immediate lowering. This is an ordinary MIR known-range
+optimization; it neither assumes an RTL width nor changes oversized-shift
+semantics.
+
+On the complete fused function this changes:
+
+| Stage | Slice/Concat baseline | Proven shift guards | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 93,637 | 92,959 | -678 |
+| pressure-scheduled MIR | 100,237 | 99,570 | -667 |
+| post-RA MIR | 211,593 | 210,229 | -1,364 |
+| x86 instructions | 147,018 | 145,414 | -1,604 |
+
+Three trace-free or perf-mapped complete executions reach exactly
+`cy=9ae070 x3=aa pass=1` in 64.814, 65.557, and 64.947 seconds. This is not a
+runtime win outside the existing host variance, so the structural reduction
+is retained as a correctness-preserving prerequisite rather than claimed as
+the missing throughput result. In the fresh mapped profile, generated
+`cmovne` samples fall from 1,859 to 1,488, while total matched generated
+samples remain comparable (62,480 versus 63,227).
+
+The same investigation rejected a tempting local MemorySSA change. Treating
+non-overlapping exact pseudo effects as byte-local invalidations instead of a
+whole direct-memory barrier admitted more partial-store overlays, but grew the
+fused x86 from 147,018 to 147,038 instructions and did not remove the hot
+chain. The relevant two-bit Store and later wide Load are separated by about
+200 CFG blocks, not by a false local alias barrier. Solving that case requires
+the executable frontier and global placement contracts in this document;
+loosening the local pass merely adds overlay arithmetic.
+
+After the guard fix, the former 32-lane block is still the largest generated
+hot region. It performs the lane predicates, priority comparisons, selected
+values, and many stack round trips as one approximately 1,000-instruction
+machine block. Removing its trivially true guards exposes the actual next
+problem: repeated lane arbitration needs a target-independent aggregate
+representation (candidate mask plus selected-index/value recipes) before
+allocation, rather than another scalar peephole or a longer carried VReg.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

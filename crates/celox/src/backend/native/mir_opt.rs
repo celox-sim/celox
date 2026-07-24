@@ -310,6 +310,27 @@ fn fold_proven_comparisons(func: &mut MFunction) {
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             let replacement = match inst {
+                MInst::CmpSelect {
+                    dst,
+                    lhs,
+                    rhs,
+                    kind: CmpKind::LtU,
+                    true_val,
+                    ..
+                } if matches!(defs.get(rhs), Some(MInst::LoadImm { value, .. }) if *value > 0
+                    && unsigned_upper_bound(
+                        *lhs,
+                        &defs,
+                        &mut upper_bounds,
+                        &mut HashSet::new(),
+                    )
+                    .is_some_and(|bound| bound < *value)) =>
+                {
+                    Some(MInst::Mov {
+                        dst: *dst,
+                        src: *true_val,
+                    })
+                }
                 MInst::CmpImmSelect {
                     dst,
                     lhs,
@@ -8522,6 +8543,73 @@ mod tests {
             func.blocks[0].insts[6],
             MInst::CmpImmSelect { .. }
         ));
+    }
+
+    #[test]
+    fn optimization_folds_shift_guard_exposed_by_immediate_lowering() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 3,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 1,
+                },
+                MInst::Shl {
+                    dst: VReg(4),
+                    lhs: VReg(3),
+                    rhs: VReg(2),
+                },
+                MInst::LoadImm {
+                    dst: VReg(5),
+                    value: 64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(6),
+                    value: 0,
+                },
+                MInst::CmpSelect {
+                    dst: VReg(7),
+                    lhs: VReg(2),
+                    rhs: VReg(5),
+                    kind: CmpKind::LtU,
+                    true_val: VReg(4),
+                    false_val: VReg(6),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(7),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            8,
+        );
+
+        optimize(&mut func);
+
+        assert!(
+            !func.blocks[0].insts.iter().any(|inst| matches!(
+                inst,
+                MInst::CmpSelect { dst: VReg(7), .. } | MInst::CmpImmSelect { dst: VReg(7), .. }
+            )),
+            "{:#?}",
+            func.blocks[0].insts
+        );
     }
 
     #[test]

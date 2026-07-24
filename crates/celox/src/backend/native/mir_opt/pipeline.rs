@@ -75,6 +75,7 @@ fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {
         // the carry/rematerialize choice to allocation.
         if iteration == 1 {
             runner.run("pre_gvn_lower_to_imm_forms", lower_to_imm_forms);
+            runner.run("post_imm_fold_proven_comparisons", fold_proven_comparisons);
         }
         runner.run("global_gvn", global_gvn);
         runner.run("dead_code_eliminate", dead_code_eliminate);
@@ -119,6 +120,7 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
     runner.run("fold_add_chain_to_popcnt", fold_add_chain_to_popcnt);
     runner.run("dead_code_eliminate", dead_code_eliminate);
     runner.run("lower_to_imm_forms", lower_to_imm_forms);
+    runner.run("post_imm_fold_proven_comparisons", fold_proven_comparisons);
     runner.run("fold_boolean_normalizations", fold_boolean_normalizations);
     runner.run("redundant_mask_eliminate", redundant_mask_eliminate);
     runner.run("copy_propagate", copy_propagate);
