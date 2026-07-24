@@ -1808,6 +1808,108 @@ semantic oracle for the verified recipe, but further optimization work moves
 to the actually hot control and RAM paths. Future aggregate work requires new
 profile evidence, not a looser static cost model.
 
+#### Rejected whole-function comb-load expansion
+
+The Milestone 1 planner was also exercised, analysis-only, with every static
+Load in the fused function treated as a possible demand. This was a
+feasibility test for widening the FF-suffix analysis into a generic comb
+mem2reg pass; no generated code was changed.
+
+```text
+static Loads                              7,389
+  FF-suffix demands                       3,666
+  additional comb demands                 3,723
+source-valid removable-Load candidates    4,692
+  boundary-feasible DirectForward           399
+  executable Rematerialize                  422
+  KeepPackedReload                        3,871
+plan-feasible removable Stores               59
+analysis time                              6.41 s
+analysis peak RSS increase                 1.21 GiB
+```
+
+The Load count alone substantially overstates executable store elimination.
+A `KeepPackedReload` plan names the concrete Store sites which remain its
+homes; after preserving those reverse dependencies, only 59 Stores can be
+deleted. The broad analysis also violates the established memory gate by an
+order of magnitude. Sharing immutable resolver data did not materially reduce
+the peak, so the cost is not justified by the executable result.
+
+This experiment is rejected rather than retained behind a production switch.
+The implementation was removed after measurement. Milestone 1 remains
+demand-local: extending it requires a sparse, profile-attributed source set
+and must report executable Store deletions after home invalidation, not just
+candidate Loads or pure cones.
+
+#### Revised hot-path hypothesis: physical state representation
+
+A fresh profile and final MIR inspection show that the remaining hot work is
+distributed across many blocks, not concentrated in either aggregate root.
+Representative hot blocks contain two recurring forms:
+
+```text
+load packed persistent word
+shift / mask several logical fields
+compute
+
+load packed destination word
+mask / shift / or several results
+store packed destination word
+```
+
+For example, hot block `bb4212` extracts many one-, five-, and twelve-bit
+fields from packed 32- and 64-bit words, then reconstructs other packed words.
+It also performs ordinary byte Loads and Stores for already scalarized values.
+This distinction matters: eliminating only a Store-to-Load round trip cannot
+remove extraction of state which is live on entry to the fused event.
+
+The corresponding Veryl AOT-C function has a materially different internal
+contract. It receives separate `ff_values` and `comb_values` buffers and
+stores most logical values narrower than 32 bits in independent `uint32_t`
+slots; 64- and 128-bit values use native slots. FF publication uses separate
+next-value locations and a write log. Its combinational evaluator is also
+split into 31 `noinline` chunks. These are observations about generated code,
+not yet an attribution of the speed difference.
+
+Celox already uses element-strided native storage for a bounded subset of
+eligible unpacked arrays. The remaining question is different: whether hot
+fields of packed structured objects need a compiler-private native
+representation across events while the exact packed public representation is
+materialized only at its required observation and commit boundaries.
+
+The next gate is profile-selected and bounded. For hot blocks only, it must
+map every packed Load/extract and insert/Store chain to:
+
+- its logical object and exact range;
+- the persistent phase version read or published;
+- all observation sites requiring the packed representation;
+- dynamic execution weight;
+- machine instructions removable by a native shadow source;
+- synchronization cost at `CommitFFState` and external observation barriers.
+
+An admitted shadow range must have one native 32- or 64-bit slot, preserve
+the exact RTL width through typed MIR operations, and name the packed
+StateVersion with which it is synchronized. Ordinary comb reads cannot observe
+staging state before `CommitFFState`. Public reads, capture, trigger, dynamic
+aliases, and four-state masks remain packed unless a separate proof covers
+them. Overlapping shadow ranges require one authoritative version and explicit
+range-order reconstruction; they may not be independently updated.
+
+The profitability test is:
+
+```text
+profile-weighted removed extraction/insertion instructions
+    >
+profile-weighted shadow synchronization and observation cost
+```
+
+It must first pass on the current profile-selected ranges without constructing
+whole-function per-range tables. Function splitting is evaluated separately:
+the existing Celox tail-call splitter is a compiler-limit mechanism, while
+Veryl's 31 chunks may also alter optimization and allocation. The current
+profile does not identify instruction-cache/front-end stalls as the dominant
+cost, so chunking alone is not treated as the physical-layout fix.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
