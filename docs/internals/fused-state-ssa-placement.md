@@ -1267,20 +1267,69 @@ untyped FF Store/commit effect, or repair cycle.
 #### Milestone 1 result
 
 Every non-packed plan has an executable, phase-correct frontier source. The
-model contains 228 target-local closed-cone `DirectForward` contracts. Each
+current model contains 312 target-local closed-cone `DirectForward` contracts.
+Each
 records the original producer/use identity, native 32-bit, 64-bit, or
 multi-chunk GPR class, target-only legal placement interval, and empty
 cross-block live-in/live-out contribution. Carry-style forwarding is not
 silently inferred.
+
+The current analysis-only plan on the complete Heliodor fused function is:
+
+| Source action | FF range demands |
+|---|---:|
+| boundary-feasible `DirectForward` | 312 |
+| partial `Rematerialize` | 240 |
+| `KeepPackedReload` | 1,933 |
+
+Thus 552 of 2,485 candidate demands (22.2%), or 15.1% of all 3,666 FF
+demands, have a non-packed plan. These remain static counts and do not
+supersede the failed profile-weighted profitability gate above.
 
 The concrete repair relation implements the lexicographic rank
 `(unsplit use pairs, direct plans, rematerialize plans)`. Cluster repair only
 refines a partition; tests reject rejoining a split cluster and every reverse
 source-action transition.
 
-The reverse Store dependency index names exact StateVersion/materialization
-dependents and validates all 1,282 preserved Stores without repeatedly walking
-the complete model.
+`KeepPackedReload` no longer creates a demand-local synthetic home. It names
+the exact defining Store site and stored StateVersion for every leaf of its
+MemoryPhi recipe, plus the exact extract/merge fragments needed by the
+original Load. The reverse Store dependency index therefore contains 1,280
+real Store sites and invalidates every cluster which names a deleted Store.
+Tests reject a packed plan after removing only one incoming home of a
+MemoryPhi.
+
+Frontier phase equality is checked by one shared access-based MemorySSA graph.
+Definitions are retained only for queried state objects; clobber walks are
+memoized per exact bit range, so disjoint ranges do not alias merely because
+they share an object. This replaced a second per-object range-SSA
+reconstruction which accounted for roughly 700 MiB of transient RSS in an
+intermediate implementation.
+
+A representative contract-hardening run reported 101,041 SIR instructions
+and completed the analysis in 4.84 seconds. Its staged current-RSS readings
+were:
+
+| Stage | RSS (KiB) | Increase from previous stage |
+|---|---:|---:|
+| before analysis | 4,509,212 | - |
+| after StateSSA | 4,732,116 | 222,904 |
+| after placement construction | 4,796,884 | 64,768 |
+| after frontier cone construction | 4,805,076 | 8,192 |
+| after frontier MemorySSA verification | 4,825,684 | 20,608 |
+| after plan construction | 4,829,908 | 4,224 |
+| after verification | 4,834,004 | 4,096 |
+| after temporary-table drop | 4,842,324 | 8,320 |
+
+The process-wide baseline includes compilation state outside this analysis,
+and allocator retention makes the total delta vary between runs. The
+stage-local result nevertheless identifies the remaining memory cost in the
+primary StateSSA and placement construction, not frontier version
+verification. Two rejected alternatives are recorded because they changed
+asymptotic behavior in practice: one all-object frontier query graph raised
+RSS by about 1.7 GiB, while resetting the primary demand resolver for every
+query increased both resolved fragments and RSS. Processing the largest
+object event sets first and sharing one sparse query graph are retained.
 
 The semantic/type contract passes, but the profile-weighted profitability gate
 above fails. Code-generating Milestone 2 is stopped.

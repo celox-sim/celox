@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use celox_analysis::cfg::ControlFlowGraph;
+use celox_analysis::cfg::{ControlFlowGraph, ForwardControlFlowGraph};
 pub(crate) use celox_analysis::cfg::{
     DominatorTree, NaturalLoop, PostDominatorTree, StronglyConnectedRegion,
 };
@@ -61,7 +61,7 @@ pub(crate) struct SirCfg {
     pub dominators: DominatorTree,
     pub dom_children: Vec<Vec<usize>>,
     pub dominance_frontier: Vec<Vec<usize>>,
-    pub postdominators: PostDominatorTree,
+    pub postdominators: Option<PostDominatorTree>,
     pub postdominance_frontier: Vec<Vec<usize>>,
     /// For each block, branches on which its execution is control-dependent.
     pub controllers: Vec<Vec<usize>>,
@@ -75,80 +75,11 @@ pub(crate) struct SirCfg {
 #[allow(dead_code)]
 impl SirCfg {
     pub(crate) fn analyze<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
-        if eu.blocks.is_empty() {
-            return Err(SirCfgError::Empty);
-        }
-        if !eu.blocks.contains_key(&eu.entry_block_id) {
-            return Err(SirCfgError::MissingEntry(eu.entry_block_id));
-        }
-
-        let mut source_block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-        source_block_ids.sort_unstable();
-        let source_index = source_block_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut source_successors = vec![Vec::new(); source_block_ids.len()];
-        for (source, &block_id) in source_block_ids.iter().enumerate() {
-            let block = &eu.blocks[&block_id];
-            if block.id != block_id {
-                return Err(SirCfgError::BlockIdentity {
-                    key: block_id,
-                    embedded: block.id,
-                });
-            }
-            let mut outgoing = terminator_successors(&block.terminator);
-            outgoing.sort_unstable();
-            outgoing.dedup();
-            for target in outgoing {
-                let Some(&target_index) = source_index.get(&target) else {
-                    return Err(SirCfgError::MissingTarget {
-                        source: block_id,
-                        target,
-                    });
-                };
-                source_successors[source].push(target_index);
-            }
-        }
-
-        let source_entry = source_index[&eu.entry_block_id];
-        let order = celox_analysis::cfg::reverse_postorder(&source_successors, source_entry)
-            .map_err(map_analysis_error)?;
-        if order.len() != source_block_ids.len() {
-            let mut reached = vec![false; source_block_ids.len()];
-            for &block in &order {
-                reached[block] = true;
-            }
-            return Err(SirCfgError::Unreachable(
-                source_block_ids
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .filter_map(|(index, block)| (!reached[index]).then_some(block))
-                    .collect(),
-            ));
-        }
-
-        let block_ids = order
-            .iter()
-            .map(|&source| source_block_ids[source])
-            .collect::<Vec<_>>();
-        let index = block_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut successors = vec![Vec::new(); block_ids.len()];
-        for (block, &source) in order.iter().enumerate() {
-            successors[block] = source_successors[source]
-                .iter()
-                .map(|&target| index[&source_block_ids[target]])
-                .collect();
-        }
-
+        let IndexedSirGraph {
+            block_ids,
+            index,
+            successors,
+        } = index_sir_graph(eu)?;
         let analysis = ControlFlowGraph::analyze(successors, 0).map_err(map_analysis_error)?;
         let dom_children = analysis.dominators.children.clone();
         Ok(Self {
@@ -159,10 +90,42 @@ impl SirCfg {
             dominators: analysis.dominators,
             dom_children,
             dominance_frontier: analysis.dominance_frontier,
-            postdominators: analysis.postdominators,
+            postdominators: Some(analysis.postdominators),
             postdominance_frontier: analysis.postdominance_frontier,
             controllers: analysis.controllers,
             control_dependents: analysis.control_dependents,
+            sccs: analysis.sccs,
+            scc_for_block: analysis.scc_for_block,
+            loops: analysis.loops,
+        })
+    }
+
+    /// Analyze only forward dominance, loops, and SCCs.
+    ///
+    /// This mode intentionally omits postdominance and control-dependence
+    /// tables, which can be dense on a large branchy SIR function.
+    pub(crate) fn analyze_forward<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+        let IndexedSirGraph {
+            block_ids,
+            index,
+            successors,
+        } = index_sir_graph(eu)?;
+        let analysis = ForwardControlFlowGraph::analyze_structure(successors, 0)
+            .map_err(map_analysis_error)?;
+        let dom_children = analysis.dominators.children.clone();
+        let blocks = block_ids.len();
+        Ok(Self {
+            block_ids,
+            index,
+            predecessors: analysis.predecessors,
+            successors: analysis.successors,
+            dominators: analysis.dominators,
+            dom_children,
+            dominance_frontier: analysis.dominance_frontier,
+            postdominators: None,
+            postdominance_frontier: vec![Vec::new(); blocks],
+            controllers: vec![Vec::new(); blocks],
+            control_dependents: vec![Vec::new(); blocks],
             sccs: analysis.sccs,
             scc_for_block: analysis.scc_for_block,
             loops: analysis.loops,
@@ -187,16 +150,111 @@ impl SirCfg {
         else {
             return false;
         };
-        self.postdominators.postdominates(postdominator, block)
+        self.postdominators
+            .as_ref()
+            .is_some_and(|tree| tree.postdominates(postdominator, block))
     }
 
     pub(crate) fn common_postdominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
         let left = self.block_index(left)?;
         let right = self.block_index(right)?;
         self.postdominators
+            .as_ref()?
             .common_postdominator(left, right)
             .map(|block| self.block_ids[block])
     }
+
+    pub(crate) fn immediate_postdominator(&self, block: usize) -> Option<usize> {
+        self.postdominators.as_ref()?.immediate_postdominator(block)
+    }
+}
+
+struct IndexedSirGraph {
+    block_ids: Vec<BlockId>,
+    index: HashMap<BlockId, usize>,
+    successors: Vec<Vec<usize>>,
+}
+
+fn index_sir_graph<A>(eu: &ExecutionUnit<A>) -> Result<IndexedSirGraph, SirCfgError> {
+    if eu.blocks.is_empty() {
+        return Err(SirCfgError::Empty);
+    }
+    if !eu.blocks.contains_key(&eu.entry_block_id) {
+        return Err(SirCfgError::MissingEntry(eu.entry_block_id));
+    }
+
+    let mut source_block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    source_block_ids.sort_unstable();
+    let source_index = source_block_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, block)| (block, index))
+        .collect::<HashMap<_, _>>();
+    let mut source_successors = vec![Vec::new(); source_block_ids.len()];
+    for (source, &block_id) in source_block_ids.iter().enumerate() {
+        let block = &eu.blocks[&block_id];
+        if block.id != block_id {
+            return Err(SirCfgError::BlockIdentity {
+                key: block_id,
+                embedded: block.id,
+            });
+        }
+        let mut outgoing = terminator_successors(&block.terminator);
+        outgoing.sort_unstable();
+        outgoing.dedup();
+        for target in outgoing {
+            let Some(&target_index) = source_index.get(&target) else {
+                return Err(SirCfgError::MissingTarget {
+                    source: block_id,
+                    target,
+                });
+            };
+            source_successors[source].push(target_index);
+        }
+    }
+
+    let source_entry = source_index[&eu.entry_block_id];
+    let order = celox_analysis::cfg::reverse_postorder(&source_successors, source_entry)
+        .map_err(map_analysis_error)?;
+    if order.len() != source_block_ids.len() {
+        let mut reached = vec![false; source_block_ids.len()];
+        for &block in &order {
+            reached[block] = true;
+        }
+        return Err(SirCfgError::Unreachable(
+            source_block_ids
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(index, block)| (!reached[index]).then_some(block))
+                .collect(),
+        ));
+    }
+
+    let block_ids = order
+        .iter()
+        .map(|&source| source_block_ids[source])
+        .collect::<Vec<_>>();
+    let index = block_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, block)| (block, index))
+        .collect::<HashMap<_, _>>();
+    let mut successors = vec![Vec::new(); block_ids.len()];
+    for (block, &source) in order.iter().enumerate() {
+        successors[block] = source_successors[source]
+            .iter()
+            .map(|&target| index[&source_block_ids[target]])
+            .collect();
+    }
+
+    Ok(IndexedSirGraph {
+        block_ids,
+        index,
+        successors,
+    })
 }
 
 impl celox_analysis::ssa::SsaCfg for SirCfg {
@@ -351,6 +409,43 @@ mod tests {
     }
 
     #[test]
+    fn forward_analysis_omits_dense_control_tables() {
+        let condition = crate::ir::RegisterId(0);
+        let mut unit = eu(
+            0,
+            vec![
+                block(
+                    0,
+                    SIRTerminator::Branch {
+                        cond: condition,
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(1, SIRTerminator::Jump(BlockId(3), Vec::new())),
+                block(2, SIRTerminator::Jump(BlockId(3), Vec::new())),
+                block(3, SIRTerminator::Return),
+            ],
+        );
+        unit.register_map.insert(
+            condition,
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        let full = SirCfg::analyze(&unit).unwrap();
+        let forward = SirCfg::analyze_forward(&unit).unwrap();
+        assert_eq!(forward.block_ids, full.block_ids);
+        assert_eq!(forward.dominators, full.dominators);
+        assert_eq!(forward.sccs, full.sccs);
+        assert!(forward.dominance_frontier.iter().all(Vec::is_empty));
+        assert!(forward.postdominators.is_none());
+        assert!(forward.controllers.iter().all(Vec::is_empty));
+        assert!(forward.control_dependents.iter().all(Vec::is_empty));
+    }
+
+    #[test]
     fn computes_nested_diamond_control_dependence() {
         let condition = crate::ir::RegisterId(0);
         let mut unit = eu(
@@ -435,11 +530,7 @@ mod tests {
 
         assert_eq!(cfg.common_postdominator(BlockId(1), BlockId(2)), None);
         assert!(!cfg.postdominates(BlockId(1), BlockId(0)));
-        assert_eq!(
-            cfg.postdominators
-                .immediate_postdominator(cfg.index[&BlockId(0)]),
-            None
-        );
+        assert_eq!(cfg.immediate_postdominator(cfg.index[&BlockId(0)]), None);
     }
 
     #[test]

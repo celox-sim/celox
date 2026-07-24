@@ -496,8 +496,7 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
             if dominated_uses == 0 || dominated_uses == use_blocks.len() {
                 continue;
             }
-            let Some(merge_index) = cfg.postdominators.immediate_postdominator(candidate_index)
-            else {
+            let Some(merge_index) = cfg.immediate_postdominator(candidate_index) else {
                 continue;
             };
             let merge = cfg.block_ids[merge_index];

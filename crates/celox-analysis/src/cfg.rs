@@ -244,10 +244,10 @@ pub struct ControlFlowGraph {
 
 /// Forward-only CFG analysis used by SSA construction and machine backends.
 ///
-/// Unlike [`ControlFlowGraph`], this does not construct postdominators,
-/// control dependence, or SCC membership tables. Clients that only need
-/// dominance and natural loops therefore retain `O(B + E + DF + L)` data
-/// rather than also materializing the reverse/control-dependence graphs.
+/// Unlike [`ControlFlowGraph`], this does not construct postdominators or
+/// control dependence. SCC membership is retained because loop-sensitive
+/// placement needs to reject irreducible cycles without materializing the
+/// potentially dense reverse/control-dependence graphs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardControlFlowGraph {
     pub root: usize,
@@ -255,12 +255,32 @@ pub struct ForwardControlFlowGraph {
     pub successors: Vec<Vec<usize>>,
     pub dominators: DominatorTree,
     pub dominance_frontier: Vec<Vec<usize>>,
+    pub sccs: Vec<StronglyConnectedRegion>,
+    pub scc_for_block: Vec<usize>,
     pub loops: Vec<NaturalLoop>,
 }
 
 impl ForwardControlFlowGraph {
     /// Analyze the forward properties of a graph without changing block IDs.
-    pub fn analyze(mut successors: Vec<Vec<usize>>, root: usize) -> Result<Self, CfgError> {
+    pub fn analyze(successors: Vec<Vec<usize>>, root: usize) -> Result<Self, CfgError> {
+        Self::analyze_impl(successors, root, true)
+    }
+
+    /// Analyze dominance, loops, and SCCs without constructing a dominance
+    /// frontier.
+    ///
+    /// This is for placement clients which issue dominance queries but do not
+    /// construct SSA. The returned frontier table has one empty entry per
+    /// block so accidental frontier use is explicit in tests and diagnostics.
+    pub fn analyze_structure(successors: Vec<Vec<usize>>, root: usize) -> Result<Self, CfgError> {
+        Self::analyze_impl(successors, root, false)
+    }
+
+    fn analyze_impl(
+        mut successors: Vec<Vec<usize>>,
+        root: usize,
+        include_frontier: bool,
+    ) -> Result<Self, CfgError> {
         validate_edges(&successors, root)?;
         for outgoing in &mut successors {
             let mut seen = BTreeSet::new();
@@ -298,8 +318,14 @@ impl ForwardControlFlowGraph {
                 "reachable block has no immediate dominator",
             ));
         }
-        let dominance_frontier = dominance_frontiers(&successors, &dominators, root);
+        let dominance_frontier = if include_frontier {
+            dominance_frontiers(&successors, &dominators, root)
+        } else {
+            vec![Vec::new(); successors.len()]
+        };
         let loops = natural_loops(&predecessors, &successors, &dominators)?;
+        let (sccs, scc_for_block) =
+            strongly_connected_regions(&predecessors, &successors, &dominators, root);
 
         Ok(Self {
             root,
@@ -307,6 +333,8 @@ impl ForwardControlFlowGraph {
             successors,
             dominators,
             dominance_frontier,
+            sccs,
+            scc_for_block,
             loops,
         })
     }
@@ -329,13 +357,6 @@ impl ControlFlowGraph {
             dependents.sort_unstable();
             dependents.dedup();
         }
-        let (sccs, scc_for_block) = strongly_connected_regions(
-            &forward.predecessors,
-            &forward.successors,
-            &forward.dominators,
-            root,
-        );
-
         Ok(Self {
             root: forward.root,
             predecessors: forward.predecessors,
@@ -346,8 +367,8 @@ impl ControlFlowGraph {
             postdominance_frontier,
             controllers,
             control_dependents,
-            sccs,
-            scc_for_block,
+            sccs: forward.sccs,
+            scc_for_block: forward.scc_for_block,
             loops: forward.loops,
         })
     }
@@ -770,6 +791,22 @@ mod tests {
             .unwrap();
         assert_eq!(region.entries, vec![1, 2]);
         assert_eq!(region.reducible_header, None);
+    }
+
+    #[test]
+    fn forward_analysis_retains_sccs_without_control_dependence() {
+        let successors = vec![vec![1, 2], vec![2], vec![1, 3], vec![]];
+        let full = ControlFlowGraph::analyze(successors.clone(), 0).unwrap();
+        let forward = ForwardControlFlowGraph::analyze(successors.clone(), 0).unwrap();
+        let structure = ForwardControlFlowGraph::analyze_structure(successors, 0).unwrap();
+        assert_eq!(forward.dominators, full.dominators);
+        assert_eq!(forward.dominance_frontier, full.dominance_frontier);
+        assert_eq!(forward.sccs, full.sccs);
+        assert_eq!(forward.scc_for_block, full.scc_for_block);
+        assert_eq!(forward.loops, full.loops);
+        assert_eq!(structure.dominators, full.dominators);
+        assert_eq!(structure.sccs, full.sccs);
+        assert!(structure.dominance_frontier.iter().all(Vec::is_empty));
     }
 
     #[test]

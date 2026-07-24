@@ -254,7 +254,11 @@ impl PlacementAnalysis {
         if eu.verify_result().is_err() {
             return Err(PlacementAnalysisError::InvalidSir);
         }
-        let cfg = SirCfg::analyze(eu)?;
+        let cfg = if include_state_and_effects {
+            SirCfg::analyze(eu)?
+        } else {
+            SirCfg::analyze_forward(eu)?
+        };
         let state = if include_state_and_effects {
             analyze_state_versions(eu, &cfg)?
         } else {
@@ -1054,6 +1058,30 @@ mod tests {
                 .operands,
             vec![first, second]
         );
+    }
+
+    #[test]
+    fn pure_value_analysis_uses_the_forward_only_cfg() {
+        let eu = unit(
+            [block(
+                0,
+                vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(7u8))],
+                SIRTerminator::Return,
+            )],
+            [(RegisterId(0), bit(8))],
+        );
+        let analysis = PlacementAnalysis::analyze_pure_values(&eu).unwrap();
+        assert!(analysis.cfg.postdominators.is_none());
+        assert!(analysis.cfg.controllers.iter().all(Vec::is_empty));
+        assert!(analysis.effects.is_empty());
+        assert!(analysis.effect_phis.is_empty());
+        assert!(matches!(
+            analysis
+                .value(analysis.value_for_register(RegisterId(0)).unwrap())
+                .unwrap()
+                .safety,
+            ValueSafety::Pure
+        ));
     }
 
     #[test]

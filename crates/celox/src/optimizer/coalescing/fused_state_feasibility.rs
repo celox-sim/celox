@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use celox_analysis::memory_ssa::{
+    self, ClobberWalker, MemoryAccessEvent, MemoryClobber, MemorySsaError,
+};
 use celox_analysis::ssa::{self, Event, SparseSsa, Version};
 
 use super::fused_state_plan::{
@@ -67,7 +70,6 @@ type ObjectVersion = Version<RegionedAbsoluteAddr, ProgramPoint>;
 enum Usage {
     DefinitionInput(ProgramPoint),
     Load(ProgramPoint),
-    Frontier(usize),
     Exit(BlockId),
 }
 
@@ -651,6 +653,9 @@ pub(crate) struct FeasibilityReport {
     pub rss_before_kib: usize,
     pub rss_after_range_partition_kib: usize,
     pub rss_after_state_ssa_kib: usize,
+    pub rss_after_placement_construction_kib: usize,
+    pub rss_after_frontier_cones_kib: usize,
+    pub rss_after_frontier_version_verification_kib: usize,
     pub rss_after_planning_kib: usize,
     pub rss_after_verification_kib: usize,
     pub rss_after_temporary_drop_kib: usize,
@@ -681,6 +686,8 @@ impl fmt::Display for FeasibilityReport {
              verified_demands={} verified_roots={} verifier_passed={} \
              rss_before_kib={} rss_after_kib={} process_peak_rss_kib={} \
              rss_after_range_partition_kib={} rss_after_state_ssa_kib={} \
+             rss_after_placement_construction_kib={} rss_after_frontier_cones_kib={} \
+             rss_after_frontier_version_verification_kib={} \
              rss_after_planning_kib={} rss_after_verification_kib={} \
              rss_after_temporary_drop_kib={} \
              plan_versions={} plan_sites={} plan_clusters={} \
@@ -743,6 +750,9 @@ impl fmt::Display for FeasibilityReport {
             self.process_peak_rss_kib,
             self.rss_after_range_partition_kib,
             self.rss_after_state_ssa_kib,
+            self.rss_after_placement_construction_kib,
+            self.rss_after_frontier_cones_kib,
+            self.rss_after_frontier_version_verification_kib,
             self.rss_after_planning_kib,
             self.rss_after_verification_kib,
             self.rss_after_temporary_drop_kib,
@@ -855,6 +865,7 @@ pub(crate) enum FeasibilityError {
     Cfg(crate::ir::cfg::SirCfgError),
     Phase(super::state_ssa::StateSsaError),
     StateSsa(ssa::SsaError),
+    MemorySsa(MemorySsaError),
     Plan(fused_state_plan::PlanError),
     Placement(PlacementAnalysisError),
     InvalidMemoryGraph(&'static str),
@@ -866,6 +877,7 @@ impl fmt::Display for FeasibilityError {
             Self::Cfg(error) => write!(f, "CFG: {error}"),
             Self::Phase(error) => write!(f, "phase: {error}"),
             Self::StateSsa(error) => write!(f, "object StateSSA: {error}"),
+            Self::MemorySsa(error) => write!(f, "frontier MemorySSA: {error}"),
             Self::Plan(error) => write!(f, "materialization plan: {error}"),
             Self::Placement(error) => write!(f, "materialization placement: {error}"),
             Self::InvalidMemoryGraph(message) => write!(f, "range resolver: {message}"),
@@ -1071,7 +1083,15 @@ pub(crate) fn analyze(
             .then_some((block, *block_id))
         })
         .collect::<Vec<_>>();
-    for (object, demanded_loads) in demanded_by_object {
+    let mut demanded_objects = demanded_by_object.into_iter().collect::<Vec<_>>();
+    demanded_objects.sort_by(|(left, _), (right, _)| {
+        object_events
+            .get(right)
+            .map_or(0, Vec::len)
+            .cmp(&object_events.get(left).map_or(0, Vec::len))
+            .then_with(|| left.cmp(right))
+    });
+    for (object, demanded_loads) in demanded_objects {
         let sparse_events =
             object_events
                 .remove(&object)
@@ -1232,16 +1252,19 @@ pub(crate) fn analyze(
         );
     }
     report.rss_after_state_ssa_kib = resident_memory_kib().map_or(0, |(resident, _)| resident);
+    drop(object_events);
+    drop(object_loads);
+    drop(accesses);
+    drop(exit_blocks);
+    drop(phases);
     report.candidate_backing_stores = candidate_stores.len();
     report.candidate_removable_stores = candidate_stores.difference(&required_stores).count();
-    classify_demand_plans(
-        eu,
-        &cfg,
-        &mut plan_demands,
-        &plan_definitions,
-        &definitions,
-        &endpoints,
-    )?;
+    let planning_memory =
+        classify_demand_plans(eu, &cfg, &mut plan_demands, &plan_definitions, &definitions)?;
+    report.rss_after_placement_construction_kib = planning_memory.after_placement_construction_kib;
+    report.rss_after_frontier_cones_kib = planning_memory.after_frontier_cones_kib;
+    report.rss_after_frontier_version_verification_kib =
+        planning_memory.after_frontier_version_verification_kib;
     for demand in &plan_demands {
         let choices = report
             .plan_block_choices
@@ -1609,16 +1632,26 @@ struct FrontierCandidate {
     has_local_frontier: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PlanningMemoryStages {
+    after_placement_construction_kib: usize,
+    after_frontier_cones_kib: usize,
+    after_frontier_version_verification_kib: usize,
+}
+
 fn classify_demand_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
     demands: &mut [DemandFact],
     plan_definitions: &BTreeMap<ProgramPoint, DefinitionFact>,
     memory_definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
-    endpoints: &BTreeMap<RegionedAbsoluteAddr, Vec<usize>>,
-) -> Result<(), FeasibilityError> {
+) -> Result<PlanningMemoryStages, FeasibilityError> {
     let placement =
         PlacementAnalysis::analyze_pure_values(eu).map_err(FeasibilityError::Placement)?;
+    let mut memory = PlanningMemoryStages {
+        after_placement_construction_kib: resident_memory_kib().map_or(0, |value| value.0),
+        ..PlanningMemoryStages::default()
+    };
     let mut queries = Vec::<FrontierQuery>::new();
     let mut candidates = Vec::<FrontierCandidate>::new();
     for (demand_index, demand) in demands.iter_mut().enumerate() {
@@ -1631,7 +1664,7 @@ fn classify_demand_plans(
             .flat_map(|fragment| fragment.reaching_definitions.iter().copied())
             .collect::<BTreeSet<_>>();
         if reaching.len() != 1 {
-            demand.keep_reason = Some(KeepReason::UnsupportedMemoryPhi);
+            demand.keep_reason = Some(KeepReason::UnsupportedMemoryPhiMaterialization);
             demand
                 .failure_predicates
                 .insert(FailurePredicates::UNSUPPORTED_MEMORY_PHI);
@@ -1772,8 +1805,10 @@ fn classify_demand_plans(
         });
     }
 
-    let stable_queries =
-        verify_frontier_versions(eu, cfg, memory_definitions, endpoints, &queries)?;
+    memory.after_frontier_cones_kib = resident_memory_kib().map_or(0, |value| value.0);
+    let stable_queries = verify_frontier_versions(eu, cfg, memory_definitions, &queries)?;
+    memory.after_frontier_version_verification_kib =
+        resident_memory_kib().map_or(0, |value| value.0);
     for candidate in candidates {
         let demand = &mut demands[candidate.demand];
         if candidate
@@ -1881,192 +1916,81 @@ fn classify_demand_plans(
                 .insert(FailurePredicates::REMATERIALIZATION_MORE_EXPENSIVE);
         }
     }
-    Ok(())
+    Ok(memory)
 }
 
 fn verify_frontier_versions(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
     definitions: &BTreeMap<ProgramPoint, MemoryDefinition>,
-    endpoints: &BTreeMap<RegionedAbsoluteAddr, Vec<usize>>,
     queries: &[FrontierQuery],
 ) -> Result<Vec<bool>, FeasibilityError> {
-    let mut result = vec![false; queries.len()];
-    if queries.is_empty() {
-        return Ok(result);
-    }
     let queried_objects = queries
         .iter()
         .map(|query| query.range.object)
         .collect::<BTreeSet<_>>();
-    let mut synthetic = BTreeMap::<(BlockId, usize), Vec<usize>>::new();
-    for (id, query) in queries.iter().enumerate() {
-        synthetic
-            .entry((query.target.block, query.target.instruction))
-            .or_default()
-            .push(id);
-    }
-    let mut events_by_object = queried_objects
+    let query_points = queries
         .iter()
-        .copied()
-        .map(|object| {
-            (
-                object,
-                Vec::<(usize, Event<RegionedAbsoluteAddr, ProgramPoint, Usage>)>::new(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+        .flat_map(|query| [query.original, query.target])
+        .collect::<BTreeSet<_>>();
+    let mut events =
+        vec![Vec::<MemoryAccessEvent<MemoryDefinition, ProgramPoint>>::new(); cfg.block_ids.len()];
     for (block, &block_id) in cfg.block_ids.iter().enumerate() {
-        for (instruction, inst) in eu.blocks[&block_id].instructions.iter().enumerate() {
-            if let Some(ids) = synthetic.get(&(block_id, instruction)) {
-                for &id in ids {
-                    let object = queries[id].range.object;
-                    events_by_object.get_mut(&object).unwrap().push((
-                        block,
-                        Event::Use {
-                            variable: object,
-                            usage: Usage::Frontier(id),
-                        },
-                    ));
-                }
-            }
+        for instruction in 0..eu.blocks[&block_id].instructions.len() {
             let point = ProgramPoint {
                 block: block_id,
                 instruction,
             };
-            match inst {
-                SIRInstruction::Load(_, object, _, _)
-                    if queried_objects.contains(object) && object.region == STABLE_REGION =>
-                {
-                    events_by_object.get_mut(object).unwrap().push((
-                        block,
-                        Event::Use {
-                            variable: *object,
-                            usage: Usage::Load(point),
-                        },
-                    ));
-                }
-                SIRInstruction::Store(object, _, _, _, _, _)
-                    if queried_objects.contains(object) && object.region == STABLE_REGION =>
-                {
-                    let events = events_by_object.get_mut(object).unwrap();
-                    events.push((
-                        block,
-                        Event::Use {
-                            variable: *object,
-                            usage: Usage::DefinitionInput(point),
-                        },
-                    ));
-                    events.push((
-                        block,
-                        Event::Definition {
-                            variable: *object,
-                            definition: point,
-                        },
-                    ));
-                }
-                SIRInstruction::Commit(_, destination, _, _, _)
-                    if queried_objects.contains(destination)
-                        && destination.region == STABLE_REGION =>
-                {
-                    let events = events_by_object.get_mut(destination).unwrap();
-                    events.push((
-                        block,
-                        Event::Use {
-                            variable: *destination,
-                            usage: Usage::DefinitionInput(point),
-                        },
-                    ));
-                    events.push((
-                        block,
-                        Event::Definition {
-                            variable: *destination,
-                            definition: point,
-                        },
-                    ));
-                }
-                _ => {}
+            let definition = definitions
+                .get(&point)
+                .copied()
+                .filter(|definition| queried_objects.contains(&definition_object(*definition)));
+            if definition.is_some() || query_points.contains(&point) {
+                events[block].push(MemoryAccessEvent { point, definition });
             }
         }
     }
-
-    let mut queries_by_object = BTreeMap::<RegionedAbsoluteAddr, Vec<usize>>::new();
+    let (graph, points) = memory_ssa::build(cfg, &events).map_err(FeasibilityError::MemorySsa)?;
+    let mut queries_by_range = BTreeMap::<BitRange, Vec<usize>>::new();
     for (id, query) in queries.iter().enumerate() {
-        queries_by_object
-            .entry(query.range.object)
-            .or_default()
-            .push(id);
+        queries_by_range.entry(query.range).or_default().push(id);
     }
-    for (object, object_queries) in queries_by_object {
-        let sparse_events = events_by_object.remove(&object).unwrap();
-        let definition_points = sparse_events
-            .iter()
-            .filter_map(|(_, event)| match event {
-                Event::Definition { definition, .. } => Some(*definition),
-                Event::Use { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        let mut events = vec![
-            Vec::<Event<RegionedAbsoluteAddr, ProgramPoint, Usage>>::new();
-            cfg.block_ids.len()
-        ];
-        for (block, event) in sparse_events {
-            events[block].push(event);
-        }
-        let state_ssa = ssa::build(cfg, &events).map_err(FeasibilityError::StateSsa)?;
-        let definition_inputs = definition_points
-            .into_iter()
-            .map(|point| {
-                state_ssa
-                    .uses
-                    .get(&Usage::DefinitionInput(point))
-                    .copied()
-                    .map(|version| (point, version))
-                    .ok_or(FeasibilityError::InvalidMemoryGraph(
-                        "frontier definition has no incoming object version",
-                    ))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let mut resolver =
-            DemandResolver::new(&state_ssa, endpoints, definitions, &definition_inputs);
-        for id in object_queries {
+    let mut result = vec![false; queries.len()];
+    let mut walker = ClobberWalker::new();
+    for (range, query_ids) in queries_by_range {
+        let mut clobbers = walker.query(&graph, &range, &memory_definition_aliases_range);
+        for id in query_ids {
             let query = queries[id];
-            let original = state_ssa
-                .uses
-                .get(&Usage::Load(query.original))
-                .copied()
+            let original =
+                points
+                    .event(query.original)
+                    .ok_or(FeasibilityError::InvalidMemoryGraph(
+                        "frontier load has no MemorySSA coordinate",
+                    ))?;
+            let target = points
+                .event(query.target)
                 .ok_or(FeasibilityError::InvalidMemoryGraph(
-                    "frontier load has no reaching object version",
+                    "frontier target has no MemorySSA coordinate",
                 ))?;
-            let target = state_ssa.uses.get(&Usage::Frontier(id)).copied().ok_or(
-                FeasibilityError::InvalidMemoryGraph(
-                    "frontier target has no reaching object version",
-                ),
-            )?;
-            let original = resolver.resolve(DemandKey {
-                version: original,
-                range: query.range,
-            })?;
-            let target = resolver.resolve(DemandKey {
-                version: target,
-                range: query.range,
-            })?;
-            verify_resolved_pieces(
-                query.range,
-                &original,
-                definitions,
-                &resolver.stats.phi_sources,
-            )?;
-            verify_resolved_pieces(
-                query.range,
-                &target,
-                definitions,
-                &resolver.stats.phi_sources,
-            )?;
-            result[id] = original == target;
+            result[id] = matches!(
+                (clobbers.clobber(original.before), clobbers.clobber(target.before)),
+                (
+                    Some(MemoryClobber::Access(original)),
+                    Some(MemoryClobber::Access(target))
+                ) if original == target
+            );
         }
     }
     Ok(result)
+}
+
+fn memory_definition_aliases_range(definition: &MemoryDefinition, query: &BitRange) -> bool {
+    match definition.kind {
+        DefinitionKind::Exact(range) => {
+            range.object == query.object && range.start < query.end && query.start < range.end
+        }
+        DefinitionKind::UnknownObject(object) => object == query.object,
+    }
 }
 
 fn classify_candidate_source(

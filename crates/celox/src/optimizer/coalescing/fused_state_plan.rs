@@ -90,7 +90,7 @@ pub(super) enum DemandPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum KeepReason {
-    UnsupportedMemoryPhi,
+    UnsupportedMemoryPhiMaterialization,
     UnsupportedRecipe,
     ProducerNotPure,
     NoLegalPlacement,
@@ -138,10 +138,13 @@ pub(super) struct MaterializationSiteId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct UseClusterId(usize);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MaterializationId(usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MaterializationLeaf {
     #[expect(dead_code, reason = "constants remain explicit in the initial cone")]
-    Constant { register: RegisterId },
+    Constant { words: Vec<u64>, width: usize },
     DominatingSsa {
         register: RegisterId,
         definition_block: BlockId,
@@ -153,7 +156,9 @@ pub(super) enum MaterializationLeaf {
     )]
     ReloadPreservedHome {
         site: MaterializationSiteId,
+        store: ProgramPoint,
         version: StateVersionId,
+        insertion_point: ProgramPoint,
     },
     ReadPersistentState {
         register: RegisterId,
@@ -192,9 +197,28 @@ struct StateVersion {
 enum MaterializationSite {
     PublicBacking {
         id: MaterializationSiteId,
+        store: ProgramPoint,
         range: StateRange,
-        required_definitions: BTreeSet<ProgramPoint>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PreservedHome {
+    site: MaterializationSiteId,
+    store: ProgramPoint,
+    version: StateVersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractMergeFragment {
+    output_range: StateRange,
+    version: StateVersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractMergeRecipe {
+    output_range: StateRange,
+    fragments: Vec<ExtractMergeFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,9 +226,10 @@ enum SourceAction {
     DirectForward,
     Rematerialize,
     KeepPackedReload {
-        site: MaterializationSiteId,
         original_load: ProgramPoint,
-        extract_range: StateRange,
+        preserved_homes: Vec<PreservedHome>,
+        state_versions: Vec<StateVersionId>,
+        extract_merge_recipe: ExtractMergeRecipe,
     },
 }
 
@@ -231,6 +256,7 @@ enum ExitAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UseClusterPlan {
     id: UseClusterId,
+    materialization: MaterializationId,
     load: ProgramPoint,
     versions: Vec<StateVersionId>,
     source: SourceAction,
@@ -289,6 +315,7 @@ struct MaterializationModel {
 enum StoreDependent {
     Version(StateVersionId),
     Site(MaterializationSiteId),
+    Cluster(UseClusterId),
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -582,13 +609,15 @@ fn build_model(
     publications: &[PublicationFact],
 ) -> Result<MaterializationModel, PlanError> {
     let mut model = MaterializationModel::default();
+    let mut definition_sites = BTreeMap::new();
     for definition in definitions.values() {
         let id = MaterializationSiteId(model.sites.len());
         model.sites.push(MaterializationSite::PublicBacking {
             id,
+            store: definition.point,
             range: definition.stored_range,
-            required_definitions: BTreeSet::from([definition.point]),
         });
+        definition_sites.insert(definition.point, id);
         model
             .contracts
             .entry(definition.point.block)
@@ -601,7 +630,8 @@ fn build_model(
             return Err(PlanError::EmptyDemand(demand.load));
         }
         let mut cluster_versions = Vec::with_capacity(demand.fragments.len());
-        let mut required_definitions = BTreeSet::new();
+        let mut preserved_homes = BTreeSet::new();
+        let mut extract_fragments = Vec::with_capacity(demand.fragments.len());
         for fragment in &demand.fragments {
             let mut inputs = Vec::with_capacity(fragment.reaching_definitions.len());
             for point in &fragment.reaching_definitions {
@@ -625,7 +655,11 @@ fn build_model(
                     },
                 });
                 inputs.push(id);
-                required_definitions.insert(*point);
+                preserved_homes.insert(PreservedHome {
+                    site: definition_sites[point],
+                    store: *point,
+                    version: id,
+                });
             }
             if inputs.is_empty() {
                 return Err(PlanError::EmptyDemand(demand.load));
@@ -642,28 +676,32 @@ fn build_model(
                 id
             };
             cluster_versions.push(version);
+            extract_fragments.push(ExtractMergeFragment {
+                output_range: fragment.range,
+                version,
+            });
         }
 
         let source = match demand.plan {
             DemandPlan::DirectForward => SourceAction::DirectForward,
             DemandPlan::Rematerialize => SourceAction::Rematerialize,
             DemandPlan::KeepPackedReload => {
-                let site_id = MaterializationSiteId(model.sites.len());
-                model.sites.push(MaterializationSite::PublicBacking {
-                    id: site_id,
-                    range: demand.range,
-                    required_definitions,
-                });
-                model
-                    .contracts
-                    .entry(demand.load.block)
-                    .or_default()
-                    .reload_at_entry
-                    .insert(site_id);
+                for home in &preserved_homes {
+                    model
+                        .contracts
+                        .entry(demand.load.block)
+                        .or_default()
+                        .reload_at_entry
+                        .insert(home.site);
+                }
                 SourceAction::KeepPackedReload {
-                    site: site_id,
                     original_load: demand.load,
-                    extract_range: demand.range,
+                    preserved_homes: preserved_homes.into_iter().collect(),
+                    state_versions: cluster_versions.clone(),
+                    extract_merge_recipe: ExtractMergeRecipe {
+                        output_range: demand.range,
+                        fragments: extract_fragments,
+                    },
                 }
             }
         };
@@ -689,6 +727,7 @@ fn build_model(
         }
         model.clusters.push(UseClusterPlan {
             id: cluster_id,
+            materialization: MaterializationId(cluster_id.0),
             load: demand.load,
             versions: cluster_versions,
             source,
@@ -731,6 +770,7 @@ fn verify_model(
     model: &MaterializationModel,
     publications: &BTreeSet<(ProgramPoint, StateRange)>,
 ) -> Result<(), PlanError> {
+    let mut materializations = BTreeSet::new();
     let commit_barriers = model
         .effects
         .iter()
@@ -784,13 +824,66 @@ fn verify_model(
         }));
     }
     for cluster in &model.clusters {
-        if cluster.versions.is_empty() {
+        if cluster.versions.is_empty() || !materializations.insert(cluster.materialization) {
             return Err(PlanError::ImplicitHome(cluster.id));
         }
         match &cluster.source {
-            SourceAction::KeepPackedReload { site, .. } => {
-                if site.0 >= model.sites.len() {
-                    return Err(PlanError::MissingMaterialization(*site));
+            SourceAction::KeepPackedReload {
+                original_load,
+                preserved_homes,
+                state_versions,
+                extract_merge_recipe,
+            } => {
+                if *original_load != cluster.load
+                    || preserved_homes.is_empty()
+                    || state_versions != &cluster.versions
+                    || extract_merge_recipe.fragments.len() != cluster.versions.len()
+                    || extract_merge_recipe
+                        .fragments
+                        .iter()
+                        .map(|fragment| fragment.version)
+                        .ne(cluster.versions.iter().copied())
+                    || !recipe_exactly_covers_output(extract_merge_recipe, &model.versions)
+                {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
+                for home in preserved_homes {
+                    let Some(MaterializationSite::PublicBacking { id, store, range }) =
+                        model.sites.get(home.site.0)
+                    else {
+                        return Err(PlanError::MissingMaterialization(home.site));
+                    };
+                    if *id != home.site
+                        || *store != home.store
+                        || !matches!(
+                            model.versions.get(home.version.0),
+                            Some(StateVersion {
+                                recipe: DefiningRecipe::StoredValue {
+                                    definition,
+                                    stored_range,
+                                    ..
+                                },
+                                ..
+                            }) if *definition == home.store && stored_range == range
+                        )
+                    {
+                        return Err(PlanError::ImplicitHome(cluster.id));
+                    }
+                }
+                let named_versions = preserved_homes
+                    .iter()
+                    .map(|home| home.version)
+                    .collect::<BTreeSet<_>>();
+                let mut required_versions = BTreeSet::new();
+                for version in &cluster.versions {
+                    collect_stored_leaf_versions(
+                        *version,
+                        &model.versions,
+                        &mut required_versions,
+                    )?;
+                }
+                if named_versions != required_versions {
+                    return Err(PlanError::ImplicitHome(cluster.id));
                 }
             }
             SourceAction::DirectForward | SourceAction::Rematerialize => {}
@@ -812,12 +905,43 @@ fn verify_model(
                 } if insertion_point.block != cluster.load.block => {
                     return Err(PlanError::ImplicitHome(cluster.id));
                 }
-                MaterializationLeaf::ReloadPreservedHome { site, version } => {
-                    if site.0 >= model.sites.len() || version.0 >= model.versions.len() {
+                MaterializationLeaf::ReloadPreservedHome {
+                    site,
+                    store,
+                    version,
+                    insertion_point,
+                } => {
+                    if insertion_point.block != cluster.load.block
+                        || !matches!(
+                            model.sites.get(site.0),
+                            Some(MaterializationSite::PublicBacking {
+                                id,
+                                store: site_store,
+                                ..
+                            }) if id == site && site_store == store
+                        )
+                        || !matches!(
+                            model.versions.get(version.0),
+                            Some(StateVersion {
+                                recipe: DefiningRecipe::StoredValue { definition, .. },
+                                ..
+                            }) if definition == store
+                        )
+                    {
                         return Err(PlanError::ImplicitHome(cluster.id));
                     }
                 }
-                MaterializationLeaf::ControlMerge { inputs } if inputs.is_empty() => {
+                MaterializationLeaf::ControlMerge { inputs }
+                    if inputs.is_empty()
+                        || inputs
+                            .iter()
+                            .any(|version| version.0 >= model.versions.len()) =>
+                {
+                    return Err(PlanError::ImplicitHome(cluster.id));
+                }
+                MaterializationLeaf::Constant { words, width }
+                    if *width == 0 || words.len() < width.div_ceil(64) =>
+                {
                     return Err(PlanError::ImplicitHome(cluster.id));
                 }
                 MaterializationLeaf::Constant { .. }
@@ -878,6 +1002,45 @@ fn verify_model(
     Ok(())
 }
 
+fn recipe_exactly_covers_output(recipe: &ExtractMergeRecipe, versions: &[StateVersion]) -> bool {
+    let mut next = recipe.output_range.start;
+    for fragment in &recipe.fragments {
+        if fragment.output_range.object != recipe.output_range.object
+            || fragment.output_range.start != next
+            || fragment.output_range.end <= fragment.output_range.start
+            || !matches!(
+                versions.get(fragment.version.0),
+                Some(version) if version.range == fragment.output_range
+            )
+        {
+            return false;
+        }
+        next = fragment.output_range.end;
+    }
+    next == recipe.output_range.end
+}
+
+fn collect_stored_leaf_versions(
+    version: StateVersionId,
+    versions: &[StateVersion],
+    leaves: &mut BTreeSet<StateVersionId>,
+) -> Result<(), PlanError> {
+    let state = versions
+        .get(version.0)
+        .ok_or(PlanError::ForwardVersionReference(version))?;
+    match &state.recipe {
+        DefiningRecipe::StoredValue { .. } => {
+            leaves.insert(version);
+        }
+        DefiningRecipe::ControlMerge { inputs } => {
+            for input in inputs {
+                collect_stored_leaf_versions(*input, versions, leaves)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_store_dependents(
     model: &MaterializationModel,
 ) -> BTreeMap<ProgramPoint, BTreeSet<StoreDependent>> {
@@ -892,17 +1055,24 @@ fn collect_store_dependents(
     }
     for site in &model.sites {
         match site {
-            MaterializationSite::PublicBacking {
-                id,
-                required_definitions,
-                ..
-            } => {
-                for definition in required_definitions {
-                    dependents
-                        .entry(*definition)
-                        .or_default()
-                        .insert(StoreDependent::Site(*id));
-                }
+            MaterializationSite::PublicBacking { id, store, .. } => {
+                dependents
+                    .entry(*store)
+                    .or_default()
+                    .insert(StoreDependent::Site(*id));
+            }
+        }
+    }
+    for cluster in &model.clusters {
+        if let SourceAction::KeepPackedReload {
+            preserved_homes, ..
+        } = &cluster.source
+        {
+            for home in preserved_homes {
+                dependents
+                    .entry(home.store)
+                    .or_default()
+                    .insert(StoreDependent::Cluster(cluster.id));
             }
         }
     }
@@ -938,6 +1108,30 @@ fn verify_repair(old: SourceAction, new: SourceAction) -> Result<(), PlanError> 
         return Err(PlanError::RepairCycle);
     }
     Ok(())
+}
+
+fn placeholder_packed_reload(
+    point: ProgramPoint,
+    range: StateRange,
+    site: MaterializationSiteId,
+) -> SourceAction {
+    let version = StateVersionId(0);
+    SourceAction::KeepPackedReload {
+        original_load: point,
+        preserved_homes: vec![PreservedHome {
+            site,
+            store: point,
+            version,
+        }],
+        state_versions: vec![version],
+        extract_merge_recipe: ExtractMergeRecipe {
+            output_range: range,
+            fragments: vec![ExtractMergeFragment {
+                output_range: range,
+                version,
+            }],
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1031,19 +1225,11 @@ fn verify_repair_relation() -> Result<(), PlanError> {
     verify_repair(SourceAction::DirectForward, SourceAction::Rematerialize)?;
     verify_repair(
         SourceAction::DirectForward,
-        SourceAction::KeepPackedReload {
-            site: placeholder,
-            original_load: point,
-            extract_range: range,
-        },
+        placeholder_packed_reload(point, range, placeholder),
     )?;
     verify_repair(
         SourceAction::Rematerialize,
-        SourceAction::KeepPackedReload {
-            site: placeholder,
-            original_load: point,
-            extract_range: range,
-        },
+        placeholder_packed_reload(point, range, placeholder),
     )?;
     verify_plan_repair(
         &[BTreeSet::from([
@@ -1132,10 +1318,120 @@ mod tests {
         }];
         let summary = build_and_verify(&one_block_cfg(), &definitions, &demands, &[]).unwrap();
         assert_eq!(summary.versions, 1);
-        assert_eq!(summary.sites, 2);
+        assert_eq!(summary.sites, 1);
         assert_eq!(summary.verified_uses, 1);
         assert_eq!(summary.invalidated_store_deletions, 1);
         assert!(summary.verifier_passed);
+    }
+
+    #[test]
+    fn packed_reload_names_every_memory_phi_store_and_version() {
+        let first = DefinitionFact {
+            point: point(0),
+            source: RegisterId(0),
+            stored_range: range(),
+        };
+        let second = DefinitionFact {
+            point: point(1),
+            source: RegisterId(1),
+            stored_range: range(),
+        };
+        let definitions = BTreeMap::from([(first.point, first), (second.point, second)]);
+        let demands = [DemandFact {
+            load: point(2),
+            range: range(),
+            fragments: vec![FragmentFact {
+                range: range(),
+                reaching_definitions: BTreeSet::from([point(0), point(1)]),
+            }],
+            plan: DemandPlan::KeepPackedReload,
+            producer_block_distance: 0,
+            loop_depth_delta: 0,
+            rematerialization_cone_instructions: 0,
+            producer_shared_uses: 0,
+            keep_reason: Some(KeepReason::UnsupportedMemoryPhiMaterialization),
+            failure_predicates: FailurePredicates::default(),
+            materialization_leaves: Vec::new(),
+            direct_forward: None,
+        }];
+        let model = build_model(&definitions, &demands, &[]).unwrap();
+        let SourceAction::KeepPackedReload {
+            preserved_homes,
+            state_versions,
+            extract_merge_recipe,
+            ..
+        } = &model.clusters[0].source
+        else {
+            panic!("the demand must retain its packed reload");
+        };
+        assert_eq!(preserved_homes.len(), 2);
+        assert_eq!(
+            preserved_homes
+                .iter()
+                .map(|home| home.store)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([point(0), point(1)])
+        );
+        assert_eq!(state_versions.len(), 1);
+        assert!(matches!(
+            model.versions[state_versions[0].0].recipe,
+            DefiningRecipe::ControlMerge { .. }
+        ));
+        assert_eq!(extract_merge_recipe.fragments.len(), 1);
+        assert!(verify_model(&one_block_cfg(), &model, &BTreeSet::new()).is_ok());
+        assert!(matches!(
+            verify_store_deletion(&model, point(0)),
+            Err(PlanError::PreservedStoreDeleted(deleted)) if deleted == point(0)
+        ));
+        assert!(matches!(
+            verify_store_deletion(&model, point(1)),
+            Err(PlanError::PreservedStoreDeleted(deleted)) if deleted == point(1)
+        ));
+    }
+
+    #[test]
+    fn packed_reload_rejects_an_incomplete_preserved_home_set() {
+        let first = DefinitionFact {
+            point: point(0),
+            source: RegisterId(0),
+            stored_range: range(),
+        };
+        let second = DefinitionFact {
+            point: point(1),
+            source: RegisterId(1),
+            stored_range: range(),
+        };
+        let definitions = BTreeMap::from([(first.point, first), (second.point, second)]);
+        let demands = [DemandFact {
+            load: point(2),
+            range: range(),
+            fragments: vec![FragmentFact {
+                range: range(),
+                reaching_definitions: BTreeSet::from([point(0), point(1)]),
+            }],
+            plan: DemandPlan::KeepPackedReload,
+            producer_block_distance: 0,
+            loop_depth_delta: 0,
+            rematerialization_cone_instructions: 0,
+            producer_shared_uses: 0,
+            keep_reason: Some(KeepReason::UnsupportedMemoryPhiMaterialization),
+            failure_predicates: FailurePredicates::default(),
+            materialization_leaves: Vec::new(),
+            direct_forward: None,
+        }];
+        let mut model = build_model(&definitions, &demands, &[]).unwrap();
+        let SourceAction::KeepPackedReload {
+            preserved_homes, ..
+        } = &mut model.clusters[0].source
+        else {
+            panic!("the demand must retain its packed reload");
+        };
+        preserved_homes.pop();
+        model.store_dependents = collect_store_dependents(&model);
+        assert_eq!(
+            verify_model(&one_block_cfg(), &model, &BTreeSet::new()),
+            Err(PlanError::ImplicitHome(UseClusterId(0)))
+        );
     }
 
     #[test]
@@ -1144,21 +1440,13 @@ mod tests {
         assert!(
             verify_repair(
                 SourceAction::Rematerialize,
-                SourceAction::KeepPackedReload {
-                    site: MaterializationSiteId(0),
-                    original_load: point(1),
-                    extract_range: range(),
-                }
+                placeholder_packed_reload(point(1), range(), MaterializationSiteId(0))
             )
             .is_ok()
         );
         assert_eq!(
             verify_repair(
-                SourceAction::KeepPackedReload {
-                    site: MaterializationSiteId(0),
-                    original_load: point(1),
-                    extract_range: range(),
-                },
+                placeholder_packed_reload(point(1), range(), MaterializationSiteId(0)),
                 SourceAction::DirectForward
             ),
             Err(PlanError::RepairCycle)
