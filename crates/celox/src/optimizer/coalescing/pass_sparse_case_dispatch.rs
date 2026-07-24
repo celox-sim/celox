@@ -481,7 +481,14 @@ fn recognize_sparse_case_chain(
     let direct_switch = selector_width <= 8;
     let mut reachable = HashSet::default();
     if direct_switch {
-        reachable.insert(0);
+        let domain_size = 1usize.checked_shl(selector_width as u32)?;
+        // An exhaustive direct switch has no semantic default value. Do not
+        // manufacture an orphan block for the Mux spine's initial value:
+        // native jump-table lowering correctly has no table entry which can
+        // reach it.
+        if cases.len() < domain_size {
+            reachable.insert(0);
+        }
         reachable.extend(cases.iter().map(|(_, arm)| *arm));
     } else {
         reachable.insert(initial_arm);
@@ -683,9 +690,17 @@ fn match_exact_case_condition_inner_impl(
     while seen.insert(cursor) {
         let inst = instruction_defining(eu, def_sites, cursor)?;
         match inst {
-            SIRInstruction::Unary(dst, UnaryOp::Ident, inner) => {
-                if eu.register_map.get(dst)?.width() == 0
-                    || eu.register_map.get(inner)?.width() == 0
+            SIRInstruction::Unary(
+                dst,
+                UnaryOp::Ident | UnaryOp::Or | UnaryOp::ToTwoState,
+                inner,
+            ) => {
+                let destination_width = eu.register_map.get(dst)?.width();
+                let source_width = eu.register_map.get(inner)?.width();
+                if destination_width == 0
+                    || source_width == 0
+                    || (!matches!(inst, SIRInstruction::Unary(_, UnaryOp::Ident, _))
+                        && (destination_width != 1 || source_width != 1))
                 {
                     return None;
                 }
@@ -1286,6 +1301,7 @@ fn is_exact_condition_dag_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr
                 _,
             )
             | SIRInstruction::Unary(_, UnaryOp::Ident, _)
+            | SIRInstruction::Unary(_, UnaryOp::Or | UnaryOp::ToTwoState, _)
             | SIRInstruction::Concat(..)
             | SIRInstruction::Slice(..)
     )
@@ -1541,6 +1557,18 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
     }
 
     let (decision_instructions, decision_terminator) = if plan.direct_switch {
+        let default_arm = if arm_blocks.contains_key(&0) {
+            0
+        } else {
+            // Every selector value has an explicit case. SIR retains a
+            // syntactic default target, but it is semantically unreachable;
+            // point it at an already reachable arm instead of creating an
+            // orphan CFG block which jump-table lowering cannot target.
+            plan.cases
+                .first()
+                .map(|(_, arm)| *arm)
+                .expect("a direct sparse dispatch has at least two cases")
+        };
         (
             Vec::new(),
             SIRTerminator::Switch {
@@ -1553,7 +1581,7 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
                         target: arm_blocks[arm],
                     })
                     .collect(),
-                default: arm_blocks[&0],
+                default: arm_blocks[&default_arm],
             },
         )
     } else {
@@ -2588,6 +2616,64 @@ mod tests {
 
         assert_eq!(eu.blocks, original.blocks);
         assert_eq!(eu.register_map, original.register_map);
+    }
+
+    #[test]
+    fn recognizes_two_state_one_bit_predicate_normalization() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(1, factor);
+        for key in 0..8 {
+            let comparison = builder.exact_condition(selector, key * 2, BinaryOp::EqWildcard);
+            let reduced = builder.register(1);
+            builder
+                .instructions
+                .push(SIRInstruction::Unary(reduced, UnaryOp::Or, comparison));
+            let condition = builder.register(1);
+            builder.instructions.push(SIRInstruction::Unary(
+                condition,
+                UnaryOp::ToTwoState,
+                reduced,
+            ));
+            let value = builder.expensive_value(20 + key, factor);
+            previous = builder.mux(condition, value, previous);
+        }
+        builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Switch { .. }
+        ));
+    }
+
+    #[test]
+    fn exhaustive_nonconstant_switch_does_not_create_an_orphan_default_arm() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(100, factor);
+        for key in 0..16 {
+            let condition = builder.exact_condition(selector, key, BinaryOp::EqWildcard);
+            let value = builder.expensive_value(200 + key, factor);
+            previous = builder.mux(condition, value, previous);
+        }
+        builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        let SIRTerminator::Switch { cases, default, .. } = &eu.blocks[&BlockId(0)].terminator
+        else {
+            panic!("full nonconstant case chain should become a switch");
+        };
+        assert_eq!(cases.len(), 16);
+        assert!(cases.iter().any(|case| case.target == *default));
     }
 
     #[test]

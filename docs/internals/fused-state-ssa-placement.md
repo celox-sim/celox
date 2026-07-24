@@ -2190,6 +2190,51 @@ pass would additionally reintroduce repeated whole-function analyses on a
 sink/effect rooted and must construct closed control-pure regions from the
 fused StateSSA/CFG contract, rather than replay source-level mux patterns.
 
+### Running sparse case dispatch before the main CFG pipeline
+
+An early-placement experiment taught `SparseCaseDispatchPass` to recognize the
+actual two-state predicate normalization emitted by the parser:
+
+```text
+logic<1> EqWildcard
+  -> logic<1> reduction Or
+  -> bit<1> ToTwoState
+  -> Mux
+```
+
+`EqWildcard` already has a one-bit result in this IR. The reduction on one bit
+is an identity in two-state mode; `ToTwoState` changes the declared domain, not
+the predicate width. A wider comparison-result hypothesis was therefore
+incorrect and is not part of the design.
+
+The predicate recognition is independently valid, but placing sparse dispatch
+before `GuardedRegionSinking` and the main `BranchifyMux` pass is not. Exact
+`rv64ui_add` traces used byte-identical pre-optimized SIR:
+
+```text
+pre-optimized SIR SHA-256
+b5a1d89c3dff582501ccb9c818d8a9d1483f607e88e90af5e61676146d0ab370
+
+late-only Switch terminators        23
+early-placement Switch terminators  73
+```
+
+The early form converted not only the intended long ALU selector spine but
+also dense integer-decode and compressed-instruction Mux regions before the
+later CFG transforms. The complete native SIR verifier and MIR verifier
+accepted the result, but the unchanged test workload ended with `tohost=0`.
+With the early invocation removed, while retaining the predicate recognizer
+and the existing late invocation, the same workload completed with `tohost=1`
+and `PASS`.
+
+The experiment is therefore rejected. A locally equivalent Mux-to-Switch
+rewrite is not sufficient authorization to expose dozens of new multi-way CFG
+regions to passes whose placement, edge-copy, and repair contracts were
+constructed for the existing CFG. This also confirms the design requirement
+above: selector reconstruction must be sink-rooted and verified as one closed
+control/effect recipe at its final placement point. It must not be obtained by
+moving a syntactic source-level dispatch earlier in the generic pipeline.
+
 ## Related documents
 
 - [Native throughput execution plan](./native-throughput-execution-plan.md)
