@@ -1763,6 +1763,51 @@ semantic feasibility, not profitability. The next implementation must replace
 the scalar lane loop with the planned bit-plane/SIMD chunk schedule and then
 repeat generated-code, execution-time, RTL, and Linux gates.
 
+#### Aggregate lowering profitability correction
+
+The executable lowering invalidated the earlier 844-instruction aggregate
+estimate as a final-machine-code estimate. The two scalar reference roots
+expand to 6,230 and 7,990 x86 instructions. The recipe contains mixed
+64-, 32-, 13-, 12-, 5-, 3-, 2-, and 1-bit lane values; the estimate charged
+idealized exact-width packed operations which do not directly exist in the
+emitter.
+
+An opt-in hybrid probe represented predicates as one GPR bit per RTL lane and
+wider values as 8-, 16-, 32-, or 64-bit SSE lanes. It folded the regular
+packed-extract/one-bit-mask prefix and reduced the two expansions to 2,517 and
+2,934 instructions. The unchanged Linux workload still showed no execution
+improvement:
+
+| lowering | compile time | generated execution |
+|---|---:|---:|
+| scalar reference | 80.895 s | 64.173 s |
+| hybrid SIMD probe | 79.773 s | 64.651 s |
+
+Both runs reached the exact `cy=9ae070 x3=aa pass=1` marker. The 0.48-second
+regression is within the scale at which another run would be needed to rank
+two production candidates, but it is sufficient to reject this much larger
+implementation as an optimization: it provides no positive signal.
+
+A fresh `cycles:u` profile explains the result. The JIT code accounts for
+45.77% of samples in the combined compile-and-execute recording. The aggregate
+root block accounts for 0.34% of total samples, or approximately 0.74% of JIT
+samples; the other root rounds to 0.00%. Even perfect elimination of this
+region cannot explain the remaining Veryl throughput gap.
+
+The shared-prefix estimate also assumed a lowering contract which is not yet
+present. The current two root pseudos are in mutually exclusive successor
+blocks and independently emit their 57-node common prefix. Sharing it requires
+an explicit control-pure region carrying the original branch guard and
+placement proof; ordinary CSE must not infer that region. This mismatch does
+not alter the profile bound: eliminating all duplicate prefix work would
+still affect less than one percent of generated execution.
+
+The aggregate path therefore fails the dynamic profitability gate and is not
+production-enabled. The scalar reference remains useful as an executable
+semantic oracle for the verified recipe, but further optimization work moves
+to the actually hot control and RAM paths. Future aggregate work requires new
+profile evidence, not a looser static cost model.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
