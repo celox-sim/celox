@@ -1524,13 +1524,33 @@ candidate, not generic GVN: its eventual placement must still prove that all
 inputs dominate the common block and must preserve distinct branch-local
 suffixes.
 
-The 844-to-1,279 SIR comparison is encouraging but is not the final gate
-because its units differ: 844 estimates emitted host instructions while 1,279
-counts eliminated SIR definitions. The production gate must compare the
-shared recipe against the covered post-ISel/post-allocation machine work,
-including removed reloads and spills. Until that comparison or an executable
-A/B exists, this result authorizes code-generation design but not enabling a
-rewrite.
+The planner now carries the exact set of SIR registers replaced by both roots
+through ISel. Backend-only temporary VRegs are included by taking the closed
+backward slice through extra definitions and the closed forward slice through
+extra users. Replaced SIR values are seeds; unrelated preallocated SIR values
+are boundaries. Repeating the query after allocation includes allocator
+reloads and stores whose VReg lineage belongs to the slice.
+
+| attributed machine work | standalone comb | fused comb/apply |
+|---|---:|---:|
+| replaced SIR registers | 1,359 | 1,345 |
+| optimized pre-RA MIR slice | 1,333 | 1,333 |
+| post-RA MIR slice | 1,955 | 1,956 |
+| stack loads in post-RA slice | 447 | 448 |
+| stack stores in post-RA slice | 132 | 132 |
+| shared aggregate estimate | 844 | 844 |
+
+This is the first like-for-like static profitability gate. In the fused
+function the proposed region replaces 1,956 post-allocation instructions with
+an estimated 844, a reduction of 1,112 instructions (56.9%), while eliminating
+the represented 580 stack accesses. The estimate already includes mandatory
+state reads and packed publication work.
+
+The static gate therefore passes and authorizes an opt-in code-generation
+implementation. It does not authorize production enablement: the attributed
+slice and aggregate estimate both include both mutually exclusive suffixes,
+so an executable A/B must still verify instruction count, execution time, RTL
+equivalence, and Linux boot before the rewrite becomes a default.
 
 The executable source distinction remains a semantic lowering constraint even
 though this workload now selects `ReloadAtSink` for all nine nodes. The earlier

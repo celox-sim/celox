@@ -4259,6 +4259,7 @@ fn emit_chained_eu_groups(
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
+    let mut lane_aggregate_coverage = None;
     if let Some(mode) = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY") {
         let start = crate::timing::now();
         let report = crate::optimizer::coalescing::analyze_lane_aggregate_feasibility(
@@ -4272,6 +4273,10 @@ fn emit_chained_eu_groups(
             "[lane-aggregate-feasibility] label={label} {report} elapsed={:?}",
             start.elapsed()
         );
+        lane_aggregate_coverage = Some((
+            report.dead_scalar_registers().len(),
+            report.replaced_scalar_registers().clone(),
+        ));
         if mode != "summary" {
             for detail in report.detail_lines() {
                 eprintln!("[lane-aggregate-feasibility-detail] label={label} {detail}");
@@ -4355,6 +4360,16 @@ fn emit_chained_eu_groups(
     }
     if mir_stats {
         log_mir_stats(label, "after_mir_opt", &mfunc);
+    }
+    if let Some((dead_definitions, replaced_registers)) = &lane_aggregate_coverage {
+        let (defined, related, sink_uses, stack_loads, stack_stores) =
+            lane_aggregate_mir_coverage(&sir_eu, &mfunc, replaced_registers);
+        eprintln!(
+            "[lane-aggregate-mir-coverage] label={label} stage=before-regalloc dead_sir_defs={dead_definitions} replaced_sir_regs={} mir_defs={} mir_related={} mir_sink_uses={sink_uses} stack_loads={stack_loads} stack_stores={stack_stores}",
+            replaced_registers.len(),
+            defined,
+            related,
+        );
     }
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
@@ -4440,6 +4455,16 @@ fn emit_chained_eu_groups(
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }
+    if let Some((dead_definitions, replaced_registers)) = &lane_aggregate_coverage {
+        let (defined, related, sink_uses, stack_loads, stack_stores) =
+            lane_aggregate_mir_coverage(&sir_eu, &mfunc, replaced_registers);
+        eprintln!(
+            "[lane-aggregate-mir-coverage] label={label} stage=after-regalloc dead_sir_defs={dead_definitions} replaced_sir_regs={} mir_defs={} mir_related={} mir_sink_uses={sink_uses} stack_loads={stack_loads} stack_stores={stack_stores}",
+            replaced_registers.len(),
+            defined,
+            related,
+        );
+    }
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
@@ -4479,6 +4504,110 @@ fn mir_inst_count(func: &super::mir::MFunction) -> usize {
         .iter()
         .map(|block| block.phis.len() + block.insts.len())
         .sum()
+}
+
+fn lane_aggregate_mir_coverage(
+    sir: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+    mir: &super::mir::MFunction,
+    replaced: &crate::HashSet<crate::ir::RegisterId>,
+) -> (usize, usize, usize, usize, usize) {
+    use std::collections::VecDeque;
+
+    let mut registers = sir.register_map.keys().copied().collect::<Vec<_>>();
+    registers.sort_unstable_by_key(|register| register.0);
+    let preallocated_vregs = registers.len() as u32;
+    let replaced_vregs = registers
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, register)| {
+            replaced.contains(&register).then_some(VReg(
+                u32::try_from(index).expect("SIR VReg index must fit u32"),
+            ))
+        })
+        .collect::<crate::HashSet<_>>();
+    let instructions = mir
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .collect::<Vec<_>>();
+    let mut definitions_by_value = HashMap::<VReg, usize>::new();
+    let mut users_by_value = HashMap::<VReg, Vec<usize>>::new();
+    for (index, instruction) in instructions.iter().enumerate() {
+        if let Some(definition) = instruction.def() {
+            definitions_by_value.insert(definition, index);
+        }
+        for &operand in instruction.uses().iter() {
+            users_by_value.entry(operand).or_default().push(index);
+        }
+    }
+
+    let definitions = replaced_vregs
+        .iter()
+        .filter(|value| definitions_by_value.contains_key(value))
+        .count();
+    let mut tainted_values = replaced_vregs.clone();
+    let mut attributed_instructions = crate::HashSet::<usize>::default();
+    let mut backward = replaced_vregs.iter().copied().collect::<VecDeque<_>>();
+    while let Some(value) = backward.pop_front() {
+        let Some(&instruction_index) = definitions_by_value.get(&value) else {
+            continue;
+        };
+        if !attributed_instructions.insert(instruction_index) {
+            continue;
+        }
+        for &operand in instructions[instruction_index].uses().iter() {
+            if operand.0 >= preallocated_vregs && tainted_values.insert(operand) {
+                backward.push_back(operand);
+            }
+        }
+    }
+
+    let mut forward = tainted_values.iter().copied().collect::<VecDeque<_>>();
+    let mut sink_uses = 0usize;
+    while let Some(value) = forward.pop_front() {
+        for &instruction_index in users_by_value.get(&value).into_iter().flatten() {
+            let instruction = instructions[instruction_index];
+            match instruction.def() {
+                None => {
+                    if attributed_instructions.insert(instruction_index) {
+                        sink_uses += 1;
+                    }
+                }
+                Some(definition)
+                    if definition.0 >= preallocated_vregs
+                        || replaced_vregs.contains(&definition) =>
+                {
+                    attributed_instructions.insert(instruction_index);
+                    if tainted_values.insert(definition) {
+                        forward.push_back(definition);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let mut stack_loads = 0usize;
+    let mut stack_stores = 0usize;
+    for &index in &attributed_instructions {
+        match instructions[index] {
+            MInst::Load {
+                base: BaseReg::StackFrame,
+                ..
+            } => stack_loads += 1,
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                ..
+            } => stack_stores += 1,
+            _ => {}
+        }
+    }
+    (
+        definitions,
+        attributed_instructions.len(),
+        sink_uses,
+        stack_loads,
+        stack_stores,
+    )
 }
 
 fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {

@@ -208,6 +208,8 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     rejected: Vec<RejectedCandidate>,
     covered_scalar_definitions: usize,
     dead_scalar_definitions: usize,
+    dead_scalar_registers: HashSet<RegisterId>,
+    replaced_scalar_registers: HashSet<RegisterId>,
     summed_estimated_instructions: usize,
     unique_estimated_instructions: usize,
     shared_recipe_nodes: usize,
@@ -225,6 +227,14 @@ pub(crate) struct LaneAggregateFeasibilityReport {
 }
 
 impl LaneAggregateFeasibilityReport {
+    pub(crate) fn dead_scalar_registers(&self) -> &HashSet<RegisterId> {
+        &self.dead_scalar_registers
+    }
+
+    pub(crate) fn replaced_scalar_registers(&self) -> &HashSet<RegisterId> {
+        &self.replaced_scalar_registers
+    }
+
     pub(crate) fn detail_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for candidate in &self.accepted {
@@ -1878,7 +1888,7 @@ pub(crate) fn analyze(
         .flat_map(|candidate| candidate.covered_consumers.iter().copied())
         .collect::<HashSet<_>>();
     report.covered_scalar_definitions = covered.len();
-    report.dead_scalar_definitions = covered
+    report.dead_scalar_registers = covered
         .iter()
         .filter(|register| {
             placement
@@ -1890,7 +1900,13 @@ pub(crate) fn analyze(
                     })
                 })
         })
-        .count();
+        .copied()
+        .collect();
+    report.dead_scalar_definitions = report.dead_scalar_registers.len();
+    report.replaced_scalar_registers = report.dead_scalar_registers.clone();
+    report
+        .replaced_scalar_registers
+        .extend(covered_consumers.difference(&covered).copied());
     let shared_plan =
         build_shared_recipe_plan(&report.accepted).ok_or("invalid shared recipe plan")?;
     let total_nodes = report
