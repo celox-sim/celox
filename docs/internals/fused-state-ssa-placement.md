@@ -357,13 +357,20 @@ retaining only a `StateRead` kind:
 AggregateStateSource =
     ReloadAtSink(loads: ExactStateLoad[])
   | ReloadAtFrontier(block, loads: ExactStateLoad[])
-  | DominatingSSA(block, values: ValueId[])
+  | DominatingSSA(block, values: SsaLeaf[])
 
 ExactStateLoad {
     value_id
     register
     defining_instruction
     StateToken(fragment, slot, MemoryVersionId)
+}
+
+SsaLeaf {
+    value_id
+    register
+    defining_instruction
+    optional StateToken
 }
 ```
 
@@ -1437,10 +1444,11 @@ The traversal established these representation boundaries:
 2. A 13-bit value is formed as `Concat(zero, twelve_bit_value)` in all 32
    lanes. In a bit-sliced representation this adds one zero plane and should
    not emit 32 scalar Concats.
-3. The fused function reaches 32 one-bit reads of `var215` whose original
-   StateVersions are no longer present at either sink. There is also no common
-   dominator entry at which all 32 memory versions coexist. Reloading them at
-   the sink would therefore be a miscompile.
+3. The fused function reaches 32 one-bit reads of `var215`, `var216`,
+   `var217`, and `var218`. An initial analysis classified four aggregate nodes
+   as unversioned `DominatingSSA` leaves. This was not an RTL phase boundary:
+   placement StateSSA had invalidated a physical slot when two-state code used
+   both `bit` and `logic` register types for the same range.
 4. Those leaves occur under a control merge. In the standalone comb function
    the same frontier appears as 31 Mux definitions plus one EU-boundary
    parameter. The parameter is not unknown: it is a binary control phi. One
@@ -1455,11 +1463,13 @@ aggregate. This is a concrete `DominatingSSA` leaf at the merge block. The
 rule accepts at most two scalar holes in an otherwise homogeneous aggregate
 and records the earliest common dominating aggregate block.
 
-The 31 strided 64-bit Loads in the fused function are not rematerialized after
-the FF suffix. Their original SSA occurrences dominate the aggregate frontier,
-so the recipe consumes those occurrences there. This distinction makes the
-standalone and fused analyses reach the same next boundary without pretending
-that an obsolete StateVersion can be reloaded.
+Placement now has an explicit two-state storage mode. It normalizes `bit` and
+`logic` accesses of the same width to one value plane while retaining the
+strict type/plane distinction in four-state mode. MemorySSA then proves that
+all nine aggregate state nodes retain their exact versions at both publication
+sinks. The fused recipe therefore needs neither 32 long-lived scalar values
+nor a private capture buffer. The mode is an explicit analysis input; a
+four-state query cannot accidentally use this relaxation.
 
 On the release-equivalent Heliodor run, both publication roots now pass the
 two control merges and the load frontier. Both stop at the same 32-lane
@@ -1475,10 +1485,9 @@ recipe converts the two predicate planes to four one-hot planes. Treating it
 as 32 scalar shifts or as 32 independent 64-bit SIMD lanes would discard the
 known range and overstate both register width and instruction cost.
 
-Code generation remains unauthorized until that decoder and the downstream
-bit-sliced add/compare costs are modeled. In particular, the current generic
-per-128-bit-chunk estimate understates a 13-bit lane-wise add; structural
-coverage is not yet a profitability result.
+Code generation remains unauthorized until the downstream bit-sliced
+add/compare estimate is compared with covered post-allocation machine work.
+Structural coverage alone is not a profitability result.
 
 The range-proven one-hot form is now part of the analysis recipe. It is
 accepted only when every left operand is exactly one, every shift count has
@@ -1502,10 +1511,10 @@ structurally executable:
 | prefix-to-suffix boundary values | 3 | 3 |
 | peak prefix local values | 7 GPR masks / 5 XMM | 7 / 5 |
 | peak suffix local values | 5 GPR masks / 4 XMM | 5 / 4 |
-| state nodes reloadable at sink | 9 | 5 |
+| state nodes reloadable at sink | 9 | 9 |
 | state nodes requiring an earlier reload frontier | 0 | 0 |
-| state nodes consuming existing dominating SSA | 0 | 4 |
-| analysis time | 1.53 s | 1.27 s |
+| state nodes consuming existing dominating SSA | 0 | 0 |
+| analysis time | 1.63 s | 2.12 s |
 
 The independent estimate is not profitable. It double-counts the common
 recipe before the branch to blocks 4425 and 4426. Deduplicating only nodes
@@ -1523,16 +1532,12 @@ including removed reloads and spills. Until that comparison or an executable
 A/B exists, this result authorizes code-generation design but not enabling a
 rewrite.
 
-The source split is a semantic lowering constraint, not only a diagnostic.
-The standalone comb graph can reload all nine aggregate state nodes at their
-sinks. In the fused graph, four of those nodes denote versions superseded by
-FF staging before the publication sinks. Their original SSA values still
-dominate a valid aggregate frontier, but the same values cannot be recovered
-from memory at the sinks. Consequently, a terminal aggregate pseudo which
-reloads all inputs is invalid. The control-pure aggregate region must begin no
-later than the recorded `DominatingSSA` frontier and consume those exact
-values there, while the other five state nodes may use their proven sink
-reloads.
+The executable source distinction remains a semantic lowering constraint even
+though this workload now selects `ReloadAtSink` for all nine nodes. The earlier
+5/4 split was evidence of a StateSSA modeling defect, not evidence that FF
+staging had superseded four versions. Inspecting the exact SIR showed no
+overlapping Store between the original loads and the sinks; carrying source
+type into physical two-state MemorySSA was the inconsistent premise.
 
 The analysis plan now retains executable typed operations rather than only
 diagnostic kind names. A node records its exact unary/binary operation,

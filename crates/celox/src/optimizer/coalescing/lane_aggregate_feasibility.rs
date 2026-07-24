@@ -69,8 +69,16 @@ enum StateReadSource {
     },
     DominatingSsa {
         block: BlockId,
-        values: Vec<ValueId>,
+        values: Vec<SsaLeaf>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SsaLeaf {
+    value: ValueId,
+    register: RegisterId,
+    origin: ValueOrigin,
+    state_token: Option<StateToken>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -253,6 +261,36 @@ impl LaneAggregateFeasibilityReport {
                         .collect::<Vec<_>>(),
                 ));
             }
+            for (node_index, node) in candidate.nodes.iter().enumerate() {
+                let RecipeOp::StateRead(source) = &node.operation else {
+                    continue;
+                };
+                match source {
+                    StateReadSource::ReloadAtSink { loads } => lines.push(format!(
+                        "status=accepted-state-source block={} root=r{} node={} source=reload-at-sink loads={}",
+                        candidate.block.0,
+                        candidate.root.0,
+                        node_index,
+                        format_state_loads(loads),
+                    )),
+                    StateReadSource::ReloadAtFrontier { block, loads } => lines.push(format!(
+                        "status=accepted-state-source block={} root=r{} node={} source=reload-at-frontier source_block={} loads={}",
+                        candidate.block.0,
+                        candidate.root.0,
+                        node_index,
+                        block.0,
+                        format_state_loads(loads),
+                    )),
+                    StateReadSource::DominatingSsa { block, values } => lines.push(format!(
+                        "status=accepted-state-source block={} root=r{} node={} source=dominating-ssa source_block={} values={}",
+                        candidate.block.0,
+                        candidate.root.0,
+                        node_index,
+                        block.0,
+                        format_ssa_leaves(values),
+                    )),
+                }
+            }
         }
         for candidate in &self.rejected {
             lines.push(format!(
@@ -317,6 +355,48 @@ impl LaneAggregateFeasibilityReport {
         }
         lines
     }
+}
+
+fn format_origin(origin: ValueOrigin) -> String {
+    match origin {
+        ValueOrigin::Parameter { block, index } => format!("b{}:param{index}", block.0),
+        ValueOrigin::Instruction { block, index } => format!("b{}:i{index}", block.0),
+    }
+}
+
+fn format_state_loads(loads: &[StateLoadLeaf]) -> String {
+    loads
+        .iter()
+        .map(|load| {
+            format!(
+                "v{}:r{}@{}:{:?}",
+                load.value.0,
+                load.register.0,
+                format_origin(load.origin),
+                load.token,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_ssa_leaves(values: &[SsaLeaf]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            format!(
+                "v{}:r{}@{}{}",
+                value.value.0,
+                value.register.0,
+                format_origin(value.origin),
+                value
+                    .state_token
+                    .map(|token| format!(":{token:?}"))
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl fmt::Display for LaneAggregateFeasibilityReport {
@@ -557,7 +637,15 @@ impl<'a> Analyzer<'a> {
                         self.ssa_frontiers.insert(frontier);
                         StateReadSource::DominatingSsa {
                             block: frontier,
-                            values: vec![value.id],
+                            values: vec![SsaLeaf {
+                                value: value.id,
+                                register: value.register,
+                                origin: value.origin,
+                                state_token: match value.safety {
+                                    ValueSafety::StateRead(token) => Some(token),
+                                    ValueSafety::Pure | ValueSafety::Pinned(_) => None,
+                                },
+                            }],
                         }
                     };
                     self.insert_node(key, RecipeOp::StateRead(source), Vec::new(), lane_width, 5)
@@ -1034,6 +1122,7 @@ impl<'a> Analyzer<'a> {
         let mut physical_offsets = Vec::with_capacity(key.len());
         let mut values = Vec::with_capacity(key.len());
         let mut state_loads = Vec::with_capacity(key.len());
+        let mut ssa_leaves = Vec::with_capacity(key.len());
         let mut all_versioned_state_reads = true;
         for &register in key {
             let value_id = self
@@ -1066,6 +1155,15 @@ impl<'a> Analyzer<'a> {
                 }
             }
             values.push(value_id);
+            ssa_leaves.push(SsaLeaf {
+                value: value.id,
+                register: value.register,
+                origin: value.origin,
+                state_token: match value.safety {
+                    ValueSafety::StateRead(token) => Some(token),
+                    ValueSafety::Pure | ValueSafety::Pinned(_) => None,
+                },
+            });
             let Some(SIRInstruction::Load(
                 _,
                 current_address,
@@ -1097,7 +1195,7 @@ impl<'a> Analyzer<'a> {
             }
             StateReadSource::DominatingSsa {
                 block: frontier,
-                values,
+                values: ssa_leaves,
             }
         } else if !values.iter().all(|&value| {
             self.placement
@@ -1120,7 +1218,7 @@ impl<'a> Analyzer<'a> {
                 self.ssa_frontiers.insert(frontier);
                 StateReadSource::DominatingSsa {
                     block: frontier,
-                    values,
+                    values: ssa_leaves,
                 }
             }
         } else {
@@ -1589,8 +1687,12 @@ fn shared_recipe_pressure(
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
+    four_state: bool,
 ) -> Result<LaneAggregateFeasibilityReport, String> {
-    let placement = PlacementAnalysis::analyze(eu).map_err(|error| error.to_string())?;
+    if four_state {
+        return Ok(LaneAggregateFeasibilityReport::default());
+    }
+    let placement = PlacementAnalysis::analyze_two_state(eu).map_err(|error| error.to_string())?;
     let definitions = collect_definitions(eu);
     let instruction_definitions = definitions
         .iter()
@@ -2020,7 +2122,7 @@ mod tests {
     fn accepts_exact_state_leaves_and_uniform_shift() {
         let (eu, layout) = fixture(false);
         eu.verify();
-        let report = analyze(&eu, &layout).unwrap();
+        let report = analyze(&eu, &layout, false).unwrap();
         assert_eq!(report.candidates, 1);
         assert_eq!(report.accepted.len(), 1);
         assert!(report.rejected.is_empty());
@@ -2051,10 +2153,19 @@ mod tests {
     }
 
     #[test]
+    fn four_state_mode_does_not_plan_two_state_aggregate_recipes() {
+        let (eu, layout) = fixture(false);
+        eu.verify();
+        let report = analyze(&eu, &layout, true).unwrap();
+        assert_eq!(report.candidates, 0);
+        assert!(report.accepted.is_empty());
+    }
+
+    #[test]
     fn rejects_lane_variable_shift_without_exact_simd_semantics() {
         let (eu, layout) = fixture(true);
         eu.verify();
-        let report = analyze(&eu, &layout).unwrap();
+        let report = analyze(&eu, &layout, false).unwrap();
         assert_eq!(report.candidates, 1);
         assert!(report.accepted.is_empty());
         assert_eq!(report.reject_counts[&RejectReason::UnsupportedOperation], 1);
@@ -2176,7 +2287,7 @@ mod tests {
         };
         eu.verify();
 
-        let report = analyze(&eu, &layout(absolute)).unwrap();
+        let report = analyze(&eu, &layout(absolute), false).unwrap();
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::OneHotDecode], 1);
     }
@@ -2283,7 +2394,7 @@ mod tests {
         );
         eu.verify();
 
-        let report = analyze(&eu, &layout).unwrap();
+        let report = analyze(&eu, &layout, false).unwrap();
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::SsaPack], 1);
         assert_eq!(report.accepted[0].ssa_frontiers, vec![BlockId(0)]);
@@ -2411,7 +2522,7 @@ mod tests {
         );
         eu.verify();
 
-        let report = analyze(&eu, &layout).unwrap();
+        let report = analyze(&eu, &layout, false).unwrap();
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(
             report.kind_counts.get(&RecipeKind::ControlMux),
@@ -2572,7 +2683,7 @@ mod tests {
         layout.unpacked_arrays.clear();
         layout.widths.insert(absolute, 64);
 
-        let report = analyze(&eu, &layout).unwrap();
+        let report = analyze(&eu, &layout, false).unwrap();
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::Affine], 1);
     }

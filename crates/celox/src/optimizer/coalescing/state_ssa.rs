@@ -238,14 +238,25 @@ struct RawSlot {
 }
 
 impl RawSlot {
-    fn record_type(&mut self, ty: &RegisterType, width: usize) {
+    fn record_type(&mut self, ty: &RegisterType, width: usize, two_state: bool) {
+        let normalized = if two_state {
+            RegisterType::Bit {
+                width,
+                signed: false,
+            }
+        } else {
+            ty.clone()
+        };
         if width == 0
             || ty.width() != width
-            || self.ty.as_ref().is_some_and(|previous| previous != ty)
+            || self
+                .ty
+                .as_ref()
+                .is_some_and(|previous| previous != &normalized)
         {
             self.invalid = true;
         }
-        self.ty.get_or_insert_with(|| ty.clone());
+        self.ty.get_or_insert(normalized);
     }
 }
 
@@ -433,7 +444,16 @@ impl StateSsa {
         eligible_load_blocks: Option<&HashSet<BlockId>>,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, eligible_load_blocks, None, phases, false)
+        Self::analyze_selected(
+            eu,
+            cfg,
+            region,
+            eligible_load_blocks,
+            None,
+            phases,
+            false,
+            false,
+        )
     }
 
     /// Build state versions for every exact load shape, including state which
@@ -447,7 +467,20 @@ impl StateSsa {
         region: u32,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true)
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true, false)
+    }
+
+    /// Placement analysis for a two-state native compilation. `bit` and
+    /// `logic` accesses of the same width name the same physical value plane;
+    /// retaining their source-language type distinction would discard the
+    /// MemorySSA version and force an unnecessary long-lived SSA value.
+    pub fn analyze_all_loads_two_state(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        phases: &StatePhaseMap,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true, true)
     }
 
     /// Build versions only for exact loads which have a prospective consumer.
@@ -461,7 +494,16 @@ impl StateSsa {
         eligible_loads: &HashSet<RegisterId>,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, Some(eligible_loads), phases, true)
+        Self::analyze_selected(
+            eu,
+            cfg,
+            region,
+            None,
+            Some(eligible_loads),
+            phases,
+            true,
+            false,
+        )
     }
 
     fn analyze_selected(
@@ -472,6 +514,7 @@ impl StateSsa {
         eligible_loads: Option<&HashSet<RegisterId>>,
         phases: &StatePhaseMap,
         include_read_only: bool,
+        two_state: bool,
     ) -> Result<Self, StateSsaError> {
         let mut raw = HashMap::<StateLocation, RawSlot>::default();
 
@@ -500,7 +543,7 @@ impl StateSsa {
                             dynamic: false,
                         })
                         .or_default()
-                        .record_type(ty, *width);
+                        .record_type(ty, *width, two_state);
                     }
                     SIRInstruction::Load(destination, addr, offset, width)
                         if addr.region == region
@@ -522,7 +565,7 @@ impl StateSsa {
                             dynamic: true,
                         })
                         .or_default()
-                        .record_type(ty, *width);
+                        .record_type(ty, *width, two_state);
                     }
                     SIRInstruction::Store(
                         addr,
@@ -543,7 +586,7 @@ impl StateSsa {
                             dynamic: false,
                         })
                         .or_default()
-                        .record_type(ty, *width);
+                        .record_type(ty, *width, two_state);
                     }
                     _ => {}
                 }
@@ -585,7 +628,7 @@ impl StateSsa {
                         .register_map
                         .get(source)
                         .ok_or(StateSsaError::MissingRegister(*source))?;
-                    slot.record_type(ty, *width);
+                    slot.record_type(ty, *width, two_state);
                 }
             }
         }
@@ -1228,6 +1271,10 @@ mod tests {
         }
     }
 
+    fn logic(width: usize) -> RegisterType {
+        RegisterType::Logic { width }
+    }
+
     fn address(region: u32, variable: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
             region,
@@ -1319,6 +1366,53 @@ mod tests {
         assert!(state.slots.is_empty());
         assert!(state.read_version(BlockId(0), 1, RegisterId(1)).is_none());
         assert!(state.read_version(BlockId(0), 2, RegisterId(2)).is_none());
+    }
+
+    #[test]
+    fn two_state_placement_unifies_bit_and_logic_storage_versions() {
+        let stable = address(STABLE_REGION, 0);
+        let eu = unit(
+            vec![block(
+                0,
+                vec![
+                    SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 8),
+                ],
+                SIRTerminator::Return,
+            )],
+            [(RegisterId(0), bit(8)), (RegisterId(1), logic(8))],
+        );
+        let cfg = SirCfg::analyze(&eu).unwrap();
+
+        let four_state =
+            StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION, &StatePhaseMap::default())
+                .unwrap();
+        assert!(four_state.slots.is_empty());
+
+        let two_state = StateSsa::analyze_all_loads_two_state(
+            &eu,
+            &cfg,
+            STABLE_REGION,
+            &StatePhaseMap::default(),
+        )
+        .unwrap();
+        assert_eq!(two_state.slots.len(), 1);
+        assert!(matches!(
+            two_state.slots[0].fragment.plane,
+            StatePlane::TwoStateValue
+        ));
+        assert!(
+            two_state
+                .read_version(BlockId(0), 1, RegisterId(1))
+                .is_some()
+        );
     }
 
     #[test]

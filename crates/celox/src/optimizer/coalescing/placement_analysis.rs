@@ -235,7 +235,16 @@ impl PlacementAnalysis {
     pub fn analyze(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     ) -> Result<Self, PlacementAnalysisError> {
-        Self::analyze_impl(eu, true)
+        Self::analyze_impl(eu, true, false)
+    }
+
+    /// Build placement facts using the physical two-state storage contract.
+    /// Source-level `bit`/`logic` differences do not split a MemorySSA slot
+    /// when the native backend has no unknown-value plane.
+    pub fn analyze_two_state(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    ) -> Result<Self, PlacementAnalysisError> {
+        Self::analyze_impl(eu, true, true)
     }
 
     /// Build only CFG and register value occurrences. State reads remain
@@ -244,12 +253,13 @@ impl PlacementAnalysis {
     pub fn analyze_pure_values(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     ) -> Result<Self, PlacementAnalysisError> {
-        Self::analyze_impl(eu, false)
+        Self::analyze_impl(eu, false, false)
     }
 
     fn analyze_impl(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         include_state_and_effects: bool,
+        two_state_memory: bool,
     ) -> Result<Self, PlacementAnalysisError> {
         if eu.verify_result().is_err() {
             return Err(PlacementAnalysisError::InvalidSir);
@@ -260,7 +270,7 @@ impl PlacementAnalysis {
             SirCfg::analyze_forward(eu)?
         };
         let state = if include_state_and_effects {
-            analyze_state_versions(eu, &cfg)?
+            analyze_state_versions(eu, &cfg, two_state_memory)?
         } else {
             BTreeMap::new()
         };
@@ -730,6 +740,7 @@ fn insert_value(
 fn analyze_state_versions(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
+    two_state: bool,
 ) -> Result<BTreeMap<u32, StateSsa>, PlacementAnalysisError> {
     let regions = cfg
         .block_ids
@@ -745,7 +756,16 @@ fn analyze_state_versions(
         .map(|region| {
             Ok((
                 region,
-                StateSsa::analyze_all_loads(eu, cfg, region, &StatePhaseMap::default())?,
+                if two_state {
+                    StateSsa::analyze_all_loads_two_state(
+                        eu,
+                        cfg,
+                        region,
+                        &StatePhaseMap::default(),
+                    )?
+                } else {
+                    StateSsa::analyze_all_loads(eu, cfg, region, &StatePhaseMap::default())?
+                },
             ))
         })
         .collect()

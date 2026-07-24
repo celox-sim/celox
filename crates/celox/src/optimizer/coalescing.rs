@@ -98,8 +98,9 @@ pub(crate) fn analyze_fused_state_feasibility(
 pub(crate) fn analyze_lane_aggregate_feasibility(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
+    four_state: bool,
 ) -> Result<lane_aggregate_feasibility::LaneAggregateFeasibilityReport, String> {
-    lane_aggregate_feasibility::analyze(eu, layout)
+    lane_aggregate_feasibility::analyze(eu, layout, four_state)
 }
 
 pub(crate) fn eliminate_unread_fused_comb_stores(
