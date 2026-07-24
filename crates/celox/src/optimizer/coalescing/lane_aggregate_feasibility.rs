@@ -29,6 +29,7 @@ enum RecipeKind {
     Unary,
     Binary,
     ShiftConstant,
+    OneHotDecode,
     Mux,
     ControlMux,
     ScalarInsert,
@@ -110,7 +111,9 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     rejected: Vec<RejectedCandidate>,
     covered_scalar_definitions: usize,
     dead_scalar_definitions: usize,
-    estimated_instructions: usize,
+    summed_estimated_instructions: usize,
+    unique_estimated_instructions: usize,
+    shared_recipe_nodes: usize,
     kind_counts: HashMap<RecipeKind, usize>,
     reject_counts: HashMap<RejectReason, usize>,
 }
@@ -222,13 +225,15 @@ impl fmt::Display for LaneAggregateFeasibilityReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_insts={}",
+            "candidates={} accepted={} rejected={} covered_scalar_defs={} dead_scalar_defs={} estimated_sum={} estimated_unique={} shared_recipe_nodes={}",
             self.candidates,
             self.accepted.len(),
             self.rejected.len(),
             self.covered_scalar_definitions,
             self.dead_scalar_definitions,
-            self.estimated_instructions,
+            self.summed_estimated_instructions,
+            self.unique_estimated_instructions,
+            self.shared_recipe_nodes,
         )
     }
 }
@@ -519,19 +524,46 @@ impl<'a> Analyzer<'a> {
                     rhs_lanes.push(*current_rhs);
                 }
                 if matches!(operation, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
-                    let shift = exact_uniform_immediate(self, &rhs_lanes)
-                        .ok_or(RejectReason::UnsupportedOperation)?;
-                    if shift >= lane_width {
-                        return Err(RejectReason::UnsupportedOperation);
+                    if let Some(shift) = exact_uniform_immediate(self, &rhs_lanes) {
+                        if shift >= lane_width {
+                            return Err(RejectReason::UnsupportedOperation);
+                        }
+                        let child = self.analyze(lhs_lanes)?;
+                        return self.insert_node(
+                            key,
+                            RecipeKind::ShiftConstant,
+                            vec![child],
+                            lane_width,
+                            1,
+                        );
                     }
-                    let child = self.analyze(lhs_lanes)?;
-                    return self.insert_node(
-                        key,
-                        RecipeKind::ShiftConstant,
-                        vec![child],
-                        lane_width,
-                        1,
-                    );
+                    if operation == BinaryOp::Shl
+                        && lhs_lanes
+                            .iter()
+                            .all(|register| self.immediate(*register) == Some(1))
+                    {
+                        let shift_width = rhs_lanes
+                            .first()
+                            .and_then(|register| self.value_width(*register))
+                            .ok_or(RejectReason::MissingDefinition)?;
+                        if shift_width < usize::BITS as usize
+                            && rhs_lanes
+                                .iter()
+                                .all(|register| self.value_width(*register) == Some(shift_width))
+                            && (1usize << shift_width).saturating_sub(1) < lane_width
+                        {
+                            let child = self.analyze(rhs_lanes)?;
+                            let lanes_per_chunk = (128 / lane_width).max(1);
+                            return self.insert_node(
+                                key,
+                                RecipeKind::OneHotDecode,
+                                vec![child],
+                                lane_width,
+                                lanes_per_chunk,
+                            );
+                        }
+                    }
+                    return Err(RejectReason::UnsupportedOperation);
                 }
                 if !supported_binary(operation) {
                     return Err(RejectReason::UnsupportedOperation);
@@ -545,7 +577,7 @@ impl<'a> Analyzer<'a> {
                     RecipeKind::Binary,
                     vec![lhs, rhs],
                     lane_width,
-                    1 + usize::from(wrap_mask),
+                    binary_cost_per_chunk(operation, lane_width) + usize::from(wrap_mask),
                 )
             }
             SIRInstruction::Mux(..) => Err(RejectReason::HeterogeneousOperation),
@@ -969,6 +1001,41 @@ fn supported_binary(operation: BinaryOp) -> bool {
     )
 }
 
+fn binary_cost_per_chunk(operation: BinaryOp, lane_width: usize) -> usize {
+    match operation {
+        BinaryOp::Eq | BinaryOp::Ne if lane_width == 64 => 6,
+        BinaryOp::LtU
+        | BinaryOp::LeU
+        | BinaryOp::GtU
+        | BinaryOp::GeU
+        | BinaryOp::LtS
+        | BinaryOp::LeS
+        | BinaryOp::GtS
+        | BinaryOp::GeS
+            if lane_width == 64 =>
+        {
+            8
+        }
+        BinaryOp::Eq | BinaryOp::Ne => 3,
+        BinaryOp::LtU
+        | BinaryOp::LeU
+        | BinaryOp::GtU
+        | BinaryOp::GeU
+        | BinaryOp::LtS
+        | BinaryOp::LeS
+        | BinaryOp::GtS
+        | BinaryOp::GeS => 6,
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::Xor
+        | BinaryOp::LogicAnd
+        | BinaryOp::LogicOr
+        | BinaryOp::Add
+        | BinaryOp::Sub => 1,
+        _ => unreachable!("unsupported operations are rejected before costing"),
+    }
+}
+
 fn instruction_name(instruction: Option<&SIRInstruction<RegionedAbsoluteAddr>>) -> &'static str {
     match instruction {
         Some(SIRInstruction::Imm(..)) => "imm",
@@ -1138,7 +1205,7 @@ pub(crate) fn analyze(
                         })
                         .sum::<usize>()
                         .saturating_add(lane_count.div_ceil(16) * 2);
-                    report.estimated_instructions += estimated_instructions;
+                    report.summed_estimated_instructions += estimated_instructions;
                     for node in &analyzer.nodes {
                         *report.kind_counts.entry(node.kind).or_default() += 1;
                         let _ = node.children.len();
@@ -1269,6 +1336,27 @@ pub(crate) fn analyze(
                 })
         })
         .count();
+    let mut unique_nodes = HashMap::<(RecipeKind, Vec<RegisterId>, usize), usize>::default();
+    let mut total_nodes = 0usize;
+    for candidate in &report.accepted {
+        total_nodes += candidate.nodes.len();
+        for node in &candidate.nodes {
+            let lanes_per_chunk = (128 / node.lane_width.max(1)).max(1);
+            let estimated =
+                node.estimated_per_chunk * candidate.lane_count.div_ceil(lanes_per_chunk);
+            unique_nodes
+                .entry((node.kind, node.lanes.clone(), node.lane_width))
+                .and_modify(|known| *known = (*known).max(estimated))
+                .or_insert(estimated);
+        }
+    }
+    let publication_cost = report
+        .accepted
+        .iter()
+        .map(|candidate| candidate.lane_count.div_ceil(16) * 2)
+        .sum::<usize>();
+    report.unique_estimated_instructions = unique_nodes.values().sum::<usize>() + publication_cost;
+    report.shared_recipe_nodes = total_nodes.saturating_sub(unique_nodes.len());
     Ok(report)
 }
 
@@ -1465,6 +1553,127 @@ mod tests {
         assert_eq!(report.candidates, 1);
         assert!(report.accepted.is_empty());
         assert_eq!(report.reject_counts[&RejectReason::UnsupportedOperation], 1);
+    }
+
+    #[test]
+    fn recognizes_range_proven_one_hot_decode() {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let destination = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                var_id: VarId::from_raw(1),
+                ..absolute
+            },
+        );
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        let one = RegisterId(0);
+        let zero = RegisterId(1);
+        for register in [one, zero] {
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        instructions.push(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let mut predicates = Vec::new();
+        let mut next = 2;
+        for lane in 0..8 {
+            let shift = RegisterId(next);
+            let decoded = RegisterId(next + 1);
+            let predicate = RegisterId(next + 2);
+            next += 3;
+            register_map.insert(
+                shift,
+                RegisterType::Bit {
+                    width: 2,
+                    signed: false,
+                },
+            );
+            register_map.insert(
+                decoded,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+            register_map.insert(
+                predicate,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(shift, SIRValue::new((lane % 4) as u8)));
+            instructions.push(SIRInstruction::Binary(decoded, one, BinaryOp::Shl, shift));
+            instructions.push(SIRInstruction::Binary(
+                predicate,
+                decoded,
+                BinaryOp::Ne,
+                zero,
+            ));
+            predicates.push(predicate);
+        }
+        let root = RegisterId(next);
+        next += 1;
+        register_map.insert(
+            root,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(
+            root,
+            predicates.iter().rev().copied().collect(),
+        ));
+        for lane in 0..8 {
+            let slice = RegisterId(next);
+            next += 1;
+            register_map.insert(
+                slice,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Slice(slice, root, lane, 1));
+            instructions.push(SIRInstruction::Store(
+                destination,
+                SIROffset::Static(lane),
+                1,
+                slice,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+        eu.verify();
+
+        let report = analyze(&eu, &layout(absolute)).unwrap();
+        assert_eq!(report.accepted.len(), 1);
+        assert_eq!(report.kind_counts[&RecipeKind::OneHotDecode], 1);
     }
 
     #[test]

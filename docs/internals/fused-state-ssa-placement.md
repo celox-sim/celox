@@ -1455,6 +1455,42 @@ bit-sliced add/compare costs are modeled. In particular, the current generic
 per-128-bit-chunk estimate understates a 13-bit lane-wise add; structural
 coverage is not yet a profitability result.
 
+The range-proven one-hot form is now part of the analysis recipe. It is
+accepted only when every left operand is exactly one, every shift count has
+the same declared width, and that width proves every count smaller than the
+result width. General variable shifts remain rejected. The baseline x86 cost
+model scalarizes this operation inside each fixed-size aggregate chunk rather
+than assuming an unavailable packed-variable-shift instruction.
+
+With conservative 64-bit comparison costs, both Heliodor roots are
+structurally executable:
+
+| metric | standalone comb | fused comb/apply |
+|---|---:|---:|
+| roots | 2 | 2 |
+| covered scalar definitions | 1,557 | 1,557 |
+| scalar definitions dead after replacing both roots | 1,293 | 1,279 |
+| independently emitted recipe estimate | 1,423 | 1,423 |
+| shared-prefix unique recipe estimate | 844 | 844 |
+| exact shared recipe nodes | 57 | 57 |
+| analysis time | 1.61 s | 1.47 s |
+
+The independent estimate is not profitable. It double-counts the common
+recipe before the branch to blocks 4425 and 4426. Deduplicating only nodes
+with the same operation kind, exact ordered SSA lane vector, and lane width
+reduces the estimate to 844 instructions. This is a legal common-prefix
+candidate, not generic GVN: its eventual placement must still prove that all
+inputs dominate the common block and must preserve distinct branch-local
+suffixes.
+
+The 844-to-1,279 SIR comparison is encouraging but is not the final gate
+because its units differ: 844 estimates emitted host instructions while 1,279
+counts eliminated SIR definitions. The production gate must compare the
+shared recipe against the covered post-ISel/post-allocation machine work,
+including removed reloads and spills. Until that comparison or an executable
+A/B exists, this result authorizes code-generation design but not enabling a
+rewrite.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
