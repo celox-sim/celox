@@ -37,6 +37,47 @@ enum RecipeKind {
     Concat,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RecipeOp {
+    StateRead,
+    Constant,
+    BroadcastScalar,
+    Affine,
+    PackedExtract,
+    SsaPack,
+    Unary(UnaryOp),
+    Binary(BinaryOp),
+    ShiftConstant { operation: BinaryOp, amount: usize },
+    OneHotDecode { shift_width: usize },
+    Mux,
+    ControlMux,
+    ScalarInsert,
+    Slice { offset: usize, width: usize },
+    Concat { operand_widths: Vec<usize> },
+}
+
+impl RecipeOp {
+    fn kind(&self) -> RecipeKind {
+        match self {
+            Self::StateRead => RecipeKind::StateRead,
+            Self::Constant => RecipeKind::Constant,
+            Self::BroadcastScalar => RecipeKind::BroadcastScalar,
+            Self::Affine => RecipeKind::Affine,
+            Self::PackedExtract => RecipeKind::PackedExtract,
+            Self::SsaPack => RecipeKind::SsaPack,
+            Self::Unary(_) => RecipeKind::Unary,
+            Self::Binary(_) => RecipeKind::Binary,
+            Self::ShiftConstant { .. } => RecipeKind::ShiftConstant,
+            Self::OneHotDecode { .. } => RecipeKind::OneHotDecode,
+            Self::Mux => RecipeKind::Mux,
+            Self::ControlMux => RecipeKind::ControlMux,
+            Self::ScalarInsert => RecipeKind::ScalarInsert,
+            Self::Slice { .. } => RecipeKind::Slice,
+            Self::Concat { .. } => RecipeKind::Concat,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RejectReason {
     MissingDefinition,
@@ -46,6 +87,7 @@ enum RejectReason {
     UnsupportedOperation,
     HeterogeneousOperation,
     LaneWidth,
+    InvalidRecipe,
     NodeBudget,
     Cycle,
 }
@@ -60,6 +102,7 @@ impl fmt::Display for RejectReason {
             Self::UnsupportedOperation => "unsupported-operation",
             Self::HeterogeneousOperation => "heterogeneous-operation",
             Self::LaneWidth => "unsupported-lane-width",
+            Self::InvalidRecipe => "invalid-recipe",
             Self::NodeBudget => "node-budget",
             Self::Cycle => "cycle",
         })
@@ -68,7 +111,7 @@ impl fmt::Display for RejectReason {
 
 #[derive(Debug, Clone)]
 struct RecipeNode {
-    kind: RecipeKind,
+    operation: RecipeOp,
     lanes: Vec<RegisterId>,
     children: Vec<usize>,
     lane_width: usize,
@@ -274,7 +317,7 @@ impl<'a> Analyzer<'a> {
     fn insert_node(
         &mut self,
         key: Vec<RegisterId>,
-        kind: RecipeKind,
+        operation: RecipeOp,
         children: Vec<usize>,
         lane_width: usize,
         estimated_per_chunk: usize,
@@ -284,7 +327,7 @@ impl<'a> Analyzer<'a> {
         }
         let id = self.nodes.len();
         self.nodes.push(RecipeNode {
-            kind,
+            operation,
             lanes: key.clone(),
             children,
             lane_width,
@@ -308,7 +351,7 @@ impl<'a> Analyzer<'a> {
             self.ssa_frontiers.insert(frontier);
             result = self.insert_node(
                 key.clone(),
-                RecipeKind::SsaPack,
+                RecipeOp::SsaPack,
                 Vec::new(),
                 1,
                 key.len().saturating_mul(2).saturating_sub(1),
@@ -380,7 +423,7 @@ impl<'a> Analyzer<'a> {
             .iter()
             .all(|register| matches!(self.instruction(*register), Some(SIRInstruction::Imm(..))))
         {
-            return self.insert_node(key, RecipeKind::Constant, Vec::new(), lane_width, 1);
+            return self.insert_node(key, RecipeOp::Constant, Vec::new(), lane_width, 1);
         }
 
         if key.iter().all(|register| *register == first) {
@@ -391,7 +434,7 @@ impl<'a> Analyzer<'a> {
                 .ok_or(RejectReason::MissingDefinition)?;
             return match value.safety {
                 ValueSafety::Pure if self.placement.can_sink_to_block(value.id, self.target) => {
-                    self.insert_node(key, RecipeKind::BroadcastScalar, Vec::new(), lane_width, 4)
+                    self.insert_node(key, RecipeOp::BroadcastScalar, Vec::new(), lane_width, 4)
                 }
                 ValueSafety::Pure | ValueSafety::Pinned(_)
                     if self
@@ -402,14 +445,14 @@ impl<'a> Analyzer<'a> {
                     // This is a concrete DominatingSSA frontier, not a
                     // relocation proof.  Only one scalar crosses the
                     // boundary regardless of the lane count.
-                    self.insert_node(key, RecipeKind::BroadcastScalar, Vec::new(), lane_width, 4)
+                    self.insert_node(key, RecipeOp::BroadcastScalar, Vec::new(), lane_width, 4)
                 }
                 ValueSafety::StateRead(_)
                     if self
                         .placement
                         .can_materialize_state_read_at_block(value.id, self.target) =>
                 {
-                    self.insert_node(key, RecipeKind::StateRead, Vec::new(), lane_width, 5)
+                    self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 5)
                 }
                 ValueSafety::StateRead(_) => {
                     if let Some(frontier) = self
@@ -424,7 +467,7 @@ impl<'a> Analyzer<'a> {
                             .ok_or(RejectReason::UnstableStateVersion)?;
                         self.ssa_frontiers.insert(frontier);
                     }
-                    self.insert_node(key, RecipeKind::StateRead, Vec::new(), lane_width, 5)
+                    self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 5)
                 }
                 ValueSafety::Pure => Err(RejectReason::UnstableStateVersion),
                 ValueSafety::Pinned(_) => Err(RejectReason::PinnedLeaf),
@@ -436,17 +479,17 @@ impl<'a> Analyzer<'a> {
             .all(|register| matches!(self.instruction(*register), Some(SIRInstruction::Load(..))))
         {
             self.verify_state_leaf(&key)?;
-            return self.insert_node(key, RecipeKind::StateRead, Vec::new(), lane_width, 1);
+            return self.insert_node(key, RecipeOp::StateRead, Vec::new(), lane_width, 1);
         }
 
         if let Some(source) = self.regular_shift_source(&key, lane_width) {
             let child = self.analyze(vec![source; key.len()])?;
-            return self.insert_node(key, RecipeKind::PackedExtract, vec![child], lane_width, 1);
+            return self.insert_node(key, RecipeOp::PackedExtract, vec![child], lane_width, 1);
         }
 
         if let Some(base) = self.affine_base(&key, lane_width) {
             let child = self.analyze(vec![base; key.len()])?;
-            return self.insert_node(key, RecipeKind::Affine, vec![child], lane_width, 2);
+            return self.insert_node(key, RecipeOp::Affine, vec![child], lane_width, 2);
         }
 
         let muxes = key
@@ -465,9 +508,9 @@ impl<'a> Analyzer<'a> {
             return self.insert_node(
                 key,
                 if from_control_merge {
-                    RecipeKind::ControlMux
+                    RecipeOp::ControlMux
                 } else {
-                    RecipeKind::Mux
+                    RecipeOp::Mux
                 },
                 vec![condition, then_value, else_value],
                 lane_width,
@@ -504,7 +547,7 @@ impl<'a> Analyzer<'a> {
                     operands.push(*operand);
                 }
                 let child = self.analyze(operands)?;
-                self.insert_node(key, RecipeKind::Unary, vec![child], lane_width, 1)
+                self.insert_node(key, RecipeOp::Unary(operation), vec![child], lane_width, 1)
             }
             SIRInstruction::Binary(_, lhs, operation, rhs) => {
                 let mut lhs_lanes = Vec::with_capacity(key.len());
@@ -531,7 +574,10 @@ impl<'a> Analyzer<'a> {
                         let child = self.analyze(lhs_lanes)?;
                         return self.insert_node(
                             key,
-                            RecipeKind::ShiftConstant,
+                            RecipeOp::ShiftConstant {
+                                operation,
+                                amount: shift,
+                            },
                             vec![child],
                             lane_width,
                             1,
@@ -556,7 +602,7 @@ impl<'a> Analyzer<'a> {
                             let lanes_per_chunk = (128 / lane_width).max(1);
                             return self.insert_node(
                                 key,
-                                RecipeKind::OneHotDecode,
+                                RecipeOp::OneHotDecode { shift_width },
                                 vec![child],
                                 lane_width,
                                 lanes_per_chunk,
@@ -574,7 +620,7 @@ impl<'a> Analyzer<'a> {
                     && !lane_width.is_power_of_two();
                 self.insert_node(
                     key,
-                    RecipeKind::Binary,
+                    RecipeOp::Binary(operation),
                     vec![lhs, rhs],
                     lane_width,
                     binary_cost_per_chunk(operation, lane_width) + usize::from(wrap_mask),
@@ -596,7 +642,13 @@ impl<'a> Analyzer<'a> {
                     sources.push(*source);
                 }
                 let child = self.analyze(sources)?;
-                self.insert_node(key, RecipeKind::Slice, vec![child], lane_width, 2)
+                self.insert_node(
+                    key,
+                    RecipeOp::Slice { offset, width },
+                    vec![child],
+                    lane_width,
+                    2,
+                )
             }
             SIRInstruction::Concat(_, arguments) => {
                 let operand_count = arguments.len();
@@ -633,7 +685,15 @@ impl<'a> Analyzer<'a> {
                 for lanes in operand_lanes {
                     children.push(self.analyze(lanes)?);
                 }
-                self.insert_node(key, RecipeKind::Concat, children, lane_width, 1)
+                self.insert_node(
+                    key,
+                    RecipeOp::Concat {
+                        operand_widths: expected_widths,
+                    },
+                    children,
+                    lane_width,
+                    1,
+                )
             }
             _ => Err(RejectReason::UnsupportedOperation),
         }
@@ -860,14 +920,14 @@ impl<'a> Analyzer<'a> {
             let aggregate = self.analyze(mux_lanes)?;
             let inserts = self.insert_node(
                 scalar_lanes.clone(),
-                RecipeKind::ScalarInsert,
+                RecipeOp::ScalarInsert,
                 Vec::new(),
                 lane_width,
                 scalar_values.len().saturating_mul(2),
             )?;
             self.insert_node(
                 key.to_vec(),
-                RecipeKind::ControlMux,
+                RecipeOp::ControlMux,
                 vec![aggregate, inserts],
                 lane_width,
                 1,
@@ -1139,6 +1199,94 @@ fn use_is_covered(
         .is_some_and(|register| covered_consumers.contains(register))
 }
 
+fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
+    if nodes
+        .get(root)
+        .is_none_or(|node| node.lanes.len() != lane_count)
+    {
+        return false;
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if node.lanes.is_empty()
+            || node.lane_width == 0
+            || node.children.iter().any(|child| *child >= index)
+        {
+            return false;
+        }
+        let child = |slot: usize| node.children.get(slot).and_then(|child| nodes.get(*child));
+        let valid = match &node.operation {
+            RecipeOp::StateRead
+            | RecipeOp::Constant
+            | RecipeOp::BroadcastScalar
+            | RecipeOp::SsaPack
+            | RecipeOp::ScalarInsert => node.children.is_empty(),
+            RecipeOp::Affine | RecipeOp::PackedExtract => node.children.len() == 1,
+            RecipeOp::Unary(operation) => {
+                node.children.len() == 1
+                    && child(0).is_some_and(|input| {
+                        operation.result_width(input.lane_width) == node.lane_width
+                    })
+            }
+            RecipeOp::Binary(_) => node.children.len() == 2,
+            RecipeOp::ShiftConstant { operation, amount } => {
+                node.children.len() == 1
+                    && matches!(operation, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar)
+                    && child(0).is_some_and(|input| *amount < input.lane_width)
+            }
+            RecipeOp::OneHotDecode { shift_width } => {
+                node.children.len() == 1
+                    && *shift_width < usize::BITS as usize
+                    && (1usize << shift_width).saturating_sub(1) < node.lane_width
+                    && child(0).is_some_and(|input| input.lane_width == *shift_width)
+            }
+            RecipeOp::Mux => {
+                node.children.len() == 3
+                    && node
+                        .children
+                        .iter()
+                        .all(|child| nodes[*child].lanes.len() == node.lanes.len())
+            }
+            RecipeOp::ControlMux => match node.children.as_slice() {
+                [condition, then_value, else_value] => [condition, then_value, else_value]
+                    .iter()
+                    .all(|child| nodes[**child].lanes.len() == node.lanes.len()),
+                [aggregate, inserts] => {
+                    let aggregate = &nodes[*aggregate];
+                    let inserts = &nodes[*inserts];
+                    aggregate.lanes.len() + inserts.lanes.len() == node.lanes.len()
+                        && inserts.operation == RecipeOp::ScalarInsert
+                        && node.lanes.iter().all(|lane| {
+                            aggregate.lanes.contains(lane) ^ inserts.lanes.contains(lane)
+                        })
+                }
+                _ => false,
+            },
+            RecipeOp::Slice { offset, width } => {
+                node.children.len() == 1
+                    && *width == node.lane_width
+                    && child(0).is_some_and(|input| {
+                        offset
+                            .checked_add(*width)
+                            .is_some_and(|end| end <= input.lane_width)
+                    })
+            }
+            RecipeOp::Concat { operand_widths } => {
+                node.children.len() == operand_widths.len()
+                    && operand_widths.iter().sum::<usize>() == node.lane_width
+                    && node
+                        .children
+                        .iter()
+                        .zip(operand_widths)
+                        .all(|(child, width)| nodes[*child].lane_width == *width)
+            }
+        };
+        if !valid {
+            return false;
+        }
+    }
+    true
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -1180,7 +1328,12 @@ pub(crate) fn analyze(
                 ssa_frontiers: HashSet::default(),
             };
             let lanes = arguments.iter().rev().copied().collect::<Vec<_>>();
-            match analyzer.analyze(lanes) {
+            let recipe = analyzer.analyze(lanes).and_then(|root| {
+                verify_recipe(&analyzer.nodes, root, lane_count)
+                    .then_some(root)
+                    .ok_or(RejectReason::InvalidRecipe)
+            });
+            match recipe {
                 Ok(_) => {
                     let covered_registers = analyzer
                         .nodes
@@ -1207,7 +1360,7 @@ pub(crate) fn analyze(
                         .saturating_add(lane_count.div_ceil(16) * 2);
                     report.summed_estimated_instructions += estimated_instructions;
                     for node in &analyzer.nodes {
-                        *report.kind_counts.entry(node.kind).or_default() += 1;
+                        *report.kind_counts.entry(node.operation.kind()).or_default() += 1;
                         let _ = node.children.len();
                     }
                     report.accepted.push(Candidate {
@@ -1336,7 +1489,7 @@ pub(crate) fn analyze(
                 })
         })
         .count();
-    let mut unique_nodes = HashMap::<(RecipeKind, Vec<RegisterId>, usize), usize>::default();
+    let mut unique_nodes = HashMap::<(RecipeOp, Vec<RegisterId>, usize), usize>::default();
     let mut total_nodes = 0usize;
     for candidate in &report.accepted {
         total_nodes += candidate.nodes.len();
@@ -1345,7 +1498,7 @@ pub(crate) fn analyze(
             let estimated =
                 node.estimated_per_chunk * candidate.lane_count.div_ceil(lanes_per_chunk);
             unique_nodes
-                .entry((node.kind, node.lanes.clone(), node.lane_width))
+                .entry((node.operation.clone(), node.lanes.clone(), node.lane_width))
                 .and_modify(|known| *known = (*known).max(estimated))
                 .or_insert(estimated);
         }
@@ -1674,6 +1827,34 @@ mod tests {
         let report = analyze(&eu, &layout(absolute)).unwrap();
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::OneHotDecode], 1);
+    }
+
+    #[test]
+    fn executable_recipe_verifier_rejects_forward_edges_and_invalid_shift_ranges() {
+        let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
+        let mut nodes = vec![
+            RecipeNode {
+                operation: RecipeOp::Constant,
+                lanes: lanes.clone(),
+                children: Vec::new(),
+                lane_width: 2,
+                estimated_per_chunk: 1,
+            },
+            RecipeNode {
+                operation: RecipeOp::OneHotDecode { shift_width: 2 },
+                lanes: lanes.clone(),
+                children: vec![0],
+                lane_width: 4,
+                estimated_per_chunk: 1,
+            },
+        ];
+        assert!(verify_recipe(&nodes, 1, 8));
+
+        nodes[0].children.push(1);
+        assert!(!verify_recipe(&nodes, 1, 8));
+        nodes[0].children.clear();
+        nodes[1].lane_width = 3;
+        assert!(!verify_recipe(&nodes, 1, 8));
     }
 
     #[test]

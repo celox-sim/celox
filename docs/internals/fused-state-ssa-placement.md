@@ -1491,6 +1491,16 @@ including removed reloads and spills. Until that comparison or an executable
 A/B exists, this result authorizes code-generation design but not enabling a
 rewrite.
 
+The analysis plan now retains executable typed operations rather than only
+diagnostic kind names. A node records its exact unary/binary operation,
+constant shift operation and amount, one-hot input width, Slice range, or
+ordered Concat operand widths. The verifier requires child-before-parent
+topological order, valid child arity, exact Concat width coverage, in-range
+constant shifts and one-hot domains, and complete lane coverage for both
+ordinary and scalar-hole control Muxes. Lowering must consume this verified
+recipe directly; it may not rediscover semantics by pattern matching the SIR
+a second time.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
