@@ -1236,6 +1236,16 @@ Therefore the next representation must preserve compile-time lane knowledge
 and shorten lane-local live ranges; a scalar runtime loop is not an acceptable
 substitute for aggregate priority selection.
 
+A second experiment recovered only the small two-state guarded recurrences and
+expanded them at compile time in lane order. It removed the runtime index,
+phis, and backedge while ensuring each lane's loads and update were lowered
+before the next lane. This also failed the gate: fused x86 grew from 145,414
+to 146,811 instructions, trace generation remained comparable at 69.249
+seconds, and exact execution took 66.041 seconds versus the retained 64.314
+second run. Lane-local scalar expansion therefore does not address the
+arithmetic volume; the selected-index/value recurrence must be reduced to an
+aggregate candidate representation instead of merely rescheduled.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
