@@ -1501,6 +1501,14 @@ ordinary and scalar-hole control Muxes. Lowering must consume this verified
 recipe directly; it may not rediscover semantics by pattern matching the SIR
 a second time.
 
+Multi-root sharing is likewise explicit in the plan. Per-root postorder nodes
+are interned into one shared recipe graph only when the typed operation,
+ordered result-lane SSA identities, lane width, and already-interned child
+identities all match. Each root names the resulting stable shared-node
+identity. Lowering therefore receives the 57 common Heliodor nodes as one
+planned prefix; ordinary GVN/CSE is neither expected nor permitted to infer
+that sharing after placement.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,

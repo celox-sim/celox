@@ -122,6 +122,7 @@ struct RecipeNode {
 struct Candidate {
     block: BlockId,
     root: RegisterId,
+    recipe_root: usize,
     lane_count: usize,
     nodes: Vec<RecipeNode>,
     covered_registers: HashSet<RegisterId>,
@@ -129,6 +130,20 @@ struct Candidate {
     snapshot_frontiers: Vec<BlockId>,
     ssa_frontiers: Vec<BlockId>,
     estimated_instructions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SharedRecipeKey {
+    operation: RecipeOp,
+    lanes: Vec<RegisterId>,
+    children: Vec<usize>,
+    lane_width: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SharedRecipePlan {
+    nodes: Vec<RecipeNode>,
+    roots: Vec<(BlockId, RegisterId, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1287,6 +1302,52 @@ fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
     true
 }
 
+fn build_shared_recipe_plan(candidates: &[Candidate]) -> Option<SharedRecipePlan> {
+    let mut nodes = Vec::<RecipeNode>::new();
+    let mut identities = HashMap::<SharedRecipeKey, usize>::default();
+    let mut roots = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let mut local_to_shared = Vec::with_capacity(candidate.nodes.len());
+        for node in &candidate.nodes {
+            let children = node
+                .children
+                .iter()
+                .map(|child| local_to_shared.get(*child).copied())
+                .collect::<Option<Vec<_>>>()?;
+            let key = SharedRecipeKey {
+                operation: node.operation.clone(),
+                lanes: node.lanes.clone(),
+                children: children.clone(),
+                lane_width: node.lane_width,
+            };
+            let shared = if let Some(&shared) = identities.get(&key) {
+                nodes[shared].estimated_per_chunk = nodes[shared]
+                    .estimated_per_chunk
+                    .max(node.estimated_per_chunk);
+                shared
+            } else {
+                let shared = nodes.len();
+                nodes.push(RecipeNode {
+                    operation: node.operation.clone(),
+                    lanes: node.lanes.clone(),
+                    children,
+                    lane_width: node.lane_width,
+                    estimated_per_chunk: node.estimated_per_chunk,
+                });
+                identities.insert(key, shared);
+                shared
+            };
+            local_to_shared.push(shared);
+        }
+        roots.push((
+            candidate.block,
+            candidate.root,
+            *local_to_shared.get(candidate.recipe_root)?,
+        ));
+    }
+    Some(SharedRecipePlan { nodes, roots })
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -1334,7 +1395,7 @@ pub(crate) fn analyze(
                     .ok_or(RejectReason::InvalidRecipe)
             });
             match recipe {
-                Ok(_) => {
+                Ok(recipe_root) => {
                     let covered_registers = analyzer
                         .nodes
                         .iter()
@@ -1366,6 +1427,7 @@ pub(crate) fn analyze(
                     report.accepted.push(Candidate {
                         block: block_id,
                         root: *root,
+                        recipe_root,
                         lane_count,
                         nodes: analyzer.nodes,
                         covered_registers,
@@ -1489,27 +1551,33 @@ pub(crate) fn analyze(
                 })
         })
         .count();
-    let mut unique_nodes = HashMap::<(RecipeOp, Vec<RegisterId>, usize), usize>::default();
-    let mut total_nodes = 0usize;
-    for candidate in &report.accepted {
-        total_nodes += candidate.nodes.len();
-        for node in &candidate.nodes {
+    let shared_plan =
+        build_shared_recipe_plan(&report.accepted).ok_or("invalid shared recipe plan")?;
+    let total_nodes = report
+        .accepted
+        .iter()
+        .map(|candidate| candidate.nodes.len())
+        .sum::<usize>();
+    let lane_count = report
+        .accepted
+        .first()
+        .map_or(0, |candidate| candidate.lane_count);
+    let unique_node_cost = shared_plan
+        .nodes
+        .iter()
+        .map(|node| {
             let lanes_per_chunk = (128 / node.lane_width.max(1)).max(1);
-            let estimated =
-                node.estimated_per_chunk * candidate.lane_count.div_ceil(lanes_per_chunk);
-            unique_nodes
-                .entry((node.operation.clone(), node.lanes.clone(), node.lane_width))
-                .and_modify(|known| *known = (*known).max(estimated))
-                .or_insert(estimated);
-        }
-    }
+            node.estimated_per_chunk * lane_count.div_ceil(lanes_per_chunk)
+        })
+        .sum::<usize>();
     let publication_cost = report
         .accepted
         .iter()
         .map(|candidate| candidate.lane_count.div_ceil(16) * 2)
         .sum::<usize>();
-    report.unique_estimated_instructions = unique_nodes.values().sum::<usize>() + publication_cost;
-    report.shared_recipe_nodes = total_nodes.saturating_sub(unique_nodes.len());
+    report.unique_estimated_instructions = unique_node_cost + publication_cost;
+    report.shared_recipe_nodes = total_nodes.saturating_sub(shared_plan.nodes.len());
+    debug_assert_eq!(shared_plan.roots.len(), report.accepted.len());
     Ok(report)
 }
 
@@ -1855,6 +1923,52 @@ mod tests {
         nodes[0].children.clear();
         nodes[1].lane_width = 3;
         assert!(!verify_recipe(&nodes, 1, 8));
+    }
+
+    #[test]
+    fn shared_plan_interns_only_identical_typed_nodes_and_children() {
+        let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
+        let nodes = vec![
+            RecipeNode {
+                operation: RecipeOp::Constant,
+                lanes: lanes.clone(),
+                children: Vec::new(),
+                lane_width: 8,
+                estimated_per_chunk: 1,
+            },
+            RecipeNode {
+                operation: RecipeOp::Unary(UnaryOp::BitNot),
+                lanes: lanes.clone(),
+                children: vec![0],
+                lane_width: 8,
+                estimated_per_chunk: 1,
+            },
+        ];
+        let candidate = |block, root, nodes: Vec<RecipeNode>| Candidate {
+            block,
+            root,
+            recipe_root: 1,
+            lane_count: 8,
+            nodes,
+            covered_registers: HashSet::default(),
+            covered_consumers: HashSet::default(),
+            snapshot_frontiers: Vec::new(),
+            ssa_frontiers: Vec::new(),
+            estimated_instructions: 0,
+        };
+        let mut distinct = nodes.clone();
+        distinct[1].operation = RecipeOp::Unary(UnaryOp::LogicNot);
+        distinct[1].lane_width = 1;
+        let plan = build_shared_recipe_plan(&[
+            candidate(BlockId(0), RegisterId(20), nodes.clone()),
+            candidate(BlockId(1), RegisterId(21), nodes),
+            candidate(BlockId(2), RegisterId(22), distinct),
+        ])
+        .unwrap();
+        assert_eq!(plan.nodes.len(), 3);
+        assert_eq!(plan.roots.len(), 3);
+        assert_eq!(plan.roots[0].2, plan.roots[1].2);
+        assert_ne!(plan.roots[0].2, plan.roots[2].2);
     }
 
     #[test]
