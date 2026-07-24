@@ -32,7 +32,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-        let mut changed = false;
+        let mut changed = fold_slices_of_concat(eu);
 
         // Build extract def map: RegisterId → (base, static_offset, width).
         // A Slice over a known base composes offsets, so Concat can merge
@@ -186,6 +186,76 @@ impl ExecutionUnitPass for ConcatFoldingPass {
     }
 }
 
+/// Fold an extraction which lies wholly inside one input of a Concat.
+///
+/// HDL lowering frequently packs fields for an observable output and then
+/// immediately extracts the same fields for internal computation:
+///
+/// ```text
+/// packed = Concat([sign, exponent, fraction])
+/// exponent_again = Slice(packed, fraction_width, exponent_width)
+/// ```
+///
+/// Lowering the latter through the packed word creates a shift and mask even
+/// though the original SSA value is still available.  Keep the public packed
+/// value, but make the internal extraction refer directly to its input.
+fn fold_slices_of_concat(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    let concat_defs = eu
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            SIRInstruction::Concat(dst, args) => Some((*dst, args.clone())),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let register_map = &eu.register_map;
+    let mut changed = false;
+
+    for block in eu.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            let SIRInstruction::Slice(dst, packed, offset, width) = instruction else {
+                continue;
+            };
+            let Some(args) = concat_defs.get(packed) else {
+                continue;
+            };
+            let Some(slice_end) = offset.checked_add(*width) else {
+                continue;
+            };
+
+            // Concat arguments are MSB-first. Walk them in reverse so
+            // `argument_start` is the argument's LSB position.
+            let mut argument_start = 0usize;
+            for argument in args.iter().rev().copied() {
+                let Some(argument_type) = register_map.get(&argument) else {
+                    break;
+                };
+                let argument_width = argument_type.width();
+                let Some(argument_end) = argument_start.checked_add(argument_width) else {
+                    break;
+                };
+                if *offset >= argument_start && slice_end <= argument_end {
+                    let inner_offset = *offset - argument_start;
+                    if inner_offset == 0
+                        && *width == argument_width
+                        && register_map.get(dst) == Some(argument_type)
+                    {
+                        *instruction = SIRInstruction::Unary(*dst, UnaryOp::Ident, argument);
+                    } else {
+                        *instruction = SIRInstruction::Slice(*dst, argument, inner_offset, *width);
+                    }
+                    changed = true;
+                    break;
+                }
+                argument_start = argument_end;
+            }
+        }
+    }
+
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +345,53 @@ mod tests {
         assert!(block.instructions.iter().any(|inst| matches!(
             inst,
             SIRInstruction::Concat(RegisterId(4), args) if args.len() == 1
+        )));
+    }
+
+    #[test]
+    fn folds_slices_back_to_their_concat_inputs() {
+        let bit = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(52));
+        register_map.insert(RegisterId(1), bit(11));
+        register_map.insert(RegisterId(2), bit(1));
+        register_map.insert(RegisterId(3), bit(64));
+        register_map.insert(RegisterId(4), bit(52));
+        register_map.insert(RegisterId(5), bit(6));
+        register_map.insert(RegisterId(6), bit(1));
+
+        let instructions = vec![
+            SIRInstruction::Concat(
+                RegisterId(3),
+                vec![RegisterId(2), RegisterId(1), RegisterId(0)],
+            ),
+            SIRInstruction::Slice(RegisterId(4), RegisterId(3), 0, 52),
+            SIRInstruction::Slice(RegisterId(5), RegisterId(3), 55, 6),
+            SIRInstruction::Slice(RegisterId(6), RegisterId(3), 63, 1),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(3), RegisterId(4), RegisterId(5), RegisterId(6)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        ConcatFoldingPass.run(&mut eu, &PassOptions::default());
+
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Unary(RegisterId(4), UnaryOp::Ident, RegisterId(0))
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Slice(RegisterId(5), RegisterId(1), 3, 6)
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Unary(RegisterId(6), UnaryOp::Ident, RegisterId(2))
         )));
     }
 

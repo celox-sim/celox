@@ -1105,6 +1105,58 @@ seconds of code generation and 65.914 seconds of generated execution. The
 structural reduction alone is not a runtime-speedup claim; this sample remains
 inside the recent timing variation.
 
+A same-workload profile of synchronous Veryl AOT-C then separated common RTL
+work from Celox-specific lowering loss. Veryl reached the same architectural
+marker in 58.981 seconds of generated execution. Of its execution samples,
+56,673 were attributed to the generated AOT objects. The corresponding Celox
+run attributed 64,949 samples to the fused JIT function and took 67.075
+seconds. At the same sampling frequency, the dominant opcode differences were:
+
+| Dynamic sample class | Celox | Veryl AOT-C |
+|---|---:|---:|
+| `and` | 9,400 | 6,133 |
+| scalar shifts, including BMI2 variable shifts | 5,263 | 2,719 |
+| conditional moves | 2,437 | 619 |
+
+These are sampled cycles, not retired-instruction counts, but their 1.146x
+total-sample ratio closely tracks the 1.137x execution-time ratio. They show
+that the remaining gap is no longer explained by the eliminated byte blend
+alone. Veryl's C retains source conditionals which GCC lowers to control flow,
+while Celox still carries avoidable bitfield reconstruction and selection work
+into native lowering.
+
+One general SIR defect was visible without relying on source provenance:
+
+```text
+packed = Concat(sign, exponent, fraction)
+fraction_again = Slice(packed, 0, 52)
+exponent_again = Slice(packed, 52, 11)
+```
+
+The original field SSA values remain available, but the old optimizer lowered
+the slices through the packed word as shifts and masks. Concat folding now
+redirects any slice wholly contained in one Concat input to that input while
+retaining the packed value for observable Stores. This is exact bit-range
+composition, not a Heliodor-specific pattern.
+
+On the fused function the rewrite changes:
+
+| Stage | Byte-blend baseline | Slice/Concat composition | Delta |
+|---|---:|---:|---:|
+| optimized MIR | 93,828 | 93,637 | -191 |
+| pressure-scheduled MIR | 100,474 | 100,237 | -237 |
+| post-RA MIR | 212,191 | 211,595 | -596 |
+| x86 instructions | 147,496 | 147,018 | -478 |
+
+More importantly, the freshly profiled 2,156-instruction floating-point block
+shrinks to 774 instructions because the simpler value graph lets existing
+control placement separate guarded work. Its samples fall from 1,674 to 795.
+A fresh complete profile attributes 62,480 samples to generated instructions,
+3.80% fewer than the preceding 64,949, and reaches the exact Linux marker in
+64.140 seconds. A separate trace-free run takes 65.748 seconds. Both runs pass
+semantically; their timing remains a measured improvement candidate rather
+than proof that all host variance has been removed.
+
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,
 `17..32`, and `33+`. Version-demand bins are `1`, `2`, `3..4`, `5..8`,
