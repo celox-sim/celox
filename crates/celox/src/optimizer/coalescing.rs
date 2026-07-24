@@ -11,6 +11,8 @@ mod dead_working_stores;
 mod fused_state_feasibility;
 #[cfg(target_arch = "x86_64")]
 mod fused_state_plan;
+#[cfg(target_arch = "x86_64")]
+mod lane_aggregate_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
@@ -90,6 +92,14 @@ pub(crate) fn analyze_fused_state_feasibility(
     ff_entry: BlockId,
 ) -> Result<fused_state_feasibility::FeasibilityReport, String> {
     fused_state_feasibility::analyze(eu, ff_entry).map_err(|error| error.to_string())
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn analyze_lane_aggregate_feasibility(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &crate::backend::MemoryLayout,
+) -> Result<lane_aggregate_feasibility::LaneAggregateFeasibilityReport, String> {
+    lane_aggregate_feasibility::analyze(eu, layout)
 }
 
 pub(crate) fn eliminate_unread_fused_comb_stores(

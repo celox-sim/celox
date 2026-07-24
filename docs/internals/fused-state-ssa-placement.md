@@ -1331,15 +1331,20 @@ executable packed implementation, or leave those producers scalar while
 changing their placement/allocation contract. In particular, an opaque
 Concat-per-frontier-node is not a viable representation for this region.
 
-#### Sink-local SIMD feasibility
+#### Lane-aggregate feasibility
 
 The native backend already has the required allocation boundary:
 `PackedLaneCompare` is one MIR operation whose emitter uses XMM registers
 outside the GPR allocator and returns only the final predicate mask in a GPR.
-The first aggregate implementation should generalize that indivisible pseudo,
-not add vector VRegs to global register allocation.
+The first aggregate implementation should generalize that indivisible
+allocation boundary, not add vector VRegs to global register allocation.
+However, one physical representation is not sufficient:
 
-An initial `PackedLaneRecipe` is legal only when all of the following hold:
+- byte/word strided state is represented as fixed-width SIMD lanes;
+- small packed fields and predicate results are represented as GPR bit
+  planes, using `pext`/`pdep` at packed boundaries where profitable.
+
+An initial `LaneAggregateRecipe` is legal only when all of the following hold:
 
 - the root is one complete 8..64-lane predicate mask consumed at one use
   cluster;
@@ -1354,13 +1359,12 @@ An initial `PackedLaneRecipe` is legal only when all of the following hold:
   sink, and the recipe contains no Store, Commit, trigger, capture, runtime
   observation, or loop-carried cycle.
 
-The pseudo is emitted in fixed 128-bit chunks. Intermediate SIMD values live
-only while emitting one chunk, so they create neither CFG live-ins nor spill
-slots. The result of each chunk is converted to predicate bits and accumulated
-in the ordinary GPR destination. SSE2 operations cover 16-bit add/sub,
-boolean operations, mux, and comparison; any operation without an exact
-baseline implementation rejects the recipe and retains scalar SIR. Wider ISA
-paths may be added only as alternative emission for the same recipe.
+SIMD recipes are emitted in fixed 128-bit chunks. Intermediate SIMD values
+live only while emitting one chunk, so they create neither CFG live-ins nor
+spill slots. Bit-sliced recipes hold one GPR mask per logical bit plane; a
+32-lane, 13-bit value therefore has 13 planes, not 32 scalar values. The final
+predicate is already one GPR mask. Wider ISA paths may be added only as
+alternative emission for the same typed recipe.
 
 Planning traverses each `(recipe node, lane group)` once and interns identical
 nodes. Its time and memory are linear in covered operand edges. A predecessor
@@ -1380,6 +1384,42 @@ Before code generation, an analysis-only gate must report for blocks 8081,
 The recipe proceeds to MIR only if its estimated emitted instructions plus
 mandatory reads are lower than the covered post-allocation scalar work. The
 same scalar SIR remains the complete fallback.
+
+The analysis-only implementation runs after native merged-chain cleanup. It
+uses the existing placement StateSSA and is enabled by
+`CELOX_LANE_AGGREGATE_FEASIBILITY`. On the release-equivalent Heliodor
+workload it identifies exactly the two 32-lane publication roots in blocks
+4425 and 4426 and completes in 1.2--1.6 seconds per large function.
+
+The traversal established these representation boundaries:
+
+1. One 64-bit packed state word is expanded as lane 0 plus 31
+   `Shr(same_source, lane_constant)` values. This is a regular packed extract,
+   not 32 unrelated 64-bit lanes. For a two-bit field it maps to two predicate
+   planes rather than a 512-bit SIMD expansion.
+2. A 13-bit value is formed as `Concat(zero, twelve_bit_value)` in all 32
+   lanes. In a bit-sliced representation this adds one zero plane and should
+   not emit 32 scalar Concats.
+3. The fused function reaches 32 one-bit reads of `var215` whose original
+   StateVersions are no longer present at either sink. There is also no common
+   dominator entry at which all 32 memory versions coexist. Reloading them at
+   the sink would therefore be a miscompile.
+4. Those leaves occur under a control merge. In the standalone comb function
+   the same frontier appears as 31 Mux definitions plus one EU-boundary
+   parameter. A single branchless sink expression cannot name all sources at
+   one legal point.
+
+Consequently the next recipe unit is a small `ControlPureAggregateRegion`.
+Each branch materializes its own legal mask/bit planes, and the aggregate
+values are merged with the original branch priority. This is not speculation:
+loads remain in their original StateVersion domains. Repair may stop at an
+already available dominating aggregate SSA value, but may not expose the
+original lane-wise scalar values as global live-ins.
+
+The current analysis intentionally rejects both roots until that
+`ControlMerge` recipe exists. Code generation remains unauthorized; treating
+the failed StateVersion check as a movable Load or accepting 32 arbitrary SSA
+leaves would reintroduce the exact long-live-range problem being removed.
 
 The distance histogram bins are `0`, `1`, `2..3`, `4..7`, `8..15`, `16+`,
 and unresolved. Cone-size bins are `0`, `1..2`, `3..4`, `5..8`, `9..16`,

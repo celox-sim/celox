@@ -472,6 +472,90 @@ impl PlacementAnalysis {
             && self.execution_safe_at_block(occurrence, origin, target)
     }
 
+    /// Whether a state-read value has an executable reload of the exact same
+    /// memory version at `target`.
+    ///
+    /// This is deliberately weaker than moving the original Load occurrence:
+    /// rematerializing a persistent-state leaf does not require the original
+    /// Load's block to dominate the target. The target's entry StateVersion is
+    /// the materialization source named by the plan.
+    pub fn can_materialize_state_read_at_block(&self, value: ValueId, target: BlockId) -> bool {
+        let Some(occurrence) = self.value(value) else {
+            return false;
+        };
+        let ValueSafety::StateRead(token) = occurrence.safety else {
+            return false;
+        };
+        self.state_for(token)
+            .and_then(|state| state.entry_version(target, token.slot))
+            == Some(token.version)
+    }
+
+    /// Find the closest dominator of `target` whose entry exposes every named
+    /// state-read version. This is the legal point for one aggregate snapshot
+    /// when those versions are overwritten before the final use cluster.
+    pub fn latest_common_state_materialization_block(
+        &self,
+        values: &[ValueId],
+        target: BlockId,
+    ) -> Option<BlockId> {
+        let tokens = values
+            .iter()
+            .map(|&value| match self.value(value)?.safety {
+                ValueSafety::StateRead(token) => Some(token),
+                ValueSafety::Pure | ValueSafety::Pinned(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut block = self.cfg.block_index(target)?;
+        loop {
+            let block_id = self.cfg.block_ids[block];
+            if tokens.iter().all(|&token| {
+                self.state_for(token)
+                    .and_then(|state| state.entry_version(block_id, token.slot))
+                    == Some(token.version)
+            }) {
+                return Some(block_id);
+            }
+            block = self.cfg.dominators.idom[block]?;
+        }
+    }
+
+    /// Find the earliest block on the target's dominator path at which all
+    /// SSA occurrences are available. This is the placement for aggregating
+    /// several exact SSA leaves before their separate live ranges continue to
+    /// a distant sink.
+    pub fn earliest_common_dominating_value_block(
+        &self,
+        values: &[ValueId],
+        target: BlockId,
+    ) -> Option<BlockId> {
+        let origins = values
+            .iter()
+            .map(|&value| self.cfg.block_index(self.value(value)?.origin.block()))
+            .collect::<Option<Vec<_>>>()?;
+        let target = self.cfg.block_index(target)?;
+        if origins
+            .iter()
+            .any(|&origin| !self.cfg.dominators.dominates(origin, target))
+        {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut cursor = Some(target);
+        while let Some(block) = cursor {
+            path.push(block);
+            cursor = self.cfg.dominators.idom[block];
+        }
+        path.reverse();
+        path.into_iter()
+            .find(|&block| {
+                origins
+                    .iter()
+                    .all(|&origin| self.cfg.dominators.dominates(origin, block))
+            })
+            .map(|block| self.cfg.block_ids[block])
+    }
+
     pub fn loop_depth(&self, block: BlockId) -> Option<usize> {
         self.cfg
             .block_index(block)
@@ -1169,6 +1253,133 @@ mod tests {
                 latest: BlockId(1),
                 legal_blocks: vec![BlockId(0), BlockId(1)],
             }
+        );
+    }
+
+    #[test]
+    fn exact_state_version_can_reload_without_original_load_dominance() {
+        let input = address(0);
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Load(
+                        RegisterId(1),
+                        input,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    SIRTerminator::Jump(BlockId(3), vec![]),
+                ),
+                block(2, vec![], SIRTerminator::Jump(BlockId(3), vec![])),
+                block(3, vec![], SIRTerminator::Return),
+            ],
+            [(RegisterId(0), bit(1)), (RegisterId(1), bit(8))],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let value = analysis.value_for_register(RegisterId(1)).unwrap();
+
+        assert!(!analysis.can_sink_to_block(value, BlockId(3)));
+        assert!(analysis.can_materialize_state_read_at_block(value, BlockId(3)));
+    }
+
+    #[test]
+    fn aggregate_ssa_frontier_is_first_block_after_all_definitions() {
+        let first = address(0);
+        let second = address(1);
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![SIRInstruction::Load(
+                        RegisterId(0),
+                        first,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    SIRTerminator::Jump(BlockId(1), vec![]),
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Load(
+                        RegisterId(1),
+                        second,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    SIRTerminator::Jump(BlockId(2), vec![]),
+                ),
+                block(2, vec![], SIRTerminator::Return),
+            ],
+            [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let values = [
+            analysis.value_for_register(RegisterId(0)).unwrap(),
+            analysis.value_for_register(RegisterId(1)).unwrap(),
+        ];
+
+        assert_eq!(
+            analysis.earliest_common_dominating_value_block(&values, BlockId(2)),
+            Some(BlockId(1))
+        );
+    }
+
+    #[test]
+    fn aggregate_state_frontier_stops_before_a_branch_write() {
+        let state = address(0);
+        let eu = unit(
+            [
+                block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(RegisterId(1), SIRValue::new(9u8)),
+                        SIRInstruction::Load(RegisterId(2), state, SIROffset::Static(0), 8),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Store(
+                        state,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(1),
+                        vec![],
+                        vec![],
+                    )],
+                    SIRTerminator::Jump(BlockId(3), vec![]),
+                ),
+                block(2, vec![], SIRTerminator::Jump(BlockId(3), vec![])),
+                block(3, vec![], SIRTerminator::Return),
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+        let analysis = PlacementAnalysis::analyze(&eu).unwrap();
+        let value = analysis.value_for_register(RegisterId(2)).unwrap();
+
+        assert!(!analysis.can_materialize_state_read_at_block(value, BlockId(3)));
+        assert_eq!(
+            analysis.latest_common_state_materialization_block(&[value], BlockId(3)),
+            Some(BlockId(0))
         );
     }
 

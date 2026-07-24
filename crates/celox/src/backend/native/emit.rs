@@ -4259,6 +4259,24 @@ fn emit_chained_eu_groups(
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
+    if let Some(mode) = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY") {
+        let start = crate::timing::now();
+        let report =
+            crate::optimizer::coalescing::analyze_lane_aggregate_feasibility(&sir_eu, layout)
+                .map_err(|message| ChainedEmitError::Analysis {
+                    phase: "lane aggregate feasibility",
+                    message,
+                })?;
+        eprintln!(
+            "[lane-aggregate-feasibility] label={label} {report} elapsed={:?}",
+            start.elapsed()
+        );
+        if mode != "summary" {
+            for detail in report.detail_lines() {
+                eprintln!("[lane-aggregate-feasibility-detail] label={label} {detail}");
+            }
+        }
+    }
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
     }
