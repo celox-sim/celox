@@ -88,6 +88,7 @@ pub(crate) struct SelectorSinkCaseSummaryFact {
     pub all_control_merges: Vec<RegisterId>,
     pub all_non_dominating_control_merges: Vec<RegisterId>,
     pub non_dominating_control_merge_cases: Vec<(String, Vec<RegisterId>)>,
+    pub path_local_placements: Vec<PathLocalPlacementFact>,
     pub all_loop_cutoffs: Vec<RegisterId>,
     pub stable_load_frontier: Vec<RegisterId>,
     pub unstable_load_frontier: Vec<RegisterId>,
@@ -110,6 +111,18 @@ pub(crate) struct SelectorSinkCaseSummaryFact {
     pub maximum_cost_external_frontier: Vec<RegisterId>,
     pub maximum_cost_control_merges: Vec<RegisterId>,
     pub maximum_cost_loop_cutoffs: Vec<RegisterId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathLocalPlacementFact {
+    pub case: String,
+    pub merge: RegisterId,
+    pub insertion_block: BlockId,
+    pub load_frontier: Vec<RegisterId>,
+    pub unavailable_ssa_frontier: Vec<RegisterId>,
+    pub stable_load_frontier: Vec<RegisterId>,
+    pub unstable_load_frontier: Vec<RegisterId>,
+    pub unversioned_load_frontier: Vec<RegisterId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +242,7 @@ impl SelectorSinkRecipeFact {
              case_unique_external_frontier={} case_unique_control_merges={} \
              case_unique_non_dominating_control_merges={} \
              case_non_dominating_control_merge_cases={:?} \
+             case_path_local_placements={:?} \
              case_unique_loop_cutoffs={} case_stable_load_frontier={} \
              case_unstable_load_frontier={} case_unversioned_load_frontier={} \
              case_maximum_unstable_loads={} case_maximum_unversioned_loads={}",
@@ -272,6 +286,7 @@ impl SelectorSinkRecipeFact {
             self.case_summary.all_control_merges.len(),
             self.case_summary.all_non_dominating_control_merges.len(),
             self.case_summary.non_dominating_control_merge_cases,
+            self.case_summary.path_local_placements,
             self.case_summary.all_loop_cutoffs.len(),
             self.case_summary.stable_load_frontier.len(),
             self.case_summary.unstable_load_frontier.len(),
@@ -602,6 +617,30 @@ fn annotate_load_frontier_versions(
             })
             .max()
             .unwrap_or(0);
+        for placement in &mut recipe.case_summary.path_local_placements {
+            placement.stable_load_frontier.clear();
+            placement.unstable_load_frontier.clear();
+            placement.unversioned_load_frontier.clear();
+            for &register in &placement.load_frontier {
+                match load_frontier_version(
+                    eu,
+                    definitions,
+                    &states,
+                    register,
+                    placement.insertion_block,
+                ) {
+                    LoadFrontierVersion::Stable => {
+                        placement.stable_load_frontier.push(register);
+                    }
+                    LoadFrontierVersion::Unstable => {
+                        placement.unstable_load_frontier.push(register);
+                    }
+                    LoadFrontierVersion::Unversioned => {
+                        placement.unversioned_load_frontier.push(register);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1217,6 +1256,66 @@ fn analyze_case_sink_recipes(
             .into_iter()
             .collect::<Vec<_>>()
     };
+    let path_local_placements = cfg.map_or_else(Vec::new, |cfg| {
+        recipes
+            .iter()
+            .filter_map(|case| {
+                if case.recipe.non_dominating_control_merges.len() != 1 {
+                    return None;
+                }
+                let merge = *case.recipe.non_dominating_control_merges.first()?;
+                let insertion_block = *parameter_blocks.get(&merge)?;
+                let mut unavailable = case
+                    .recipe
+                    .dominating_ssa_frontier
+                    .iter()
+                    .chain(&case.recipe.control_merges)
+                    .chain(&case.recipe.external_frontier)
+                    .copied()
+                    .filter(|&register| {
+                        !value_available_at_block_entry(
+                            eu,
+                            register,
+                            insertion_block,
+                            definitions,
+                            parameter_blocks,
+                            cfg,
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                for &load in &case.recipe.load_frontier {
+                    let Some(site) = definitions.get(&load) else {
+                        unavailable.insert(load);
+                        continue;
+                    };
+                    for operand in
+                        instruction_uses(&eu.blocks[&site.block].instructions[site.index])
+                    {
+                        if !value_available_at_block_entry(
+                            eu,
+                            operand,
+                            insertion_block,
+                            definitions,
+                            parameter_blocks,
+                            cfg,
+                        ) {
+                            unavailable.insert(operand);
+                        }
+                    }
+                }
+                Some(PathLocalPlacementFact {
+                    case: case.label.clone(),
+                    merge,
+                    insertion_block,
+                    load_frontier: case.recipe.load_frontier.iter().copied().collect(),
+                    unavailable_ssa_frontier: unavailable.into_iter().collect(),
+                    stable_load_frontier: Vec::new(),
+                    unstable_load_frontier: Vec::new(),
+                    unversioned_load_frontier: Vec::new(),
+                })
+            })
+            .collect()
+    });
     SelectorSinkCaseSummaryFact {
         alternatives,
         reachable_alternatives,
@@ -1282,6 +1381,7 @@ fn analyze_case_sink_recipes(
                 )
             })
             .collect(),
+        path_local_placements,
         all_loop_cutoffs: union(|recipe| &recipe.loop_cutoffs),
         stable_load_frontier: Vec::new(),
         unstable_load_frontier: Vec::new(),
@@ -1557,6 +1657,30 @@ fn classify_ssa_frontier(
     } else {
         recipe.external_frontier.insert(register);
     }
+}
+
+fn value_available_at_block_entry(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    register: RegisterId,
+    insertion_block: BlockId,
+    definitions: &HashMap<RegisterId, DefinitionSite>,
+    parameter_blocks: &HashMap<RegisterId, BlockId>,
+    cfg: &SirCfg,
+) -> bool {
+    if let Some(&block) = parameter_blocks.get(&register) {
+        return block == insertion_block
+            || (block != insertion_block && cfg.dominates(block, insertion_block));
+    }
+    let Some(site) = definitions.get(&register) else {
+        return false;
+    };
+    if matches!(
+        eu.blocks[&site.block].instructions[site.index],
+        SIRInstruction::Imm(..)
+    ) {
+        return true;
+    }
+    site.block != insertion_block && cfg.dominates(site.block, insertion_block)
 }
 
 fn build_selector_case_contexts(
@@ -2283,7 +2407,9 @@ mod tests {
         let guard_one = RegisterId(8);
         let path_local = RegisterId(9);
         let joined = RegisterId(10);
-        let result = RegisterId(11);
+        let combined = RegisterId(11);
+        let result = RegisterId(12);
+        let loaded = RegisterId(13);
         let origin = BasicBlock {
             id: BlockId(0),
             params: vec![selector, outer, true_value, false_value, fallback],
@@ -2292,6 +2418,7 @@ mod tests {
                 SIRInstruction::Imm(one, SIRValue::new(1u8)),
                 SIRInstruction::Binary(guard_zero, selector, BinaryOp::Eq, zero),
                 SIRInstruction::Binary(guard_one, selector, BinaryOp::Eq, one),
+                SIRInstruction::Load(loaded, address(1), SIROffset::Static(0), 2),
             ],
             terminator: SIRTerminator::Branch {
                 cond: guard_zero,
@@ -2337,7 +2464,8 @@ mod tests {
             id: BlockId(6),
             params: vec![joined],
             instructions: vec![
-                SIRInstruction::Mux(result, guard_one, one, joined),
+                SIRInstruction::Binary(combined, joined, BinaryOp::Add, loaded),
+                SIRInstruction::Mux(result, guard_one, one, combined),
                 SIRInstruction::Store(
                     address(0),
                     SIROffset::Static(0),
@@ -2374,7 +2502,9 @@ mod tests {
                 (guard_one, bit(1)),
                 (path_local, bit(2)),
                 (joined, bit(2)),
+                (combined, bit(2)),
                 (result, bit(2)),
+                (loaded, bit(2)),
             ]
             .into_iter()
             .collect(),
@@ -2386,6 +2516,19 @@ mod tests {
         assert_eq!(
             summary.non_dominating_control_merge_cases,
             vec![("0".to_owned(), vec![path_local])]
+        );
+        assert_eq!(
+            summary.path_local_placements,
+            vec![PathLocalPlacementFact {
+                case: "0".to_owned(),
+                merge: path_local,
+                insertion_block: BlockId(5),
+                load_frontier: vec![loaded],
+                unavailable_ssa_frontier: Vec::new(),
+                stable_load_frontier: vec![loaded],
+                unstable_load_frontier: Vec::new(),
+                unversioned_load_frontier: Vec::new(),
+            }]
         );
         assert!(summary.all_control_merges.is_empty());
     }

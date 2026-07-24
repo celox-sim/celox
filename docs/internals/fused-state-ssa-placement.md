@@ -2196,6 +2196,27 @@ only at sink block 5834. The other 75 alternatives and the complete second
 Store path can then use sink-local dispatch. A generated case block must never
 refer directly to `r59001` or `r59008` from block 5834.
 
+The block-entry placement check is now part of the analysis contract. It
+requires the selected merge parameter to be a parameter of the insertion
+block, every other SSA frontier value to strictly dominate that block entry,
+every dynamic Load-address operand to be available there, and every
+rematerialized Load to name the same StateSSA version at that entry. The
+focused result is:
+
+```text
+case  merge    insertion entry  Loads  unavailable SSA  unstable/unversioned
+57    r59008   b6032             0      0                0 / 0
+71    r59001   b6266             0      0                0 / 0
+```
+
+Both exceptional recipes are therefore closed at their merge entries. A
+lowering may split each entry before its original instructions, branch on the
+already dominating exact-case guard, materialize and publish the selected
+case on the taken edge, and move the original block body to the fallback edge.
+This preserves the unknown outer-control merge and does not carry either
+parameter to block 5834. The complete focused analysis, including sparse
+StateSSA and both placement checks, takes 28.9 ms.
+
 The first whole-function sink-local prototype was rejected and removed. It
 required every case to be closed at the final Store and therefore failed
 dominance on `r59008`; it also selected candidates without profile guidance.
