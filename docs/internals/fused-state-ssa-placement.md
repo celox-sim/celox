@@ -1552,6 +1552,28 @@ slice and aggregate estimate both include both mutually exclusive suffixes,
 so an executable A/B must still verify instruction count, execution time, RTL
 equivalence, and Linux boot before the rewrite becomes a default.
 
+The analysis shape is not itself the lowering contract. An audit before ISel
+found that the original internal recipe named `Constant`, `Affine`, and
+`PackedExtract` only by shape; their constant values and per-lane offsets
+would have had to be rediscovered from SIR. The immutable code-generation plan
+now carries:
+
+- every constant value and affine/extract lane offset;
+- the exact scalar register and placement block for SSA materializations;
+- each state address, logical range, physical byte/bit position, and
+  placement-StateSSA slot/version;
+- the exact publication address/range for each root;
+- typed operation operands as topologically earlier plan-node identities.
+
+Plan verification consumes only this representation. It rejects missing
+operands, forward edges, incomplete lane vectors, invalid materialization
+cardinality, and incomplete publication roots without consulting SIR
+instruction shapes. In particular, one exact state load broadcast to every
+lane is represented as one materialization source, while a strided state
+vector names one exact source per lane. This is the boundary that prevents a
+second pattern matcher from silently acquiring different legality rules in
+ISel.
+
 The executable source distinction remains a semantic lowering constraint even
 though this workload now selects `ReloadAtSink` for all nine nodes. The earlier
 5/4 split was evidence of a StateSSA modeling defect, not evidence that FF

@@ -42,18 +42,18 @@ enum RecipeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RecipeOp {
     StateRead(StateReadSource),
-    Constant,
-    BroadcastScalar,
-    Affine,
-    PackedExtract,
-    SsaPack,
+    Constant { values: Vec<u64> },
+    BroadcastScalar { register: RegisterId },
+    Affine { offsets: Vec<u64> },
+    PackedExtract { offsets: Vec<usize> },
+    SsaPack { block: BlockId },
     Unary(UnaryOp),
     Binary(BinaryOp),
     ShiftConstant { operation: BinaryOp, amount: usize },
     OneHotDecode { shift_width: usize },
     Mux,
     ControlMux,
-    ScalarInsert,
+    ScalarInsert { block: BlockId },
     Slice { offset: usize, width: usize },
     Concat { operand_widths: Vec<usize> },
 }
@@ -87,24 +87,29 @@ struct StateLoadLeaf {
     register: RegisterId,
     origin: ValueOrigin,
     token: StateToken,
+    address: RegionedAbsoluteAddr,
+    bit_offset: usize,
+    width: usize,
+    physical_byte: usize,
+    physical_bit: usize,
 }
 
 impl RecipeOp {
     fn kind(&self) -> RecipeKind {
         match self {
             Self::StateRead(_) => RecipeKind::StateRead,
-            Self::Constant => RecipeKind::Constant,
-            Self::BroadcastScalar => RecipeKind::BroadcastScalar,
-            Self::Affine => RecipeKind::Affine,
-            Self::PackedExtract => RecipeKind::PackedExtract,
-            Self::SsaPack => RecipeKind::SsaPack,
+            Self::Constant { .. } => RecipeKind::Constant,
+            Self::BroadcastScalar { .. } => RecipeKind::BroadcastScalar,
+            Self::Affine { .. } => RecipeKind::Affine,
+            Self::PackedExtract { .. } => RecipeKind::PackedExtract,
+            Self::SsaPack { .. } => RecipeKind::SsaPack,
             Self::Unary(_) => RecipeKind::Unary,
             Self::Binary(_) => RecipeKind::Binary,
             Self::ShiftConstant { .. } => RecipeKind::ShiftConstant,
             Self::OneHotDecode { .. } => RecipeKind::OneHotDecode,
             Self::Mux => RecipeKind::Mux,
             Self::ControlMux => RecipeKind::ControlMux,
-            Self::ScalarInsert => RecipeKind::ScalarInsert,
+            Self::ScalarInsert { .. } => RecipeKind::ScalarInsert,
             Self::Slice { .. } => RecipeKind::Slice,
             Self::Concat { .. } => RecipeKind::Concat,
         }
@@ -163,6 +168,105 @@ struct Candidate {
     snapshot_frontiers: Vec<BlockId>,
     ssa_frontiers: Vec<BlockId>,
     estimated_instructions: usize,
+    publication: Publication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Publication {
+    address: RegionedAbsoluteAddr,
+    first_bit_offset: usize,
+    lane_count: usize,
+}
+
+/// Immutable, fully specified recipe consumed by native lowering.
+///
+/// No consumer may inspect the original SIR instruction shape to recover a
+/// missing operand.  Keeping this separate from `RecipeNode` makes that
+/// boundary mechanically reviewable.
+#[derive(Debug, Clone)]
+pub(crate) struct LaneAggregatePlan {
+    pub(crate) nodes: Vec<LaneAggregatePlanNode>,
+    pub(crate) roots: Vec<LaneAggregatePlanRoot>,
+    pub(crate) dead_scalar_registers: HashSet<RegisterId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LaneAggregatePlanNode {
+    pub(crate) operation: LaneAggregatePlanOp,
+    pub(crate) children: Vec<usize>,
+    pub(crate) lane_width: usize,
+    pub(crate) lane_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LaneAggregatePlanOp {
+    StateRead(LaneAggregateMaterialization),
+    Constant(Vec<u64>),
+    BroadcastScalar(RegisterId),
+    Affine(Vec<u64>),
+    PackedExtract(Vec<usize>),
+    SsaPack {
+        block: BlockId,
+        values: Vec<RegisterId>,
+    },
+    Unary(UnaryOp),
+    Binary(BinaryOp),
+    ShiftConstant {
+        operation: BinaryOp,
+        amount: usize,
+    },
+    OneHotDecode {
+        shift_width: usize,
+    },
+    Mux,
+    ControlMux,
+    ScalarInsert {
+        block: BlockId,
+        values: Vec<RegisterId>,
+    },
+    Slice {
+        offset: usize,
+        width: usize,
+    },
+    Concat {
+        operand_widths: Vec<usize>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LaneAggregateMaterialization {
+    ReloadAtSink(Vec<LaneAggregateStateLoad>),
+    ReloadAtFrontier {
+        block: BlockId,
+        loads: Vec<LaneAggregateStateLoad>,
+    },
+    DominatingSsa {
+        block: BlockId,
+        values: Vec<RegisterId>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LaneAggregateStateLoad {
+    pub(crate) register: RegisterId,
+    pub(crate) address: RegionedAbsoluteAddr,
+    pub(crate) bit_offset: usize,
+    pub(crate) width: usize,
+    pub(crate) physical_byte: usize,
+    pub(crate) physical_bit: usize,
+    /// Stable identity of the exact placement-StateSSA version.
+    pub(crate) state_slot: usize,
+    pub(crate) state_version: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LaneAggregatePlanRoot {
+    pub(crate) block: BlockId,
+    pub(crate) original_root: RegisterId,
+    pub(crate) recipe_root: usize,
+    pub(crate) publication_address: RegionedAbsoluteAddr,
+    pub(crate) publication_bit_offset: usize,
+    pub(crate) lane_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -176,7 +280,7 @@ struct SharedRecipeKey {
 #[derive(Debug, Clone)]
 struct SharedRecipePlan {
     nodes: Vec<RecipeNode>,
-    roots: Vec<(BlockId, RegisterId, usize)>,
+    roots: Vec<(BlockId, RegisterId, usize, Publication)>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -224,6 +328,7 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     state_dominating_ssa_nodes: usize,
     kind_counts: HashMap<RecipeKind, usize>,
     reject_counts: HashMap<RejectReason, usize>,
+    plan: Option<LaneAggregatePlan>,
 }
 
 impl LaneAggregateFeasibilityReport {
@@ -235,17 +340,24 @@ impl LaneAggregateFeasibilityReport {
         &self.replaced_scalar_registers
     }
 
+    pub(crate) fn plan(&self) -> Option<&LaneAggregatePlan> {
+        self.plan.as_ref()
+    }
+
     pub(crate) fn detail_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         for candidate in &self.accepted {
             lines.push(format!(
-                "status=accepted block={} root=r{} lanes={} nodes={} covered={} estimated={}",
+                "status=accepted block={} root=r{} lanes={} nodes={} covered={} estimated={} publication={:?}+{}:{}",
                 candidate.block.0,
                 candidate.root.0,
                 candidate.lane_count,
                 candidate.nodes.len(),
                 candidate.covered_registers.len(),
                 candidate.estimated_instructions,
+                candidate.publication.address,
+                candidate.publication.first_bit_offset,
+                candidate.publication.lane_count,
             ));
             if !candidate.snapshot_frontiers.is_empty() {
                 lines.push(format!(
@@ -468,6 +580,32 @@ impl<'a> Analyzer<'a> {
         self.eu.register_map.get(&register).map(|ty| ty.width())
     }
 
+    fn state_load_leaf(
+        &self,
+        value: &super::placement_analysis::ValueOccurrence,
+        token: StateToken,
+    ) -> Result<StateLoadLeaf, RejectReason> {
+        let Some(SIRInstruction::Load(_, address, SIROffset::Static(bit_offset), width)) =
+            self.instruction(value.register)
+        else {
+            return Err(RejectReason::NonStridedStateLeaf);
+        };
+        let (physical_byte, physical_bit) = self
+            .layout
+            .map_static_bit_offset(&address.absolute_addr(), *bit_offset);
+        Ok(StateLoadLeaf {
+            value: value.id,
+            register: value.register,
+            origin: value.origin,
+            token,
+            address: *address,
+            bit_offset: *bit_offset,
+            width: *width,
+            physical_byte,
+            physical_bit,
+        })
+    }
+
     fn insert_node(
         &mut self,
         key: Vec<RegisterId>,
@@ -505,7 +643,7 @@ impl<'a> Analyzer<'a> {
             self.ssa_frontiers.insert(frontier);
             result = self.insert_node(
                 key.clone(),
-                RecipeOp::SsaPack,
+                RecipeOp::SsaPack { block: frontier },
                 Vec::new(),
                 1,
                 key.len().saturating_mul(2).saturating_sub(1),
@@ -577,7 +715,18 @@ impl<'a> Analyzer<'a> {
             .iter()
             .all(|register| matches!(self.instruction(*register), Some(SIRInstruction::Imm(..))))
         {
-            return self.insert_node(key, RecipeOp::Constant, Vec::new(), lane_width, 1);
+            let values = key
+                .iter()
+                .map(|register| self.immediate(*register))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(RejectReason::InvalidRecipe)?;
+            return self.insert_node(
+                key,
+                RecipeOp::Constant { values },
+                Vec::new(),
+                lane_width,
+                1,
+            );
         }
 
         if key.iter().all(|register| *register == first) {
@@ -588,7 +737,13 @@ impl<'a> Analyzer<'a> {
                 .ok_or(RejectReason::MissingDefinition)?;
             return match value.safety {
                 ValueSafety::Pure if self.placement.can_sink_to_block(value.id, self.target) => {
-                    self.insert_node(key, RecipeOp::BroadcastScalar, Vec::new(), lane_width, 4)
+                    self.insert_node(
+                        key,
+                        RecipeOp::BroadcastScalar { register: first },
+                        Vec::new(),
+                        lane_width,
+                        4,
+                    )
                 }
                 ValueSafety::Pure | ValueSafety::Pinned(_)
                     if self
@@ -599,23 +754,23 @@ impl<'a> Analyzer<'a> {
                     // This is a concrete DominatingSSA frontier, not a
                     // relocation proof.  Only one scalar crosses the
                     // boundary regardless of the lane count.
-                    self.insert_node(key, RecipeOp::BroadcastScalar, Vec::new(), lane_width, 4)
+                    self.insert_node(
+                        key,
+                        RecipeOp::BroadcastScalar { register: first },
+                        Vec::new(),
+                        lane_width,
+                        4,
+                    )
                 }
                 ValueSafety::StateRead(token)
                     if self
                         .placement
                         .can_materialize_state_read_at_block(value.id, self.target) =>
                 {
+                    let load = self.state_load_leaf(value, token)?;
                     self.insert_node(
                         key,
-                        RecipeOp::StateRead(StateReadSource::ReloadAtSink {
-                            loads: vec![StateLoadLeaf {
-                                value: value.id,
-                                register: value.register,
-                                origin: value.origin,
-                                token,
-                            }],
-                        }),
+                        RecipeOp::StateRead(StateReadSource::ReloadAtSink { loads: vec![load] }),
                         Vec::new(),
                         lane_width,
                         5,
@@ -630,14 +785,10 @@ impl<'a> Analyzer<'a> {
                         let ValueSafety::StateRead(token) = value.safety else {
                             unreachable!();
                         };
+                        let load = self.state_load_leaf(value, token)?;
                         StateReadSource::ReloadAtFrontier {
                             block: frontier,
-                            loads: vec![StateLoadLeaf {
-                                value: value.id,
-                                register: value.register,
-                                origin: value.origin,
-                                token,
-                            }],
+                            loads: vec![load],
                         }
                     } else {
                         let frontier = self
@@ -673,14 +824,26 @@ impl<'a> Analyzer<'a> {
             return self.insert_node(key, RecipeOp::StateRead(source), Vec::new(), lane_width, 1);
         }
 
-        if let Some(source) = self.regular_shift_source(&key, lane_width) {
+        if let Some((source, offsets)) = self.regular_shift_source(&key, lane_width) {
             let child = self.analyze(vec![source; key.len()])?;
-            return self.insert_node(key, RecipeOp::PackedExtract, vec![child], lane_width, 1);
+            return self.insert_node(
+                key,
+                RecipeOp::PackedExtract { offsets },
+                vec![child],
+                lane_width,
+                1,
+            );
         }
 
-        if let Some(base) = self.affine_base(&key, lane_width) {
+        if let Some((base, offsets)) = self.affine_base(&key, lane_width) {
             let child = self.analyze(vec![base; key.len()])?;
-            return self.insert_node(key, RecipeOp::Affine, vec![child], lane_width, 2);
+            return self.insert_node(
+                key,
+                RecipeOp::Affine { offsets },
+                vec![child],
+                lane_width,
+                2,
+            );
         }
 
         let muxes = key
@@ -890,7 +1053,11 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn regular_shift_source(&self, key: &[RegisterId], width: usize) -> Option<RegisterId> {
+    fn regular_shift_source(
+        &self,
+        key: &[RegisterId],
+        width: usize,
+    ) -> Option<(RegisterId, Vec<usize>)> {
         let mut source = None;
         let mut offsets = Vec::with_capacity(key.len());
         for &register in key {
@@ -917,12 +1084,13 @@ impl<'a> Analyzer<'a> {
         {
             return None;
         }
-        source
+        Some((source?, offsets))
     }
 
-    fn affine_base(&self, key: &[RegisterId], width: usize) -> Option<RegisterId> {
+    fn affine_base(&self, key: &[RegisterId], width: usize) -> Option<(RegisterId, Vec<u64>)> {
         let mut base = None;
         let mut saw_offset = false;
+        let mut offsets = Vec::with_capacity(key.len());
         for &register in key {
             let (current_base, offset) = self.resolve_affine(register, width)?;
             if base.is_some_and(|known| known != current_base) {
@@ -930,8 +1098,9 @@ impl<'a> Analyzer<'a> {
             }
             base.get_or_insert(current_base);
             saw_offset |= offset != 0;
+            offsets.push(offset);
         }
-        saw_offset.then_some(base?)
+        saw_offset.then_some((base?, offsets))
     }
 
     fn resolve_affine(&self, register: RegisterId, width: usize) -> Option<(RegisterId, u64)> {
@@ -1111,7 +1280,7 @@ impl<'a> Analyzer<'a> {
             let aggregate = self.analyze(mux_lanes)?;
             let inserts = self.insert_node(
                 scalar_lanes.clone(),
-                RecipeOp::ScalarInsert,
+                RecipeOp::ScalarInsert { block: frontier },
                 Vec::new(),
                 lane_width,
                 scalar_values.len().saturating_mul(2),
@@ -1145,12 +1314,7 @@ impl<'a> Analyzer<'a> {
                 .ok_or(RejectReason::MissingDefinition)?;
             match value.safety {
                 ValueSafety::StateRead(token) => {
-                    state_loads.push(StateLoadLeaf {
-                        value: value.id,
-                        register: value.register,
-                        origin: value.origin,
-                        token,
-                    });
+                    state_loads.push(self.state_load_leaf(value, token)?);
                 }
                 ValueSafety::Pure | ValueSafety::Pinned(_)
                     if self
@@ -1346,10 +1510,10 @@ fn complete_publication_root(
     index: usize,
     root: RegisterId,
     lane_count: usize,
-) -> bool {
+) -> Option<Publication> {
     let instructions = &eu.blocks[&block].instructions;
     if index + lane_count * 2 >= instructions.len() {
-        return false;
+        return None;
     }
     let mut destination = None;
     let mut first_offset = None;
@@ -1357,7 +1521,7 @@ fn complete_publication_root(
         let slice_index = index + 1 + lane * 2;
         let store_index = slice_index + 1;
         let SIRInstruction::Slice(slice, source, offset, 1) = instructions[slice_index] else {
-            return false;
+            return None;
         };
         let SIRInstruction::Store(
             address,
@@ -1368,7 +1532,7 @@ fn complete_publication_root(
             ref captures,
         ) = instructions[store_index]
         else {
-            return false;
+            return None;
         };
         if source != root
             || offset != lane
@@ -1376,15 +1540,19 @@ fn complete_publication_root(
             || !triggers.is_empty()
             || !captures.is_empty()
         {
-            return false;
+            return None;
         }
         let start = *first_offset.get_or_insert(store_offset);
         if destination.is_some_and(|known| known != address) || store_offset != start + lane {
-            return false;
+            return None;
         }
         destination.get_or_insert(address);
     }
-    true
+    Some(Publication {
+        address: destination?,
+        first_bit_offset: first_offset?,
+        lane_count,
+    })
 }
 
 fn collect_definitions(
@@ -1442,11 +1610,18 @@ fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
         let child = |slot: usize| node.children.get(slot).and_then(|child| nodes.get(*child));
         let valid = match &node.operation {
             RecipeOp::StateRead(_)
-            | RecipeOp::Constant
-            | RecipeOp::BroadcastScalar
-            | RecipeOp::SsaPack
-            | RecipeOp::ScalarInsert => node.children.is_empty(),
-            RecipeOp::Affine | RecipeOp::PackedExtract => node.children.len() == 1,
+            | RecipeOp::BroadcastScalar { .. }
+            | RecipeOp::SsaPack { .. }
+            | RecipeOp::ScalarInsert { .. } => node.children.is_empty(),
+            RecipeOp::Constant { values } => {
+                node.children.is_empty() && values.len() == node.lanes.len()
+            }
+            RecipeOp::Affine { offsets } => {
+                node.children.len() == 1 && offsets.len() == node.lanes.len()
+            }
+            RecipeOp::PackedExtract { offsets } => {
+                node.children.len() == 1 && offsets.len() == node.lanes.len()
+            }
             RecipeOp::Unary(operation) => {
                 node.children.len() == 1
                     && child(0).is_some_and(|input| {
@@ -1480,7 +1655,7 @@ fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
                     let aggregate = &nodes[*aggregate];
                     let inserts = &nodes[*inserts];
                     aggregate.lanes.len() + inserts.lanes.len() == node.lanes.len()
-                        && inserts.operation == RecipeOp::ScalarInsert
+                        && matches!(inserts.operation, RecipeOp::ScalarInsert { .. })
                         && node.lanes.iter().all(|lane| {
                             aggregate.lanes.contains(lane) ^ inserts.lanes.contains(lane)
                         })
@@ -1554,9 +1729,227 @@ fn build_shared_recipe_plan(candidates: &[Candidate]) -> Option<SharedRecipePlan
             candidate.block,
             candidate.root,
             *local_to_shared.get(candidate.recipe_root)?,
+            candidate.publication,
         ));
     }
     Some(SharedRecipePlan { nodes, roots })
+}
+
+fn lower_state_load(load: &StateLoadLeaf) -> LaneAggregateStateLoad {
+    LaneAggregateStateLoad {
+        register: load.register,
+        address: load.address,
+        bit_offset: load.bit_offset,
+        width: load.width,
+        physical_byte: load.physical_byte,
+        physical_bit: load.physical_bit,
+        state_slot: load.token.slot,
+        state_version: load.token.version.0,
+    }
+}
+
+fn lower_materialization(source: &StateReadSource) -> LaneAggregateMaterialization {
+    match source {
+        StateReadSource::ReloadAtSink { loads } => {
+            LaneAggregateMaterialization::ReloadAtSink(loads.iter().map(lower_state_load).collect())
+        }
+        StateReadSource::ReloadAtFrontier { block, loads } => {
+            LaneAggregateMaterialization::ReloadAtFrontier {
+                block: *block,
+                loads: loads.iter().map(lower_state_load).collect(),
+            }
+        }
+        StateReadSource::DominatingSsa { block, values } => {
+            LaneAggregateMaterialization::DominatingSsa {
+                block: *block,
+                values: values.iter().map(|value| value.register).collect(),
+            }
+        }
+    }
+}
+
+fn lower_plan_operation(node: &RecipeNode) -> LaneAggregatePlanOp {
+    match &node.operation {
+        RecipeOp::StateRead(source) => {
+            LaneAggregatePlanOp::StateRead(lower_materialization(source))
+        }
+        RecipeOp::Constant { values } => LaneAggregatePlanOp::Constant(values.clone()),
+        RecipeOp::BroadcastScalar { register } => LaneAggregatePlanOp::BroadcastScalar(*register),
+        RecipeOp::Affine { offsets } => LaneAggregatePlanOp::Affine(offsets.clone()),
+        RecipeOp::PackedExtract { offsets } => LaneAggregatePlanOp::PackedExtract(offsets.clone()),
+        RecipeOp::SsaPack { block } => LaneAggregatePlanOp::SsaPack {
+            block: *block,
+            values: node.lanes.clone(),
+        },
+        RecipeOp::Unary(operation) => LaneAggregatePlanOp::Unary(*operation),
+        RecipeOp::Binary(operation) => LaneAggregatePlanOp::Binary(*operation),
+        RecipeOp::ShiftConstant { operation, amount } => LaneAggregatePlanOp::ShiftConstant {
+            operation: *operation,
+            amount: *amount,
+        },
+        RecipeOp::OneHotDecode { shift_width } => LaneAggregatePlanOp::OneHotDecode {
+            shift_width: *shift_width,
+        },
+        RecipeOp::Mux => LaneAggregatePlanOp::Mux,
+        RecipeOp::ControlMux => LaneAggregatePlanOp::ControlMux,
+        RecipeOp::ScalarInsert { block } => LaneAggregatePlanOp::ScalarInsert {
+            block: *block,
+            values: node.lanes.clone(),
+        },
+        RecipeOp::Slice { offset, width } => LaneAggregatePlanOp::Slice {
+            offset: *offset,
+            width: *width,
+        },
+        RecipeOp::Concat { operand_widths } => LaneAggregatePlanOp::Concat {
+            operand_widths: operand_widths.clone(),
+        },
+    }
+}
+
+fn executable_plan(
+    shared: &SharedRecipePlan,
+    dead_scalar_registers: HashSet<RegisterId>,
+) -> LaneAggregatePlan {
+    LaneAggregatePlan {
+        nodes: shared
+            .nodes
+            .iter()
+            .map(|node| LaneAggregatePlanNode {
+                operation: lower_plan_operation(node),
+                children: node.children.clone(),
+                lane_width: node.lane_width,
+                lane_count: node.lanes.len(),
+            })
+            .collect(),
+        roots: shared
+            .roots
+            .iter()
+            .map(
+                |(block, original_root, recipe_root, publication)| LaneAggregatePlanRoot {
+                    block: *block,
+                    original_root: *original_root,
+                    recipe_root: *recipe_root,
+                    publication_address: publication.address,
+                    publication_bit_offset: publication.first_bit_offset,
+                    lane_count: publication.lane_count,
+                },
+            )
+            .collect(),
+        dead_scalar_registers,
+    }
+}
+
+fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.lane_width == 0
+            || node.lane_count == 0
+            || node.children.iter().any(|child| *child >= index)
+        {
+            return Err(format!("invalid executable aggregate node {index}"));
+        }
+        let operand_count = node.children.len();
+        let executable = match &node.operation {
+            LaneAggregatePlanOp::StateRead(source) => {
+                let loads = match source {
+                    LaneAggregateMaterialization::ReloadAtSink(loads) => loads,
+                    LaneAggregateMaterialization::ReloadAtFrontier { block, loads } => {
+                        let _ = block;
+                        loads
+                    }
+                    LaneAggregateMaterialization::DominatingSsa { block, values } => {
+                        let _ = block;
+                        if values.len() != node.lane_count {
+                            return Err(format!(
+                                "aggregate node {index} has incomplete SSA materialization"
+                            ));
+                        }
+                        continue;
+                    }
+                };
+                (loads.len() == 1 || loads.len() == node.lane_count)
+                    && loads.iter().all(|load| {
+                        let _ = (
+                            load.register,
+                            load.address,
+                            load.bit_offset,
+                            load.physical_byte,
+                            load.state_slot,
+                            load.state_version,
+                        );
+                        load.width == node.lane_width && load.physical_bit < 8
+                    })
+            }
+            LaneAggregatePlanOp::Constant(values) => {
+                operand_count == 0 && values.len() == node.lane_count
+            }
+            LaneAggregatePlanOp::BroadcastScalar(register) => {
+                let _ = register;
+                operand_count == 0
+            }
+            LaneAggregatePlanOp::Affine(offsets) => {
+                operand_count == 1 && offsets.len() == node.lane_count
+            }
+            LaneAggregatePlanOp::PackedExtract(offsets) => {
+                operand_count == 1 && offsets.len() == node.lane_count
+            }
+            LaneAggregatePlanOp::SsaPack { block, values }
+            | LaneAggregatePlanOp::ScalarInsert { block, values } => {
+                let _ = block;
+                operand_count == 0 && values.len() == node.lane_count
+            }
+            LaneAggregatePlanOp::Unary(operation) => {
+                let _ = operation;
+                operand_count == 1
+            }
+            LaneAggregatePlanOp::Binary(operation) => {
+                let _ = operation;
+                operand_count == 2
+            }
+            LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
+                let _ = (operation, amount);
+                operand_count == 1
+            }
+            LaneAggregatePlanOp::OneHotDecode { shift_width } => {
+                let _ = shift_width;
+                operand_count == 1
+            }
+            LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => operand_count >= 2,
+            LaneAggregatePlanOp::Slice { offset, width } => {
+                let _ = offset;
+                operand_count == 1 && *width == node.lane_width
+            }
+            LaneAggregatePlanOp::Concat { operand_widths } => {
+                operand_count == operand_widths.len()
+                    && operand_widths.iter().sum::<usize>() == node.lane_width
+            }
+        };
+        if !executable {
+            return Err(format!(
+                "aggregate node {index} lacks a complete executable recipe"
+            ));
+        }
+    }
+    for root in &plan.roots {
+        let _ = (
+            root.block,
+            root.original_root,
+            root.publication_address,
+            root.publication_bit_offset,
+        );
+        if root.lane_count == 0
+            || plan
+                .nodes
+                .get(root.recipe_root)
+                .is_none_or(|node| node.lane_count != root.lane_count)
+        {
+            return Err(format!(
+                "aggregate root r{} does not name a complete recipe",
+                root.original_root.0
+            ));
+        }
+    }
+    let _ = plan.dead_scalar_registers.len();
+    Ok(())
 }
 
 fn recipe_ancestors(nodes: &[RecipeNode], root: usize) -> Option<HashSet<usize>> {
@@ -1648,7 +2041,7 @@ fn shared_recipe_pressure(
     let mut root_ancestors = plan
         .roots
         .iter()
-        .map(|(_, _, root)| recipe_ancestors(&plan.nodes, *root))
+        .map(|(_, _, root, _)| recipe_ancestors(&plan.nodes, *root))
         .collect::<Option<Vec<_>>>()?;
     let mut common = root_ancestors.pop()?;
     for ancestors in &root_ancestors {
@@ -1672,7 +2065,7 @@ fn shared_recipe_pressure(
         &boundary.iter().copied().collect::<Vec<_>>(),
     )?;
     let mut suffix_peak = LocalPressure::default();
-    for (_, _, root) in &plan.roots {
+    for (_, _, root, _) in &plan.roots {
         let ancestors = recipe_ancestors(&plan.nodes, *root)?;
         let suffix = ancestors
             .difference(&common)
@@ -1718,11 +2111,14 @@ pub(crate) fn analyze(
                 continue;
             };
             let lane_count = arguments.len();
-            if !(8..=64).contains(&lane_count)
-                || !complete_publication_root(eu, block_id, index, *root, lane_count)
-            {
+            if !(8..=64).contains(&lane_count) {
                 continue;
             }
+            let Some(publication) =
+                complete_publication_root(eu, block_id, index, *root, lane_count)
+            else {
+                continue;
+            };
             report.candidates += 1;
             let mut analyzer = Analyzer {
                 eu,
@@ -1795,6 +2191,7 @@ pub(crate) fn analyze(
                             frontiers
                         },
                         estimated_instructions,
+                        publication,
                     });
                 }
                 Err(reason) => {
@@ -1957,6 +2354,11 @@ pub(crate) fn analyze(
         report.peak_prefix_xmm_values = prefix_peak.xmm;
         report.peak_suffix_gpr_values = suffix_peak.gpr;
         report.peak_suffix_xmm_values = suffix_peak.xmm;
+    }
+    if !shared_plan.roots.is_empty() {
+        let plan = executable_plan(&shared_plan, report.dead_scalar_registers.clone());
+        verify_executable_plan(&plan)?;
+        report.plan = Some(plan);
     }
     Ok(report)
 }
@@ -2166,6 +2568,32 @@ mod tests {
         assert_eq!(report.state_sink_reload_nodes, 1);
         assert_eq!(report.state_frontier_reload_nodes, 0);
         assert_eq!(report.state_dominating_ssa_nodes, 0);
+        let plan = report.plan().expect("accepted recipes must be executable");
+        assert_eq!(plan.roots.len(), 1);
+        assert_eq!(plan.roots[0].publication_bit_offset, 0);
+        assert_eq!(plan.roots[0].lane_count, 8);
+        let planned_loads = plan
+            .nodes
+            .iter()
+            .find_map(|node| match &node.operation {
+                LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(
+                    loads,
+                )) if loads.len() == 8 => Some(loads),
+                _ => None,
+            })
+            .expect("strided leaf must name each exact executable load");
+        assert_eq!(
+            planned_loads
+                .iter()
+                .map(|load| load.physical_byte)
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert!(
+            planned_loads
+                .iter()
+                .all(|load| load.width == 1 && load.physical_bit == 0)
+        );
     }
 
     #[test]
@@ -2313,7 +2741,9 @@ mod tests {
         let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
         let mut nodes = vec![
             RecipeNode {
-                operation: RecipeOp::Constant,
+                operation: RecipeOp::Constant {
+                    values: vec![0; lanes.len()],
+                },
                 lanes: lanes.clone(),
                 children: Vec::new(),
                 lane_width: 2,
@@ -2341,7 +2771,9 @@ mod tests {
         let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
         let nodes = vec![
             RecipeNode {
-                operation: RecipeOp::Constant,
+                operation: RecipeOp::Constant {
+                    values: vec![0; lanes.len()],
+                },
                 lanes: lanes.clone(),
                 children: Vec::new(),
                 lane_width: 8,
@@ -2366,6 +2798,17 @@ mod tests {
             snapshot_frontiers: Vec::new(),
             ssa_frontiers: Vec::new(),
             estimated_instructions: 0,
+            publication: Publication {
+                address: RegionedAbsoluteAddr::from_absolute_addr(
+                    STABLE_REGION,
+                    AbsoluteAddr {
+                        instance_id: InstanceId(0),
+                        var_id: VarId::default(),
+                    },
+                ),
+                first_bit_offset: 0,
+                lane_count: 8,
+            },
         };
         let mut distinct = nodes.clone();
         distinct[1].operation = RecipeOp::Unary(UnaryOp::LogicNot);

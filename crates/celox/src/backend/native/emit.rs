@@ -4273,6 +4273,14 @@ fn emit_chained_eu_groups(
             "[lane-aggregate-feasibility] label={label} {report} elapsed={:?}",
             start.elapsed()
         );
+        if let Some(plan) = report.plan() {
+            eprintln!(
+                "[lane-aggregate-plan] label={label} nodes={} roots={} dead_scalar_defs={}",
+                plan.nodes.len(),
+                plan.roots.len(),
+                plan.dead_scalar_registers.len(),
+            );
+        }
         lane_aggregate_coverage = Some((
             report.dead_scalar_registers().len(),
             report.replaced_scalar_registers().clone(),
