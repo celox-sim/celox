@@ -2591,16 +2591,28 @@ fn relocate_units(
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
-        for logic_path in &mut relocated_module.comb_blocks {
-            if let Some(local_region) = logic_path.semantic_region {
-                let instance_region = u64::try_from(id.0)
-                    .expect("instance identifier exceeds semantic-region domain");
-                assert!(
-                    local_region <= u64::from(u32::MAX),
-                    "comb process identifier exceeds semantic-region domain"
-                );
-                logic_path.semantic_region = Some((instance_region << 32) | local_region);
-            }
+        let instance_region =
+            u64::try_from(id.0).expect("instance identifier exceeds semantic-region domain");
+        for (path_index, logic_path) in relocated_module.comb_blocks.iter_mut().enumerate() {
+            let local_region = match logic_path.semantic_region {
+                Some(process) => {
+                    assert!(
+                        process < (1u64 << 31),
+                        "comb process identifier exceeds semantic-region domain"
+                    );
+                    process
+                }
+                None => {
+                    let path = u64::try_from(path_index)
+                        .expect("logic-path index exceeds semantic-region domain");
+                    assert!(
+                        path < (1u64 << 31),
+                        "logic-path index exceeds semantic-region domain"
+                    );
+                    (1u64 << 31) | path
+                }
+            };
+            logic_path.semantic_region = Some((instance_region << 32) | local_region);
         }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);

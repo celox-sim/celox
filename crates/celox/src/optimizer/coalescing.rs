@@ -160,9 +160,16 @@ pub(crate) fn analyze_reactive_event_projection(
     provenance: &crate::ir::SirMergeProvenance,
     cut: &reactive_phase::FusedPhaseCut,
     four_state: bool,
+    semantic_regions: Option<&crate::HashMap<crate::ir::VarAtomBase<AbsoluteAddr>, u64>>,
 ) -> Result<String, String> {
-    reactive_event_graph::ReactiveEventProjection::analyze(eu, provenance, cut, four_state)
-        .map(|projection| projection.format_report())
+    reactive_event_graph::ReactiveEventProjection::analyze(
+        eu,
+        provenance,
+        cut,
+        four_state,
+        semantic_regions,
+    )
+    .map(|projection| projection.format_report())
 }
 
 #[cfg(target_arch = "x86_64")]

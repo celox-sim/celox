@@ -94,6 +94,12 @@ Several independent FF demand clusters may refer to definitions contained in
 the same comb EU without acquiring a shared live range or a common
 materialization decision.
 
+Semantic-region identity is retained for every elaborated comb process and
+for otherwise ungrouped continuous/glue LogicPaths. It is a clustering and
+placement hint, not a correctness proof. Optimizer-created aggregate or
+repartitioned Stores may not have one unique source region; their legality is
+still decided solely by exact MemorySSA versions and effects.
+
 ## The incorrect boundary
 
 The parser is not required to emit machine order, and the machine backend must
@@ -269,6 +275,12 @@ largest pure suffix              579
 SIR control merges             1,880
 unsupported frontiers            462
 ```
+
+After connecting source semantic regions to MemorySSA definitions, 1,824 of
+the 2,017 publication-backed clusters have an unambiguous region identity.
+The remaining 193 include definitions whose optimized range no longer has one
+unique containing source range. They remain valid MemorySSA clusters and must
+not be rejected or guessed solely from provenance.
 
 The whole retained projection still contains 13,040 instructions and exceeds
 the obsolete 4,096-instruction whole-projection limit. No individual demand

@@ -8,8 +8,9 @@ use std::fmt::Write as _;
 
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
-    BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
-    SIRTerminator, SPARSE_WORKING_REGION, STABLE_REGION, SirMergeProvenance, WORKING_REGION,
+    AbsoluteAddr, BitAccess, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
+    SIRInstruction, SIROffset, SIRTerminator, SPARSE_WORKING_REGION, STABLE_REGION,
+    SirMergeProvenance, VarAtomBase, WORKING_REGION,
 };
 use crate::{HashMap, HashSet};
 
@@ -81,11 +82,65 @@ struct DemandClusterSummary {
     unsupported_frontiers: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DemandCluster {
     consumer: InstructionSite,
     fragment: StateFragment,
+    semantic_regions: Vec<u64>,
     summary: DemandClusterSummary,
+}
+
+#[derive(Debug, Default)]
+struct SemanticRegionIndex {
+    by_address: HashMap<AbsoluteAddr, Vec<(BitAccess, u64)>>,
+}
+
+impl SemanticRegionIndex {
+    fn new(regions: Option<&HashMap<VarAtomBase<AbsoluteAddr>, u64>>) -> Self {
+        let mut by_address = HashMap::<AbsoluteAddr, Vec<(BitAccess, u64)>>::default();
+        if let Some(regions) = regions {
+            for (range, &region) in regions {
+                by_address
+                    .entry(range.id)
+                    .or_default()
+                    .push((range.access, region));
+            }
+        }
+        for ranges in by_address.values_mut() {
+            ranges.sort_unstable_by_key(|(range, region)| (range.lsb, range.msb, *region));
+        }
+        Self { by_address }
+    }
+
+    fn containing(&self, fragment: StateFragment) -> Result<Option<u64>, String> {
+        if fragment.addr.region != STABLE_REGION || fragment.dynamic || fragment.width == 0 {
+            return Ok(None);
+        }
+        let address = AbsoluteAddr {
+            instance_id: fragment.addr.instance_id,
+            var_id: fragment.addr.var_id,
+        };
+        let Some(end) = fragment
+            .bit_offset
+            .checked_add(fragment.width)
+            .and_then(|end| end.checked_sub(1))
+        else {
+            return Err("semantic-region fragment range overflows".into());
+        };
+        let mut matches = self
+            .by_address
+            .get(&address)
+            .into_iter()
+            .flatten()
+            .filter_map(|(range, region)| {
+                (range.lsb <= fragment.bit_offset && end <= range.msb).then_some(*region)
+            });
+        let first = matches.next();
+        if matches.any(|region| Some(region) != first) {
+            return Err("one MemorySSA definition overlaps multiple semantic regions".into());
+        }
+        Ok(first)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,6 +204,7 @@ impl ReactiveEventProjection {
         provenance: &SirMergeProvenance,
         cut: &FusedPhaseCut,
         four_state: bool,
+        semantic_regions: Option<&HashMap<VarAtomBase<AbsoluteAddr>, u64>>,
     ) -> Result<Self, String> {
         let cfg = SirCfg::analyze_forward(eu).map_err(|error| error.to_string())?;
         let phases =
@@ -421,6 +477,7 @@ impl ReactiveEventProjection {
             &state_uses,
             &definitions,
             &projection.phase_by_unit,
+            &SemanticRegionIndex::new(semantic_regions),
         )?;
         projection.static_projection =
             match projection.try_build_straight_line_projection(eu, provenance) {
@@ -615,6 +672,11 @@ impl ReactiveEventProjection {
             .iter()
             .filter(|cluster| cluster.summary.publication_definitions != 0)
             .count();
+        let regioned_clusters = self
+            .demand_clusters
+            .iter()
+            .filter(|cluster| !cluster.semantic_regions.is_empty())
+            .count();
         let max_cluster_instructions = self
             .demand_clusters
             .iter()
@@ -623,9 +685,10 @@ impl ReactiveEventProjection {
             .unwrap_or(0);
         writeln!(
             output,
-            "Demand clusters: complete={} publication_backed={} memory_versions={} pure_instructions={} max_pure_instructions={} persistent_leaves={} memory_phis={} control_merges={} unsupported_frontiers={}",
+            "Demand clusters: complete={} publication_backed={} semantic_region_backed={} memory_versions={} pure_instructions={} max_pure_instructions={} persistent_leaves={} memory_phis={} control_merges={} unsupported_frontiers={}",
             complete_clusters,
             publication_clusters,
+            regioned_clusters,
             cluster_totals.memory_versions,
             cluster_totals.pure_instructions,
             max_cluster_instructions,
@@ -727,6 +790,7 @@ fn build_demand_clusters(
     state_uses: &HashMap<InstructionSite, Vec<StateUse>>,
     definitions: &HashMap<RegisterId, ValueDefinition>,
     phase_by_unit: &[bool],
+    region_index: &SemanticRegionIndex,
 ) -> Result<Vec<DemandCluster>, String> {
     let mut clusters = Vec::new();
     for (&consumer, uses) in state_uses {
@@ -745,6 +809,7 @@ fn build_demand_clusters(
             let mut summary = DemandClusterSummary::default();
             let mut memory_seen = HashSet::default();
             let mut value_seen = HashSet::default();
+            let mut semantic_regions = HashSet::default();
             collect_cluster_memory(
                 eu,
                 provenance,
@@ -754,11 +819,16 @@ fn build_demand_clusters(
                 phase_by_unit,
                 &mut memory_seen,
                 &mut value_seen,
+                region_index,
+                &mut semantic_regions,
                 &mut summary,
             )?;
+            let mut semantic_regions = semantic_regions.into_iter().collect::<Vec<_>>();
+            semantic_regions.sort_unstable();
             clusters.push(DemandCluster {
                 consumer,
                 fragment,
+                semantic_regions,
                 summary,
             });
         }
@@ -785,6 +855,8 @@ fn collect_cluster_memory(
     phase_by_unit: &[bool],
     memory_seen: &mut HashSet<MemoryAccessId>,
     value_seen: &mut HashSet<RegisterId>,
+    region_index: &SemanticRegionIndex,
+    semantic_regions: &mut HashSet<u64>,
     summary: &mut DemandClusterSummary,
 ) -> Result<(), String> {
     if !memory_seen.insert(version) {
@@ -803,6 +875,8 @@ fn collect_cluster_memory(
             phase_by_unit,
             memory_seen,
             value_seen,
+            region_index,
+            semantic_regions,
             summary,
         )?,
         MemoryAccessKind::Phi { incoming } => {
@@ -817,6 +891,8 @@ fn collect_cluster_memory(
                     phase_by_unit,
                     memory_seen,
                     value_seen,
+                    region_index,
+                    semantic_regions,
                     summary,
                 )?;
             }
@@ -827,6 +903,10 @@ fn collect_cluster_memory(
             };
             if !phase_by_unit[provenance.block_units[&block]] && !observable {
                 summary.publication_definitions += 1;
+                let fragment = model.slots[access.slot].fragment;
+                if let Some(region) = region_index.containing(fragment)? {
+                    semantic_regions.insert(region);
+                }
                 collect_cluster_value(eu, definitions, *source, value_seen, summary);
             } else {
                 summary.unsupported_frontiers += 1;
@@ -1084,6 +1164,13 @@ mod tests {
         }
     }
 
+    fn absolute(variable: u32) -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(variable),
+        }
+    }
+
     fn unit(
         instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
         registers: &[(usize, usize)],
@@ -1212,8 +1299,17 @@ mod tests {
         let (merged, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff]);
         let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
 
-        let projection =
-            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+        let semantic_regions = [(VarAtomBase::new(absolute(0), 0, 7), 41)]
+            .into_iter()
+            .collect();
+        let projection = ReactiveEventProjection::analyze(
+            &merged,
+            &provenance,
+            &cut,
+            false,
+            Some(&semantic_regions),
+        )
+        .unwrap();
 
         assert!(projection.unit_flows.iter().any(|flow| {
             flow.producer == 0
@@ -1235,6 +1331,7 @@ mod tests {
             projection.demand_clusters[0].summary.unsupported_frontiers,
             0
         );
+        assert_eq!(projection.demand_clusters[0].semantic_regions, vec![41]);
 
         let projected = projection
             .try_build_straight_line_projection(&merged, &provenance)
@@ -1309,7 +1406,7 @@ mod tests {
         let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
 
         let projection =
-            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false, None).unwrap();
         let report = projection.format_report();
 
         assert!(report.contains("u0 -> u1"));
@@ -1393,7 +1490,7 @@ mod tests {
         let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
 
         let projection =
-            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false, None).unwrap();
 
         assert_eq!(projection.demand_clusters.len(), 2);
         assert!(projection.demand_clusters.iter().all(|cluster| {
@@ -1439,7 +1536,7 @@ mod tests {
         let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
 
         let projection =
-            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false, None).unwrap();
 
         assert!(
             projection
@@ -1469,7 +1566,7 @@ mod tests {
         let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
 
         let projection =
-            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false, None).unwrap();
         let ff_entry = provenance.unit_entries[1];
 
         assert_eq!(

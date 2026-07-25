@@ -192,6 +192,7 @@ fn compile_comb_eval_apply_units(
     capture_trace: bool,
     program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
     profile_blocks: &[(crate::ir::BlockId, u64)],
+    semantic_regions: &crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
     let emit_result = if let Some(trace) = trace.as_mut() {
@@ -204,9 +205,17 @@ fn compile_comb_eval_apply_units(
             trace,
             program_facts,
             profile_blocks,
+            semantic_regions,
         )
     } else {
-        emit::emit_comb_eval_apply_eus(comb_units, ff_units, layout, four_state, label)
+        emit::emit_comb_eval_apply_eus(
+            comb_units,
+            ff_units,
+            layout,
+            four_state,
+            label,
+            semantic_regions,
+        )
     }
     .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
@@ -593,6 +602,7 @@ fn compile_program(
                                 capture_trace,
                                 program_state_accesses_ref,
                                 fused_profile_blocks_ref,
+                                &sir.comb_semantic_regions,
                             )
                         }),
                     ));

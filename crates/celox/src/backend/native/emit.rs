@@ -4795,6 +4795,7 @@ pub fn emit_chained_eus(
         ChainedFunctionShape::Generic,
         None,
         None,
+        None,
     )
 }
 
@@ -4812,6 +4813,7 @@ pub(crate) fn emit_chained_eus_with_trace(
         label,
         ChainedFunctionShape::Generic,
         Some(trace),
+        None,
         None,
     )
 }
@@ -4837,6 +4839,7 @@ pub fn emit_comb_eval_apply_eus(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
+    semantic_regions: &crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>,
 ) -> Result<EmitResult, ChainedEmitError> {
     let shape = if ff_units.is_empty() {
         ChainedFunctionShape::Generic
@@ -4853,6 +4856,7 @@ pub fn emit_comb_eval_apply_eus(
         shape,
         None,
         None,
+        Some(semantic_regions),
     )
 }
 
@@ -4865,6 +4869,7 @@ pub(crate) fn emit_comb_eval_apply_eus_with_trace(
     trace: &mut NativeFunctionTrace,
     program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
     profile_blocks: &[(crate::ir::BlockId, u64)],
+    semantic_regions: &crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>,
 ) -> Result<EmitResult, ChainedEmitError> {
     let shape = if ff_units.is_empty() {
         ChainedFunctionShape::Generic
@@ -4881,6 +4886,7 @@ pub(crate) fn emit_comb_eval_apply_eus_with_trace(
         shape,
         Some(trace),
         Some((program_facts, profile_blocks)),
+        Some(semantic_regions),
     )
 }
 
@@ -4895,6 +4901,7 @@ fn emit_chained_eu_groups(
         &crate::optimizer::coalescing::ProgramStateAccessSummary,
         &[(crate::ir::BlockId, u64)],
     )>,
+    semantic_regions: Option<&crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
     let units = groups
@@ -4935,6 +4942,7 @@ fn emit_chained_eu_groups(
             &merge_provenance,
             cut,
             four_state,
+            semantic_regions,
         )
         .map_err(|message| ChainedEmitError::Analysis {
             phase: "reactive event projection",
