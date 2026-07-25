@@ -160,6 +160,17 @@ fn forward_and_simplify(
                     _ => {}
                 }
             }
+            SIRInstruction::Unary(dst, UnaryOp::And | UnaryOp::Or | UnaryOp::Xor, src) => {
+                // A reduction over one bit is the bit itself, including an
+                // unknown four-state bit. Require the exact register type so
+                // replacing the unsigned reduction result cannot expose the
+                // signedness of a one-bit source to later width extension.
+                if register_map.get(src).is_some_and(|ty| ty.width() == 1)
+                    && register_map.get(dst) == register_map.get(src)
+                {
+                    aliases.insert(*dst, *src);
+                }
+            }
             SIRInstruction::Commit(_, dst_addr, SIROffset::Static(_), _, _) => {
                 // Invalidate known stores for the destination address
                 known_stores.remove(dst_addr);
@@ -499,6 +510,65 @@ mod tests {
             instructions[2],
             SIRInstruction::Binary(_, RegisterId(1), BinaryOp::Eq, RegisterId(2))
         ));
+    }
+
+    #[test]
+    fn folds_one_bit_reductions_in_four_state_mode() {
+        for operation in [UnaryOp::And, UnaryOp::Or, UnaryOp::Xor] {
+            let mut instructions = vec![
+                SIRInstruction::Unary(RegisterId(1), operation, RegisterId(0)),
+                SIRInstruction::Unary(RegisterId(2), UnaryOp::ToTwoState, RegisterId(1)),
+            ];
+            let register_map = [
+                (RegisterId(0), RegisterType::Logic { width: 1 }),
+                (RegisterId(1), RegisterType::Logic { width: 1 }),
+                (RegisterId(2), bit(1)),
+            ]
+            .into_iter()
+            .collect();
+
+            forward_and_simplify(&mut instructions, &register_map, true);
+
+            assert_eq!(
+                instructions[1],
+                SIRInstruction::Unary(RegisterId(2), UnaryOp::ToTwoState, RegisterId(0),)
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_wide_reductions_and_signed_one_bit_sources() {
+        let mut instructions = vec![
+            SIRInstruction::Unary(RegisterId(1), UnaryOp::Or, RegisterId(0)),
+            SIRInstruction::Unary(RegisterId(3), UnaryOp::Or, RegisterId(2)),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(1), BinaryOp::Or, RegisterId(3)),
+        ];
+        let register_map = [
+            (RegisterId(0), RegisterType::Logic { width: 2 }),
+            (RegisterId(1), RegisterType::Logic { width: 1 }),
+            (
+                RegisterId(2),
+                RegisterType::Bit {
+                    width: 1,
+                    signed: true,
+                },
+            ),
+            (RegisterId(3), bit(1)),
+            (RegisterId(5), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert_eq!(
+            instructions[0],
+            SIRInstruction::Unary(RegisterId(1), UnaryOp::Or, RegisterId(0))
+        );
+        assert_eq!(
+            instructions[1],
+            SIRInstruction::Unary(RegisterId(3), UnaryOp::Or, RegisterId(2))
+        );
     }
 
     #[test]

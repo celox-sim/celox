@@ -2809,6 +2809,77 @@ work must return to larger hot structures such as the 32-lane arbitration in
 `bb8261` and its scheduling/allocation behavior rather than extending this
 local pattern.
 
+##### One-bit reduction normalization
+
+The complete optimized SIR exposed a separate upstream canonicalization
+failure in the generated selector CFG. `EqWildcard` compares multi-bit
+operands, but its result is always one bit. In four-state form the result type
+is `logic<1>`, not a wider value. Nevertheless, procedural-truth construction
+left this sequence after optimization:
+
+```text
+r909: logic<1>
+
+r909 = r908 EqWildcard r560
+r910 = Or r909
+r911 = ToTwoState r910
+```
+
+Reduction AND, OR, and XOR over exactly one bit are the input bit itself,
+including when that bit is unknown. The per-block SIR algebraic simplifier now
+aliases such a reduction only when source and destination have the exact same
+register type. Exact type equality is required because a reduction result is
+unsigned; replacing it with a signed one-bit source could otherwise change a
+later extension. Wide reductions and type-changing one-bit reductions remain
+unchanged.
+
+On the complete Heliodor input, the final optimized sequence is:
+
+```text
+r909 = r908 EqWildcard r560
+r911 = ToTwoState r909
+```
+
+The complete final SIR changed as follows:
+
+```text
+unary And/Or/Xor instructions              4,344 -> 64
+EqWildcard immediately followed by one     1,368 -> 0
+optimized SIR lines                       420,699 -> 411,327
+complete MIR dump lines                 1,622,278 -> 1,618,334
+complete MIR dump bytes                45,904,096 -> 45,817,629
+```
+
+The line reduction is larger than the 4,280 directly removed reductions
+because alias propagation exposes additional DCE and CFG simplification.
+This is an SIR identity, not a target peephole: retaining the redundant
+operation until ISel also obscured selector predicates from the existing
+control-flow passes.
+
+Post-allocation changes were not uniformly local. `eval_comb` lost 699
+pre-allocation MIR instructions, while its fused copy lost 698, but changing
+the earlier SIR/VReg stream also changed allocation tie breaks in later native
+functions. The fused post-allocation instruction count increased in this run.
+Consequently neither total MIR bytes nor a single post-allocation count is
+used as a runtime claim.
+
+All 1,121 library tests and 60 native-testbench tests passed (one unrelated
+upstream limitation remains ignored). The exact non-LTO Linux workload
+displayed the kernel boot and powered down at:
+
+```text
+v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1
+compile_ns=76721562961
+execute_ns=65390210275
+```
+
+The 65.39-second execution is within the previously observed multi-second
+run-to-run drift and does not pass the generated-execution improvement gate.
+The simplification is retained because the complete emitted IR directly
+proves a broad, semantics-preserving canonicalization improvement. It does
+not explain the remaining Veryl-CC gap, so subsequent work still requires a
+larger profile-attributed structure rather than more adjacent peepholes.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
