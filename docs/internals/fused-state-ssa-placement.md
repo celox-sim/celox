@@ -2988,10 +2988,10 @@ final x86 instructions                408,036       408,078             408,291
 
 A source rank is not a dependency closure. It can prefer a definition whose
 nominal final-use position is near while starting unrelated prerequisites and
-retaining shared values across other sinks. Both scalar additions are rejected
-as an allocation objective. Immediate-edge prices may eventually contribute
-to CFG boundary allocation, but they are not independently profitable and are
-not evidence for the missing join contract.
+retaining shared values across other sinks. The completion-span rank is
+rejected. Immediate-edge prices are not independently profitable and are not
+the missing join contract, but the combined experiment below shows that they
+are a necessary boundary-cost input to the sink-directed walk.
 
 The experiment was also deliberately incomplete at CFG boundaries. Summing
 immediate successor reloads is at most one local eviction price, not the
@@ -3004,13 +3004,14 @@ missing global contract:
 - blocks are committed in layout order, so a predecessor cannot consume a
   successor's final W-entry decision.
 
-The completion-span rank and direct-edge sum are not retained. Their
-replacement below uses the actual dependency closure inside each movable
-region. CFG boundary allocation still requires a sparse boundary demand before
-the forward W/S walk and reconciliation by the existing edge-coupling
-verifier. It must remain bounded by the target register count or by hash-consed
-demand frontiers; a dense block-by-value solution and whole-function
-scheduling retry remain forbidden.
+The completion-span rank is not retained. The replacement below uses the
+actual dependency closure inside each movable region and retains the
+immediate-edge sum only when a value has no remaining local use. CFG boundary
+allocation still requires a sparse boundary demand before the forward W/S
+walk and reconciliation by the existing edge-coupling verifier. It must remain
+bounded by the target register count or by hash-consed demand frontiers; a
+dense block-by-value solution and whole-function scheduling retry remain
+forbidden.
 
 ##### Bounded sink-directed allocation packets
 
@@ -3031,6 +3032,13 @@ source/continuation/W/S choice may make progress, and the same demand resumes
 afterward. This is a bounded sink-directed packet, not an indivisible packet:
 it never forces an unrelated CFG-boundary resident out merely to complete a
 cone.
+
+For a value with no remaining local use, eviction cost sums its exact reload
+price once per immediate successor edge which demands it. Phi destinations
+are translated to the predecessor logical value, and duplicate exposure
+through live-in and phi tables is removed per edge. This remains a local
+approximation, but it lets packet completion compare a live-out resident with
+the actual immediate cost of discarding it.
 
 Every instruction is inserted into and removed from the ready queue once.
 Each DAG edge is discharged once by the forward walk and scanned at most once
@@ -3087,6 +3095,20 @@ falls from 958 instructions and 331 stack accesses to 839 and 250; `bb8424`
 falls from 701/261 to 634/219. Conversely, `bb1650` grows from 682/87 to
 704/104. The whole-function result passes the static gate, while the local
 regression shows that sink order alone is not the final allocation objective.
+
+Removing only the immediate-edge prices while retaining identical packet
+selection reverses the whole-function result:
+
+```text
+                              parent   packet without edge price   combined packet
+post-RA MIR instructions      300,038                    299,656           299,327
+final x86 instructions        408,036                    408,336           407,757
+```
+
+Thus the edge price is harmful as an isolated source-order score (+42 x86)
+and necessary when the reverse dependency demand changes the ready order
+(-579 x86 relative to the same packet without it). The retained unit is the
+combined W/S decision, not either heuristic evaluated in isolation.
 
 All 1,125 library tests and 60 enabled native-testbench tests pass (one
 upstream fixture remains ignored). Formatting and strict Clippy pass. The
