@@ -436,6 +436,20 @@ fn plan_internal(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
+        let exit_reload_costs = constraints
+            .map(|_| {
+                exit_reload_costs(
+                    func,
+                    cfg,
+                    next_use,
+                    planning_recipes,
+                    &result.logical,
+                    &edge_translations,
+                    block,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
         let (spilled, transition, order) = loop {
             // S means that a valid home exists on every path.  Every live
             // value omitted from W_entry therefore requires a home; edge
@@ -466,6 +480,7 @@ fn plan_internal(
                     &entry,
                     spilled.clone(),
                     instruction_constraints,
+                    &exit_reload_costs,
                 )?;
                 (transition, Some(order))
             } else {
@@ -664,6 +679,54 @@ fn plan_internal(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn exit_reload_costs(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    logical: &LogicalValues,
+    edge_translations: &EdgeTranslations,
+    block: usize,
+) -> Result<HashMap<LogicalValue, u32>, SpillPlanError> {
+    let mut costs = HashMap::<LogicalValue, u32>::new();
+    for &successor in &cfg.successors[block] {
+        let mut demanded = BTreeSet::<LogicalValue>::new();
+        for &value in next_use.entry[successor].keys() {
+            let destination =
+                logical.checked_of(value, Some(func.blocks[successor].id), Some(0))?;
+            demanded.insert(edge_translations.to_predecessor(block, successor, destination));
+        }
+        for phi in &func.blocks[successor].phis {
+            if let Some((_, source)) = phi
+                .sources
+                .iter()
+                .find(|(predecessor, _)| *predecessor == func.blocks[block].id)
+            {
+                demanded.insert(logical.checked_of(
+                    *source,
+                    Some(func.blocks[block].id),
+                    Some(func.blocks[block].insts.len()),
+                )?);
+            }
+        }
+        for value in demanded {
+            let reload = u32::from(reload_cost_on_edge(
+                func,
+                planning_recipes,
+                block,
+                successor,
+                value,
+            ));
+            costs
+                .entry(value)
+                .and_modify(|cost| *cost = cost.saturating_add(reload))
+                .or_insert(reload);
+        }
+    }
+    Ok(costs)
+}
+
 fn spilled_at_entry(
     cfg: &NormalizedCfg,
     plan: &SpillPlan,
@@ -791,6 +854,8 @@ struct TransitionPoint {
 struct AllocationCandidateScore {
     blocked_by_deferred_reload: bool,
     continuation_tie: std::cmp::Reverse<bool>,
+    definition_live_out: bool,
+    definition_span: usize,
     resident_operand_tie: std::cmp::Reverse<usize>,
     operand_tie: std::cmp::Reverse<usize>,
     materialization_cost: u32,
@@ -844,6 +909,11 @@ impl AllocationReadyQueue {
             current_resident.saturating_add(source_score.pressure_delta as usize)
         };
         let &(best_score, best_instruction) = self.ordered.first()?;
+        let best_projected = if best_score.pressure_delta < 0 {
+            current_resident.saturating_sub(best_score.pressure_delta.unsigned_abs())
+        } else {
+            current_resident.saturating_add(best_score.pressure_delta as usize)
+        };
         let demanded = demanded.and_then(|instruction| {
             let score = self.scores[instruction]?;
             let projected = if score.pressure_delta < 0 {
@@ -856,7 +926,7 @@ impl AllocationReadyQueue {
         });
         let (score, instruction) = if let Some(demanded) = demanded {
             demanded
-        } else if !best_score.blocked_by_deferred_reload && best_score.continuation_tie.0 {
+        } else if !best_score.blocked_by_deferred_reload && best_projected <= register_capacity {
             (best_score, best_instruction)
         } else if !source_score.blocked_by_deferred_reload && source_projected <= register_capacity
         {
@@ -951,6 +1021,7 @@ fn plan_scheduled_block_transition(
     w_entry: &BTreeSet<LogicalValue>,
     spilled: BTreeSet<LogicalValue>,
     constraints: &[super::constraints::InstructionConstraints],
+    exit_reload_costs: &HashMap<LogicalValue, u32>,
 ) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
     let instructions = &func.blocks[block].insts;
     if instructions.len() != constraints.len() {
@@ -962,7 +1033,8 @@ fn plan_scheduled_block_transition(
             "allocation constraints do not cover every block instruction",
         ));
     }
-    let mut remaining = RemainingBlockUses::build(func, next_use, logical, block)?;
+    let mut remaining =
+        RemainingBlockUses::build(func, next_use, logical, block, exit_reload_costs)?;
     let mut planner = BlockTransitionPlanner::new(
         func,
         next_use,
@@ -1294,12 +1366,23 @@ impl<'a> BlockTransitionPlanner<'a> {
         let pressure_delta = isize::try_from(missing + usize::from(definition_live))
             .unwrap_or(isize::MAX)
             .saturating_sub(isize::try_from(dying).unwrap_or(isize::MAX));
+        let (definition_live_out, definition_span) = inst
+            .def()
+            .map(|value| {
+                self.logical
+                    .checked_of(value, Some(block_id), Some(source))
+                    .map(|value| remaining.completion_span(value))
+            })
+            .transpose()?
+            .unwrap_or((false, 0));
         Ok(AllocationCandidateScore {
             blocked_by_deferred_reload,
             continuation_tie: std::cmp::Reverse(
                 self.last_definition
                     .is_some_and(|value| uses.contains(&value)),
             ),
+            definition_live_out,
+            definition_span,
             // Reusing an operand already in W closes the residency cluster
             // which made that value worth keeping.  Rank this before a new
             // root with no operands; otherwise a stream of cheap Loads fills
@@ -1702,6 +1785,9 @@ fn init_loop_region(
 trait FutureUses {
     fn distance(&self, value: LogicalValue) -> NextUseDistance;
     fn next_point(&self, value: LogicalValue) -> Option<PointUse>;
+    fn exit_reload_cost(&self, _value: LogicalValue) -> u32 {
+        0
+    }
 }
 
 struct LinearFutureUses<'a> {
@@ -1734,6 +1820,7 @@ struct RemainingBlockUses {
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, BTreeSet<(usize, usize)>>,
     exit: HashMap<LogicalValue, NextUseDistance>,
+    exit_reload_costs: HashMap<LogicalValue, u32>,
     emitted: Vec<bool>,
     emitted_count: usize,
 }
@@ -1744,6 +1831,7 @@ impl RemainingBlockUses {
         next_use: &NextUseAnalysis,
         logical: &LogicalValues,
         block: usize,
+        exit_reload_costs: &HashMap<LogicalValue, u32>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
         let preferred_rank = (0..instructions).collect::<Vec<_>>();
@@ -1773,6 +1861,7 @@ impl RemainingBlockUses {
             preferred_rank,
             remaining,
             exit,
+            exit_reload_costs: exit_reload_costs.clone(),
             emitted: vec![false; instructions],
             emitted_count: 0,
         })
@@ -1831,6 +1920,15 @@ impl RemainingBlockUses {
         self.exit.contains_key(&value)
     }
 
+    fn completion_span(&self, value: LogicalValue) -> (bool, usize) {
+        let last_local_rank = self
+            .remaining
+            .get(&value)
+            .and_then(BTreeSet::last)
+            .map_or(0, |&(rank, _)| rank.saturating_sub(self.emitted_count));
+        (self.is_live_out(value), last_local_rank)
+    }
+
     fn distance(&self, value: LogicalValue) -> NextUseDistance {
         if let Some(&(rank, _)) = self.remaining.get(&value).and_then(BTreeSet::first) {
             return NextUseDistance::Finite {
@@ -1859,6 +1957,10 @@ impl RemainingBlockUses {
             value: VReg(value.0),
         })
     }
+
+    fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
+        self.exit_reload_costs.get(&value).copied().unwrap_or(0)
+    }
 }
 
 struct DynamicFutureUses<'a>(&'a RemainingBlockUses);
@@ -1870,6 +1972,10 @@ impl FutureUses for DynamicFutureUses<'_> {
 
     fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
         self.0.next_point(value)
+    }
+
+    fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
+        self.0.exit_reload_cost(value)
     }
 }
 
@@ -2049,20 +2155,29 @@ fn eviction_cost(
     spilled: &BTreeSet<LogicalValue>,
     value: LogicalValue,
     future_uses: &impl FutureUses,
-) -> u16 {
+) -> u32 {
     let has_persistent_home = spilled.contains(&value);
-    let persistent_cost = reload_cost_at_next_local_use(func, planning_recipes, value, future_uses)
-        .saturating_add(if has_persistent_home {
-            0
+    let local_reload =
+        reload_cost_at_next_local_use(func, planning_recipes, value, future_uses).map(u32::from);
+    let reload_cost = local_reload.unwrap_or_else(|| {
+        let exit_cost = future_uses.exit_reload_cost(value);
+        if exit_cost == 0 {
+            u32::from(reload_cost(func, planning_recipes, value))
         } else {
-            spill_cost(func, value)
-        });
+            exit_cost
+        }
+    });
+    let persistent_cost = reload_cost.saturating_add(if has_persistent_home {
+        0
+    } else {
+        u32::from(spill_cost(func, value))
+    });
     if has_persistent_home {
         return persistent_cost;
     }
     next_use_point_recipe(planning_recipes, value, future_uses)
         .map_or(persistent_cost, |(_, recipe_cost)| {
-            persistent_cost.min(recipe_cost)
+            persistent_cost.min(u32::from(recipe_cost))
         })
 }
 
@@ -2071,12 +2186,11 @@ fn reload_cost_at_next_local_use(
     planning_recipes: &PlanningRecipes,
     value: LogicalValue,
     future_uses: &impl FutureUses,
-) -> u16 {
+) -> Option<u16> {
     let costs = super::cost::MachineSpillCosts::with_recipes(func, planning_recipes);
-    if let Some(point) = future_uses.next_point(value) {
-        return costs.reload_at_point(point);
-    }
-    costs.persistent_reload(VReg(value.0))
+    future_uses
+        .next_point(value)
+        .map(|point| costs.reload_at_point(point))
 }
 
 /// Cost the complete guaranteed straight-line use cluster for a value which
@@ -2804,6 +2918,7 @@ mod tests {
             &BTreeSet::new(),
             BTreeSet::new(),
             &constraints.instructions[0],
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -2827,6 +2942,164 @@ mod tests {
         }
         assert!(outstanding.is_empty());
         assert_eq!(order.last(), Some(&(LANES * 2)));
+    }
+
+    #[test]
+    fn integrated_ready_walk_starts_the_definition_with_the_shorter_completion_span() {
+        let mut vregs = VRegAllocator::new();
+        let long_root = vregs.alloc();
+        let short_root = vregs.alloc();
+        let short_result = vregs.alloc();
+        let filler_root = vregs.alloc();
+        let filler_result = vregs.alloc();
+        let long_result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+        let mut block = MBlock::new(BlockId(0));
+        // Source order alone starts `long_root` and keeps it resident while
+        // the independent short cluster executes. Completion-span order
+        // starts and closes the short cluster first.
+        block.push(MInst::LoadImm {
+            dst: long_root,
+            value: 1,
+        });
+        block.push(MInst::LoadImm {
+            dst: short_root,
+            value: 2,
+        });
+        block.push(MInst::AndImm {
+            dst: short_result,
+            src: short_root,
+            imm: 1,
+        });
+        block.push(MInst::LoadImm {
+            dst: filler_root,
+            value: 3,
+        });
+        block.push(MInst::AndImm {
+            dst: filler_result,
+            src: filler_root,
+            imm: 1,
+        });
+        block.push(MInst::AndImm {
+            dst: long_result,
+            src: long_root,
+            imm: 1,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = super::super::constraints::ConstraintModel::build(&func, &cfg).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = SpillHomes::build(&func).unwrap();
+        let recipes = PlanningRecipes::stack_only(func.vregs.count());
+        let (_, order) = plan_scheduled_block_transition(
+            &func,
+            &next_use,
+            &recipes,
+            &logical,
+            &homes,
+            0,
+            4,
+            &BTreeSet::new(),
+            BTreeSet::new(),
+            &constraints.instructions[0],
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(&order[..2], &[1, 2]);
+        assert!(
+            order.iter().position(|source| *source == 0)
+                < order.iter().position(|source| *source == 5)
+        );
+        assert_eq!(order.last(), Some(&6));
+    }
+
+    #[test]
+    fn exit_reload_price_is_deduplicated_per_edge_and_summed_across_edges() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let source = vregs.alloc();
+        let true_value = vregs.alloc();
+        let false_value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: source,
+            value: 2,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.phis.push(PhiNode {
+            dst: true_value,
+            sources: vec![(BlockId(0), source)],
+        });
+        true_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: true_value,
+            size: OpSize::S64,
+        });
+        true_block.push(MInst::Return);
+
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.phis.push(PhiNode {
+            dst: false_value,
+            sources: vec![(BlockId(0), source)],
+        });
+        false_block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: false_value,
+            size: OpSize::S64,
+        });
+        false_block.push(MInst::Return);
+        func.blocks = vec![entry, true_block, false_block];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let recipes = PlanningRecipes::stack_only(func.vregs.count());
+        let entry = cfg.block_index[&BlockId(0)];
+        let true_block = cfg.block_index[&BlockId(1)];
+        let false_block = cfg.block_index[&BlockId(2)];
+        let costs = exit_reload_costs(
+            &func,
+            &cfg,
+            &next_use,
+            &recipes,
+            &logical,
+            &translations,
+            entry,
+        )
+        .unwrap();
+        let source = LogicalValue(source.0);
+        let expected = u32::from(reload_cost_on_edge(
+            &func, &recipes, entry, true_block, source,
+        ))
+        .saturating_add(u32::from(reload_cost_on_edge(
+            &func,
+            &recipes,
+            entry,
+            false_block,
+            source,
+        )));
+
+        assert_eq!(costs.get(&source), Some(&expected));
+        assert_eq!(costs.len(), 1, "only the shared phi source is live out");
     }
 
     #[test]

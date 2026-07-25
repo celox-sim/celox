@@ -2909,6 +2909,92 @@ tree may displace a cheap local value without displacing a valuable
 CFG-coupled entry value. Until that model passes complete emitted-MIR and
 execution gates, the throughput milestone remains open.
 
+##### Definition completion span and direct-edge price
+
+The next experiment replaced the remaining source-order preference with a
+sink-side occupancy fact. For every dependency-ready definition, the
+allocation walk records:
+
+```text
+definition is live out
+last remaining local use rank - number of committed instructions
+```
+
+This is a completion span, not a global critical-path rank. A definition with
+a nearby final use can start and close before a definition whose first use is
+nearby but whose remaining users extend across the region. The score is
+updated from the same sparse remaining-use sets already consumed by the W/S
+transition; it does not construct another DAG or a block-by-VReg table.
+
+Once a value has no remaining local use, its eviction price now sums the
+materialization price on each immediate successor edge which demands that
+logical value. Phi destinations are translated back to their exact
+predecessor source. A `(successor edge, predecessor value)` is charged once
+even when both the successor live-in set and a phi operand expose it. This
+replaces the previous single persistent-reload fallback only at the block
+exit; exact point-recipe prices continue to own local uses.
+
+The first exploratory artifacts appeared to show the intended local-order
+change, but they were emitted by an example runner which had not been rebuilt
+from the source under review. Those line and timing comparisons are not
+evidence for this implementation and are discarded.
+
+The runner was then rebuilt explicitly from the current source and invoked
+twice with the benchmark script's exact source manifest. Both complete traces
+were byte-identical:
+
+```text
+pre-optimized SIR SHA-256
+031bb3d5b40ae13da961017e7346195bbe08bf45ab104d241c9aae4cc830efe7
+
+post-optimized SIR SHA-256
+65fb1fda44bbf99a93a0dc4263f37851aa9a30b9518ae3bb1c1753df9e8b3d26
+
+native optimized SIR SHA-256
+a3af7989a9549d9c451b5f5741395da98ee3539a2b062a2f3dd277cf096e481d
+
+complete MIR SHA-256
+82f745f202dde2b848c8cbd49b8b82b0a541cd9253c3234a55fedd2c7d8a9bfd
+
+complete MIR lines / bytes
+1,598,109 / 45,455,513
+```
+
+The rebuilt non-LTO runner also completes the normal-display workload:
+
+```text
+reboot: Power down
+v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1
+compile_ns=61608555255
+execute_ns=72656615748
+```
+
+This proves deterministic generation and semantics for the checkpoint. It does
+not establish an instruction-count or throughput improvement over bounded
+demand. That comparison requires rebuilding the parent runner and generating
+both complete traces from their corresponding source, rather than comparing
+new source against a stale executable.
+
+The implementation remains deliberately incomplete at CFG boundaries.
+Summing immediate successor reloads is a valid local eviction price but not
+the missing global contract:
+
+- it cannot price which K values a join should receive from all predecessors;
+- an unweighted edge sum can overvalue mutually exclusive successors;
+- it does not distinguish a reload frontier that reconverges from independent
+  frontiers;
+- blocks are committed in layout order, so a predecessor cannot consume a
+  successor's final W-entry decision.
+
+The retained completion span is the first sink-side component of the common
+marginal value, and the direct-edge sum is a bounded fallback when no local use
+remains. Neither is claimed as complete boundary allocation. The next design
+must expose a sparse boundary demand before the forward W/S walk, then let the
+existing edge-coupling verifier reconcile the committed exits. It must remain
+bounded by the target register count or by hash-consed demand frontiers; a
+dense block-by-value solution and whole-function scheduling retry remain
+forbidden.
+
 ##### Relocated bit-copy reconstruction in mixed OR roots
 
 Inspection of the complete pre-RA MIR, post-RA MIR, and disassembly found a
@@ -3113,9 +3199,11 @@ Verify:
 
 The structural implementation is complete. Whole-function profitability is
 not: bounded single-use demand is better in the two diagnosed blocks but still
-changes other large blocks adversely. The next gate is a common marginal
-value for CFG boundary residency and local-tree completion, followed by the
-full semantic and execution gates.
+changes other large blocks adversely. Definition completion span now supplies
+the local-tree half of the marginal value, and direct successor reload prices
+supply a bounded exit fallback. The remaining gate is a sparse,
+join/reconvergence-aware CFG boundary demand consumed by that same walk,
+followed by the full semantic and execution gates.
 
 ### Milestone 6: production and performance gate
 
