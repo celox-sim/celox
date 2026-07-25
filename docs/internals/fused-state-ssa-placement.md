@@ -2518,6 +2518,70 @@ The first implementation gate is exact, not timing-based:
 - full native semantic tests and the Heliodor marker/power-down pass before any
   runtime claim.
 
+##### Rejected fixed-boundary schedule repair
+
+A bounded prototype tested whether the existing W/S plan could be retained and
+its instruction order repaired afterward. For each block it froze the exact
+`W_entry`, `S_entry`, `W_exit`, and `S_exit`, constructed a forward order from
+the shared register/MemorySSA dependency graph, remapped sparse next-use and
+reload-recipe points, and ran `plan_block_transition` once on that candidate.
+Memory operations remained fixed barriers. A candidate was accepted only when
+both exit sets were unchanged and its target spill/reload cost did not
+increase.
+
+The first gate used a non-strict cost comparison. It admitted many different
+orders with equal spill cost, changed reconstruction and affinity decisions
+throughout the large functions, and removed only two post-RA instructions from
+`eval_apply_ff` and one from the fused function. Equal-cost reordering is
+therefore not a valid acceptance rule.
+
+A stricter version skipped zero-cost blocks and required a strictly smaller
+target spill/reload cost. The optimized SIR remained byte-identical to the
+accepted effect-case baseline:
+
+```text
+native optimized SIR SHA-256
+fe5dd0b804fbd537f8ded4f273d37a5fe132e964544859d41bc7a37199561081
+```
+
+An adjacent no-dump compile-only baseline/strict-repair pair produced:
+
+```text
+                                               baseline       strict repair
+eval_comb post-RA instructions                   88,998              88,997
+eval_apply_ff post-RA instructions               36,348              36,348
+eval_only_ff post-RA instructions                64,788              64,788
+eval_comb_apply_ff post-RA instructions         120,607             120,606
+eval_comb spill-plan phase                        2.457 s             3.202 s
+eval_comb complete regalloc                      26.170 s            26.657 s
+fused spill-plan phase                            1.397 s             1.865 s
+fused complete regalloc                          13.852 s            14.256 s
+complete code generation                         82.659 s            82.841 s
+```
+
+The same single transition is present in `eval_comb` and its fused copy. Stack
+frames remained 4,440 and 4,056 bytes respectively. Thus the strict repair
+removed one allocation action in each copy but added about 1.21 seconds to the
+two spill-plan phases. Total code-generation time was within run noise because
+the large native functions are generated concurrently; it does not make two
+instructions a profitable result.
+
+This rejects post-hoc scheduling under frozen exits, not allocation-owned
+scheduling. Exact `S_exit` equality removes almost all freedom that could
+eliminate a home, while relaxing it would invalidate already planned successor
+entries and edge coupling. Conversely, choosing a complete forward order
+before allocation was already measured to grow `eval_only_ff`'s frame from
+136 to 1,752 bytes because ready selection could not see the eviction and home
+decision it was causing.
+
+The next implementation must therefore integrate ready selection directly
+inside the first `plan_block_transition` walk. Selecting one ready instruction
+must evaluate and commit the same marginal W/S transition that performs its
+operand reloads, clobber handling, definition placement, and any eviction.
+That transition then produces the authoritative exit used by later blocks;
+there is no remapped plan and no fixed-exit repair pass. The rejected prototype
+and its environment switches were removed.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
