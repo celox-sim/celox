@@ -4786,7 +4786,15 @@ pub fn emit_chained_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[units], layout, four_state, label, None, None, None)
+    emit_chained_eu_groups(
+        &[units],
+        layout,
+        four_state,
+        label,
+        ChainedFunctionShape::Generic,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn emit_chained_eus_with_trace(
@@ -4796,7 +4804,15 @@ pub(crate) fn emit_chained_eus_with_trace(
     label: &str,
     trace: &mut NativeFunctionTrace,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(&[units], layout, four_state, label, None, Some(trace), None)
+    emit_chained_eu_groups(
+        &[units],
+        layout,
+        four_state,
+        label,
+        ChainedFunctionShape::Generic,
+        Some(trace),
+        None,
+    )
 }
 
 // Cross-phase stable forwarding deliberately stays staged until the allocator
@@ -4805,6 +4821,12 @@ pub(crate) fn emit_chained_eus_with_trace(
 // whole-function live ranges, which is a compile-time and spill regression on
 // large fused CFGs. StateSSA itself and working-state promotion remain active.
 const ENABLE_CROSS_PHASE_STABLE_FORWARDING: bool = false;
+
+#[derive(Debug, Clone, Copy)]
+enum ChainedFunctionShape {
+    Generic,
+    ClockEvent { first_ff_unit: usize },
+}
 
 /// Compile combinational evaluation followed by one eval/apply FF domain as
 /// one SIR/MIR function.
@@ -4815,13 +4837,19 @@ pub fn emit_comb_eval_apply_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    let stable_load_suffix = (!ff_units.is_empty()).then_some(comb_units.len());
+    let shape = if ff_units.is_empty() {
+        ChainedFunctionShape::Generic
+    } else {
+        ChainedFunctionShape::ClockEvent {
+            first_ff_unit: comb_units.len(),
+        }
+    };
     emit_chained_eu_groups(
         &[comb_units, ff_units],
         layout,
         four_state,
         label,
-        stable_load_suffix,
+        shape,
         None,
         None,
     )
@@ -4837,13 +4865,19 @@ pub(crate) fn emit_comb_eval_apply_eus_with_trace(
     program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
     profile_blocks: &[(crate::ir::BlockId, u64)],
 ) -> Result<EmitResult, ChainedEmitError> {
-    let stable_load_suffix = (!ff_units.is_empty()).then_some(comb_units.len());
+    let shape = if ff_units.is_empty() {
+        ChainedFunctionShape::Generic
+    } else {
+        ChainedFunctionShape::ClockEvent {
+            first_ff_unit: comb_units.len(),
+        }
+    };
     emit_chained_eu_groups(
         &[comb_units, ff_units],
         layout,
         four_state,
         label,
-        stable_load_suffix,
+        shape,
         Some(trace),
         Some((program_facts, profile_blocks)),
     )
@@ -4854,7 +4888,7 @@ fn emit_chained_eu_groups(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
-    stable_load_suffix: Option<usize>,
+    shape: ChainedFunctionShape,
     mut trace: Option<&mut NativeFunctionTrace>,
     state_layout_profile: Option<(
         &crate::optimizer::coalescing::ProgramStateAccessSummary,
@@ -4877,18 +4911,23 @@ fn emit_chained_eu_groups(
 
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
-    let (mut sir_eu, sir_boundaries) = if units.len() > 1 {
-        crate::ir::merge_sir_eu_refs(&units)
-    } else {
-        ((*units[0]).clone(), vec![])
+    let (mut sir_eu, merge_provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&units);
+    let sir_boundaries = merge_provenance.unit_entries[1..].to_vec();
+    let fused_phase_cut = match shape {
+        ChainedFunctionShape::Generic => None,
+        ChainedFunctionShape::ClockEvent { first_ff_unit } => Some(
+            crate::optimizer::coalescing::verify_fused_phase_cut(
+                &sir_eu,
+                &merge_provenance,
+                first_ff_unit,
+            )
+            .map_err(|message| ChainedEmitError::Analysis {
+                phase: "fused phase-cut verification",
+                message,
+            })?,
+        ),
     };
-    let stable_suffix_entry = stable_load_suffix.map(|first_suffix_unit| {
-        if first_suffix_unit == 0 {
-            sir_eu.entry_block_id
-        } else {
-            sir_boundaries[first_suffix_unit - 1]
-        }
-    });
+    let stable_suffix_entry = fused_phase_cut.as_ref().map(|cut| cut.ff_entry());
     let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
         eu.verify_result()
             .map_err(|error| ChainedEmitError::Sir { phase, error })
@@ -5048,10 +5087,13 @@ fn emit_chained_eu_groups(
             .map(|block| block.instructions.len())
             .sum();
         eprintln!(
-            "[native-timing] emit_chained merge eus={} sir_blocks={} sir_insts={} elapsed={:?}",
+            "[native-timing] emit_chained merge eus={} sir_blocks={} sir_insts={} ff_blocks={} elapsed={:?}",
             units.len(),
             sir_eu.blocks.len(),
             sir_insts,
+            fused_phase_cut
+                .as_ref()
+                .map_or(0, |cut| cut.ff_block_count()),
             start.elapsed()
         );
     }

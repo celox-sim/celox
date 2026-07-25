@@ -3459,6 +3459,7 @@ moving a syntactic source-level dispatch earlier in the generic pipeline.
 
 ## Related documents
 
+- [Reactive SSA lowering](./reactive-ssa-lowering.md)
 - [Native throughput execution plan](./native-throughput-execution-plan.md)
 - [Native register allocation](./native-register-allocation.md)
 - [Simulator architecture](./architecture.md)

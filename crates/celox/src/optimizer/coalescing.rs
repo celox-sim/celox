@@ -53,6 +53,8 @@ pub(crate) mod pass_tail_call_split;
 mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod placement_analysis;
+#[cfg(target_arch = "x86_64")]
+mod reactive_phase;
 mod shared;
 mod sir_analysis;
 mod state_ssa;
@@ -139,6 +141,15 @@ pub(crate) fn eliminate_unread_fused_comb_stores(
     ff_entry: BlockId,
 ) -> Result<usize, String> {
     pass_dead_store_elimination::eliminate_unread_fused_comb_stores(eu, ff_entry)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn verify_fused_phase_cut<A>(
+    eu: &ExecutionUnit<A>,
+    provenance: &crate::ir::SirMergeProvenance,
+    first_ff_unit: usize,
+) -> Result<reactive_phase::FusedPhaseCut, String> {
+    reactive_phase::verify(eu, provenance, first_ff_unit)
 }
 
 #[cfg(target_arch = "x86_64")]

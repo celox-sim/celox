@@ -809,19 +809,49 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
     merge_sir_eu_refs(&units)
 }
 
+/// Exact source-unit provenance for a merged SIR function.
+///
+/// Unlike a list of boundary block IDs, this remains valid when an input
+/// execution unit has a nonzero entry ID or sparse block IDs.
+#[derive(Debug, Clone)]
+pub(crate) struct SirMergeProvenance {
+    pub unit_entries: Vec<BlockId>,
+    pub block_units: crate::HashMap<BlockId, usize>,
+}
+
 /// Reference-based variant of [`merge_sir_eus`] used when one compilation
 /// unit is assembled from multiple Program-owned EU slices.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(crate) fn merge_sir_eu_refs<A: Clone>(
     units: &[&ExecutionUnit<A>],
 ) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    let (merged, provenance) = merge_sir_eu_refs_with_provenance(units);
+    (merged, provenance.unit_entries[1..].to_vec())
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
+    units: &[&ExecutionUnit<A>],
+) -> (ExecutionUnit<A>, SirMergeProvenance) {
     assert!(!units.is_empty(), "cannot merge an empty SIR EU list");
     if units.len() == 1 {
-        return ((*units[0]).clone(), vec![]);
+        return (
+            (*units[0]).clone(),
+            SirMergeProvenance {
+                unit_entries: vec![units[0].entry_block_id],
+                block_units: units[0]
+                    .blocks
+                    .keys()
+                    .copied()
+                    .map(|block| (block, 0))
+                    .collect(),
+            },
+        );
     }
 
     let mut merged_blocks = crate::HashMap::default();
     let mut merged_regs = crate::HashMap::default();
+    let mut block_units = crate::HashMap::default();
 
     // Compute offsets for renumbering
     let mut reg_offset = 0usize;
@@ -863,6 +893,7 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
         // Copy blocks with renumbering
         for (&block_id, block) in &eu.blocks {
             let new_block_id = BlockId(block_id.0 + bo);
+            block_units.insert(new_block_id, eu_idx);
             let r = |reg: RegisterId| RegisterId(reg.0 + ro);
             let b = |bid: BlockId| BlockId(bid.0 + bo);
 
@@ -930,14 +961,16 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
         }
     }
 
-    let eu_boundary_blocks: Vec<BlockId> = entry_blocks[1..].to_vec();
     (
         ExecutionUnit {
             entry_block_id: entry_blocks[0],
             blocks: merged_blocks,
             register_map: merged_regs,
         },
-        eu_boundary_blocks,
+        SirMergeProvenance {
+            unit_entries: entry_blocks,
+            block_units,
+        },
     )
 }
 
