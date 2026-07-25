@@ -2582,6 +2582,45 @@ That transition then produces the authoritative exit used by later blocks;
 there is no remapped plan and no fixed-exit repair pass. The rejected prototype
 and its environment switches were removed.
 
+##### Rejected independent boundary-residency selection
+
+A second diagnostic replaced the scheduler's unbounded raw live-out set with
+at most the target register count of values. Candidates were selected directly
+from the existing global next-use result by target spill-plus-reload cost per
+distance. This analysis is sparse and cheap, and the exact dependency
+scheduler still verified every emitted order.
+
+The experiment confirms the local diagnosis. With byte-identical optimized
+SIR, the hot `b8261` post-RA block fell from 1,002 to 941 instructions and the
+raw pressure attributed to the largest blocks fell from 1,023 to 244. A
+bounded resident exit is therefore materially better than pretending that all
+32 lane payloads remain in GPRs.
+
+It is not valid to select that exit independently per block:
+
+```text
+                                             baseline    independent boundary
+eval_comb post-RA instructions                 88,998                 89,143
+eval_comb_apply_ff post-RA instructions       120,607                121,060
+eval_comb spill frame                            4,440                  4,464
+fused spill frame                                4,056                  4,080
+eval_comb effective edge copies                  3,045                  3,677
+fused effective edge copies                      3,306                  3,881
+```
+
+The local 61-instruction win was outweighed by 145 and 453 extra instructions
+over the complete functions. The increase in edge copies identifies the
+missing contract: boundary residency is a CFG-coupled allocation decision, not
+a local scheduler score. A value retained at one exit must be priced against
+the translated `W_entry` and valid `S_entry` of every successor, including phi
+edges and loop backedges.
+
+This rules out preselecting K live-outs with an independent distance heuristic.
+It strengthens the integrated-transition requirement: ready selection may
+change `W_exit`, but that exit must be the authoritative state consumed by
+the existing Section 4.3 coupling relation. The diagnostic code and its
+environment switch were removed.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
