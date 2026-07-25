@@ -61,6 +61,15 @@ struct UnitStateFlow {
     fragment: StateFragment,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct ExactStateFlow {
+    producer: InstructionSite,
+    consumer: InstructionSite,
+    source: RegisterId,
+    destination: RegisterId,
+    fragment: StateFragment,
+}
+
 #[derive(Debug, Clone, Default)]
 struct UnitSummary {
     blocks: usize,
@@ -68,6 +77,13 @@ struct UnitSummary {
     stores: usize,
     commits: usize,
     effects: usize,
+}
+
+#[derive(Debug)]
+enum StaticProjectionStatus {
+    NotEvaluated,
+    Admitted { instructions: usize },
+    Rejected(&'static str),
 }
 
 #[derive(Debug)]
@@ -79,7 +95,9 @@ pub(crate) struct ReactiveEventProjection {
     retained_units: HashSet<usize>,
     frontiers: HashSet<ProjectionFrontier>,
     unit_flows: HashSet<UnitStateFlow>,
+    exact_flows: HashSet<ExactStateFlow>,
     phase_by_unit: Vec<bool>,
+    static_projection: StaticProjectionStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -164,11 +182,13 @@ impl ReactiveEventProjection {
             retained_units: HashSet::default(),
             frontiers: HashSet::default(),
             unit_flows: HashSet::default(),
+            exact_flows: HashSet::default(),
             phase_by_unit: provenance
                 .unit_entries
                 .iter()
                 .map(|&entry| cut.is_ff_block(entry))
                 .collect(),
+            static_projection: StaticProjectionStatus::NotEvaluated,
         };
         let mut work = Vec::new();
         for root in &projection.roots {
@@ -266,7 +286,7 @@ impl ReactiveEventProjection {
                                 fragment: Some(fragment),
                             });
                         }
-                        MemoryAccessKind::Def { .. } => {
+                        MemoryAccessKind::Def { source, .. } => {
                             let definition = InstructionSite {
                                 block: access.block.ok_or(
                                     "Reactive StateSSA definition has no containing block",
@@ -277,6 +297,17 @@ impl ReactiveEventProjection {
                             };
                             let producer = provenance.block_units[&definition.block];
                             let consumer_unit = provenance.block_units[&consumer.block];
+                            if let SIRInstruction::Load(destination, _, _, _) =
+                                eu.blocks[&consumer.block].instructions[consumer.instruction]
+                            {
+                                projection.exact_flows.insert(ExactStateFlow {
+                                    producer: definition,
+                                    consumer,
+                                    source: *source,
+                                    destination,
+                                    fragment,
+                                });
+                            }
                             if producer != consumer_unit {
                                 projection.unit_flows.insert(UnitStateFlow {
                                     producer,
@@ -363,6 +394,17 @@ impl ReactiveEventProjection {
                 }
             }
         }
+        projection.static_projection =
+            match projection.try_build_straight_line_projection(eu, provenance) {
+                Ok(projected) => StaticProjectionStatus::Admitted {
+                    instructions: projected
+                        .blocks
+                        .values()
+                        .map(|block| block.instructions.len())
+                        .sum(),
+                },
+                Err(reason) => StaticProjectionStatus::Rejected(reason),
+            };
         Ok(projection)
     }
 
@@ -371,6 +413,115 @@ impl ReactiveEventProjection {
         self.retained_blocks.insert(site.block);
         self.retained_units
             .insert(provenance.block_units[&site.block]);
+    }
+
+    fn try_build_straight_line_projection(
+        &self,
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        provenance: &SirMergeProvenance,
+    ) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, &'static str> {
+        if self.retained_instructions.len() > 4096 {
+            return Err("retained projection exceeds the initial bounded subset");
+        }
+        if self
+            .frontiers
+            .iter()
+            .any(|frontier| frontier.kind != FrontierKind::LiveOnEntry)
+        {
+            return Err("projection has a non-materializable initial frontier");
+        }
+        if eu.blocks.values().any(|block| {
+            !block.params.is_empty()
+                || matches!(
+                    block.terminator,
+                    SIRTerminator::Branch { .. } | SIRTerminator::Switch { .. }
+                )
+        }) {
+            return Err("projection is not straight-line");
+        }
+        let cfg = SirCfg::analyze_forward(eu).map_err(|_| "projection CFG is invalid")?;
+        let mut replacements = HashMap::default();
+        let mut removed = HashSet::default();
+        let mut admitted_flows = HashSet::default();
+        for flow in &self.exact_flows {
+            let producer_unit = provenance.block_units[&flow.producer.block];
+            let consumer_unit = provenance.block_units[&flow.consumer.block];
+            if self.phase_by_unit[producer_unit] || !self.phase_by_unit[consumer_unit] {
+                continue;
+            }
+            let SIRInstruction::Store(_, SIROffset::Static(_), _, source, triggers, captures) =
+                &eu.blocks[&flow.producer.block].instructions[flow.producer.instruction]
+            else {
+                return Err("exact flow producer is not a static Store");
+            };
+            let SIRInstruction::Load(destination, _, SIROffset::Static(_), _) =
+                &eu.blocks[&flow.consumer.block].instructions[flow.consumer.instruction]
+            else {
+                return Err("exact flow consumer is not a static Load");
+            };
+            if !triggers.is_empty() || !captures.is_empty() {
+                return Err("exact flow producer is observable");
+            }
+            if source != &flow.source || destination != &flow.destination {
+                return Err("exact flow no longer names its SIR values");
+            }
+            if eu.register_map.get(source) != eu.register_map.get(destination) {
+                return Err("exact flow requires a type conversion");
+            }
+            let producer_block = cfg.index[&flow.producer.block];
+            let consumer_block = cfg.index[&flow.consumer.block];
+            if !cfg.dominators.dominates(producer_block, consumer_block) {
+                return Err("exact flow producer does not dominate its consumer");
+            }
+            if replacements.insert(*destination, *source).is_some() {
+                return Err("one projected Load has multiple exact producers");
+            }
+            removed.insert(flow.consumer);
+            admitted_flows.insert(*flow);
+        }
+        let admitted_producers = admitted_flows
+            .iter()
+            .map(|flow| flow.producer)
+            .collect::<HashSet<_>>();
+        for producer in admitted_producers {
+            if self
+                .exact_flows
+                .iter()
+                .filter(|flow| flow.producer == producer)
+                .all(|flow| admitted_flows.contains(flow))
+            {
+                removed.insert(producer);
+            }
+        }
+        if replacements.is_empty() {
+            return Err("projection has no admitted exact comb-to-FF flow");
+        }
+
+        let mut projected = eu.clone();
+        for block in projected.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                super::shared::batch_replace_in_inst(instruction, &replacements);
+            }
+            super::shared::batch_replace_in_terminator(&mut block.terminator, &replacements);
+            let block_id = block.id;
+            block.instructions = std::mem::take(&mut block.instructions)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(instruction, value)| {
+                    let site = InstructionSite {
+                        block: block_id,
+                        instruction,
+                    };
+                    (self.retained_instructions.contains(&site) && !removed.contains(&site))
+                        .then_some(value)
+                })
+                .collect();
+        }
+        super::pass_vectorize_concat::remove_dead_definitions(&mut projected);
+        projected
+            .verify_result()
+            .map_err(|_| "projected SIR failed verification")?;
+        Ok(projected)
     }
 
     pub(crate) fn format_report(&self) -> String {
@@ -385,15 +536,31 @@ impl ReactiveEventProjection {
             ff_units
         )
         .unwrap();
+        match self.static_projection {
+            StaticProjectionStatus::NotEvaluated => {
+                writeln!(output, "straight_line_projection=not-evaluated").unwrap();
+            }
+            StaticProjectionStatus::Admitted { instructions } => {
+                writeln!(
+                    output,
+                    "straight_line_projection=admitted instructions={instructions}"
+                )
+                .unwrap();
+            }
+            StaticProjectionStatus::Rejected(reason) => {
+                writeln!(output, "straight_line_projection=rejected reason={reason}").unwrap();
+            }
+        }
         writeln!(
             output,
-            "roots={} retained_units={} retained_blocks={} retained_instructions={} frontiers={} cross_unit_state_flows={}",
+            "roots={} retained_units={} retained_blocks={} retained_instructions={} frontiers={} cross_unit_state_flows={} exact_store_load_flows={}",
             self.roots.len(),
             self.retained_units.len(),
             self.retained_blocks.len(),
             self.retained_instructions.len(),
             self.frontiers.len(),
-            self.unit_flows.len()
+            self.unit_flows.len(),
+            self.exact_flows.len()
         )
         .unwrap();
         writeln!(output, "Units:").unwrap();
@@ -673,6 +840,8 @@ mod tests {
     };
     use veryl_analyzer::ir::VarId;
 
+    type TestMemory = HashMap<(RegionedAbsoluteAddr, usize, usize), u64>;
+
     fn address(region: u32, variable: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
             region,
@@ -713,24 +882,90 @@ mod tests {
         }
     }
 
+    fn execute_straight_line(eu: &ExecutionUnit<RegionedAbsoluteAddr>, memory: &mut TestMemory) {
+        let mut registers = HashMap::<RegisterId, u64>::default();
+        let mut block = eu.entry_block_id;
+        for _ in 0..=eu.blocks.len() {
+            let current = &eu.blocks[&block];
+            for instruction in &current.instructions {
+                match instruction {
+                    SIRInstruction::Load(
+                        destination,
+                        address,
+                        SIROffset::Static(offset),
+                        width,
+                    ) => {
+                        registers.insert(
+                            *destination,
+                            *memory.get(&(*address, *offset, *width)).unwrap_or(&0),
+                        );
+                    }
+                    SIRInstruction::Store(
+                        address,
+                        SIROffset::Static(offset),
+                        width,
+                        source,
+                        _,
+                        _,
+                    ) => {
+                        memory.insert(
+                            (*address, *offset, *width),
+                            registers[source] & width_mask(*width),
+                        );
+                    }
+                    SIRInstruction::Commit(
+                        source,
+                        destination,
+                        SIROffset::Static(offset),
+                        width,
+                        _,
+                    ) => {
+                        let value = *memory.get(&(*source, *offset, *width)).unwrap_or(&0);
+                        memory.insert((*destination, *offset, *width), value);
+                    }
+                    SIRInstruction::Unary(destination, crate::ir::UnaryOp::Ident, source) => {
+                        registers.insert(*destination, registers[source]);
+                    }
+                    other => panic!("unsupported straight-line test instruction: {other:?}"),
+                }
+            }
+            match &current.terminator {
+                SIRTerminator::Jump(target, arguments) if arguments.is_empty() => block = *target,
+                SIRTerminator::Return => return,
+                other => panic!("unsupported straight-line test terminator: {other:?}"),
+            }
+        }
+        panic!("straight-line test execution did not return");
+    }
+
+    fn width_mask(width: usize) -> u64 {
+        if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        }
+    }
+
     #[test]
     fn clock_projection_reaches_comb_store_through_exact_state_version() {
         let signal = address(STABLE_REGION, 0);
         let next = address(WORKING_REGION, 1);
         let published = address(STABLE_REGION, 1);
+        let input = address(STABLE_REGION, 2);
         let comb = unit(
             vec![
-                SIRInstruction::Imm(RegisterId(0), SIRValue::new(7u32)),
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Unary(RegisterId(1), crate::ir::UnaryOp::Ident, RegisterId(0)),
                 SIRInstruction::Store(
                     signal,
                     SIROffset::Static(0),
                     8,
-                    RegisterId(0),
+                    RegisterId(1),
                     vec![],
                     vec![],
                 ),
             ],
-            &[(0, 8)],
+            &[(0, 8), (1, 8)],
         );
         let ff = unit(
             vec![
@@ -755,6 +990,37 @@ mod tests {
         }));
         assert!(projection.retained_units.contains(&0));
         assert!(projection.retained_units.contains(&1));
+
+        let projected = projection
+            .try_build_straight_line_projection(&merged, &provenance)
+            .unwrap();
+        assert!(!projected.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                        if *address == signal
+                )
+            })
+        }));
+
+        for value in [0, 1, 7, 0x55, 0xff] {
+            let mut reference = TestMemory::default();
+            reference.insert((input, 0, 8), value);
+            reference.insert((signal, 0, 8), 0);
+            reference.insert((next, 0, 8), 0);
+            reference.insert((published, 0, 8), 0);
+            let mut projected_memory = reference.clone();
+
+            execute_straight_line(&merged, &mut reference);
+            execute_straight_line(&projected, &mut projected_memory);
+            // The generic comb projection republishes derived outputs before
+            // externally visible state is compared.
+            execute_straight_line(&comb, &mut reference);
+            execute_straight_line(&comb, &mut projected_memory);
+
+            assert_eq!(projected_memory, reference);
+        }
     }
 
     #[test]

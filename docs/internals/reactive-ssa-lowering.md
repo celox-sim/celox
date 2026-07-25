@@ -377,6 +377,27 @@ Compile both the old fused function and the new projection in tests. Execute
 randomized input states and compare final Stable/Working/triggered memory plus
 status.
 
+The first non-production prototype now admits only a bounded, branchless SIR
+projection with exact static StateSSA edges and materializable live-on-entry
+frontiers. For an exact comb-Store to FF-Load edge it:
+
+1. proves that the Store dominates the Load;
+2. requires identical SIR value types and an effect-free Store;
+3. replaces the Load result with the Store's SSA source;
+4. removes the Load;
+5. removes the Store only when every retained exact consumer is admitted; and
+6. runs ordinary SIR DCE and verification on the projected function.
+
+A focused differential test executes the old fused SIR and projected SIR over
+several input states, then executes the ordinary comb projection before
+comparing state. This models the simulator's dirty-comb contract: a clock-only
+projection need not publish an unobserved intermediate comb value, but the
+value must be reconstructed before an external observation.
+
+This is not yet enabled in native production emission. The next gate is native
+JIT differential execution, including triggered state and status, before the
+admitted subset can replace the old fused path.
+
 ### Step D: control-pure regions
 
 Add exact branch priority, `ControlMerge`, and loop-independent case regions.
