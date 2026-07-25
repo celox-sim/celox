@@ -75,6 +75,25 @@ function should have all of these properties:
 These are properties of the machine program. Store counts, VReg counts, and
 SIR size are diagnostics only.
 
+An `ExecutionUnit` is only a physical code-generation container. In
+particular, putting all acyclic combinational logic in one EU must not collapse
+the semantic units inside it. The lowering pipeline preserves this hierarchy:
+
+```text
+comb process
+  -> exact LogicPath/range definitions
+  -> scheduler SCC and effect interval
+  -> SIR definition sites
+  -> MemorySSA StateVersions
+  -> FF demand cluster
+```
+
+The clock projection and placement planner operate on the lower levels of this
+hierarchy, never on the whole comb EU as one scheduling or allocation region.
+Several independent FF demand clusters may refer to definitions contained in
+the same comb EU without acquiring a shared live range or a common
+materialization decision.
+
 ## The incorrect boundary
 
 The parser is not required to emit machine order, and the machine backend must
@@ -231,6 +250,31 @@ For one requested projection:
 
 This is sparse graph reachability. It does not enumerate paths and does not
 construct a whole-function scheduling DAG.
+
+The first implementation represents every FF state Load as an independent
+MemorySSA demand root. Its reaching `Def`, `MemoryPhi`, or `LiveOnEntry`
+version is expanded without treating a merge as ambiguous. A silent comb
+publication `Def` crosses into the defining SSA value; an observable
+publication remains an effect frontier. This establishes clusters before any
+Store deletion or code motion is attempted.
+
+On the Heliodor Linux workload, the first demand-cluster trace reports:
+
+```text
+FF state demand clusters       3,704
+complete clusters              3,242
+comb-publication-backed        2,017
+pure suffix instructions      41,821
+largest pure suffix              579
+SIR control merges             1,880
+unsupported frontiers            462
+```
+
+The whole retained projection still contains 13,040 instructions and exceeds
+the obsolete 4,096-instruction whole-projection limit. No individual demand
+cluster does. This is evidence for sink-local construction, not yet a runtime
+speedup: shared producer accounting, cluster partitioning, and executable
+control placement are still required before code generation.
 
 ## Placement and allocation
 

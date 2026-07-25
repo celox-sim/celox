@@ -70,6 +70,24 @@ struct ExactStateFlow {
     fragment: StateFragment,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DemandClusterSummary {
+    memory_versions: usize,
+    pure_instructions: usize,
+    persistent_leaves: usize,
+    publication_definitions: usize,
+    memory_phis: usize,
+    control_merges: usize,
+    unsupported_frontiers: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DemandCluster {
+    consumer: InstructionSite,
+    fragment: StateFragment,
+    summary: DemandClusterSummary,
+}
+
 #[derive(Debug, Clone, Default)]
 struct UnitSummary {
     blocks: usize,
@@ -96,6 +114,7 @@ pub(crate) struct ReactiveEventProjection {
     frontiers: HashSet<ProjectionFrontier>,
     unit_flows: HashSet<UnitStateFlow>,
     exact_flows: HashSet<ExactStateFlow>,
+    demand_clusters: Vec<DemandCluster>,
     phase_by_unit: Vec<bool>,
     static_projection: StaticProjectionStatus,
 }
@@ -183,6 +202,7 @@ impl ReactiveEventProjection {
             frontiers: HashSet::default(),
             unit_flows: HashSet::default(),
             exact_flows: HashSet::default(),
+            demand_clusters: Vec::new(),
             phase_by_unit: provenance
                 .unit_entries
                 .iter()
@@ -394,6 +414,14 @@ impl ReactiveEventProjection {
                 }
             }
         }
+        projection.demand_clusters = build_demand_clusters(
+            eu,
+            provenance,
+            &state_models,
+            &state_uses,
+            &definitions,
+            &projection.phase_by_unit,
+        )?;
         projection.static_projection =
             match projection.try_build_straight_line_projection(eu, provenance) {
                 Ok(projected) => StaticProjectionStatus::Admitted {
@@ -553,14 +581,58 @@ impl ReactiveEventProjection {
         }
         writeln!(
             output,
-            "roots={} retained_units={} retained_blocks={} retained_instructions={} frontiers={} cross_unit_state_flows={} exact_store_load_flows={}",
+            "roots={} retained_units={} retained_blocks={} retained_instructions={} frontiers={} cross_unit_state_flows={} exact_store_load_flows={} demand_clusters={}",
             self.roots.len(),
             self.retained_units.len(),
             self.retained_blocks.len(),
             self.retained_instructions.len(),
             self.frontiers.len(),
             self.unit_flows.len(),
-            self.exact_flows.len()
+            self.exact_flows.len(),
+            self.demand_clusters.len(),
+        )
+        .unwrap();
+        let cluster_totals = self.demand_clusters.iter().fold(
+            DemandClusterSummary::default(),
+            |mut total, cluster| {
+                total.memory_versions += cluster.summary.memory_versions;
+                total.pure_instructions += cluster.summary.pure_instructions;
+                total.persistent_leaves += cluster.summary.persistent_leaves;
+                total.publication_definitions += cluster.summary.publication_definitions;
+                total.memory_phis += cluster.summary.memory_phis;
+                total.control_merges += cluster.summary.control_merges;
+                total.unsupported_frontiers += cluster.summary.unsupported_frontiers;
+                total
+            },
+        );
+        let complete_clusters = self
+            .demand_clusters
+            .iter()
+            .filter(|cluster| cluster.summary.unsupported_frontiers == 0)
+            .count();
+        let publication_clusters = self
+            .demand_clusters
+            .iter()
+            .filter(|cluster| cluster.summary.publication_definitions != 0)
+            .count();
+        let max_cluster_instructions = self
+            .demand_clusters
+            .iter()
+            .map(|cluster| cluster.summary.pure_instructions)
+            .max()
+            .unwrap_or(0);
+        writeln!(
+            output,
+            "Demand clusters: complete={} publication_backed={} memory_versions={} pure_instructions={} max_pure_instructions={} persistent_leaves={} memory_phis={} control_merges={} unsupported_frontiers={}",
+            complete_clusters,
+            publication_clusters,
+            cluster_totals.memory_versions,
+            cluster_totals.pure_instructions,
+            max_cluster_instructions,
+            cluster_totals.persistent_leaves,
+            cluster_totals.memory_phis,
+            cluster_totals.control_merges,
+            cluster_totals.unsupported_frontiers,
         )
         .unwrap();
         writeln!(output, "Units:").unwrap();
@@ -645,6 +717,168 @@ impl ReactiveEventProjection {
             writeln!(output, "  b{}.i{}", site.block.0, site.instruction).unwrap();
         }
         output
+    }
+}
+
+fn build_demand_clusters(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &SirMergeProvenance,
+    models: &[StateSsa],
+    state_uses: &HashMap<InstructionSite, Vec<StateUse>>,
+    definitions: &HashMap<RegisterId, ValueDefinition>,
+    phase_by_unit: &[bool],
+) -> Result<Vec<DemandCluster>, String> {
+    let mut clusters = Vec::new();
+    for (&consumer, uses) in state_uses {
+        if !phase_by_unit[provenance.block_units[&consumer.block]]
+            || !matches!(
+                eu.blocks[&consumer.block].instructions[consumer.instruction],
+                SIRInstruction::Load(..)
+            )
+        {
+            continue;
+        }
+        for state_use in uses {
+            let model = &models[state_use.model];
+            let access = &model.accesses[state_use.version.0];
+            let fragment = model.slots[access.slot].fragment;
+            let mut summary = DemandClusterSummary::default();
+            let mut memory_seen = HashSet::default();
+            let mut value_seen = HashSet::default();
+            collect_cluster_memory(
+                eu,
+                provenance,
+                model,
+                state_use.version,
+                definitions,
+                phase_by_unit,
+                &mut memory_seen,
+                &mut value_seen,
+                &mut summary,
+            )?;
+            clusters.push(DemandCluster {
+                consumer,
+                fragment,
+                summary,
+            });
+        }
+    }
+    clusters.sort_by_key(|cluster| {
+        (
+            cluster.consumer,
+            cluster.fragment.addr,
+            cluster.fragment.bit_offset,
+            cluster.fragment.width,
+            cluster.fragment.plane,
+        )
+    });
+    Ok(clusters)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_cluster_memory(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &SirMergeProvenance,
+    model: &StateSsa,
+    version: MemoryAccessId,
+    definitions: &HashMap<RegisterId, ValueDefinition>,
+    phase_by_unit: &[bool],
+    memory_seen: &mut HashSet<MemoryAccessId>,
+    value_seen: &mut HashSet<RegisterId>,
+    summary: &mut DemandClusterSummary,
+) -> Result<(), String> {
+    if !memory_seen.insert(version) {
+        return Ok(());
+    }
+    summary.memory_versions += 1;
+    let access = &model.accesses[version.0];
+    match &access.kind {
+        MemoryAccessKind::LiveOnEntry => summary.persistent_leaves += 1,
+        MemoryAccessKind::Use { reaching, .. } => collect_cluster_memory(
+            eu,
+            provenance,
+            model,
+            *reaching,
+            definitions,
+            phase_by_unit,
+            memory_seen,
+            value_seen,
+            summary,
+        )?,
+        MemoryAccessKind::Phi { incoming } => {
+            summary.memory_phis += 1;
+            for &(_, incoming) in incoming {
+                collect_cluster_memory(
+                    eu,
+                    provenance,
+                    model,
+                    incoming,
+                    definitions,
+                    phase_by_unit,
+                    memory_seen,
+                    value_seen,
+                    summary,
+                )?;
+            }
+        }
+        MemoryAccessKind::Def { source, observable } => {
+            let Some(block) = access.block else {
+                return Err("MemorySSA definition has no containing block".into());
+            };
+            if !phase_by_unit[provenance.block_units[&block]] && !observable {
+                summary.publication_definitions += 1;
+                collect_cluster_value(eu, definitions, *source, value_seen, summary);
+            } else {
+                summary.unsupported_frontiers += 1;
+            }
+        }
+        MemoryAccessKind::Kill => summary.unsupported_frontiers += 1,
+    }
+    Ok(())
+}
+
+fn collect_cluster_value(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, ValueDefinition>,
+    value: RegisterId,
+    seen: &mut HashSet<RegisterId>,
+    summary: &mut DemandClusterSummary,
+) {
+    if !seen.insert(value) {
+        return;
+    }
+    match definitions.get(&value) {
+        Some(ValueDefinition::Instruction(site)) => {
+            let instruction = &eu.blocks[&site.block].instructions[site.instruction];
+            match instruction {
+                SIRInstruction::Imm(..)
+                | SIRInstruction::Binary(..)
+                | SIRInstruction::Unary(..)
+                | SIRInstruction::Concat(..)
+                | SIRInstruction::Slice(..)
+                | SIRInstruction::Mux(..) => {
+                    summary.pure_instructions += 1;
+                    for input in super::sir_analysis::instruction_uses(instruction) {
+                        collect_cluster_value(eu, definitions, input, seen, summary);
+                    }
+                }
+                SIRInstruction::Load(..) => summary.persistent_leaves += 1,
+                SIRInstruction::Store(..)
+                | SIRInstruction::Commit(..)
+                | SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
+                    summary.unsupported_frontiers += 1;
+                }
+            }
+        }
+        Some(ValueDefinition::BlockParameter(incoming)) => {
+            summary.control_merges += 1;
+            for &input in incoming {
+                collect_cluster_value(eu, definitions, input, seen, summary);
+            }
+        }
+        None => summary.unsupported_frontiers += 1,
     }
 }
 
@@ -990,6 +1224,17 @@ mod tests {
         }));
         assert!(projection.retained_units.contains(&0));
         assert!(projection.retained_units.contains(&1));
+        assert_eq!(projection.demand_clusters.len(), 1);
+        assert_eq!(
+            projection.demand_clusters[0]
+                .summary
+                .publication_definitions,
+            1
+        );
+        assert_eq!(
+            projection.demand_clusters[0].summary.unsupported_frontiers,
+            0
+        );
 
         let projected = projection
             .try_build_straight_line_projection(&merged, &provenance)
@@ -1081,6 +1326,84 @@ mod tests {
                 block: provenance.unit_entries[0],
                 instruction: 3,
             })
+        );
+    }
+
+    #[test]
+    fn one_comb_execution_unit_yields_independent_memoryssa_demand_clusters() {
+        let input_a = address(STABLE_REGION, 0);
+        let input_b = address(STABLE_REGION, 1);
+        let comb_a = address(STABLE_REGION, 2);
+        let comb_b = address(STABLE_REGION, 3);
+        let next_a = address(WORKING_REGION, 4);
+        let next_b = address(WORKING_REGION, 5);
+        let published_a = address(STABLE_REGION, 4);
+        let published_b = address(STABLE_REGION, 5);
+        let comb = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), input_a, SIROffset::Static(0), 8),
+                SIRInstruction::Unary(RegisterId(1), crate::ir::UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Store(
+                    comb_a,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Load(RegisterId(2), input_b, SIROffset::Static(0), 8),
+                SIRInstruction::Unary(RegisterId(3), crate::ir::UnaryOp::Ident, RegisterId(2)),
+                SIRInstruction::Store(
+                    comb_b,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(3),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8), (1, 8), (2, 8), (3, 8)],
+        );
+        let ff = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), comb_a, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    next_a,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Load(RegisterId(1), comb_b, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    next_b,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Commit(next_a, published_a, SIROffset::Static(0), 8, vec![]),
+                SIRInstruction::Commit(next_b, published_b, SIROffset::Static(0), 8, vec![]),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+        let (merged, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff]);
+        let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
+
+        let projection =
+            ReactiveEventProjection::analyze(&merged, &provenance, &cut, false).unwrap();
+
+        assert_eq!(projection.demand_clusters.len(), 2);
+        assert!(projection.demand_clusters.iter().all(|cluster| {
+            cluster.summary.publication_definitions == 1
+                && cluster.summary.pure_instructions == 1
+                && cluster.summary.unsupported_frontiers == 0
+        }));
+        assert_ne!(
+            projection.demand_clusters[0].fragment.addr,
+            projection.demand_clusters[1].fragment.addr
         );
     }
 
