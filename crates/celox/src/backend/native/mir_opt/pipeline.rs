@@ -161,6 +161,10 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
         "fold_reconstructed_bit_partitions",
         fold_reconstructed_bit_partitions,
     );
+    runner.run(
+        "fold_relocated_bit_copy_groups",
+        fold_relocated_bit_copy_groups,
+    );
     runner.run("post_lower_algebraic_simplify", algebraic_simplify);
     runner.run("post_lower_copy_propagate", copy_propagate);
     runner.run(

@@ -2739,6 +2739,76 @@ then, pre-CSSA physical scheduling followed by linear post-CSSA W/S planning
 is the executable boundary. A preferred-rank overlay or a second ready-list
 walk is explicitly rejected.
 
+##### Relocated bit-copy reconstruction in mixed OR roots
+
+Inspection of the complete pre-RA MIR, post-RA MIR, and disassembly found a
+separate target-level canonicalization failure in hot fused block `bb4212`.
+One packed word was reconstructed from two relocated fields plus values from
+other sources. The first field appeared as six independent copies:
+
+```text
+shr source, 42; and 1; shl 1
+shr source, 43; and 1; shl 2
+...
+shr source, 47; and 1; shl 6
+```
+
+The second repeated the same shape for source bits 48--52 and destination bits
+17--21. The existing complete-partition fold correctly rejected the whole OR
+tree: it contained mixed sources and neither field preserved its original bit
+positions. Rejecting the whole tree, however, left each same-source affine
+subset scalarized.
+
+The retained MIR fold traces only `mov`, fixed logical shifts, and immediate
+masks inside one block. It groups terms with the exact relation
+`output_bit = source_bit + displacement` and rebuilds a group only after at
+least two private terms establish profitability. A shared projection may join
+an already-paid group; its original definition remains for the other use.
+The safety boundary is:
+
+- whole-function use counts include instruction and phi-edge uses;
+- every bypassed private projection is single-use;
+- only a maximal OR root and private nested 64-bit OR nodes are flattened;
+- a nested `Or32` remains an opaque truncation boundary;
+- the rebuilt final instruction defines the original root VReg and preserves
+  whether that root was `Or` or `Or32`; and
+- an out-of-range affine displacement retains its original expression.
+
+On the same Heliodor input, disabling only this MIR pass and enabling it again
+produced byte-identical pre-optimized, post-optimized, and native-optimized
+SIR:
+
+```text
+pre-optimized SIR     031bb3d5b40ae13da961017e7346195bbe08bf45ab104d241c9aae4cc830efe7
+post-optimized SIR    bc2cf9bde252a1e715d63f4d9903e936b0538e1032b9ab74d2eb1865b25cacdd
+native-optimized SIR  e552c0d4ba30d757222aaa024abf124d8e62aec8c9d3b8cbea4b4bbd17be79c1
+```
+
+The complete emitted MIR changed from 46,057,454 to 45,904,096 bytes. More
+importantly, the identified pre-RA sequence now reads:
+
+```text
+shr source, 41
+and.w32 ..., 0x7e
+shr source, 31
+and.w32 ..., 0x3e0000
+```
+
+The same two shift/mask pairs are present directly in the final x86
+disassembly. The bit-42 extraction remains because it also has a later
+independent use, but its root-only `shl 1` is gone; the rebuilt `0x7e` field
+contains that bit without deleting the shared definition.
+
+The exact Linux workload still powered down at
+`cy=9ae070 x3=aa pass=1`. A paired non-LTO run measured 63.973 seconds with
+the fold and 63.824 seconds with it disabled. The 0.23% difference is noise
+at this measurement granularity, so this result does **not** pass the runtime
+improvement gate and does not explain the Veryl-CC gap. The fold is retained
+as a general, directly verified generated-code canonicalization; subsequent
+work must return to larger hot structures such as the 32-lane arbitration in
+`bb8261` and its scheduling/allocation behavior rather than extending this
+local pattern.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a

@@ -5067,6 +5067,9 @@ struct SelectTerm {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LinearBitCopy {
+    /// Value at the root of this one OR term before tracing through its
+    /// shift/mask chain.
+    expression: VReg,
     source: VReg,
     /// `output_bit = source_bit + shift`.
     shift: i16,
@@ -5159,6 +5162,493 @@ fn fold_reconstructed_bit_partitions(func: &mut MFunction) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RelocatedBitGroup {
+    Existing(VReg),
+    Discarded,
+    Rebuild {
+        source: VReg,
+        shift: i16,
+        output_mask: u64,
+        terms: usize,
+        first_expression: VReg,
+    },
+}
+
+#[derive(Clone)]
+struct RelocatedBitPlan {
+    instruction: usize,
+    destination: VReg,
+    word32: bool,
+    groups: Vec<RelocatedBitGroup>,
+}
+
+/// Coalesce same-source bit-copy terms inside a mixed reconstruction.
+///
+/// A complete reconstruction can contain fields from several sources:
+///
+/// ```text
+/// opaque
+///   | (((source >> 42) & 1) << 1)
+///   | (((source >> 43) & 1) << 2)
+///   | ...
+/// ```
+///
+/// The complete-tree fold above must reject this because the result is not
+/// simply `source & mask`.  The repeated terms nevertheless have one exact
+/// affine relation, `output_bit = source_bit + shift`, and can be replaced by
+/// one shift and mask.  Only maximal OR roots are rebuilt.  A traced term is
+/// grouped only when every bypassed definition is single-use, so shared field
+/// projections remain available without duplicating their computation.
+fn fold_relocated_bit_copy_groups(func: &mut MFunction) {
+    // A bypassed projection must be private to the reconstructed root across
+    // the whole function.  In particular, phi sources are edge uses and must
+    // not disappear merely because this pass scans one block at a time.
+    let mut use_counts = HashMap::<VReg, usize>::new();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+        for instruction in &block.insts {
+            for source in instruction.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    for block_index in 0..func.blocks.len() {
+        let plans = {
+            let block = &func.blocks[block_index];
+            let definitions = block
+                .insts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| instruction.def().map(|dst| (dst, index)))
+                .collect::<HashMap<_, _>>();
+            let mut nested_or_inputs = HashSet::<VReg>::new();
+            for instruction in &block.insts {
+                match instruction {
+                    MInst::Or { lhs, rhs, .. } | MInst::Or32 { lhs, rhs, .. } => {
+                        nested_or_inputs.insert(*lhs);
+                        nested_or_inputs.insert(*rhs);
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut plans = Vec::new();
+            for (instruction, root) in block.insts.iter().enumerate() {
+                let (dst, word32) = match root {
+                    MInst::Or { dst, .. } => (*dst, false),
+                    MInst::Or32 { dst, .. } => (*dst, true),
+                    _ => continue,
+                };
+                if nested_or_inputs.contains(&dst) {
+                    continue;
+                }
+
+                let mut terms = Vec::new();
+                if !collect_relocated_terms(
+                    dst,
+                    dst,
+                    u64::MAX,
+                    &block.insts,
+                    &definitions,
+                    &use_counts,
+                    &mut terms,
+                    0,
+                ) || terms.len() < 3
+                {
+                    continue;
+                }
+
+                let mut groups = Vec::<RelocatedBitGroup>::new();
+                let mut grouped = HashMap::<(VReg, i16), usize>::new();
+                let mut shared_terms = Vec::<(usize, (VReg, i16), u64)>::new();
+                for term in terms {
+                    // A nonzero copied mask normally proves that the affine
+                    // displacement remains representable by one machine
+                    // shift.  Keep the original expression instead of making
+                    // that fact an unchecked release-build precondition.
+                    if term.shift.unsigned_abs() >= 64 {
+                        groups.push(RelocatedBitGroup::Existing(term.expression));
+                        continue;
+                    }
+                    if !linear_bit_copy_path_is_exclusive(
+                        term.expression,
+                        term.source,
+                        &block.insts,
+                        &definitions,
+                        &use_counts,
+                    ) {
+                        shared_terms.push((
+                            groups.len(),
+                            (term.source, term.shift),
+                            term.output_mask,
+                        ));
+                        groups.push(RelocatedBitGroup::Existing(term.expression));
+                        continue;
+                    }
+                    let key = (term.source, term.shift);
+                    if let Some(&group) = grouped.get(&key) {
+                        let RelocatedBitGroup::Rebuild {
+                            output_mask, terms, ..
+                        } = &mut groups[group]
+                        else {
+                            unreachable!("grouped bit-copy entries are rebuild candidates");
+                        };
+                        *output_mask |= term.output_mask;
+                        *terms += 1;
+                    } else {
+                        grouped.insert(key, groups.len());
+                        groups.push(RelocatedBitGroup::Rebuild {
+                            source: term.source,
+                            shift: term.shift,
+                            output_mask: term.output_mask,
+                            terms: 1,
+                            first_expression: term.expression,
+                        });
+                    }
+                }
+
+                // Once at least two private terms already pay for a rebuilt
+                // shift/mask, including a shared term with the same affine
+                // mapping is free.  Its original expression remains for the
+                // other use, while this OR root no longer needs the final
+                // projection and one extra OR.
+                for (existing, key, output_mask) in shared_terms {
+                    let Some(&group) = grouped.get(&key) else {
+                        continue;
+                    };
+                    let RelocatedBitGroup::Rebuild {
+                        output_mask: grouped_mask,
+                        terms,
+                        ..
+                    } = &mut groups[group]
+                    else {
+                        unreachable!("grouped bit-copy entries are rebuild candidates");
+                    };
+                    if *terms >= 2 {
+                        *grouped_mask |= output_mask;
+                        groups[existing] = RelocatedBitGroup::Discarded;
+                    }
+                }
+
+                let mut changed = false;
+                for group in &mut groups {
+                    if let RelocatedBitGroup::Rebuild {
+                        terms,
+                        first_expression,
+                        ..
+                    } = *group
+                        && terms == 1
+                    {
+                        *group = RelocatedBitGroup::Existing(first_expression);
+                    } else if matches!(
+                        group,
+                        RelocatedBitGroup::Rebuild { terms, .. } if *terms >= 2
+                    ) {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    plans.push(RelocatedBitPlan {
+                        instruction,
+                        destination: dst,
+                        word32,
+                        groups,
+                    });
+                }
+            }
+            plans
+        };
+
+        for plan in plans.into_iter().rev() {
+            let replacement = materialize_relocated_bit_plan(func, &plan);
+            func.blocks[block_index]
+                .insts
+                .splice(plan.instruction..=plan.instruction, replacement);
+        }
+    }
+}
+
+fn collect_relocated_terms(
+    root: VReg,
+    value: VReg,
+    output_mask: u64,
+    instructions: &[MInst],
+    definitions: &HashMap<VReg, usize>,
+    use_counts: &HashMap<VReg, usize>,
+    terms: &mut Vec<LinearBitCopy>,
+    depth: usize,
+) -> bool {
+    if depth >= MAX_RECONSTRUCTION_DEPTH || terms.len() >= MAX_RECONSTRUCTION_TERMS {
+        return false;
+    }
+    let Some(&definition) = definitions.get(&value) else {
+        terms.push(LinearBitCopy {
+            expression: value,
+            source: value,
+            shift: 0,
+            output_mask,
+        });
+        return true;
+    };
+
+    // Flatten only private 64-bit OR nodes.  A nested Or32 is a truncation
+    // boundary, not merely an associative OR; retaining it as one opaque term
+    // preserves that boundary.  The root Or32 remains safe because the rebuilt
+    // chain also ends in Or32.
+    if let MInst::Or { lhs, rhs, .. } = instructions[definition]
+        && (value == root || use_counts.get(&value).copied() == Some(1))
+    {
+        return collect_relocated_terms(
+            root,
+            lhs,
+            output_mask,
+            instructions,
+            definitions,
+            use_counts,
+            terms,
+            depth + 1,
+        ) && collect_relocated_terms(
+            root,
+            rhs,
+            output_mask,
+            instructions,
+            definitions,
+            use_counts,
+            terms,
+            depth + 1,
+        );
+    }
+    if value == root
+        && let MInst::Or32 { lhs, rhs, .. } = instructions[definition]
+    {
+        let output_mask = output_mask & u64::from(u32::MAX);
+        return collect_relocated_terms(
+            root,
+            lhs,
+            output_mask,
+            instructions,
+            definitions,
+            use_counts,
+            terms,
+            depth + 1,
+        ) && collect_relocated_terms(
+            root,
+            rhs,
+            output_mask,
+            instructions,
+            definitions,
+            use_counts,
+            terms,
+            depth + 1,
+        );
+    }
+
+    let Some(mut term) = trace_linear_bit_copy(value, instructions, definitions, depth + 1) else {
+        return false;
+    };
+    term.expression = value;
+    term.output_mask &= output_mask;
+    if term.output_mask != 0 {
+        terms.push(term);
+    }
+    true
+}
+
+fn linear_bit_copy_path_is_exclusive(
+    mut value: VReg,
+    source: VReg,
+    instructions: &[MInst],
+    definitions: &HashMap<VReg, usize>,
+    use_counts: &HashMap<VReg, usize>,
+) -> bool {
+    while value != source {
+        if use_counts.get(&value).copied() != Some(1) {
+            return false;
+        }
+        let Some(&definition) = definitions.get(&value) else {
+            return false;
+        };
+        value = match instructions[definition] {
+            MInst::Mov { src, .. }
+            | MInst::Mov32 { src, .. }
+            | MInst::AndImm { src, .. }
+            | MInst::AndImm32 { src, .. }
+            | MInst::ShrImm { src, .. }
+            | MInst::ShlImm { src, .. } => src,
+            _ => return false,
+        };
+    }
+    true
+}
+
+fn materialize_relocated_bit_plan(func: &mut MFunction, plan: &RelocatedBitPlan) -> Vec<MInst> {
+    let mut instructions = Vec::new();
+    let mut values = Vec::with_capacity(plan.groups.len());
+    for group in &plan.groups {
+        match *group {
+            RelocatedBitGroup::Existing(value) => values.push(value),
+            RelocatedBitGroup::Discarded => {}
+            RelocatedBitGroup::Rebuild {
+                source,
+                shift,
+                output_mask,
+                ..
+            } => {
+                let value = materialize_relocated_bit_group(
+                    &mut func.vregs,
+                    &mut func.spill_descs,
+                    &mut instructions,
+                    source,
+                    shift,
+                    output_mask,
+                );
+                values.push(value);
+            }
+        }
+    }
+
+    let destination = match plan.word32 {
+        false => match values.as_slice() {
+            [value] => MInst::Mov {
+                dst: plan.destination,
+                src: *value,
+            },
+            _ => build_relocated_or_chain(
+                &mut func.vregs,
+                &mut func.spill_descs,
+                &mut instructions,
+                &values,
+                plan.destination,
+                false,
+            ),
+        },
+        true => match values.as_slice() {
+            [value] => MInst::Mov32 {
+                dst: plan.destination,
+                src: *value,
+            },
+            _ => build_relocated_or_chain(
+                &mut func.vregs,
+                &mut func.spill_descs,
+                &mut instructions,
+                &values,
+                plan.destination,
+                true,
+            ),
+        },
+    };
+    instructions.push(destination);
+    instructions
+}
+
+fn build_relocated_or_chain(
+    vregs: &mut VRegAllocator,
+    spill_descs: &mut Vec<SpillDesc>,
+    instructions: &mut Vec<MInst>,
+    values: &[VReg],
+    destination: VReg,
+    word32: bool,
+) -> MInst {
+    debug_assert!(values.len() >= 2);
+    let mut current = values[0];
+    for &value in &values[1..values.len() - 1] {
+        let dst = alloc_transient_vreg(vregs, spill_descs);
+        instructions.push(MInst::Or {
+            dst,
+            lhs: current,
+            rhs: value,
+        });
+        current = dst;
+    }
+    if word32 {
+        MInst::Or32 {
+            dst: destination,
+            lhs: current,
+            rhs: values[values.len() - 1],
+        }
+    } else {
+        MInst::Or {
+            dst: destination,
+            lhs: current,
+            rhs: values[values.len() - 1],
+        }
+    }
+}
+
+fn materialize_relocated_bit_group(
+    vregs: &mut VRegAllocator,
+    spill_descs: &mut Vec<SpillDesc>,
+    instructions: &mut Vec<MInst>,
+    source: VReg,
+    shift: i16,
+    output_mask: u64,
+) -> VReg {
+    debug_assert!(output_mask != 0);
+    let magnitude = shift.unsigned_abs();
+    debug_assert!(magnitude < 64);
+    let shifted_full_mask = match shift.cmp(&0) {
+        std::cmp::Ordering::Less => u64::MAX >> magnitude,
+        std::cmp::Ordering::Equal => u64::MAX,
+        std::cmp::Ordering::Greater => u64::MAX << magnitude,
+    };
+    let shifted = if shift == 0 {
+        source
+    } else {
+        let dst = alloc_transient_vreg(vregs, spill_descs);
+        instructions.push(if shift < 0 {
+            MInst::ShrImm {
+                dst,
+                src: source,
+                imm: magnitude as u8,
+            }
+        } else {
+            MInst::ShlImm {
+                dst,
+                src: source,
+                imm: magnitude as u8,
+            }
+        });
+        dst
+    };
+    if output_mask == shifted_full_mask {
+        return shifted;
+    }
+
+    let dst = alloc_transient_vreg(vregs, spill_descs);
+    if let Ok(mask) = u32::try_from(output_mask) {
+        instructions.push(MInst::AndImm32 {
+            dst,
+            src: shifted,
+            imm: mask,
+        });
+    } else if and_imm_ok(output_mask) {
+        instructions.push(MInst::AndImm {
+            dst,
+            src: shifted,
+            imm: output_mask,
+        });
+    } else {
+        let mask = alloc_transient_vreg(vregs, spill_descs);
+        spill_descs[mask.0 as usize] = SpillDesc::remat(output_mask);
+        instructions.push(MInst::LoadImm {
+            dst: mask,
+            value: output_mask,
+        });
+        instructions.push(MInst::And {
+            dst,
+            lhs: shifted,
+            rhs: mask,
+        });
+    }
+    dst
+}
+
 fn collect_reconstructed_terms(
     value: VReg,
     output_mask: u64,
@@ -5172,6 +5662,7 @@ fn collect_reconstructed_terms(
     }
     let Some(&definition) = definitions.get(&value) else {
         terms.push(LinearBitCopy {
+            expression: value,
             source: value,
             shift: 0,
             output_mask,
@@ -5221,6 +5712,7 @@ fn collect_reconstructed_terms(
             else {
                 return false;
             };
+            term.expression = value;
             term.output_mask &= output_mask;
             if term.output_mask != 0 {
                 terms.push(term);
@@ -5241,6 +5733,7 @@ fn trace_linear_bit_copy(
     }
     let Some(&definition) = definitions.get(&value) else {
         return Some(LinearBitCopy {
+            expression: value,
             source: value,
             shift: 0,
             output_mask: u64::MAX,
@@ -5257,6 +5750,7 @@ fn trace_linear_bit_copy(
         MInst::ShlImm { src, imm, .. } => (*src, LinearCopyOp::ShiftLeft(*imm)),
         MInst::LoadImm { value: 0, .. } => {
             return Some(LinearBitCopy {
+                expression: value,
                 source: value,
                 shift: 0,
                 output_mask: 0,
@@ -5267,6 +5761,7 @@ fn trace_linear_bit_copy(
         // already-available packed value instead of duplicating its inputs.
         _ => {
             return Some(LinearBitCopy {
+                expression: value,
                 source: value,
                 shift: 0,
                 output_mask: u64::MAX,
@@ -7813,6 +8308,265 @@ mod tests {
         fold_reconstructed_bit_partitions(&mut func);
 
         assert!(matches!(func.blocks[0].insts[3], MInst::Or { .. }));
+    }
+
+    #[test]
+    fn relocated_bit_copy_groups_fold_private_runs_and_keep_shared_terms() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(1),
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    size: OpSize::S64,
+                },
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 42,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(6),
+                    src: VReg(0),
+                    imm: 43,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(7),
+                    src: VReg(6),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(8),
+                    src: VReg(7),
+                    imm: 2,
+                },
+                MInst::ShrImm {
+                    dst: VReg(9),
+                    src: VReg(0),
+                    imm: 44,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(10),
+                    src: VReg(9),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(11),
+                    src: VReg(10),
+                    imm: 3,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(12),
+                    src: VReg(2),
+                    imm: 0x100,
+                },
+                MInst::Or {
+                    dst: VReg(13),
+                    lhs: VReg(1),
+                    rhs: VReg(5),
+                },
+                MInst::Or {
+                    dst: VReg(14),
+                    lhs: VReg(13),
+                    rhs: VReg(8),
+                },
+                MInst::Or {
+                    dst: VReg(15),
+                    lhs: VReg(14),
+                    rhs: VReg(11),
+                },
+                MInst::Or {
+                    dst: VReg(16),
+                    lhs: VReg(15),
+                    rhs: VReg(12),
+                },
+                // The third projection is intentionally shared.  It must stay
+                // as an existing term instead of being bypassed into the run.
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 24,
+                    src: VReg(11),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(16),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            17,
+        );
+
+        fold_relocated_bit_copy_groups(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::ShrImm {
+                src: VReg(0),
+                imm: 41,
+                ..
+            }
+        )));
+        assert!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(instruction, MInst::AndImm32 { imm: 0xe, .. }))
+        );
+        assert!(!func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::ShrImm {
+                src: VReg(0),
+                imm: 42 | 43,
+                ..
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::ShrImm {
+                dst: VReg(9),
+                src: VReg(0),
+                imm: 44,
+            }
+        )));
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|instruction| instruction.def() == Some(VReg(16)))
+                .count(),
+            1
+        );
+        func.verify();
+    }
+
+    #[test]
+    fn relocated_bit_copy_groups_preserve_a_projection_used_on_a_phi_edge() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::ShrImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 42,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(3),
+                    src: VReg(2),
+                    imm: 1,
+                },
+                MInst::ShrImm {
+                    dst: VReg(4),
+                    src: VReg(0),
+                    imm: 43,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(5),
+                    src: VReg(4),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(6),
+                    src: VReg(5),
+                    imm: 2,
+                },
+                MInst::ShrImm {
+                    dst: VReg(7),
+                    src: VReg(0),
+                    imm: 44,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(8),
+                    src: VReg(7),
+                    imm: 1,
+                },
+                MInst::ShlImm {
+                    dst: VReg(9),
+                    src: VReg(8),
+                    imm: 3,
+                },
+                MInst::Or {
+                    dst: VReg(10),
+                    lhs: VReg(3),
+                    rhs: VReg(6),
+                },
+                MInst::Or {
+                    dst: VReg(11),
+                    lhs: VReg(10),
+                    rhs: VReg(9),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(11),
+                    size: OpSize::S64,
+                },
+                MInst::Jump { target: BlockId(1) },
+            ],
+            13,
+        );
+        let mut join = MBlock::new(BlockId(1));
+        join.phis.push(PhiNode {
+            dst: VReg(12),
+            sources: vec![(BlockId(0), VReg(9))],
+        });
+        join.insts = vec![
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: VReg(12),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ];
+        func.push_block(join);
+
+        fold_relocated_bit_copy_groups(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| instruction.def() == Some(VReg(9)))
+        );
+        assert_eq!(func.blocks[1].phis[0].sources, vec![(BlockId(0), VReg(9))]);
+        func.verify();
     }
 
     #[test]
