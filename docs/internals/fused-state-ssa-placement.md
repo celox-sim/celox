@@ -2621,6 +2621,124 @@ change `W_exit`, but that exit must be the authoritative state consumed by
 the existing Section 4.3 coupling relation. The diagnostic code and its
 environment switch were removed.
 
+##### CSSA-order experiment and revised allocation boundary
+
+The first implementation of the proposed integrated transition was tested
+against the complete emitted MIR, not only aggregate planner counters. It
+performed ready selection and W/S state updates in one forward walk after
+CSSA. This was the wrong phase boundary.
+
+All measurements below use the same optimized native SIR:
+
+```text
+SHA-256
+fe5dd0b804fbd537f8ded4f273d37a5fe132e964544859d41bc7a37199561081
+```
+
+The source-stable integrated walk grew `eval_comb` to 101,448 post-RA
+instructions and the fused function to 138,842. A corrected bottom-up
+preference still produced 99,923 and 137,166 instructions. Restricting the
+forward walk to a focused single-use cone reduced those results only to 98,934
+and 136,140. These are not acceptable local regressions hidden by a
+whole-function statistic: the emitted order itself identifies the defect.
+
+In `eval_comb` block `bb317`, the profitable order finishes one recurrence
+before starting the next:
+
+```text
+imm
+shl
+shr
+add 6
+cmp_select
+add 5
+cmp_select
+...
+```
+
+The post-CSSA integrated walk emitted the first comparison, then selected
+foundational operations and independent `imm` instructions from other
+recurrences. That changed the post-RA block from 463 instructions to more than
+800. `bb3850` exhibited the same transformation. Thus the regression was not
+caused by an inaccurate scalar pressure count; the walk discarded the
+producer-chain order which kept each recurrence's intermediates local.
+
+Carrying only a preferred-rank side table across CSSA did not fix the problem.
+CSSA's inserted snapshots and its interference repair are themselves
+order-sensitive. If CSSA sees the unscheduled MIR, it constructs a different
+snapshot set before the allocator can consult the side table. Scheduling again
+after CSSA is also harmful because it reconstructs an order from that changed
+graph.
+
+The retained phase order is therefore:
+
+```text
+late local memory folds
+  -> exact register/MemorySSA dependency DAG
+  -> physical pressure order
+  -> CSSA normalization on that order
+  -> next-use and W/S planning in the resulting linear order
+  -> reconstruction and coloring
+```
+
+There is one authoritative instruction order. W/S planning does not perform a
+second scheduling walk. On the same SIR this produces:
+
+```text
+                                      post-RA instructions   spill frame
+eval_comb                                           89,064         4,440
+eval_comb_apply_ff                                 121,261         4,056
+```
+
+The complete emitted `bb317` is again 463 instructions and retains the
+contiguous `cmp_select` recurrences. These results are within 66 and 654
+instructions of the earlier 88,998/120,607 baseline while avoiding the
+10--18-thousand-instruction integrated-walk regression. The remaining fused
+difference must be inspected as generated MIR before changing the scheduler
+again.
+
+This result also exposes why simply moving W/S planning before CSSA is not yet
+valid. `PhiCongruenceClasses` currently unions every phi web into one
+`SpillHome`. An edge reload carries a predecessor logical value but names the
+successor congruence home:
+
+```text
+Reload {
+    value: predecessor_value,
+    home: home(successor_value),
+}
+```
+
+That is executable only because CSSA and congruence coalescing make the source
+and destination home identical. A per-VReg-home planner must represent the
+edge transfer explicitly:
+
+```text
+EdgeReload {
+    source_value,
+    source_home,
+    destination_value,
+}
+
+EdgeSpill {
+    source_value,
+    destination_home,
+}
+```
+
+In particular, a reload reads the source home and defines a representative of
+the destination logical value; a spill reads the predecessor representative
+and publishes the successor home. The current generic
+`PlannedOp::{Reload, Spill}` and its verifier require
+`operation.home == home(operation.value)`, so changing only
+`PhiCongruenceClasses` would silently read the wrong stack slot.
+
+Any future attempt to move allocation before CSSA must first add and verify
+these distinct edge materializations on diamonds and loop backedges. Until
+then, pre-CSSA physical scheduling followed by linear post-CSSA W/S planning
+is the executable boundary. A preferred-rank overlay or a second ready-list
+walk is explicitly rejected.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
@@ -2667,17 +2785,19 @@ materialization.
 
 ### Milestone 5: scheduling and physical allocation integration
 
-Introduce stable machine instruction identities and the bidirectional
-per-block scheduler. Feed it explicit residency/rematerialization/reload
-choices and block boundary contracts; do not add another scalar priority to
-the current scheduler.
+Retain the single pre-CSSA physical order and make any further allocation
+integration conditional on an explicit source-home/destination-value edge
+materialization model. Do not reconstruct a second order after CSSA and do not
+use a preferred-rank side table as a substitute for the order consumed by
+CSSA.
 
 Verify:
 
 - sparse dependency order;
+- contiguous producer recurrences in complete emitted MIR;
 - fixed-register and clobber constraints;
 - reconstructed pressure;
-- exact point/edge reloads and their concrete defining materializations;
+- exact point/edge reloads, including distinct source and destination homes;
 - final SSA assignment and destruction.
 
 ### Milestone 6: production and performance gate

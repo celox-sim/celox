@@ -300,43 +300,8 @@ fn run_regalloc_in_place(
         );
     }
 
-    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
-        .map_err(|error| constraint_error("scheduling constraint construction", error))?;
-    scheduling_constraints
-        .verify(func)
-        .map_err(|error| constraint_error("scheduling constraint verification", error))?;
-    let schedule_analysis = analysis::analyze(func);
-    let schedule_start = timing.then(crate::timing::now);
-    let schedule_stats = schedule::schedule_for_pressure(
-        func,
-        &normalized_cfg,
-        &scheduling_constraints,
-        &schedule_analysis,
-    )
-    .map_err(|error| {
-        RegallocError::new(
-            "pressure scheduling",
-            error.rule,
-            Some(error.block),
-            None,
-            Vec::new(),
-            error.reason,
-        )
-    })?;
-    if let Some(start) = schedule_start {
-        eprintln!(
-            "[regalloc-timing] label={label} pressure_schedule changed_blocks={} max_before={} max_after={} elapsed={:?}",
-            schedule_stats.changed_blocks,
-            schedule_stats.maximum_before,
-            schedule_stats.maximum_after,
-            start.elapsed()
-        );
-    }
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
     let late_memory_fold_start = timing.then(crate::timing::now);
-    // These folds deliberately run after pressure scheduling because memory
-    // operations participate in its dependence graph. They only remove local
+    // These folds run before pressure scheduling. They only remove local
     // instructions and never replace a load with a new cross-block VReg.
     super::mir_opt::eliminate_redundant_local_stores(func);
     let folded_direct_immediate_stores = super::mir_opt::fold_direct_immediate_stores(func);
@@ -346,6 +311,47 @@ fn run_regalloc_in_place(
     if let Some(start) = late_memory_fold_start {
         eprintln!(
             "[regalloc-timing] label={label} late_memory_fold folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("placement constraint construction", error))?;
+    scheduling_constraints
+        .verify(func)
+        .map_err(|error| constraint_error("placement constraint verification", error))?;
+    let scheduling_liveness = analysis::analyze(func);
+    let schedule_start = timing.then(crate::timing::now);
+    let pre_cssa_placement = schedule::PreCssaPlacement::analyze(
+        func,
+        &scheduling_constraints,
+        &scheduling_liveness,
+        NUM_REGS,
+    )
+    .ok_or_else(|| {
+        RegallocError::new(
+            "pre-CSSA placement analysis",
+            "SCHEDULE.DEPENDENCY_ORDER",
+            None,
+            None,
+            Vec::new(),
+            "pre-CSSA placement did not cover every block instruction",
+        )
+    })?;
+    pre_cssa_placement.apply(func).ok_or_else(|| {
+        RegallocError::new(
+            "pre-CSSA placement application",
+            "SCHEDULE.STABLE_IDENTITY",
+            None,
+            None,
+            Vec::new(),
+            "pre-CSSA placement did not name every instruction exactly once",
+        )
+    })?;
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("pre-CSSA placement verification", error))?;
+    if let Some(start) = schedule_start {
+        eprintln!(
+            "[regalloc-timing] label={label} pre_cssa_pressure_schedule elapsed={:?}",
             start.elapsed()
         );
     }

@@ -1,17 +1,24 @@
 //! Pressure-aware scheduling of side-effect-free machine DAG regions.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
+#[cfg(test)]
 use std::fmt;
 
 use celox_analysis::dependence::MemoryDependencyTracker;
 
 use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
-use crate::backend::native::mir::{BlockId, MFunction, MInst, VReg};
+#[cfg(test)]
+use crate::backend::native::mir::BlockId;
+use crate::backend::native::mir::{MFunction, MInst, VReg};
 
 use super::analysis::AnalysisResult;
+#[cfg(test)]
 use super::cfg::NormalizedCfg;
+#[cfg(test)]
 use super::constraints::ConstraintModel;
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(super) struct ScheduleStats {
     pub changed_blocks: usize,
@@ -30,6 +37,7 @@ pub(super) struct ScheduleStats {
     pub priority_value_index_visits: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct ScheduleError {
     pub rule: &'static str,
@@ -37,6 +45,7 @@ pub(super) struct ScheduleError {
     pub reason: &'static str,
 }
 
+#[cfg(test)]
 impl fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -47,8 +56,10 @@ impl fmt::Display for ScheduleError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ScheduleError {}
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct RegionWork {
     ready_insertions: usize,
@@ -59,6 +70,7 @@ struct RegionWork {
     priority_value_index_visits: usize,
 }
 
+#[cfg(test)]
 impl ScheduleStats {
     fn add_region_work(&mut self, work: &RegionWork) {
         self.ready_insertions += work.ready_insertions;
@@ -70,6 +82,7 @@ impl ScheduleStats {
     }
 }
 
+#[cfg(test)]
 pub(super) fn schedule_for_pressure(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
@@ -140,6 +153,7 @@ pub(super) fn schedule_for_pressure(
     Ok(stats)
 }
 
+#[cfg(test)]
 fn schedule_block(
     instructions: &[MInst],
     constraints: &[super::constraints::InstructionConstraints],
@@ -203,6 +217,7 @@ fn schedule_block(
     Ok(result)
 }
 
+#[cfg(test)]
 fn transfer_liveness(inst: &MInst, live: &mut BTreeSet<VReg>) {
     if let Some(definition) = inst.def() {
         live.remove(&definition);
@@ -210,6 +225,7 @@ fn transfer_liveness(inst: &MInst, live: &mut BTreeSet<VReg>) {
     live.extend(inst.uses());
 }
 
+#[cfg(test)]
 struct RegionSchedule {
     instructions: Vec<MInst>,
     dependency_verified: bool,
@@ -223,6 +239,7 @@ struct RegionSchedule {
 /// second, weaker dependency model in spill planning would allow the chosen
 /// W/S transition to reorder an effect which the standalone scheduler keeps
 /// fixed.
+#[derive(Debug)]
 pub(super) struct InstructionDag {
     dependencies: Vec<Vec<usize>>,
     dependents: Vec<Vec<usize>>,
@@ -262,7 +279,6 @@ impl InstructionDag {
                 }
             }
         }
-
         // Preserve RAW, WAR, and WAW without inventing read-after-read edges.
         // The sparse interval partition scales with effect endpoints rather
         // than the physical byte length of wide state ranges.
@@ -294,6 +310,440 @@ impl InstructionDag {
     }
 }
 
+/// Sparse forward traversal state for one exact instruction DAG.
+///
+/// This is deliberately only the dependency/liveness substrate.  The
+/// allocation transition owns candidate ranking because readiness by itself
+/// does not know which values are resident in W or already have a valid home
+/// in S.  Every instruction is inserted into `ready` once and every
+/// dependency edge is discharged once.
+#[derive(Debug)]
+#[cfg(test)]
+pub(super) struct ForwardReadyRegion {
+    dag: InstructionDag,
+    remaining_dependencies: Vec<usize>,
+    remaining_uses: HashMap<VReg, usize>,
+    ready: BTreeSet<usize>,
+    emitted: Vec<bool>,
+    emitted_count: usize,
+    discharged_edges: usize,
+}
+
+#[cfg(test)]
+impl ForwardReadyRegion {
+    pub(super) fn build(region: &[MInst]) -> Option<Self> {
+        let dag = InstructionDag::build(region)?;
+        let remaining_dependencies = dag.dependencies.iter().map(Vec::len).collect::<Vec<_>>();
+        let ready = remaining_dependencies
+            .iter()
+            .enumerate()
+            .filter_map(|(instruction, &dependencies)| (dependencies == 0).then_some(instruction))
+            .collect();
+        let remaining_uses = dag.unique_uses.iter().flatten().copied().fold(
+            HashMap::<VReg, usize>::new(),
+            |mut counts, value| {
+                *counts.entry(value).or_default() += 1;
+                counts
+            },
+        );
+        let instructions = remaining_dependencies.len();
+        Some(Self {
+            dag,
+            remaining_dependencies,
+            remaining_uses,
+            ready,
+            emitted: vec![false; instructions],
+            emitted_count: 0,
+            discharged_edges: 0,
+        })
+    }
+
+    pub(super) fn ready(&self) -> &BTreeSet<usize> {
+        &self.ready
+    }
+
+    pub(super) fn is_ready(&self, instruction: usize) -> bool {
+        self.ready.contains(&instruction)
+    }
+
+    pub(super) fn remaining_uses(&self, value: VReg) -> usize {
+        self.remaining_uses.get(&value).copied().unwrap_or(0)
+    }
+
+    /// Commit one ready instruction and return instructions which became
+    /// ready as a direct consequence.
+    pub(super) fn emit(&mut self, instruction: usize) -> Option<Vec<usize>> {
+        if instruction >= self.emitted.len()
+            || self.emitted[instruction]
+            || !self.ready.remove(&instruction)
+        {
+            return None;
+        }
+        self.emitted[instruction] = true;
+        self.emitted_count += 1;
+        for &value in &self.dag.unique_uses[instruction] {
+            let count = self
+                .remaining_uses
+                .get_mut(&value)
+                .expect("every DAG use has a remaining-use counter");
+            *count = count.checked_sub(1).expect("a use is discharged only once");
+        }
+        let mut newly_ready = Vec::new();
+        for &dependent in &self.dag.dependents[instruction] {
+            let count = &mut self.remaining_dependencies[dependent];
+            *count = count
+                .checked_sub(1)
+                .expect("a dependency edge is discharged only once");
+            self.discharged_edges += 1;
+            if *count == 0 {
+                self.ready.insert(dependent);
+                newly_ready.push(dependent);
+            }
+        }
+        Some(newly_ready)
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.emitted_count == self.emitted.len()
+    }
+
+    #[cfg(test)]
+    fn discharged_edges(&self) -> usize {
+        self.discharged_edges
+    }
+
+    #[cfg(test)]
+    fn edge_count(&self) -> usize {
+        self.dag.dependencies.iter().map(Vec::len).sum()
+    }
+}
+
+/// Stable pre-CSSA placement identity for every existing block instruction.
+///
+/// CSSA is allowed to append edge snapshots before a terminator, but it must
+/// not force the allocator to rediscover the profitable order from a
+/// different DAG. This side table carries the exact pre-CSSA source order
+/// across that transformation without rewriting MIR.
+pub(super) struct PreCssaPlacement {
+    original_lengths: Vec<usize>,
+    preferred_orders: Vec<Vec<usize>>,
+}
+
+impl PreCssaPlacement {
+    pub(super) fn analyze(
+        func: &MFunction,
+        constraints: &super::constraints::ConstraintModel,
+        liveness: &AnalysisResult,
+        register_capacity: usize,
+    ) -> Option<Self> {
+        if constraints.instructions.len() != func.blocks.len()
+            || liveness.exit_distances.len() != func.blocks.len()
+        {
+            return None;
+        }
+        let mut original_lengths = Vec::with_capacity(func.blocks.len());
+        let mut preferred_orders = Vec::with_capacity(func.blocks.len());
+        for (block, mir_block) in func.blocks.iter().enumerate() {
+            let order = pressure_preferred_block_order(
+                &mir_block.insts,
+                &constraints.instructions[block],
+                liveness.exit_distances[block].keys().copied(),
+                register_capacity,
+            )?;
+            original_lengths.push(mir_block.insts.len());
+            preferred_orders.push(order);
+        }
+        Some(Self {
+            original_lengths,
+            preferred_orders,
+        })
+    }
+
+    pub(super) fn apply(self, func: &mut MFunction) -> Option<()> {
+        if self.original_lengths.len() != func.blocks.len()
+            || self.preferred_orders.len() != func.blocks.len()
+        {
+            return None;
+        }
+        for (block, mir_block) in func.blocks.iter_mut().enumerate() {
+            if mir_block.insts.len() != self.original_lengths[block] {
+                return None;
+            }
+            let original = mir_block.insts.clone();
+            let mut scheduled = Vec::with_capacity(original.len());
+            let mut seen = vec![false; original.len()];
+            for &source in &self.preferred_orders[block] {
+                if source >= original.len() || seen[source] {
+                    return None;
+                }
+                seen[source] = true;
+                scheduled.push(original[source].clone());
+            }
+            if seen.contains(&false) {
+                return None;
+            }
+            mir_block.insts = scheduled;
+        }
+        Some(())
+    }
+}
+
+/// Build a bottom-up pressure order before CSSA rewrites phi edges.
+///
+/// Every instruction and dependency edge is visited a constant number of
+/// times. Ready-set operations are logarithmic and all auxiliary tables are
+/// linear in the block DAG.
+pub(super) fn pressure_preferred_block_order(
+    instructions: &[MInst],
+    constraints: &[super::constraints::InstructionConstraints],
+    live_out: impl Iterator<Item = VReg>,
+    register_capacity: usize,
+) -> Option<Vec<usize>> {
+    if instructions.len() != constraints.len() {
+        return None;
+    }
+
+    enum ReverseChunk {
+        Barrier(usize),
+        Region(Vec<usize>),
+    }
+
+    let live_out = live_out.collect::<BTreeSet<_>>();
+    let mut live = live_out.clone();
+    let mut reverse_chunks = Vec::<ReverseChunk>::new();
+    let mut cursor = instructions.len();
+    while cursor != 0 {
+        let last = cursor - 1;
+        if !is_allocation_schedulable_at(instructions, constraints, last) {
+            transfer_liveness_at(instructions, last, &mut live);
+            reverse_chunks.push(ReverseChunk::Barrier(last));
+            cursor = last;
+            continue;
+        }
+
+        let end = cursor;
+        let mut start = last;
+        while start != 0 && is_allocation_schedulable_at(instructions, constraints, start - 1) {
+            start -= 1;
+        }
+        let region = &instructions[start..end];
+        let order = pressure_preferred_region_order(region, &mut live, register_capacity)?;
+        reverse_chunks.push(ReverseChunk::Region(
+            order.into_iter().map(|source| start + source).collect(),
+        ));
+        cursor = start;
+    }
+
+    let mut candidate = Vec::with_capacity(instructions.len());
+    for chunk in reverse_chunks.into_iter().rev() {
+        match chunk {
+            ReverseChunk::Barrier(source) => candidate.push(source),
+            ReverseChunk::Region(order) => candidate.extend(order),
+        }
+    }
+    let identity = (0..instructions.len()).collect::<Vec<_>>();
+    let candidate_cost =
+        pressure_cost_for_order(instructions, &candidate, &live_out, register_capacity);
+    let identity_cost =
+        pressure_cost_for_order(instructions, &identity, &live_out, register_capacity);
+    Some(if candidate_cost <= identity_cost {
+        candidate
+    } else {
+        identity
+    })
+}
+
+fn transfer_liveness_at(instructions: &[MInst], source: usize, live: &mut BTreeSet<VReg>) {
+    let inst = &instructions[source];
+    if let Some(definition) = inst.def() {
+        live.remove(&definition);
+    }
+    live.extend(inst.uses());
+}
+
+fn pressure_preferred_region_order(
+    region: &[MInst],
+    live: &mut BTreeSet<VReg>,
+    register_capacity: usize,
+) -> Option<Vec<usize>> {
+    if region.len() < 2 {
+        if !region.is_empty() {
+            transfer_liveness_at(region, 0, live);
+        }
+        return Some((0..region.len()).collect());
+    }
+    let dag = InstructionDag::build(region)?;
+    let mut remaining_dependents = dag.dependents.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut ready = BackwardPressureQueue::new(dag.dependency_priorities.clone());
+    for (instruction, &count) in remaining_dependents.iter().enumerate() {
+        if count == 0 {
+            ready.insert(
+                instruction,
+                backward_pressure_delta(
+                    region[instruction].def(),
+                    &dag.unique_uses[instruction],
+                    live,
+                ),
+            );
+        }
+    }
+
+    let mut reverse = Vec::with_capacity(region.len());
+    while reverse.len() != region.len() {
+        let candidate = ready.pop(live.len(), register_capacity)?;
+        let inst = &region[candidate];
+        if let Some(definition) = inst.def()
+            && live.remove(&definition)
+        {
+            update_backward_pressure_candidates(definition, false, &dag, &mut ready);
+        }
+        for &value in &dag.unique_uses[candidate] {
+            if live.insert(value) {
+                update_backward_pressure_candidates(value, true, &dag, &mut ready);
+            }
+        }
+        for &dependency in &dag.dependencies[candidate] {
+            remaining_dependents[dependency] = remaining_dependents[dependency].checked_sub(1)?;
+            if remaining_dependents[dependency] == 0 {
+                ready.insert(
+                    dependency,
+                    backward_pressure_delta(
+                        region[dependency].def(),
+                        &dag.unique_uses[dependency],
+                        live,
+                    ),
+                );
+            }
+        }
+        reverse.push(candidate);
+    }
+    reverse.reverse();
+    Some(reverse)
+}
+
+fn backward_pressure_delta(
+    definition: Option<VReg>,
+    uses: &[VReg],
+    live: &BTreeSet<VReg>,
+) -> isize {
+    let missing_uses = uses.iter().filter(|value| !live.contains(value)).count() as isize;
+    let live_definition = isize::from(definition.is_some_and(|value| live.contains(&value)));
+    missing_uses - live_definition
+}
+
+fn update_backward_pressure_candidates(
+    value: VReg,
+    became_live: bool,
+    dag: &InstructionDag,
+    ready: &mut BackwardPressureQueue,
+) {
+    let delta = if became_live { -1 } else { 1 };
+    if let Some(candidates) = dag.use_candidates.get(&value) {
+        for &candidate in candidates {
+            ready.adjust(candidate, delta);
+        }
+    }
+    if let Some(&candidate) = dag.definitions.get(&value) {
+        ready.adjust(candidate, delta);
+    }
+}
+
+struct BackwardPressureQueue {
+    by_pressure: BTreeSet<(isize, Reverse<usize>, Reverse<usize>, Reverse<usize>)>,
+    by_depth: BTreeSet<(Reverse<usize>, Reverse<usize>, isize, Reverse<usize>)>,
+    pressure_deltas: Vec<Option<isize>>,
+    dependency_priorities: Vec<(usize, usize)>,
+}
+
+impl BackwardPressureQueue {
+    fn new(dependency_priorities: Vec<(usize, usize)>) -> Self {
+        let instructions = dependency_priorities.len();
+        Self {
+            by_pressure: BTreeSet::new(),
+            by_depth: BTreeSet::new(),
+            pressure_deltas: vec![None; instructions],
+            dependency_priorities,
+        }
+    }
+
+    fn insert(&mut self, instruction: usize, pressure_delta: isize) {
+        debug_assert!(self.pressure_deltas[instruction].is_none());
+        let depth = self.depth_key(instruction);
+        self.by_pressure
+            .insert((pressure_delta, depth.0, depth.1, Reverse(instruction)));
+        self.by_depth
+            .insert((depth.0, depth.1, pressure_delta, Reverse(instruction)));
+        self.pressure_deltas[instruction] = Some(pressure_delta);
+    }
+
+    fn adjust(&mut self, instruction: usize, delta: isize) {
+        let Some(old_delta) = self.pressure_deltas[instruction] else {
+            return;
+        };
+        let depth = self.depth_key(instruction);
+        self.by_pressure
+            .remove(&(old_delta, depth.0, depth.1, Reverse(instruction)));
+        self.by_depth
+            .remove(&(depth.0, depth.1, old_delta, Reverse(instruction)));
+        let new_delta = old_delta + delta;
+        self.by_pressure
+            .insert((new_delta, depth.0, depth.1, Reverse(instruction)));
+        self.by_depth
+            .insert((depth.0, depth.1, new_delta, Reverse(instruction)));
+        self.pressure_deltas[instruction] = Some(new_delta);
+    }
+
+    fn pop(&mut self, live: usize, register_capacity: usize) -> Option<usize> {
+        let &(_, _, _, Reverse(dependency)) = self.by_depth.first()?;
+        let dependency_delta = self.pressure_deltas[dependency]?;
+        let dependency_fits =
+            projected_pressure_signed(live, dependency_delta) <= register_capacity;
+        let instruction = if live <= register_capacity && dependency_fits {
+            dependency
+        } else {
+            self.by_pressure.first()?.3.0
+        };
+        let pressure_delta = self.pressure_deltas[instruction].take()?;
+        let depth = self.depth_key(instruction);
+        self.by_pressure
+            .remove(&(pressure_delta, depth.0, depth.1, Reverse(instruction)));
+        self.by_depth
+            .remove(&(depth.0, depth.1, pressure_delta, Reverse(instruction)));
+        Some(instruction)
+    }
+
+    fn depth_key(&self, instruction: usize) -> (Reverse<usize>, Reverse<usize>, usize) {
+        let (exit, entry) = self.dependency_priorities[instruction];
+        (Reverse(exit), Reverse(entry), instruction)
+    }
+}
+
+fn projected_pressure_signed(current: usize, delta: isize) -> usize {
+    if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize)
+    }
+}
+
+fn pressure_cost_for_order(
+    instructions: &[MInst],
+    order: &[usize],
+    live_out: &BTreeSet<VReg>,
+    register_capacity: usize,
+) -> (u128, usize) {
+    let mut live = live_out.clone();
+    let mut maximum = live.len();
+    let mut excess_area = live.len().saturating_sub(register_capacity) as u128;
+    for &source in order.iter().rev() {
+        transfer_liveness_at(instructions, source, &mut live);
+        maximum = maximum.max(live.len());
+        excess_area += live.len().saturating_sub(register_capacity) as u128;
+    }
+    (excess_area, maximum)
+}
+
+#[cfg(test)]
 fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule {
     if region.len() < 2 {
         if let Some(inst) = region.first() {
@@ -406,6 +856,7 @@ fn add_dependency(
     }
 }
 
+#[cfg(test)]
 fn dependency_order_valid(dependencies: &[Vec<usize>], order: &[usize]) -> bool {
     if dependencies.len() != order.len() {
         return false;
@@ -449,6 +900,7 @@ fn dependency_priorities(dependencies: &[Vec<usize>]) -> Option<Vec<(usize, usiz
     Some(exit_depths.into_iter().zip(entry_depths).collect())
 }
 
+#[cfg(test)]
 fn enqueue_ready(
     ready: &mut IndexedReadyQueue,
     instruction: usize,
@@ -462,12 +914,14 @@ fn enqueue_ready(
     ready.insert(instruction, priority, work);
 }
 
+#[cfg(test)]
 fn priority(definition: Option<VReg>, uses: &[VReg], live: &BTreeSet<VReg>) -> i8 {
     let missing_uses = uses.iter().filter(|value| !live.contains(value)).count() as i8;
     let live_definition = i8::from(definition.is_some_and(|value| live.contains(&value)));
     missing_uses - live_definition
 }
 
+#[cfg(test)]
 fn update_priorities_for_value(
     value: VReg,
     became_live: bool,
@@ -493,10 +947,14 @@ fn update_priorities_for_value(
     }
 }
 
+#[cfg(test)]
 const MIN_PRIORITY: i8 = -1;
+#[cfg(test)]
 const MAX_PRIORITY: i8 = 5;
+#[cfg(test)]
 const PRIORITY_BUCKETS: usize = (MAX_PRIORITY - MIN_PRIORITY + 1) as usize;
 
+#[cfg(test)]
 struct IndexedReadyQueue {
     buckets: [BTreeSet<(usize, usize, usize)>; PRIORITY_BUCKETS],
     priorities: Vec<i8>,
@@ -504,6 +962,7 @@ struct IndexedReadyQueue {
     present: Vec<bool>,
 }
 
+#[cfg(test)]
 impl IndexedReadyQueue {
     fn new(dependency_priorities: Vec<(usize, usize)>) -> Self {
         let instructions = dependency_priorities.len();
@@ -577,6 +1036,7 @@ impl IndexedReadyQueue {
     }
 }
 
+#[cfg(test)]
 fn projected_pressure(current: usize, delta: i8) -> usize {
     if delta >= 0 {
         current.saturating_add(delta as usize)
@@ -585,17 +1045,20 @@ fn projected_pressure(current: usize, delta: i8) -> usize {
     }
 }
 
+#[cfg(test)]
 fn priority_bucket(priority: i8) -> usize {
     debug_assert!((MIN_PRIORITY..=MAX_PRIORITY).contains(&priority));
     (priority - MIN_PRIORITY) as usize
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PressureCost {
     maximum: usize,
     excess_area: u128,
 }
 
+#[cfg(test)]
 fn pressure_cost(
     instructions: &[MInst],
     live_out: &BTreeSet<VReg>,
@@ -623,7 +1086,33 @@ fn max_pressure(instructions: &[MInst], live_out: &BTreeSet<VReg>) -> usize {
     pressure_cost(instructions, live_out, super::NUM_REGS).maximum
 }
 
+#[cfg(test)]
 fn is_schedulable_at(
+    instructions: &[MInst],
+    constraints: &[super::constraints::InstructionConstraints],
+    index: usize,
+) -> bool {
+    unconstrained_schedulable_at(instructions, constraints, index)
+        && is_pressure_schedulable_kind(&instructions[index])
+}
+
+/// Allocation-owned scheduling moves pure register instructions and direct
+/// reads, but never crosses a write.  Read reordering cannot change a
+/// point-specific MemorySSA version; making writes region boundaries keeps
+/// reload recipes phase-correct while allowing a Load and its sink-local
+/// consumer cone to be scheduled together.
+pub(super) fn is_allocation_schedulable_at(
+    instructions: &[MInst],
+    constraints: &[super::constraints::InstructionConstraints],
+    index: usize,
+) -> bool {
+    let inst = &instructions[index];
+    unconstrained_schedulable_at(instructions, constraints, index)
+        && is_pressure_schedulable_kind(inst)
+        && !memory_effect::writes(inst).has_effect()
+}
+
+fn unconstrained_schedulable_at(
     instructions: &[MInst],
     constraints: &[super::constraints::InstructionConstraints],
     index: usize,
@@ -637,10 +1126,7 @@ fn is_schedulable_at(
                 .any(|(value, _)| *value == definition)
         })
     });
-    !is_fixed_copy
-        && facts.fixed_uses.is_empty()
-        && facts.clobbers.is_empty()
-        && is_pressure_schedulable_kind(inst)
+    !is_fixed_copy && facts.fixed_uses.is_empty() && facts.clobbers.is_empty()
 }
 
 /// Classify every MIR opcode explicitly so adding a new width or side effect
@@ -729,6 +1215,170 @@ mod tests {
     use crate::backend::native::mir::{
         BaseReg, BlockId, MBlock, MemoryAliasRange, OpSize, SpillDesc, VRegAllocator,
     };
+
+    #[test]
+    fn pre_cssa_pressure_order_finishes_one_recurrence_before_starting_another() {
+        let first_seed = VReg(0);
+        let second_seed = VReg(1);
+        let first_middle = VReg(2);
+        let second_middle = VReg(3);
+        let first_result = VReg(4);
+        let second_result = VReg(5);
+        let instructions = vec![
+            MInst::LoadImm {
+                dst: first_seed,
+                value: 0,
+            },
+            MInst::LoadImm {
+                dst: second_seed,
+                value: 0,
+            },
+            MInst::AddImm {
+                dst: first_middle,
+                src: first_seed,
+                imm: 1,
+            },
+            MInst::AddImm {
+                dst: second_middle,
+                src: second_seed,
+                imm: 1,
+            },
+            MInst::AddImm {
+                dst: first_result,
+                src: first_middle,
+                imm: 1,
+            },
+            MInst::AddImm {
+                dst: second_result,
+                src: second_middle,
+                imm: 1,
+            },
+        ];
+        let constraints = vec![Default::default(); instructions.len()];
+
+        let order = pressure_preferred_block_order(
+            &instructions,
+            &constraints,
+            [first_result, second_result].into_iter(),
+            16,
+        )
+        .unwrap();
+
+        assert!(
+            order == [0, 2, 4, 1, 3, 5] || order == [1, 3, 5, 0, 2, 4],
+            "independent recurrence lanes must not be interleaved: {order:?}"
+        );
+    }
+
+    #[test]
+    fn forward_ready_region_discloses_only_dependency_ready_instructions() {
+        let left = VReg(0);
+        let right = VReg(1);
+        let sum = VReg(2);
+        let masked = VReg(3);
+        let region = vec![
+            MInst::LoadImm {
+                dst: left,
+                value: 1,
+            },
+            MInst::LoadImm {
+                dst: right,
+                value: 2,
+            },
+            MInst::Add {
+                dst: sum,
+                lhs: left,
+                rhs: right,
+            },
+            MInst::AndImm {
+                dst: masked,
+                src: sum,
+                imm: 3,
+            },
+        ];
+        let mut ready = ForwardReadyRegion::build(&region).unwrap();
+
+        assert_eq!(ready.ready(), &BTreeSet::from([0, 1]));
+        assert!(!ready.is_ready(2));
+        assert_eq!(ready.remaining_uses(left), 1);
+        assert_eq!(ready.emit(2), None);
+        assert_eq!(ready.ready(), &BTreeSet::from([0, 1]));
+
+        assert_eq!(ready.emit(1), Some(Vec::new()));
+        assert_eq!(ready.emit(0), Some(vec![2]));
+        assert_eq!(ready.remaining_uses(left), 1);
+        assert_eq!(ready.ready(), &BTreeSet::from([2]));
+        assert_eq!(ready.emit(2), Some(vec![3]));
+        assert_eq!(ready.remaining_uses(left), 0);
+        assert_eq!(ready.emit(3), Some(Vec::new()));
+        assert!(ready.is_complete());
+        assert_eq!(ready.discharged_edges(), ready.edge_count());
+    }
+
+    #[test]
+    fn forward_ready_region_processes_each_sparse_edge_once() {
+        const LANES: usize = 4096;
+        let mut region = Vec::with_capacity(LANES * 2);
+        for lane in 0..LANES {
+            let input = VReg((lane * 2) as u32);
+            let output = VReg((lane * 2 + 1) as u32);
+            region.push(MInst::LoadImm {
+                dst: input,
+                value: lane as u64,
+            });
+            region.push(MInst::AndImm {
+                dst: output,
+                src: input,
+                imm: 3,
+            });
+        }
+        let mut ready = ForwardReadyRegion::build(&region).unwrap();
+        assert_eq!(ready.ready().len(), LANES);
+
+        for lane in 0..LANES {
+            let producer = lane * 2;
+            let consumer = producer + 1;
+            assert_eq!(ready.emit(producer), Some(vec![consumer]));
+            assert_eq!(ready.emit(consumer), Some(Vec::new()));
+        }
+
+        assert!(ready.is_complete());
+        assert_eq!(ready.discharged_edges(), LANES);
+        assert_eq!(ready.discharged_edges(), ready.edge_count());
+    }
+
+    #[test]
+    fn forward_ready_region_does_not_invent_read_after_read_edges() {
+        let source = VReg(0);
+        let first = VReg(1);
+        let second = VReg(2);
+        let region = vec![
+            MInst::LoadImm {
+                dst: source,
+                value: 3,
+            },
+            MInst::AndImm {
+                dst: first,
+                src: source,
+                imm: 1,
+            },
+            MInst::OrImm {
+                dst: second,
+                src: source,
+                imm: 4,
+            },
+        ];
+        let mut ready = ForwardReadyRegion::build(&region).unwrap();
+
+        assert_eq!(ready.emit(0), Some(vec![1, 2]));
+        assert_eq!(ready.ready(), &BTreeSet::from([1, 2]));
+        assert_eq!(ready.remaining_uses(source), 2);
+        assert_eq!(ready.emit(2), Some(Vec::new()));
+        assert_eq!(ready.remaining_uses(source), 1);
+        assert_eq!(ready.emit(1), Some(Vec::new()));
+        assert!(ready.is_complete());
+    }
+
     #[test]
     fn indexed_buckets_do_not_scan_a_long_ready_set() {
         const INSTRUCTIONS: usize = 4096;
