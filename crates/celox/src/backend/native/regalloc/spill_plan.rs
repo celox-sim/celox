@@ -224,15 +224,16 @@ impl SpillHomes {
 
 #[derive(Debug, Default)]
 struct EdgeTranslation {
-    to_successor: HashMap<LogicalValue, LogicalValue>,
+    to_successor: HashMap<LogicalValue, Vec<LogicalValue>>,
     to_predecessor: HashMap<LogicalValue, LogicalValue>,
 }
 
-/// O(1) logical-value translation across normalized phi edges.
+/// Indexed logical-value translation across normalized phi edges.
 ///
 /// Building the two directions in one pass over phi operands avoids rescanning
-/// every phi (and its predecessor list) for every member of W/S.  CSSA gives
-/// each phi operand a distinct edge-local name, so both maps are one-to-one.
+/// every phi (and its predecessor list) for every member of W/S. A destination
+/// has exactly one source on an edge. A legal non-CSSA source may feed several
+/// phi destinations, so the forward relation is one-to-many.
 #[derive(Debug)]
 struct EdgeTranslations {
     by_edge: HashMap<(usize, usize), EdgeTranslation>,
@@ -278,22 +279,11 @@ impl EdgeTranslations {
                     }
                     let source = logical.checked_of(source, Some(predecessor_id), None)?;
                     let translation = by_edge.entry((predecessor, successor)).or_default();
-                    if translation
+                    translation
                         .to_successor
-                        .insert(source, destination)
-                        .is_some()
-                    {
-                        return Err(SpillPlanError::new(
-                            "SPILL_PLAN.PHI_SOURCE_UNIQUE",
-                            Some(predecessor_id),
-                            None,
-                            vec![VReg(source.0), VReg(destination.0)],
-                            format!(
-                                "CSSA edge {predecessor_id} -> {} reuses phi source v{}",
-                                block.id, source.0
-                            ),
-                        ));
-                    }
+                        .entry(source)
+                        .or_default()
+                        .push(destination);
                     if translation
                         .to_predecessor
                         .insert(destination, source)
@@ -316,17 +306,22 @@ impl EdgeTranslations {
         Ok(Self { by_edge })
     }
 
-    fn to_successor(
+    fn to_successors(
         &self,
         predecessor: usize,
         successor: usize,
         value: LogicalValue,
-    ) -> LogicalValue {
-        self.by_edge
+    ) -> impl Iterator<Item = LogicalValue> + '_ {
+        let destinations = self
+            .by_edge
             .get(&(predecessor, successor))
             .and_then(|translation| translation.to_successor.get(&value))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        destinations
+            .iter()
             .copied()
-            .unwrap_or(value)
+            .chain(destinations.is_empty().then_some(value))
     }
 
     fn to_predecessor(
@@ -998,14 +993,15 @@ fn init_usual(
         return plan.w_exit[predecessor]
             .iter()
             .copied()
-            .map(|value| edge_translations.to_successor(predecessor, block, value))
+            .flat_map(|value| edge_translations.to_successors(predecessor, block, value))
             .collect();
     }
     let mut frequency = HashMap::<LogicalValue, usize>::new();
     for predecessor in &processed {
         for &value in &plan.w_exit[*predecessor] {
-            let value = edge_translations.to_successor(*predecessor, block, value);
-            *frequency.entry(value).or_default() += 1;
+            for value in edge_translations.to_successors(*predecessor, block, value) {
+                *frequency.entry(value).or_default() += 1;
+            }
         }
     }
     let mut candidates = frequency
@@ -2460,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_cssa_edge_source_is_a_structured_error() {
+    fn reused_non_cssa_edge_source_maps_to_every_destination() {
         let mut vregs = VRegAllocator::new();
         let source = vregs.alloc();
         let first = vregs.alloc();
@@ -2488,11 +2484,20 @@ mod tests {
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let logical = LogicalValues::build(&func);
 
-        let error = EdgeTranslations::build(&func, &cfg, &logical).unwrap_err();
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let mapped = translations
+            .to_successors(0, 1, LogicalValue(source.0))
+            .collect::<Vec<_>>();
 
-        assert_eq!(error.rule, "SPILL_PLAN.PHI_SOURCE_UNIQUE");
-        assert_eq!(error.block, Some(BlockId(0)));
-        assert_eq!(error.values, vec![source, second]);
+        assert_eq!(mapped, [LogicalValue(first.0), LogicalValue(second.0)]);
+        assert_eq!(
+            translations.to_predecessor(0, 1, LogicalValue(first.0)),
+            LogicalValue(source.0)
+        );
+        assert_eq!(
+            translations.to_predecessor(0, 1, LogicalValue(second.0)),
+            LogicalValue(source.0)
+        );
     }
 
     #[test]
@@ -3305,9 +3310,10 @@ mod tests {
         let join = cfg.block_index[&join_id];
         for (predecessor_id, source, destination) in expected {
             let predecessor = cfg.block_index[&predecessor_id];
-            assert_eq!(
-                translations.to_successor(predecessor, join, LogicalValue(source.0),),
-                LogicalValue(destination.0)
+            assert!(
+                translations
+                    .to_successors(predecessor, join, LogicalValue(source.0))
+                    .any(|value| value == LogicalValue(destination.0))
             );
             assert_eq!(
                 translations.to_predecessor(predecessor, join, LogicalValue(destination.0),),

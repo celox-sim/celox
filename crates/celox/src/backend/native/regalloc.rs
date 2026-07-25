@@ -1,8 +1,9 @@
 //! Verified SSA register allocator based on Braun & Hack's extended MIN.
 //!
-//! The pipeline schedules pure DAG regions, constructs CSSA, plans spilling,
-//! reconstructs strict SSA, materializes late full-live Perm boundaries, and
-//! colors chordal SSA live ranges without an explicit interference graph.
+//! The pipeline schedules pure DAG regions, plans explicit per-value homes and
+//! phi-edge transfers, reconstructs strict SSA, materializes late full-live
+//! Perm boundaries, and colors chordal SSA live ranges without an explicit
+//! interference graph.
 
 #[allow(dead_code)]
 mod allocation_ir;
@@ -195,6 +196,7 @@ fn reload_recipe_error(phase: &'static str, error: reload::ReloadRecipeError) ->
     )
 }
 
+#[cfg(test)]
 fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
     RegallocError::new(
         phase,
@@ -358,26 +360,10 @@ fn run_regalloc_in_place(
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
-    let cssa_start = timing.then(crate::timing::now);
-    let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
-        .map_err(|error| cssa_error("CSSA normalization", error))?;
-    if let Some(start) = cssa_start {
-        eprintln!(
-            "[regalloc-timing] label={label} cssa_normalize elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    let cssa_verify_start = timing.then(crate::timing::now);
-    cssa::verify_cssa(func, &normalized_cfg, &cssa)
-        .map_err(|error| cssa_error("CSSA verification", error))?;
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("CSSA structural verification", error))?;
-    if let Some(start) = cssa_verify_start {
-        eprintln!(
-            "[regalloc-timing] label={label} cssa_verify elapsed={:?}",
-            start.elapsed()
-        );
-    }
+    // W/S planning now owns independent homes for every SSA value and
+    // materializes phi-edge transfers explicitly.  It therefore consumes the
+    // one authoritative pre-CSSA order directly; inserting CSSA snapshots
+    // here would lengthen the very ranges the spill plan is meant to split.
     let constraint_start = timing.then(crate::timing::now);
     let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
         .map_err(|error| constraint_error("allocation constraint construction", error))?;

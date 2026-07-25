@@ -2790,6 +2790,37 @@ planning before CSSA. The remaining phase-order work must preserve the one
 authoritative pre-CSSA dependency order while making W/S decisions before CSSA
 creates edge snapshots.
 
+The next production step removed CSSA normalization from the allocation
+boundary. W/S planning now consumes the authoritative pre-CSSA physical order
+directly. This required one additional non-CSSA edge rule: a single source may
+feed multiple phi destinations, while each destination still has exactly one
+source per edge. `EdgeTranslations` therefore stores a one-to-many forward
+relation and a one-to-one reverse relation.
+
+On the unchanged Heliodor optimized SIR
+`ec72edfb73efeb4cb609d5ac97178335765ec315e21f041995d4a16f7dd1540d`,
+the complete MIR changed as follows:
+
+```text
+                                  CSSA boundary    direct pre-CSSA W/S
+complete MIR lines                    1,619,698              1,586,429
+complete MIR bytes                   45,865,958             45,125,374
+```
+
+The normal-display Linux workload reached the exact marker and power-down:
+
+```text
+cy=9ae070 x3=aa pass=1
+compile_ns=70762771432
+execute_ns=62107828216
+```
+
+This removes 33,269 emitted trace lines and the CSSA snapshot phase, but does
+not yet fix the scheduler objective: hot `bb8164` remains 1,002 post-RA lines
+with 405 stack references. The next work is still the integrated
+ready-selection/W/S transition; the CSSA phase is no longer between those two
+decisions.
+
 ##### Relocated bit-copy reconstruction in mixed OR roots
 
 Inspection of the complete pre-RA MIR, post-RA MIR, and disassembly found a
