@@ -372,6 +372,7 @@ mod slt_root_verify_tests {
 
     fn path(expr: crate::logic_tree::NodeId) -> LogicPath<u32> {
         LogicPath {
+            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(2, 0, 7)),
             sources: crate::HashSet::default(),
             previous_sources: crate::HashSet::default(),
@@ -1306,6 +1307,7 @@ pub(crate) fn flatten(
                 eval_only_ffs: HashMap::default(),
                 apply_ffs: HashMap::default(),
                 eval_comb: Vec::new(),
+                comb_semantic_regions: HashMap::default(),
                 runtime_errors: HashMap::default(),
                 runtime_event_sites: Vec::new(),
                 comb_observers: Vec::new(),
@@ -1346,6 +1348,7 @@ pub(crate) fn flatten(
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
+    let comb_semantic_regions = schedule.semantic_regions;
     let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
         .execution_units
         .into_iter()
@@ -1434,6 +1437,7 @@ pub(crate) fn flatten(
         eval_only_ffs,
         apply_ffs,
         eval_comb,
+        comb_semantic_regions,
         runtime_errors,
         runtime_event_sites,
         comb_observers,
@@ -2587,6 +2591,17 @@ fn relocate_units(
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
+        for logic_path in &mut relocated_module.comb_blocks {
+            if let Some(local_region) = logic_path.semantic_region {
+                let instance_region = u64::try_from(id.0)
+                    .expect("instance identifier exceeds semantic-region domain");
+                assert!(
+                    local_region <= u64::from(u32::MAX),
+                    "comb process identifier exceeds semantic-region domain"
+                );
+                logic_path.semantic_region = Some((instance_region << 32) | local_region);
+            }
+        }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
 
@@ -2795,6 +2810,7 @@ fn build_comb_observer_capture_paths(
                 comb_blocks[idx.0].order_before.insert(path_id);
             }
             comb_blocks.push(LogicPath {
+                semantic_region: None,
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
                     guard: None,
@@ -2826,6 +2842,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    semantic_region: None,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: observer.site_id,
                         guard: None,
@@ -2906,6 +2923,7 @@ fn build_comb_observer_capture_paths(
             comb_blocks[idx.0].order_before.insert(path_id);
         }
         comb_blocks.push(LogicPath {
+            semantic_region: None,
             target: LogicPathTarget::CombCaptureEvent {
                 site_id: observer.site_id,
                 guard: observer.guard,
@@ -2963,6 +2981,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    semantic_region: None,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: member.site_id,
                         guard: member.guard,

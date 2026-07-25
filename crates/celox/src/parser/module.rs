@@ -43,6 +43,7 @@ pub struct ModuleParser<'a> {
     comb_blocks: Vec<LogicPath<VarId>>,
     comb_observers: Vec<CombObserver<VarId>>,
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
+    next_comb_semantic_region: u64,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     initial_memory_values: Vec<ModuleInitialMemoryValue>,
@@ -462,6 +463,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: Vec::new(),
             comb_observers: Vec::new(),
             comb_runtime_event_sites: Vec::new(),
+            next_comb_semantic_region: 0,
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
             initial_memory_values: Vec::new(),
@@ -477,12 +479,17 @@ impl<'a> ModuleParser<'a> {
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
         let arena_start = self.arena.len();
-        let (paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
+        let (mut paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
             self.module,
             decl,
             &mut self.arena,
             &self.loop_candidates,
         )?;
+        let semantic_region = self.next_comb_semantic_region;
+        self.next_comb_semantic_region += 1;
+        for path in &mut paths {
+            path.semantic_region = Some(semantic_region);
+        }
         let site_offset = self.comb_runtime_event_sites.len();
         for observer in &mut observers {
             observer.site_id += site_offset as u32;
@@ -573,6 +580,7 @@ impl<'a> ModuleParser<'a> {
             )?;
 
             let path = LogicPath {
+                semantic_region: None,
                 target: LogicPathTarget::Var(VarAtomBase::new(
                     GlueAddr::Child(child_port_id),
                     0,
@@ -695,6 +703,7 @@ impl<'a> ModuleParser<'a> {
                     };
 
                 let path = LogicPath {
+                    semantic_region: None,
                     target: LogicPathTarget::Var(VarAtomBase::new(
                         GlueAddr::Parent(dst.id),
                         access.lsb,

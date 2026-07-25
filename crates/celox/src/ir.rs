@@ -167,6 +167,9 @@ pub struct Program {
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    /// Semantic comb process for each exact published range. Physical
+    /// ExecutionUnit boundaries deliberately do not define these regions.
+    pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,

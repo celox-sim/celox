@@ -7,7 +7,7 @@ use crate::ir::SIRInstruction;
 use crate::ir::SIROffset;
 use crate::ir::SIRTerminator;
 use crate::ir::SIRValue;
-use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo};
+use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo, VarAtomBase};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
 use celox_analysis::dag_schedule::schedule_min_live_values;
@@ -1956,6 +1956,9 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
 pub struct ScheduleResult<Addr> {
     pub execution_units: Vec<ExecutionUnit<Addr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>>,
+    /// Exact comb range definitions grouped by their source semantic process.
+    /// This survives physical EU coalescing and is not an ordering constraint.
+    pub semantic_regions: HashMap<VarAtomBase<Addr>, u64>,
 }
 
 /// Lower a consecutive set of exact grouped-fold paths.  The packed fold
@@ -2283,6 +2286,10 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     // This is the source dataflow adapter; interval indexing and DAG
     // scheduling remain IR-independent in celox-analysis.
     let n = input.len();
+    let semantic_regions = input
+        .iter()
+        .filter_map(|path| Some((*path.target.var()?, path.semantic_region?)))
+        .collect();
     let LogicPathMemorySsa {
         successors: adj,
         value_users,
@@ -2701,6 +2708,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     Ok(ScheduleResult {
         execution_units: result_eus,
         runtime_errors,
+        semantic_regions,
     })
 }
 
@@ -2782,6 +2790,7 @@ mod tests {
                 .unwrap()
         };
         LogicPath {
+            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             sources: source
                 .map(|source| [VarAtomBase::new(source, 0, 7)].into_iter().collect())
@@ -2828,6 +2837,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(stores, vec![10, 11, 12, 20, 21, 22]);
+    }
+
+    #[test]
+    fn physical_comb_unit_preserves_independent_semantic_regions() {
+        let mut arena = SLTNodeArena::new();
+        let mut first = simple_path(&mut arena, 10, None);
+        first.semantic_region = Some(7);
+        let mut second = simple_path(&mut arena, 20, None);
+        second.semantic_region = Some(9);
+
+        let result = sort(
+            vec![first, second],
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &crate::HashMap::default(),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(result.execution_units.len(), 1);
+        assert_eq!(result.semantic_regions[&VarAtomBase::new(10, 0, 7)], 7);
+        assert_eq!(result.semantic_regions[&VarAtomBase::new(20, 0, 7)], 9);
     }
 
     #[test]
@@ -2978,6 +3011,7 @@ mod tests {
             })
             .unwrap();
         LogicPath {
+            semantic_region: None,
             target: LogicPathTarget::Var(target),
             sources: [VarAtomBase::new(external, 0, 63)].into_iter().collect(),
             previous_sources: crate::HashSet::default(),
@@ -3457,6 +3491,7 @@ mod tests {
             })
             .unwrap();
         let path = |target, expr| LogicPath {
+            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             // Keep the scheduling graph acyclic in this focused cache test;
             // dependency memoization still sees both initial reads.
