@@ -2403,6 +2403,121 @@ whole-function selector scan; it is to admit additional profile-selected
 effect recipes under the same executable frontier, StateVersion, path-local
 merge, and atomic-verification contracts.
 
+#### Execute-only profile and the scheduler/allocation boundary
+
+An execution-only profile was collected after the final effect-case run. The
+profiler was attached after code generation, so its 55,758 samples and
+approximately 285 billion cycles describe generated execution rather than a
+mixture of compilation and execution. The run retained the exact
+`cy=9ae070 x3=aa pass=1` marker and kernel power-down and reported 55.578
+seconds of code generation and 58.949 seconds of execution.
+
+The rewritten effect case is not the remaining dominant cost. Its origin block
+`b8674` accounted for 0.43% of samples. The hottest generated block was
+`b8261` at 1.91%, followed by `b4212` at 1.44%, `b4182` at 1.10%, `b4194` at
+1.08%, `b451` at 1.04%, and `b3984` at 1.02%. This rejects further
+effect-selector work as the next large improvement.
+
+Reading all three representations of `b8261` exposes a separate phase-order
+defect:
+
+- optimized SIR computes each of 32 lanes' predicate, arithmetic, select, and
+  one-hot payload as a local chain;
+- ISel MIR preserves that lane-local order;
+- pressure-scheduled MIR first computes the same operation for all 32 lanes,
+  then the next operation for all lanes, producing a breadth-first,
+  stage-wide order;
+- allocated MIR and final x86-64 consequently contain long groups of stack
+  stores, later stack predicate comparisons feeding `cmovne`, and stack-fed
+  two-bit indices feeding `shlx`.
+
+The hot final instructions include the repeated forms:
+
+```text
+and    r8d, 3
+shlx   ..., ..., r8
+
+cmp    qword ptr [rsp + ...], 0
+cmovne ..., ...
+```
+
+The issue is not an abstract preference for short live ranges. The current
+phase order is:
+
+```text
+raw liveness
+  -> pressure scheduler
+  -> CSSA
+  -> next-use and W/S spill planning
+  -> reconstruction
+  -> coloring
+```
+
+At scheduling time every raw block live-out is charged as if it must stay in a
+GPR. Only later does the W/S planner decide which values actually remain
+resident and which have stack, state, or rematerialization homes. On `b8261`
+that impossible boundary assumption makes the theoretical excess-live-area
+objective prefer the stage-wide schedule.
+
+Disabling candidate acceptance while retaining exactly the same generated SIR
+kept `b8261` lane-local and reduced that block's post-allocation MIR from about
+1,003 instructions to 837. The complete Linux workload still reached the exact
+marker and power-down. Its 61.327-second execution result is not a qualified
+speed comparison because adjacent identical-code measurements drifted by more
+than six seconds, but the instruction reduction proves that the current
+scheduler objective does not predict the allocator's result for this block.
+
+Two broader fixes were implemented and measured, then rejected:
+
+1. Moving all pressure scheduling after spill reconstruction made homes
+   explicit, but forced every other block through the original ISel order
+   during W/S planning. `eval_comb_apply_ff` grew to 125,835 instructions at
+   reconstruction and 129,006 after allocation; code generation increased to
+   70.290 seconds.
+2. Keeping the existing phase order but skipping every block whose raw
+   live-out count exceeds the GPR count classified 12,361 of 12,400
+   `eval_comb` blocks and 22,121 of 22,963 fused blocks as infeasible.
+   `eval_comb_apply_ff` still ended at 129,001 instructions and code generation
+   took 69.543 seconds.
+
+These failures establish that neither raw liveness nor globally retaining the
+ISel order is a usable residency model. They also rule out a block-ID exception
+for `b8261`.
+
+The required integration is one allocation-owned pass over each block:
+
+```text
+known W_entry / S_entry
+  -> ready instruction selection under exact dependencies
+  -> update resident W, valid-home S, and pressure
+  -> emit spill/reload action at the selected program point
+  -> produce W_exit / S_exit
+```
+
+The scheduler and `plan_block_transition` currently perform overlapping
+versions of this walk on different orders. They must become one transition:
+ready-list selection uses the actual W/S state, and selecting an instruction
+advances the same state that decides eviction and materialization. CFG edge
+coupling remains the existing Section 4.3 pass after all block exits are known.
+This does not run allocation twice and does not require an interference graph.
+
+For a block with `I` instructions and `E` register/memory dependency edges,
+the integrated walk must retain the scheduler's `O(I log I + E)` time and
+`O(I + E)` space bound. W and pinned operands are bounded by the fixed target
+register count. No block-by-VReg table, cloned whole-function state, or
+schedule/reallocate retry is permitted.
+
+The first implementation gate is exact, not timing-based:
+
+- all emitted orders pass the existing dependency verifier;
+- `W/S` and every spill/reload point are produced by that order, never remapped
+  from another order;
+- reconstructed pressure remains at most the target register count;
+- `b8261` remains cone/lane-local and does not regain the eliminated stack
+  traffic;
+- full native semantic tests and the Heliodor marker/power-down pass before any
+  runtime claim.
+
 ### Milestone 2: use-local FF forwarding
 
 On focused fixtures, bypass admitted FF Load/extract chains according to a
