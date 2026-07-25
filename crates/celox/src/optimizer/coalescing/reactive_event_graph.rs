@@ -1219,6 +1219,7 @@ pub(crate) fn materialize_static_clusters(
         );
     }
     let definitions = value_definitions(eu, &cfg)?;
+    let register_uses = super::sir_analysis::collect_uses(eu);
     let (_, physical_state_uses) = state_uses(&physical_models);
     let (_, state_uses) = state_uses(&models);
     let static_reads = index_static_reads(eu);
@@ -1229,6 +1230,7 @@ pub(crate) fn materialize_static_clusters(
         .collect::<Vec<_>>();
     let mut rewrites = Vec::new();
     let mut claimed_consumers = HashSet::default();
+    let mut considered_pairs = HashSet::default();
 
     for (&consumer, uses) in &state_uses {
         if !phase_by_unit[provenance.block_units[&consumer.block]] {
@@ -1265,6 +1267,9 @@ pub(crate) fn materialize_static_clusters(
                 block: producer_block,
                 instruction: producer_instruction,
             };
+            if !considered_pairs.insert((producer, consumer)) {
+                continue;
+            }
             let SIRInstruction::Store(
                 producer_address,
                 producer_offset @ SIROffset::Static(_),
@@ -1290,7 +1295,7 @@ pub(crate) fn materialize_static_clusters(
             }
             let mut seen = HashSet::default();
             let mut cone = Vec::new();
-            if !collect_static_clone_cone(
+            if collect_static_clone_cone(
                 eu,
                 &definitions,
                 &state_uses,
@@ -1298,22 +1303,37 @@ pub(crate) fn materialize_static_clusters(
                 &physical_state_uses,
                 &physical_models,
                 source,
-                producer.block,
                 consumer,
                 &mut seen,
                 &mut cone,
-            ) || cone.is_empty()
-                || cone.len() > 16
-                || !store_atomically_feeds_load(&models, uses, producer, consumer, source)
-                || has_other_overlapping_read(
-                    &static_reads,
-                    *producer_address,
-                    producer_offset,
-                    *producer_width,
-                    consumer,
-                )
-                || !claimed_consumers.insert(consumer)
+            )
+            .is_err()
             {
+                continue;
+            }
+            if cone.is_empty() {
+                continue;
+            }
+            if cone.len() > 16 {
+                continue;
+            }
+            let dead_cone = dead_cone_instruction_count(eu, &cone, producer, &register_uses);
+            if cone.len() > dead_cone.saturating_add(2) {
+                continue;
+            }
+            if !store_atomically_feeds_load(&models, uses, producer, consumer, source) {
+                continue;
+            }
+            if has_other_overlapping_read(
+                &static_reads,
+                *producer_address,
+                producer_offset,
+                *producer_width,
+                consumer,
+            ) {
+                continue;
+            }
+            if !claimed_consumers.insert(consumer) {
                 continue;
             }
             rewrites.push(StaticClusterRewrite {
@@ -1395,6 +1415,40 @@ pub(crate) fn materialize_static_clusters(
     eu.verify_result()
         .map_err(|error| format!("static event materialization produced invalid SIR: {error}"))?;
     Ok(rewrites.len())
+}
+
+fn dead_cone_instruction_count(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cone: &[InstructionSite],
+    removed_store: InstructionSite,
+    register_uses: &HashMap<RegisterId, Vec<super::sir_analysis::UseSite>>,
+) -> usize {
+    let mut dead = HashSet::default();
+    for &site in cone.iter().rev() {
+        let Some(register) =
+            eu.blocks[&site.block].instructions[site.instruction].defined_register()
+        else {
+            continue;
+        };
+        if register_uses
+            .get(&register)
+            .into_iter()
+            .flatten()
+            .all(|use_site| match *use_site {
+                super::sir_analysis::UseSite::Instruction { block, index } => {
+                    let site = InstructionSite {
+                        block,
+                        instruction: index,
+                    };
+                    site == removed_store || dead.contains(&site)
+                }
+                _ => false,
+            })
+        {
+            dead.insert(site);
+        }
+    }
+    dead.len()
 }
 
 fn index_static_reads(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> StaticReadIndex {
@@ -1515,20 +1569,16 @@ fn collect_static_clone_cone(
     physical_state_uses: &HashMap<InstructionSite, Vec<StateUse>>,
     physical_models: &[StateSsa],
     value: RegisterId,
-    producer_block: BlockId,
     consumer: InstructionSite,
     seen: &mut HashSet<RegisterId>,
     cone: &mut Vec<InstructionSite>,
-) -> bool {
+) -> Result<(), &'static str> {
     if !seen.insert(value) {
-        return true;
+        return Ok(());
     }
     let Some(ValueDefinition::Instruction(site)) = definitions.get(&value) else {
-        return false;
+        return Err("cone-missing-definition");
     };
-    if site.block != producer_block {
-        return false;
-    }
     let instruction = &eu.blocks[&site.block].instructions[site.instruction];
     match instruction {
         SIRInstruction::Imm(..)
@@ -1538,7 +1588,7 @@ fn collect_static_clone_cone(
         | SIRInstruction::Slice(..)
         | SIRInstruction::Mux(..) => {
             for input in super::sir_analysis::instruction_uses(instruction) {
-                if !collect_static_clone_cone(
+                collect_static_clone_cone(
                     eu,
                     definitions,
                     state_uses,
@@ -1546,18 +1596,15 @@ fn collect_static_clone_cone(
                     physical_state_uses,
                     physical_models,
                     input,
-                    producer_block,
                     consumer,
                     seen,
                     cone,
-                ) {
-                    return false;
-                }
+                )?;
             }
         }
         SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {
             let Some(uses) = state_uses.get(site) else {
-                return false;
+                return Err("cone-load-missing-event-version");
             };
             if uses.iter().any(|state_use| {
                 let model = &models[state_use.model];
@@ -1565,10 +1612,10 @@ fn collect_static_clone_cone(
                 model.version_before(consumer.block, consumer.instruction, slot)
                     != Some(state_use.version)
             }) {
-                return false;
+                return Err("cone-load-event-version-changed");
             }
             let Some(physical_uses) = physical_state_uses.get(site) else {
-                return false;
+                return Err("cone-load-missing-physical-version");
             };
             if physical_uses.iter().any(|state_use| {
                 let model = &physical_models[state_use.model];
@@ -1576,13 +1623,13 @@ fn collect_static_clone_cone(
                 model.version_before(consumer.block, consumer.instruction, slot)
                     != Some(state_use.version)
             }) {
-                return false;
+                return Err("cone-load-physical-version-changed");
             }
         }
-        _ => return false,
+        _ => return Err("cone-unsupported-instruction"),
     }
     cone.push(*site);
-    true
+    Ok(())
 }
 
 fn clone_static_materialization(
@@ -1924,6 +1971,137 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn static_materialization_clones_a_pure_cross_block_dag() {
+        let signal = address(STABLE_REGION, 0);
+        let input = address(STABLE_REGION, 1);
+        let next = address(WORKING_REGION, 2);
+        let mut comb = unit(Vec::new(), &[(0, 8), (1, 8)]);
+        comb.blocks = [
+            (
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(0),
+                        input,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                },
+            ),
+            (
+                BlockId(1),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Unary(
+                            RegisterId(1),
+                            crate::ir::UnaryOp::Ident,
+                            RegisterId(0),
+                        ),
+                        SIRInstruction::Store(
+                            signal,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(1),
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let ff = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), signal, SIROffset::Static(0), 8),
+                SIRInstruction::Store(next, SIROffset::Static(0), 8, RegisterId(0), vec![], vec![]),
+            ],
+            &[(0, 8)],
+        );
+        let (merged, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff]);
+        let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
+        let mut materialized = merged.clone();
+
+        assert_eq!(
+            materialize_static_clusters(&mut materialized, &provenance, &cut, false).unwrap(),
+            1
+        );
+        assert!(!materialized.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                        if *address == signal
+                )
+            })
+        }));
+        for value in [0, 1, 0x55, 0xff] {
+            let mut reference = TestMemory::default();
+            reference.insert((input, 0, 8), value);
+            reference.insert((signal, 0, 8), 0);
+            reference.insert((next, 0, 8), 0);
+            let mut actual = reference.clone();
+            execute_straight_line(&merged, &mut reference);
+            execute_straight_line(&materialized, &mut actual);
+            execute_straight_line(&comb, &mut reference);
+            execute_straight_line(&comb, &mut actual);
+            assert_eq!(actual, reference);
+        }
+    }
+
+    #[test]
+    fn static_materialization_does_not_duplicate_a_shared_bit_cone() {
+        let signal = address(STABLE_REGION, 0);
+        let input = address(STABLE_REGION, 1);
+        let shared_sink = address(STABLE_REGION, 2);
+        let next = address(WORKING_REGION, 3);
+        let comb = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Slice(RegisterId(1), RegisterId(0), 0, 8),
+                SIRInstruction::Unary(RegisterId(2), crate::ir::UnaryOp::Ident, RegisterId(1)),
+                SIRInstruction::Store(
+                    signal,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(2),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Store(
+                    shared_sink,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(2),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8), (1, 8), (2, 8)],
+        );
+        let ff = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), signal, SIROffset::Static(0), 8),
+                SIRInstruction::Store(next, SIROffset::Static(0), 8, RegisterId(0), vec![], vec![]),
+            ],
+            &[(0, 8)],
+        );
+        let (mut merged, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff]);
+        let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
+
+        assert_eq!(
+            materialize_static_clusters(&mut merged, &provenance, &cut, false).unwrap(),
+            0
+        );
     }
 
     #[test]

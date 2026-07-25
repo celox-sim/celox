@@ -452,12 +452,15 @@ exact comb-Store to FF-Load edge it:
 3. requires an effect-free comb Store and one exact FF Load consumer;
 4. rejects any other static or dynamic read overlapping the Store range,
    including differently shaped accesses which MemorySSA represents as kills;
-5. clones at most 16 pure instructions from one producer block immediately
-   before the FF Load;
+5. clones at most 16 pure SSA instructions, including definitions from
+   dominating predecessor blocks, immediately before the FF Load;
 6. requires every state Load frontier to observe the same event StateVersion
    and the same physically reloadable StateVersion at the sink;
-7. removes the FF Load and comb Store together; and
-8. runs ordinary SIR DCE and verification.
+7. computes which original cone instructions become dead after deleting the
+   publication and admits the rewrite only when the cloned cone is no larger
+   than the dead cone plus the removed Store and Load;
+8. removes the FF Load and comb Store together; and
+9. runs ordinary SIR DCE and verification.
 
 A focused differential test executes the old fused SIR and projected SIR over
 several input states, then executes the ordinary comb projection before
@@ -472,16 +475,27 @@ the Heliodor Linux completion marker by one 10,000-cycle polling interval.
 Inspection of the complete generated SIR exposed the differently shaped Load;
 the range-wide read index above closes that hole.
 
-On the Heliodor Linux workload the admitted production subset materializes 114
-clusters. Relative to the phase-cut baseline, native optimized SIR decreases
-from 18,811,600 to 18,791,632 bytes and MIR from 54,736,563 to 54,709,671
-bytes. A non-LTO optimized qualification completed kernel power-down at the
-exact `cy=9ae070 x3=aa pass=1` marker, with 72.249 seconds of code generation
-and 60.989 seconds of generated execution. The final release/LTO qualification
-also reached the exact marker, with 68.290 seconds of code generation and
-63.990 seconds of generated execution. These byte counts and single timing
-samples establish semantic and code-generation progress, not a release/LTO
-throughput win.
+The initial production subset incorrectly restricted every producer cone to
+the Store's basic block and therefore admitted only 114 clusters. Removing
+that restriction without a profitability contract admitted 285 clusters, but
+duplicated shared, already optimized packed-bit cones. Although memory
+operands decreased, the final x86 function grew by 342 instructions:
+`and +105`, `test +73`, `shr +45`, and `xchg +47`. Store/Load elimination had
+been traded for repeated extraction work and additional allocation copies.
+
+The dead-cone contract above admits 160 clusters on the Heliodor Linux
+workload. Relative to the phase-cut baseline, native optimized SIR decreases
+from 18,811,600 to 18,784,955 bytes and MIR from 54,736,563 to 54,695,093
+bytes. Relative to the old 114-cluster subset, the final x86 function has 105
+fewer instructions, 101 fewer memory operands, 84 fewer GS state accesses, and
+47 fewer memory-source `movzx` instructions. A non-LTO optimized
+qualification completed kernel power-down at the exact
+`cy=9ae070 x3=aa pass=1` marker, with 75.710 seconds of code generation and
+62.194 seconds of generated execution. The release/LTO qualification reached
+the same exact marker with 67.231 seconds of code generation and 61.940
+seconds of generated execution. Host timing varies by several seconds; the
+structural machine-code deltas and exact cycle marker are the acceptance
+evidence here, not either single wall-clock sample.
 
 ### Step D: control-pure regions
 
