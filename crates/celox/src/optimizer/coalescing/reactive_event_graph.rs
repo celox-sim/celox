@@ -1176,6 +1176,449 @@ fn static_fragment(
     ))
 }
 
+#[derive(Debug)]
+struct StaticClusterRewrite {
+    consumer: InstructionSite,
+    producer: InstructionSite,
+    source: RegisterId,
+    destination: RegisterId,
+    cone: Vec<InstructionSite>,
+}
+
+type StaticReadIndex = HashMap<RegionedAbsoluteAddr, Vec<(InstructionSite, Option<usize>, usize)>>;
+
+pub(crate) fn materialize_static_clusters(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &SirMergeProvenance,
+    cut: &FusedPhaseCut,
+    four_state: bool,
+) -> Result<usize, String> {
+    // A four-state Store defines both value and mask StateSSA fragments.  The
+    // initial rewrite below proves exclusivity for one fragment at a time, so
+    // deleting the shared Store is not yet legal until all planes are checked
+    // as one atomic definition.
+    if four_state {
+        return Ok(0);
+    }
+    let cfg = SirCfg::analyze_forward(eu).map_err(|error| error.to_string())?;
+    let phases =
+        StatePhaseMap::fused(eu, &cfg, cut.ff_entry()).map_err(|error| error.to_string())?;
+    let mut models = Vec::new();
+    for region in [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION] {
+        models.push(
+            StateSsa::analyze_event_projection(eu, &cfg, region, &phases, !four_state)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    let physical_phases = StatePhaseMap::default();
+    let mut physical_models = Vec::new();
+    for region in [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION] {
+        physical_models.push(
+            StateSsa::analyze_all_loads_two_state(eu, &cfg, region, &physical_phases)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    let definitions = value_definitions(eu, &cfg)?;
+    let (_, physical_state_uses) = state_uses(&physical_models);
+    let (_, state_uses) = state_uses(&models);
+    let static_reads = index_static_reads(eu);
+    let phase_by_unit = provenance
+        .unit_entries
+        .iter()
+        .map(|&entry| cut.is_ff_block(entry))
+        .collect::<Vec<_>>();
+    let mut rewrites = Vec::new();
+    let mut claimed_consumers = HashSet::default();
+
+    for (&consumer, uses) in &state_uses {
+        if !phase_by_unit[provenance.block_units[&consumer.block]] {
+            continue;
+        }
+        let SIRInstruction::Load(
+            destination,
+            consumer_address,
+            consumer_offset @ SIROffset::Static(_),
+            consumer_width,
+        ) = &eu.blocks[&consumer.block].instructions[consumer.instruction]
+        else {
+            continue;
+        };
+        for state_use in uses {
+            let model = &models[state_use.model];
+            let access = &model.accesses[state_use.version.0];
+            let MemoryAccessKind::Def {
+                source,
+                observable: false,
+            } = access.kind
+            else {
+                continue;
+            };
+            let (Some(producer_block), Some(producer_instruction)) =
+                (access.block, access.instruction)
+            else {
+                continue;
+            };
+            if phase_by_unit[provenance.block_units[&producer_block]] {
+                continue;
+            }
+            let producer = InstructionSite {
+                block: producer_block,
+                instruction: producer_instruction,
+            };
+            let SIRInstruction::Store(
+                producer_address,
+                producer_offset @ SIROffset::Static(_),
+                producer_width,
+                stored,
+                triggers,
+                captures,
+            ) = &eu.blocks[&producer.block].instructions[producer.instruction]
+            else {
+                continue;
+            };
+            if *producer_address != *consumer_address
+                || producer_offset != consumer_offset
+                || producer_width != consumer_width
+                || *stored != source
+                || !triggers.is_empty()
+                || !captures.is_empty()
+            {
+                continue;
+            }
+            if eu.register_map.get(&source) != eu.register_map.get(destination) {
+                continue;
+            }
+            let mut seen = HashSet::default();
+            let mut cone = Vec::new();
+            if !collect_static_clone_cone(
+                eu,
+                &definitions,
+                &state_uses,
+                &models,
+                &physical_state_uses,
+                &physical_models,
+                source,
+                producer.block,
+                consumer,
+                &mut seen,
+                &mut cone,
+            ) || cone.is_empty()
+                || cone.len() > 16
+                || !store_atomically_feeds_load(&models, uses, producer, consumer, source)
+                || has_other_overlapping_read(
+                    &static_reads,
+                    *producer_address,
+                    producer_offset,
+                    *producer_width,
+                    consumer,
+                )
+                || !claimed_consumers.insert(consumer)
+            {
+                continue;
+            }
+            rewrites.push(StaticClusterRewrite {
+                consumer,
+                producer,
+                source,
+                destination: *destination,
+                cone,
+            });
+        }
+    }
+    if rewrites.is_empty() {
+        return Ok(0);
+    }
+
+    let mut next_register = eu
+        .register_map
+        .keys()
+        .map(|register| register.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or("SIR register identifier overflow")?;
+    let mut insertions =
+        HashMap::<InstructionSite, Vec<SIRInstruction<RegionedAbsoluteAddr>>>::default();
+    let mut removals = HashSet::default();
+    for rewrite in &rewrites {
+        let mut replacements = HashMap::default();
+        for &site in &rewrite.cone {
+            let instruction = &eu.blocks[&site.block].instructions[site.instruction];
+            let old = instruction
+                .defined_register()
+                .ok_or("static materialization cone contains a non-definition")?;
+            let new = if old == rewrite.source {
+                rewrite.destination
+            } else {
+                while eu.register_map.contains_key(&RegisterId(next_register)) {
+                    next_register = next_register
+                        .checked_add(1)
+                        .ok_or("SIR register identifier overflow")?;
+                }
+                let register = RegisterId(next_register);
+                next_register = next_register
+                    .checked_add(1)
+                    .ok_or("SIR register identifier overflow")?;
+                eu.register_map
+                    .insert(register, eu.register_map[&old].clone());
+                register
+            };
+            let cloned = clone_static_materialization(instruction, new, &replacements)
+                .ok_or("static materialization instruction is no longer cloneable")?;
+            replacements.insert(old, new);
+            insertions.entry(rewrite.consumer).or_default().push(cloned);
+        }
+        removals.insert(rewrite.consumer);
+        removals.insert(rewrite.producer);
+    }
+    for block in eu.blocks.values_mut() {
+        let block_id = block.id;
+        let mut rewritten = Vec::with_capacity(block.instructions.len());
+        for (instruction, value) in std::mem::take(&mut block.instructions)
+            .into_iter()
+            .enumerate()
+        {
+            let site = InstructionSite {
+                block: block_id,
+                instruction,
+            };
+            if let Some(cloned) = insertions.remove(&site) {
+                rewritten.extend(cloned);
+            }
+            if !removals.contains(&site) {
+                rewritten.push(value);
+            }
+        }
+        block.instructions = rewritten;
+    }
+    super::pass_vectorize_concat::remove_dead_definitions(eu);
+    eu.verify_result()
+        .map_err(|error| format!("static event materialization produced invalid SIR: {error}"))?;
+    Ok(rewrites.len())
+}
+
+fn index_static_reads(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> StaticReadIndex {
+    let mut reads = StaticReadIndex::default();
+    for (&block, body) in &eu.blocks {
+        for (instruction, value) in body.instructions.iter().enumerate() {
+            let site = InstructionSite { block, instruction };
+            let access = match value {
+                SIRInstruction::Load(_, address, offset, width) => Some((*address, offset, *width)),
+                SIRInstruction::Commit(source, _, offset, width, _) => {
+                    Some((*source, offset, *width))
+                }
+                _ => None,
+            };
+            let Some((address, offset, width)) = access else {
+                continue;
+            };
+            let offset = match offset {
+                SIROffset::Static(offset) => Some(*offset),
+                SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+            };
+            reads
+                .entry(address)
+                .or_default()
+                .push((site, offset, width));
+        }
+    }
+    reads
+}
+
+fn has_other_overlapping_read(
+    reads: &StaticReadIndex,
+    address: RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+    admitted_consumer: InstructionSite,
+) -> bool {
+    let SIROffset::Static(offset) = offset else {
+        return true;
+    };
+    reads.get(&address).is_some_and(|reads| {
+        reads.iter().any(|&(site, read_offset, read_width)| {
+            site != admitted_consumer
+                && read_offset.is_none_or(|read_offset| {
+                    ranges_overlap(*offset, width, read_offset, read_width)
+                })
+        })
+    })
+}
+
+fn ranges_overlap(
+    lhs_offset: usize,
+    lhs_width: usize,
+    rhs_offset: usize,
+    rhs_width: usize,
+) -> bool {
+    lhs_offset < rhs_offset.saturating_add(rhs_width)
+        && rhs_offset < lhs_offset.saturating_add(lhs_width)
+}
+
+fn store_atomically_feeds_load(
+    models: &[StateSsa],
+    uses: &[StateUse],
+    producer: InstructionSite,
+    consumer: InstructionSite,
+    source: RegisterId,
+) -> bool {
+    !uses.is_empty()
+        && uses.iter().all(|state_use| {
+            let model = &models[state_use.model];
+            let access = &model.accesses[state_use.version.0];
+            matches!(
+                access.kind,
+                MemoryAccessKind::Def {
+                    source: definition_source,
+                    observable: false,
+                } if definition_source == source
+            ) && access.block == Some(producer.block)
+                && access.instruction == Some(producer.instruction)
+                && state_definition_has_only_use(model, access.id, consumer)
+        })
+}
+
+fn state_definition_has_only_use(
+    model: &StateSsa,
+    definition: MemoryAccessId,
+    consumer: InstructionSite,
+) -> bool {
+    let mut found = false;
+    for access in &model.accesses {
+        match &access.kind {
+            MemoryAccessKind::Use { reaching, .. } if *reaching == definition => {
+                if access.block != Some(consumer.block)
+                    || access.instruction != Some(consumer.instruction)
+                    || found
+                {
+                    return false;
+                }
+                found = true;
+            }
+            MemoryAccessKind::Phi { incoming }
+                if incoming.iter().any(|(_, version)| *version == definition) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_static_clone_cone(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, ValueDefinition>,
+    state_uses: &HashMap<InstructionSite, Vec<StateUse>>,
+    models: &[StateSsa],
+    physical_state_uses: &HashMap<InstructionSite, Vec<StateUse>>,
+    physical_models: &[StateSsa],
+    value: RegisterId,
+    producer_block: BlockId,
+    consumer: InstructionSite,
+    seen: &mut HashSet<RegisterId>,
+    cone: &mut Vec<InstructionSite>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let Some(ValueDefinition::Instruction(site)) = definitions.get(&value) else {
+        return false;
+    };
+    if site.block != producer_block {
+        return false;
+    }
+    let instruction = &eu.blocks[&site.block].instructions[site.instruction];
+    match instruction {
+        SIRInstruction::Imm(..)
+        | SIRInstruction::Binary(..)
+        | SIRInstruction::Unary(..)
+        | SIRInstruction::Concat(..)
+        | SIRInstruction::Slice(..)
+        | SIRInstruction::Mux(..) => {
+            for input in super::sir_analysis::instruction_uses(instruction) {
+                if !collect_static_clone_cone(
+                    eu,
+                    definitions,
+                    state_uses,
+                    models,
+                    physical_state_uses,
+                    physical_models,
+                    input,
+                    producer_block,
+                    consumer,
+                    seen,
+                    cone,
+                ) {
+                    return false;
+                }
+            }
+        }
+        SIRInstruction::Load(_, _, SIROffset::Static(_), _) => {
+            let Some(uses) = state_uses.get(site) else {
+                return false;
+            };
+            if uses.iter().any(|state_use| {
+                let model = &models[state_use.model];
+                let slot = model.accesses[state_use.version.0].slot;
+                model.version_before(consumer.block, consumer.instruction, slot)
+                    != Some(state_use.version)
+            }) {
+                return false;
+            }
+            let Some(physical_uses) = physical_state_uses.get(site) else {
+                return false;
+            };
+            if physical_uses.iter().any(|state_use| {
+                let model = &physical_models[state_use.model];
+                let slot = model.accesses[state_use.version.0].slot;
+                model.version_before(consumer.block, consumer.instruction, slot)
+                    != Some(state_use.version)
+            }) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    cone.push(*site);
+    true
+}
+
+fn clone_static_materialization(
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    destination: RegisterId,
+    replacements: &HashMap<RegisterId, RegisterId>,
+) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
+    let get = |register: &RegisterId| replacements.get(register).copied();
+    Some(match instruction {
+        SIRInstruction::Imm(_, value) => SIRInstruction::Imm(destination, value.clone()),
+        SIRInstruction::Binary(_, lhs, operation, rhs) => {
+            SIRInstruction::Binary(destination, get(lhs)?, *operation, get(rhs)?)
+        }
+        SIRInstruction::Unary(_, operation, source) => {
+            SIRInstruction::Unary(destination, *operation, get(source)?)
+        }
+        SIRInstruction::Load(_, address, offset @ SIROffset::Static(_), width) => {
+            SIRInstruction::Load(destination, *address, offset.clone(), *width)
+        }
+        SIRInstruction::Concat(_, sources) => SIRInstruction::Concat(
+            destination,
+            sources.iter().map(get).collect::<Option<Vec<_>>>()?,
+        ),
+        SIRInstruction::Slice(_, source, offset, width) => {
+            SIRInstruction::Slice(destination, get(source)?, *offset, *width)
+        }
+        SIRInstruction::Mux(_, condition, then_value, else_value) => SIRInstruction::Mux(
+            destination,
+            get(condition)?,
+            get(then_value)?,
+            get(else_value)?,
+        ),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1819,34 @@ mod tests {
                 )
             })
         }));
+        let mut four_state = merged.clone();
+        assert_eq!(
+            materialize_static_clusters(&mut four_state, &provenance, &cut, true).unwrap(),
+            0
+        );
+        assert!(four_state.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                        if *address == signal
+                )
+            })
+        }));
+        let mut materialized = merged.clone();
+        assert_eq!(
+            materialize_static_clusters(&mut materialized, &provenance, &cut, false,).unwrap(),
+            1
+        );
+        assert!(!materialized.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                        if *address == signal
+                )
+            })
+        }));
 
         for value in [0, 1, 7, 0x55, 0xff] {
             let mut reference = TestMemory::default();
@@ -1384,16 +1855,75 @@ mod tests {
             reference.insert((next, 0, 8), 0);
             reference.insert((published, 0, 8), 0);
             let mut projected_memory = reference.clone();
+            let mut materialized_memory = reference.clone();
 
             execute_straight_line(&merged, &mut reference);
             execute_straight_line(&projected, &mut projected_memory);
+            execute_straight_line(&materialized, &mut materialized_memory);
             // The generic comb projection republishes derived outputs before
             // externally visible state is compared.
             execute_straight_line(&comb, &mut reference);
             execute_straight_line(&comb, &mut projected_memory);
+            execute_straight_line(&comb, &mut materialized_memory);
 
             assert_eq!(projected_memory, reference);
+            assert_eq!(materialized_memory, reference);
         }
+    }
+
+    #[test]
+    fn static_materialization_preserves_store_with_overlapping_read() {
+        let signal = address(STABLE_REGION, 0);
+        let input = address(STABLE_REGION, 1);
+        let partial_sink = address(WORKING_REGION, 2);
+        let next = address(WORKING_REGION, 3);
+        let comb = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Unary(RegisterId(1), crate::ir::UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Store(
+                    signal,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+        let ff = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), signal, SIROffset::Static(0), 4),
+                SIRInstruction::Store(
+                    partial_sink,
+                    SIROffset::Static(0),
+                    4,
+                    RegisterId(0),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Load(RegisterId(1), signal, SIROffset::Static(0), 8),
+                SIRInstruction::Store(next, SIROffset::Static(0), 8, RegisterId(1), vec![], vec![]),
+            ],
+            &[(0, 4), (1, 8)],
+        );
+        let (mut merged, provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff]);
+        let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
+
+        assert_eq!(
+            materialize_static_clusters(&mut merged, &provenance, &cut, false).unwrap(),
+            0
+        );
+        assert!(merged.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, SIROffset::Static(0), 8, ..)
+                        if *address == signal
+                )
+            })
+        }));
     }
 
     #[test]

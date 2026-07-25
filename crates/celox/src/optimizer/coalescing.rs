@@ -173,6 +173,16 @@ pub(crate) fn analyze_reactive_event_projection(
 }
 
 #[cfg(target_arch = "x86_64")]
+pub(crate) fn materialize_static_event_clusters(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &crate::ir::SirMergeProvenance,
+    cut: &reactive_phase::FusedPhaseCut,
+    four_state: bool,
+) -> Result<usize, String> {
+    reactive_event_graph::materialize_static_clusters(eu, provenance, cut, four_state)
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,

@@ -1,9 +1,10 @@
 # Reactive SSA lowering
 
-> **Status:** architecture proposal and migration contract. The current native
-> backend still composes the combinational and FF SIR CFGs sequentially. The
-> first implementation step is limited to making that phase cut explicit and
-> independently verified; it does not claim a runtime improvement.
+> **Status:** architecture proposal and migration contract with the first
+> production sink-local rewrite enabled. The current native backend still
+> composes the combinational and FF SIR CFGs sequentially; the admitted
+> two-state static subset removes individually proved Store/Load round trips
+> without claiming that the full projection architecture is complete.
 
 ## Motivation
 
@@ -441,16 +442,22 @@ Compile both the old fused function and the new projection in tests. Execute
 randomized input states and compare final Stable/Working/triggered memory plus
 status.
 
-The first non-production prototype now admits only a bounded, branchless SIR
-projection with exact static StateSSA edges and materializable live-on-entry
-frontiers. For an exact comb-Store to FF-Load edge it:
+The first production rewrite admits only a bounded, branchless SIR projection
+with exact static StateSSA edges and executable sink-local frontiers. For an
+exact comb-Store to FF-Load edge it:
 
-1. proves that the Store dominates the Load;
-2. requires identical SIR value types and an effect-free Store;
-3. replaces the Load result with the Store's SSA source;
-4. removes the Load;
-5. removes the Store only when every retained exact consumer is admitted; and
-6. runs ordinary SIR DCE and verification on the projected function.
+1. is disabled for four-state execution until value and mask planes can be
+   proved and deleted atomically;
+2. requires identical static address, range, and SIR value type;
+3. requires an effect-free comb Store and one exact FF Load consumer;
+4. rejects any other static or dynamic read overlapping the Store range,
+   including differently shaped accesses which MemorySSA represents as kills;
+5. clones at most 16 pure instructions from one producer block immediately
+   before the FF Load;
+6. requires every state Load frontier to observe the same event StateVersion
+   and the same physically reloadable StateVersion at the sink;
+7. removes the FF Load and comb Store together; and
+8. runs ordinary SIR DCE and verification.
 
 A focused differential test executes the old fused SIR and projected SIR over
 several input states, then executes the ordinary comb projection before
@@ -458,9 +465,23 @@ comparing state. This models the simulator's dirty-comb contract: a clock-only
 projection need not publish an unobserved intermediate comb value, but the
 value must be reconstructed before an external observation.
 
-This is not yet enabled in native production emission. The next gate is native
-JIT differential execution, including triggered state and status, before the
-admitted subset can replace the old fused path.
+An additional regression preserves a 64-bit publication when a 12-bit
+overlapping Load also consumes it. The initial implementation checked only the
+64-bit MemorySSA Def's exact consumers and deleted the whole Store, delaying
+the Heliodor Linux completion marker by one 10,000-cycle polling interval.
+Inspection of the complete generated SIR exposed the differently shaped Load;
+the range-wide read index above closes that hole.
+
+On the Heliodor Linux workload the admitted production subset materializes 114
+clusters. Relative to the phase-cut baseline, native optimized SIR decreases
+from 18,811,600 to 18,791,632 bytes and MIR from 54,736,563 to 54,709,671
+bytes. A non-LTO optimized qualification completed kernel power-down at the
+exact `cy=9ae070 x3=aa pass=1` marker, with 72.249 seconds of code generation
+and 60.989 seconds of generated execution. The final release/LTO qualification
+also reached the exact marker, with 68.290 seconds of code generation and
+63.990 seconds of generated execution. These byte counts and single timing
+samples establish semantic and code-generation progress, not a release/LTO
+throughput win.
 
 ### Step D: control-pure regions
 

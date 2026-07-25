@@ -4954,6 +4954,24 @@ fn emit_chained_eu_groups(
             .map_err(|error| ChainedEmitError::Sir { phase, error })
     };
     verify_sir(&sir_eu, "before native StateSSA")?;
+    if let Some(cut) = fused_phase_cut.as_ref() {
+        let materialized = crate::optimizer::coalescing::materialize_static_event_clusters(
+            &mut sir_eu,
+            &merge_provenance,
+            cut,
+            four_state,
+        )
+        .map_err(|message| ChainedEmitError::Analysis {
+            phase: "static event materialization",
+            message,
+        })?;
+        if let Some(trace) = trace.as_deref_mut() {
+            trace
+                .reactive_graph
+                .push_str(&format!("static_materialized_clusters={materialized}\n"));
+        }
+        verify_sir(&sir_eu, "after static event materialization")?;
+    }
     if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(
         &mut sir_eu,
         stable_suffix_entry,
