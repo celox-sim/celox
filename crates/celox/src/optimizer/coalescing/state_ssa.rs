@@ -304,6 +304,7 @@ pub(super) struct StateSsa {
     read_versions: HashMap<(BlockId, usize, RegisterId), (usize, MemoryVersionId)>,
     entry_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
     exit_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
+    definitions_by_block_slot: HashMap<(BlockId, usize), Vec<(usize, MemoryVersionId)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +439,29 @@ fn phi_blocks_for_slot(cfg: &SirCfg, facts: &RawSlot, live_in: &[bool]) -> Vec<u
 }
 
 impl StateSsa {
+    /// MemorySSA version visible immediately before one instruction.
+    ///
+    /// This is the phase-correct query used by sink-local materialization:
+    /// a Load may move to the sink only when its original reaching version is
+    /// exactly the version returned here.
+    pub(super) fn version_before(
+        &self,
+        block: BlockId,
+        instruction: usize,
+        slot: usize,
+    ) -> Option<MemoryVersionId> {
+        let entry = *self.entry_versions.get(&block)?.get(slot)?;
+        let Some(definitions) = self.definitions_by_block_slot.get(&(block, slot)) else {
+            return Some(entry);
+        };
+        let index = definitions.partition_point(|(site, _)| *site < instruction);
+        Some(
+            index
+                .checked_sub(1)
+                .map_or(entry, |index| definitions[index].1),
+        )
+    }
+
     pub fn analyze(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,
@@ -973,8 +997,23 @@ impl StateSsa {
             read_versions: HashMap::default(),
             entry_versions: HashMap::default(),
             exit_versions: HashMap::default(),
+            definitions_by_block_slot: HashMap::default(),
         };
         state_ssa.build_access_graph(eu, cfg)?;
+        for access in &state_ssa.accesses {
+            if access.kind.defines_version()
+                && let (Some(block), Some(instruction)) = (access.block, access.instruction)
+            {
+                state_ssa
+                    .definitions_by_block_slot
+                    .entry((block, access.slot))
+                    .or_default()
+                    .push((instruction, access.id));
+            }
+        }
+        for definitions in state_ssa.definitions_by_block_slot.values_mut() {
+            definitions.sort_unstable_by_key(|(instruction, _)| *instruction);
+        }
         state_ssa.verify(cfg)?;
         Ok(state_ssa)
     }

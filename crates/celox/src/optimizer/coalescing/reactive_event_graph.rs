@@ -76,6 +76,8 @@ struct DemandClusterSummary {
     memory_versions: usize,
     pure_instructions: usize,
     persistent_leaves: usize,
+    state_load_leaves: usize,
+    phase_correct_state_load_leaves: usize,
     publication_definitions: usize,
     memory_phis: usize,
     control_merges: usize,
@@ -655,6 +657,9 @@ impl ReactiveEventProjection {
                 total.memory_versions += cluster.summary.memory_versions;
                 total.pure_instructions += cluster.summary.pure_instructions;
                 total.persistent_leaves += cluster.summary.persistent_leaves;
+                total.state_load_leaves += cluster.summary.state_load_leaves;
+                total.phase_correct_state_load_leaves +=
+                    cluster.summary.phase_correct_state_load_leaves;
                 total.publication_definitions += cluster.summary.publication_definitions;
                 total.memory_phis += cluster.summary.memory_phis;
                 total.control_merges += cluster.summary.control_merges;
@@ -685,7 +690,7 @@ impl ReactiveEventProjection {
             .unwrap_or(0);
         writeln!(
             output,
-            "Demand clusters: complete={} publication_backed={} semantic_region_backed={} memory_versions={} pure_instructions={} max_pure_instructions={} persistent_leaves={} memory_phis={} control_merges={} unsupported_frontiers={}",
+            "Demand clusters: complete={} publication_backed={} semantic_region_backed={} memory_versions={} pure_instructions={} max_pure_instructions={} persistent_leaves={} state_load_leaves={} phase_correct_state_load_leaves={} memory_phis={} control_merges={} unsupported_frontiers={}",
             complete_clusters,
             publication_clusters,
             regioned_clusters,
@@ -693,6 +698,8 @@ impl ReactiveEventProjection {
             cluster_totals.pure_instructions,
             max_cluster_instructions,
             cluster_totals.persistent_leaves,
+            cluster_totals.state_load_leaves,
+            cluster_totals.phase_correct_state_load_leaves,
             cluster_totals.memory_phis,
             cluster_totals.control_merges,
             cluster_totals.unsupported_frontiers,
@@ -823,6 +830,30 @@ fn build_demand_clusters(
                 &mut semantic_regions,
                 &mut summary,
             )?;
+            for &value in &value_seen {
+                let Some(ValueDefinition::Instruction(site)) = definitions.get(&value) else {
+                    continue;
+                };
+                if !matches!(
+                    eu.blocks[&site.block].instructions[site.instruction],
+                    SIRInstruction::Load(..)
+                ) {
+                    continue;
+                }
+                let Some(leaf_uses) = state_uses.get(site) else {
+                    continue;
+                };
+                for leaf_use in leaf_uses {
+                    summary.state_load_leaves += 1;
+                    let model = &models[leaf_use.model];
+                    let slot = model.accesses[leaf_use.version.0].slot;
+                    if model.version_before(consumer.block, consumer.instruction, slot)
+                        == Some(leaf_use.version)
+                    {
+                        summary.phase_correct_state_load_leaves += 1;
+                    }
+                }
+            }
             let mut semantic_regions = semantic_regions.into_iter().collect::<Vec<_>>();
             semantic_regions.sort_unstable();
             clusters.push(DemandCluster {

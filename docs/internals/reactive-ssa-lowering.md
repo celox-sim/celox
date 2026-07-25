@@ -282,6 +282,14 @@ The remaining 193 include definitions whose optimized range no longer has one
 unique containing source range. They remain valid MemorySSA clusters and must
 not be rejected or guessed solely from provenance.
 
+Point-specific MemorySSA checks of producer-cone Load frontiers report 17,030
+state Load leaves. Of these, 15,582 (91.5%) observe exactly the same
+StateVersion at the target FF use cluster and may be reloaded there. The
+remaining 1,448 must retain an earlier value or stop at a version-valid
+frontier; moving them unconditionally would change RTL semantics. Queries use
+a sorted per-block/per-slot definition index rather than rescanning all
+MemorySSA accesses per leaf.
+
 The whole retained projection still contains 13,040 instructions and exceeds
 the obsolete 4,096-instruction whole-projection limit. No individual demand
 cluster does. This is evidence for sink-local construction, not yet a runtime
