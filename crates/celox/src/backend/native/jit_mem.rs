@@ -62,7 +62,23 @@ impl JitCode {
     /// The caller must ensure `state` points to a valid simulation state
     /// buffer of sufficient size, and the JIT code is correct.
     pub unsafe fn call(&self, state: &mut [u8]) -> i64 {
-        unsafe { (self.fn_ptr)(state.as_mut_ptr()) }
+        // Standalone emitter/ISel tests pass only their semantic state bytes,
+        // while native functions use the following memory as a private
+        // spill/scratch/save arena. Production NativeBackend calls `fn_ptr`
+        // directly with its already-extended per-instance allocation.
+        const STANDALONE_ARENA_BYTES: usize = 1024 * 1024;
+        let total_bytes = state
+            .len()
+            .checked_add(STANDALONE_ARENA_BYTES)
+            .expect("standalone native state size overflow");
+        let mut owned = vec![0u64; total_bytes.div_ceil(8)];
+        let owned_bytes = unsafe {
+            std::slice::from_raw_parts_mut(owned.as_mut_ptr().cast::<u8>(), owned.len() * 8)
+        };
+        owned_bytes[..state.len()].copy_from_slice(state);
+        let result = unsafe { (self.fn_ptr)(owned_bytes.as_mut_ptr()) };
+        state.copy_from_slice(&owned_bytes[..state.len()]);
+        result
     }
 }
 

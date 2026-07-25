@@ -1,9 +1,13 @@
 //! x86-64 code emission: MIR + physical register assignment → machine code.
 //!
 //! Uses iced-x86's CodeAssembler for instruction encoding.
-//! ABI: System V AMD64 — sim state base in RDI (moved to R15 in prologue).
+//! ABI: System V AMD64 at the external boundary. On supported x86-64 hosts,
+//! generated code temporarily uses an otherwise available segment base for
+//! simulation-state/allocator-arena addressing, leaving every non-stack GPR
+//! available to allocation. Other hosts reserve R15 as the state base.
 //! Function signature: `fn(unified_mem: *mut u8) -> i64`
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -12,7 +16,7 @@ use iced_x86::code_asm::*;
 
 use celox_analysis::cfg::ForwardControlFlowGraph;
 
-use crate::backend::native::features::VariableShiftEncoding;
+use crate::backend::native::features::{StateBaseStrategy, VariableShiftEncoding};
 use crate::backend::native::mir::*;
 use crate::backend::native::regalloc::assignment::{
     ALLOCATABLE_REGS, AssignmentMap, PhysReg, PhysRegSet, clobbers,
@@ -27,9 +31,6 @@ use crate::lane_aggregate_plan::{
 };
 
 pub use crate::backend::native::ssa_destroy::SsaDestructionError;
-
-/// Reserved register for simulation state base pointer.
-const SIM_BASE: AsmRegister64 = r15;
 
 // ────────────────────────────────────────────────────────────────
 // PhysReg → iced-x86 register mapping
@@ -51,6 +52,7 @@ fn preg_to_reg64(preg: PhysReg) -> AsmRegister64 {
         PhysReg::R12 => r12,
         PhysReg::R13 => r13,
         PhysReg::R14 => r14,
+        PhysReg::R15 => r15,
     }
 }
 
@@ -70,6 +72,7 @@ fn preg_to_reg32(preg: PhysReg) -> AsmRegister32 {
         PhysReg::R12 => r12d,
         PhysReg::R13 => r13d,
         PhysReg::R14 => r14d,
+        PhysReg::R15 => r15d,
     }
 }
 
@@ -89,6 +92,7 @@ fn preg_to_reg16(preg: PhysReg) -> AsmRegister16 {
         PhysReg::R12 => r12w,
         PhysReg::R13 => r13w,
         PhysReg::R14 => r14w,
+        PhysReg::R15 => r15w,
     }
 }
 
@@ -108,6 +112,7 @@ fn preg_to_reg8(preg: PhysReg) -> AsmRegister8 {
         PhysReg::R12 => r12b,
         PhysReg::R13 => r13b,
         PhysReg::R14 => r14b,
+        PhysReg::R15 => r15b,
     }
 }
 
@@ -125,12 +130,196 @@ fn resolve(assignment: &AssignmentMap, vreg: VReg) -> PhysReg {
 // Memory operand helpers
 // ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+struct NativeArenaLayout {
+    spill_base: i32,
+    scratch_base: i32,
+    scratch_size: i32,
+    total_size: u32,
+    callee_saved: Vec<PhysReg>,
+}
+
+impl NativeArenaLayout {
+    fn build(
+        func: &MFunction,
+        assignment: &AssignmentMap,
+        state_size: usize,
+        spill_frame_size: u32,
+        state_base: StateBaseStrategy,
+    ) -> Result<Self, EmitInputError> {
+        fn align16(value: usize) -> Option<usize> {
+            value.checked_add(15).map(|value| value & !15)
+        }
+
+        let spill_base = align16(state_size).ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "simulation-state size overflows native arena layout",
+            )
+        })?;
+        let scratch_base = align16(
+            spill_base
+                .checked_add(spill_frame_size as usize)
+                .ok_or_else(|| {
+                    EmitInputError::new(
+                        "EMIT.NATIVE_ARENA_RANGE",
+                        None,
+                        None,
+                        None,
+                        "spill frame overflows native arena layout",
+                    )
+                })?,
+        )
+        .ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "spill-frame alignment overflows native arena layout",
+            )
+        })?;
+        let aggregate_scratch = func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                MInst::LaneAggregate { inputs, .. } => inputs.len().checked_mul(8),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        // Four qwords cover the largest fixed-register save set used by one
+        // inline memory pseudo. The same instruction-local area is reused by
+        // div/shift and parallel-copy cycle breaking.
+        let scratch_size = align16(aggregate_scratch.max(4 * 8)).ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "instruction scratch area overflows native arena layout",
+            )
+        })?;
+        let callee_saved =
+            used_callee_saved(func, assignment, state_base == StateBaseStrategy::R15);
+        let total_size = align16(scratch_base.checked_add(scratch_size).ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "native arena size overflows",
+            )
+        })?)
+        .ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "native arena alignment overflows",
+            )
+        })?;
+
+        let to_i32 = |value: usize, what: &'static str| {
+            i32::try_from(value).map_err(|_| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    format!("{what} exceeds signed 32-bit x86 displacement"),
+                )
+            })
+        };
+        Ok(Self {
+            spill_base: to_i32(spill_base, "spill base")?,
+            scratch_base: to_i32(scratch_base, "scratch base")?,
+            scratch_size: to_i32(scratch_size, "scratch size")?,
+            total_size: u32::try_from(total_size).map_err(|_| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "native arena size exceeds u32",
+                )
+            })?,
+            callee_saved,
+        })
+    }
+}
+
+fn saved_gpr_xmm(index: usize) -> AsmRegisterXmm {
+    match index {
+        0 => xmm9,
+        1 => xmm10,
+        2 => xmm11,
+        3 => xmm12,
+        4 => xmm13,
+        5 => xmm14,
+        _ => unreachable!("x86-64 has at most six allocatable callee-saved GPRs"),
+    }
+}
+
+thread_local! {
+    /// Emission-only relocation from logical allocator stack slots into the
+    /// per-instance area following simulation state. Native functions are
+    /// compiled concurrently, so this context is thread-local rather than
+    /// process-global.
+    static ACTIVE_SPILL_BASE: Cell<i32> = const { Cell::new(0) };
+    static ACTIVE_SCRATCH_BASE: Cell<i32> = const { Cell::new(0) };
+    static ACTIVE_STATE_BASE: Cell<StateBaseStrategy> =
+        const { Cell::new(StateBaseStrategy::R15) };
+}
+
+fn state_base_strategy() -> StateBaseStrategy {
+    ACTIVE_STATE_BASE.with(Cell::get)
+}
+
+fn physical_offset(base: BaseReg, offset: i32) -> i32 {
+    match base {
+        BaseReg::SimState => offset,
+        BaseReg::StackFrame => ACTIVE_SPILL_BASE.with(|base| {
+            base.get()
+                .checked_add(offset)
+                .expect("verified stack offset fits native arena displacement")
+        }),
+    }
+}
+
 fn mem_operand(base: BaseReg, offset: i32) -> AsmMemoryOperand {
-    let base_reg = match base {
-        BaseReg::SimState => SIM_BASE,
-        BaseReg::StackFrame => rsp,
-    };
-    base_reg + offset
+    let offset = physical_offset(base, offset);
+    match state_base_strategy() {
+        StateBaseStrategy::Fs => ptr(offset).fs(),
+        StateBaseStrategy::Gs => ptr(offset).gs(),
+        StateBaseStrategy::R15 => r15 + offset,
+    }
+}
+
+fn scratch_offset(slot: usize) -> i32 {
+    ACTIVE_SCRATCH_BASE.with(|base| {
+        base.get()
+            .checked_add(i32::try_from(slot * 8).expect("scratch slot offset"))
+            .expect("scratch slot displacement")
+    })
+}
+
+fn scratch_operand(slot: usize) -> AsmMemoryOperand {
+    let offset = scratch_offset(slot);
+    match state_base_strategy() {
+        StateBaseStrategy::Fs => ptr(offset).fs(),
+        StateBaseStrategy::Gs => ptr(offset).gs(),
+        StateBaseStrategy::R15 => r15 + offset,
+    }
+}
+
+fn scratch_stack_offset(slot: usize) -> i32 {
+    ACTIVE_SPILL_BASE.with(|spill| scratch_offset(slot) - spill.get())
 }
 
 fn mem_operand_indexed(
@@ -139,16 +328,29 @@ fn mem_operand_indexed(
     index: AsmRegister64,
     scale: u8,
 ) -> AsmMemoryOperand {
-    let base_reg = match base {
-        BaseReg::SimState => SIM_BASE,
-        BaseReg::StackFrame => rsp,
-    };
-    match scale {
-        1 => base_reg + index + offset,
-        2 => base_reg + index * 2 + offset,
-        4 => base_reg + index * 4 + offset,
-        8 => base_reg + index * 8 + offset,
+    let offset = physical_offset(base, offset);
+    match (state_base_strategy(), scale) {
+        (StateBaseStrategy::Fs, 1) => ptr(index + offset).fs(),
+        (StateBaseStrategy::Fs, 2) => ptr(index * 2 + offset).fs(),
+        (StateBaseStrategy::Fs, 4) => ptr(index * 4 + offset).fs(),
+        (StateBaseStrategy::Fs, 8) => ptr(index * 8 + offset).fs(),
+        (StateBaseStrategy::Gs, 1) => ptr(index + offset).gs(),
+        (StateBaseStrategy::Gs, 2) => ptr(index * 2 + offset).gs(),
+        (StateBaseStrategy::Gs, 4) => ptr(index * 4 + offset).gs(),
+        (StateBaseStrategy::Gs, 8) => ptr(index * 8 + offset).gs(),
+        (StateBaseStrategy::R15, 1) => r15 + index + offset,
+        (StateBaseStrategy::R15, 2) => r15 + index * 2 + offset,
+        (StateBaseStrategy::R15, 4) => r15 + index * 4 + offset,
+        (StateBaseStrategy::R15, 8) => r15 + index * 8 + offset,
         _ => unreachable!("invalid indexed-memory scale {scale}"),
+    }
+}
+
+fn emit_state_base(asm: &mut CodeAssembler, destination: AsmRegister64) -> Result<(), IcedError> {
+    match state_base_strategy() {
+        StateBaseStrategy::Fs => asm.rdfsbase(destination),
+        StateBaseStrategy::Gs => asm.rdgsbase(destination),
+        StateBaseStrategy::R15 => asm.mov(destination, r15),
     }
 }
 
@@ -259,6 +461,9 @@ fn emit_sparse_commit_worklist(
     // r12 = active bitmap word index, r13 = captured bits in that word.
     // Clear each word before processing it. Sparse writes cannot execute
     // concurrently with this event-tail commit, so no mark can be lost.
+    // This inline region owns every allocatable GPR, so R15 can cache the
+    // otherwise implicit GS base while constructing ordinary pointers.
+    emit_state_base(asm, r15)?;
     asm.xor(r12d, r12d)?;
 
     let active_word_count = active_capacity.div_ceil(64);
@@ -275,8 +480,8 @@ fn emit_sparse_commit_worklist(
     asm.cmp(r12, active_word_count as i32)?;
     asm.jae(active_done)?;
 
-    asm.mov(r13, qword_ptr(SIM_BASE + r12 * 8 + active_bits_offset))?;
-    asm.mov(qword_ptr(SIM_BASE + r12 * 8 + active_bits_offset), 0i32)?;
+    asm.mov(r13, qword_ptr(r15 + r12 * 8 + active_bits_offset))?;
+    asm.mov(qword_ptr(r15 + r12 * 8 + active_bits_offset), 0i32)?;
 
     asm.set_label(&mut active_bits)?;
     asm.test(r13, r13)?;
@@ -308,17 +513,17 @@ fn emit_sparse_commit_worklist(
     // Clear the fixed summary word and take the fixed dirty word. A zero dirty
     // word is tolerated for restored/corrupt checkpoint metadata.
     asm.mov(r10, qword_ptr(rbx + 40))?;
-    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+    asm.mov(qword_ptr(r15 + r10), 0i32)?;
     asm.mov(r10, qword_ptr(rbx + 24))?;
-    asm.mov(r8, qword_ptr(SIM_BASE + r10))?;
-    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+    asm.mov(r8, qword_ptr(r15 + r10))?;
+    asm.mov(qword_ptr(r15 + r10), 0i32)?;
     asm.test(r8, r8)?;
     asm.je(active_next)?;
 
     asm.mov(rsi, qword_ptr(rbx))?;
-    asm.add(rsi, SIM_BASE)?;
+    asm.add(rsi, r15)?;
     asm.mov(rdi, qword_ptr(rbx + 8))?;
-    asm.add(rdi, SIM_BASE)?;
+    asm.add(rdi, r15)?;
     asm.mov(r11, qword_ptr(rbx + 16))?;
     emit_sparse_runtime_plane_copy(asm)?;
 
@@ -327,10 +532,10 @@ fn emit_sparse_commit_worklist(
     asm.je(single_plane_done)?;
     asm.mov(rsi, qword_ptr(rbx))?;
     asm.add(rsi, qword_ptr(rbx + 16))?;
-    asm.add(rsi, SIM_BASE)?;
+    asm.add(rsi, r15)?;
     asm.mov(rdi, qword_ptr(rbx + 8))?;
     asm.add(rdi, qword_ptr(rbx + 16))?;
-    asm.add(rdi, SIM_BASE)?;
+    asm.add(rdi, r15)?;
     emit_sparse_runtime_plane_copy(asm)?;
     asm.set_label(&mut single_plane_done)?;
     asm.jmp(active_next)?;
@@ -350,8 +555,8 @@ fn emit_sparse_commit_worklist(
     asm.mov(r10, r14)?;
     asm.shl(r10, 3)?;
     asm.add(r10, qword_ptr(rbx + 40))?;
-    asm.mov(rax, qword_ptr(SIM_BASE + r10))?;
-    asm.mov(qword_ptr(SIM_BASE + r10), 0i32)?;
+    asm.mov(rax, qword_ptr(r15 + r10))?;
+    asm.mov(qword_ptr(r15 + r10), 0i32)?;
 
     asm.set_label(&mut summary_bits)?;
     asm.test(rax, rax)?;
@@ -368,8 +573,8 @@ fn emit_sparse_commit_worklist(
     asm.mov(r9, r10)?;
     asm.shl(r9, 3)?;
     asm.add(r9, qword_ptr(rbx + 24))?;
-    asm.mov(r8, qword_ptr(SIM_BASE + r9))?;
-    asm.mov(qword_ptr(SIM_BASE + r9), 0i32)?;
+    asm.mov(r8, qword_ptr(r15 + r9))?;
+    asm.mov(qword_ptr(r15 + r9), 0i32)?;
 
     let mut dirty_loop = asm.create_label();
     asm.set_label(&mut dirty_loop)?;
@@ -390,10 +595,10 @@ fn emit_sparse_commit_worklist(
 
     asm.mov(rsi, qword_ptr(rbx))?;
     asm.add(rsi, rdx)?;
-    asm.add(rsi, SIM_BASE)?;
+    asm.add(rsi, r15)?;
     asm.mov(rdi, qword_ptr(rbx + 8))?;
     asm.add(rdi, rdx)?;
-    asm.add(rdi, SIM_BASE)?;
+    asm.add(rdi, r15)?;
     asm.mov(r11, qword_ptr(rbx + 16))?;
     asm.sub(r11, rdx)?;
     emit_sparse_runtime_plane_copy(asm)?;
@@ -407,11 +612,11 @@ fn emit_sparse_commit_worklist(
     asm.mov(rsi, qword_ptr(rbx))?;
     asm.add(rsi, qword_ptr(rbx + 16))?;
     asm.add(rsi, rdx)?;
-    asm.add(rsi, SIM_BASE)?;
+    asm.add(rsi, r15)?;
     asm.mov(rdi, qword_ptr(rbx + 8))?;
     asm.add(rdi, qword_ptr(rbx + 16))?;
     asm.add(rdi, rdx)?;
-    asm.add(rdi, SIM_BASE)?;
+    asm.add(rdi, r15)?;
     emit_sparse_runtime_plane_copy(asm)?;
     asm.set_label(&mut plane_done)?;
     asm.jmp(dirty_loop)?;
@@ -444,9 +649,14 @@ const CALLEE_SAVED: &[PhysReg] = &[
     PhysReg::R12,
     PhysReg::R13,
     PhysReg::R14,
+    PhysReg::R15,
 ];
 
-fn used_callee_saved(func: &MFunction, assignment: &AssignmentMap) -> Vec<PhysReg> {
+fn used_callee_saved(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    reserve_r15_state_base: bool,
+) -> Vec<PhysReg> {
     let mut used = PhysRegSet::new();
     for &preg in assignment.map.values() {
         used.insert(preg);
@@ -458,6 +668,9 @@ fn used_callee_saved(func: &MFunction, assignment: &AssignmentMap) -> Vec<PhysRe
         for &preg in clobbers(inst) {
             used.insert(preg);
         }
+    }
+    if reserve_r15_state_base {
+        used.insert(PhysReg::R15);
     }
     CALLEE_SAVED
         .iter()
@@ -477,6 +690,9 @@ pub struct EmitResult {
     pub text_size: usize,
     /// Stack frame size (bytes) for spill slots, excluding callee-saved pushes.
     pub frame_size: u32,
+    /// Total bytes required by simulation state plus the per-function native
+    /// spill/scratch/save arena.
+    pub required_state_size: u32,
     /// Machine-code offsets for MIR basic-block entry labels.
     pub block_offsets: Vec<(BlockId, u64)>,
 }
@@ -492,6 +708,7 @@ pub(crate) struct NativeFunctionTrace {
     pub optimized_sir: String,
     pub state_layout: String,
     pub mir_before_regalloc: String,
+    pub mir_after_late_memory_folds: String,
     pub mir_after_scheduling: String,
     pub mir_after_regalloc: String,
     pub register_assignment: String,
@@ -728,8 +945,7 @@ fn emit_parallel_copy_plan(
                 destination,
                 source,
             } => {
-                let stack_adjustment = if temporary_live { 8 } else { 0 };
-                emit_single_parallel_copy(asm, destination, source, stack_adjustment)?;
+                emit_single_parallel_copy(asm, destination, source, 0)?;
             }
             ParallelCopyOperation::SwapRegisters { left, right } => {
                 if temporary_live {
@@ -749,11 +965,12 @@ fn emit_parallel_copy_plan(
                 }
                 match location {
                     ParallelCopyDestination::Register(register) => {
-                        asm.push(preg_to_reg64(register))?
+                        asm.mov(qword_ptr(scratch_operand(0)), preg_to_reg64(register))?
                     }
                     ParallelCopyDestination::Stack(slot) => {
                         let offset = checked_parallel_copy_offset(slot, 0)?;
-                        asm.push(qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
+                        asm.movq(xmm0, qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
+                        asm.movq(qword_ptr(scratch_operand(0)), xmm0)?;
                     }
                 }
                 temporary_live = true;
@@ -767,13 +984,12 @@ fn emit_parallel_copy_plan(
                 }
                 match location {
                     ParallelCopyDestination::Register(register) => {
-                        asm.pop(preg_to_reg64(register))?
+                        asm.mov(preg_to_reg64(register), qword_ptr(scratch_operand(0)))?
                     }
                     ParallelCopyDestination::Stack(slot) => {
-                        // POP computes an RSP-based destination after advancing
-                        // RSP, so this uses the unadjusted frame displacement.
                         let offset = checked_parallel_copy_offset(slot, 0)?;
-                        asm.pop(qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
+                        asm.movq(xmm0, qword_ptr(scratch_operand(0)))?;
+                        asm.movq(qword_ptr(mem_operand(BaseReg::StackFrame, offset)), xmm0)?;
                     }
                 }
                 temporary_live = false;
@@ -1314,7 +1530,35 @@ pub fn emit(
     verify_emission_inputs(func, assignment, spill_frame_size)?;
     let plan = SsaDestructionPlan::build(func, assignment)?;
     plan.verify(func, assignment, spill_frame_size)?;
-    emit_planned(func, assignment, spill_frame_size, &plan)
+    emit_planned(
+        func,
+        assignment,
+        spill_frame_size,
+        inferred_standalone_state_size(func),
+        &plan,
+    )
+}
+
+/// Direct emitter tests do not carry a complete `MemoryLayout`. Place their
+/// native arena beyond every statically named SimState byte plus a guard so
+/// test-owned sentinel bytes cannot alias prologue/scratch storage.
+fn inferred_standalone_state_size(func: &MFunction) -> usize {
+    let static_end = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .flat_map(|inst| {
+            [
+                super::memory_effect::reads(inst),
+                super::memory_effect::writes(inst),
+            ]
+        })
+        .flat_map(|effects| effects.ranges().collect::<Vec<_>>())
+        .filter(|range| range.base == BaseReg::SimState && range.offset >= 0)
+        .filter_map(|range| usize::try_from(range.end()?).ok())
+        .max()
+        .unwrap_or(0);
+    static_end.saturating_add(4096)
 }
 
 /// Emit using the allocation phase's explicit SSA destruction artifact.
@@ -1324,11 +1568,12 @@ pub(crate) fn emit_with_plan(
     func: &MFunction,
     assignment: &AssignmentMap,
     spill_frame_size: u32,
+    state_size: usize,
     plan: &SsaDestructionPlan,
 ) -> Result<EmitResult, EmitError> {
     verify_emission_inputs(func, assignment, spill_frame_size)?;
     plan.verify(func, assignment, spill_frame_size)?;
-    emit_planned(func, assignment, spill_frame_size, plan)
+    emit_planned(func, assignment, spill_frame_size, state_size, plan)
 }
 
 fn verify_emission_inputs(
@@ -1409,10 +1654,16 @@ fn verify_emission_inputs(
         }
     }
 
-    // x86-64's `sub rsp, imm32` encodes a signed immediate.  Include the
-    // alignment padding and callee-save pushes in the proof rather than
-    // allowing a large (but otherwise well-formed) frame to wrap at encoding.
-    checked_frame_size(spill_frame_size, used_callee_saved(func, assignment).len())?;
+    if spill_frame_size > (i32::MAX as u32).saturating_sub(15) {
+        return Err(EmitInputError::new(
+            "EMIT.FRAME_SIZE_RANGE",
+            None,
+            None,
+            None,
+            "aligned spill frame exceeds signed 32-bit x86 displacement",
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -1446,70 +1697,11 @@ fn verify_stack_frame_access(
     .into())
 }
 
-fn checked_frame_size(
-    spill_frame_size: u32,
-    callee_saved_count: usize,
-) -> Result<u32, EmitInputError> {
-    let callee_push_size = u32::try_from(callee_saved_count)
-        .ok()
-        .and_then(|count| count.checked_mul(8))
-        .ok_or_else(|| {
-            EmitInputError::new(
-                "EMIT.FRAME_SIZE_RANGE",
-                None,
-                None,
-                None,
-                "callee-save area exceeds the addressable native stack frame",
-            )
-        })?;
-    let total_push = callee_push_size.checked_add(8).ok_or_else(|| {
-        EmitInputError::new(
-            "EMIT.FRAME_SIZE_RANGE",
-            None,
-            None,
-            None,
-            "native prologue size overflow",
-        )
-    })?;
-    let misalignment = total_push.checked_add(spill_frame_size).ok_or_else(|| {
-        EmitInputError::new(
-            "EMIT.FRAME_SIZE_RANGE",
-            None,
-            None,
-            None,
-            "spill frame plus native prologue exceeds u32",
-        )
-    })? % 16;
-    let padding = if misalignment == 0 {
-        0
-    } else {
-        16 - misalignment
-    };
-    let frame_size = spill_frame_size.checked_add(padding).ok_or_else(|| {
-        EmitInputError::new(
-            "EMIT.FRAME_SIZE_RANGE",
-            None,
-            None,
-            None,
-            "aligned spill frame exceeds u32",
-        )
-    })?;
-    i32::try_from(frame_size).map_err(|_| {
-        EmitInputError::new(
-            "EMIT.FRAME_SIZE_RANGE",
-            None,
-            None,
-            None,
-            "aligned spill frame exceeds signed 32-bit x86 addressing",
-        )
-    })?;
-    Ok(frame_size)
-}
-
 fn emit_planned(
     func: &MFunction,
     assignment: &AssignmentMap,
     spill_frame_size: u32,
+    state_size: usize,
     plan: &SsaDestructionPlan,
 ) -> Result<EmitResult, EmitError> {
     let mut asm = CodeAssembler::new(64)?;
@@ -1534,22 +1726,41 @@ fn emit_planned(
         }
     }
 
-    let callee_saved = used_callee_saved(func, assignment);
-    let frame_size = checked_frame_size(spill_frame_size, callee_saved.len())?;
+    let state_base = func.target_features.state_base();
+    let arena =
+        NativeArenaLayout::build(func, assignment, state_size, spill_frame_size, state_base)?;
+    debug_assert!(arena.scratch_size >= 4 * 8);
+    ACTIVE_SPILL_BASE.with(|base| base.set(arena.spill_base));
+    ACTIVE_SCRATCH_BASE.with(|base| base.set(arena.scratch_base));
+    ACTIVE_STATE_BASE.with(|active| active.set(state_base));
 
     let mut epilogue_label = asm.create_label();
     let use_counts = count_vreg_uses(func, plan);
 
     // ── Prologue ──
     {
-        for &reg in &callee_saved {
-            asm.push(preg_to_reg64(reg))?;
+        // The GPR allocator does not own vector registers. Preserve the used
+        // callee-saved GPRs outside that file. GS mode additionally preserves
+        // the caller's segment base; fallback mode borrows the saved R15.
+        match state_base {
+            StateBaseStrategy::Fs => {
+                asm.rdfsbase(rax)?;
+                asm.movq(xmm15, rax)?;
+            }
+            StateBaseStrategy::Gs => {
+                asm.rdgsbase(rax)?;
+                asm.movq(xmm15, rax)?;
+            }
+            StateBaseStrategy::R15 => {}
         }
-        asm.push(SIM_BASE)?;
-        if frame_size > 0 {
-            asm.sub(rsp, frame_size as i32)?;
+        for (index, &reg) in arena.callee_saved.iter().enumerate() {
+            asm.movq(saved_gpr_xmm(index), preg_to_reg64(reg))?;
         }
-        asm.mov(SIM_BASE, rdi)?;
+        match state_base {
+            StateBaseStrategy::Fs => asm.wrfsbase(rdi)?,
+            StateBaseStrategy::Gs => asm.wrgsbase(rdi)?,
+            StateBaseStrategy::R15 => asm.mov(r15, rdi)?,
+        }
     }
 
     // ── Blocks ──
@@ -1708,12 +1919,19 @@ fn emit_planned(
 
     // ── Epilogue ──
     asm.set_label(&mut epilogue_label)?;
-    if frame_size > 0 {
-        asm.add(rsp, frame_size as i32)?;
+    for (index, &reg) in arena.callee_saved.iter().enumerate().rev() {
+        asm.movq(preg_to_reg64(reg), saved_gpr_xmm(index))?;
     }
-    asm.pop(SIM_BASE)?;
-    for &reg in callee_saved.iter().rev() {
-        asm.pop(preg_to_reg64(reg))?;
+    match state_base {
+        StateBaseStrategy::Fs => {
+            asm.movq(r11, xmm15)?;
+            asm.wrfsbase(r11)?;
+        }
+        StateBaseStrategy::Gs => {
+            asm.movq(r11, xmm15)?;
+            asm.wrgsbase(r11)?;
+        }
+        StateBaseStrategy::R15 => {}
     }
     asm.ret()?;
 
@@ -1831,7 +2049,8 @@ fn emit_planned(
     Ok(EmitResult {
         code: result.inner.code_buffer,
         text_size,
-        frame_size,
+        frame_size: spill_frame_size,
+        required_state_size: arena.total_size,
         block_offsets,
     })
 }
@@ -2516,6 +2735,9 @@ fn emit_lane_aggregate_scalar(
         let mut free = ALLOCATABLE_REGS
             .iter()
             .copied()
+            .filter(|register| {
+                state_base_strategy() != StateBaseStrategy::R15 || *register != PhysReg::R15
+            })
             .filter(|register| *register != PhysReg::RCX && *register != output)
             .collect::<Vec<_>>();
         let mut node_registers = vec![None; plan.nodes.len()];
@@ -2733,7 +2955,7 @@ fn emit_inst(
                 }
                 let mut copied = vector_bytes;
                 if copied != *byte_len {
-                    asm.push(rax)?;
+                    asm.mov(qword_ptr(scratch_operand(0)), rax)?;
                     if copied + 8 <= *byte_len {
                         asm.mov(
                             rax,
@@ -2777,22 +2999,28 @@ fn emit_inst(
                             al,
                         )?;
                     }
-                    asm.pop(rax)?;
+                    asm.mov(rax, qword_ptr(scratch_operand(0)))?;
                 }
                 return Ok(false);
             }
             let qwords = byte_len / 8;
             let rem = byte_len % 8;
             if rem != 0 {
-                asm.push(rax)?;
+                asm.mov(qword_ptr(scratch_operand(0)), rax)?;
             }
             if qwords != 0 {
-                asm.push(rcx)?;
+                asm.mov(qword_ptr(scratch_operand(1)), rcx)?;
             }
-            asm.push(rsi)?;
-            asm.push(rdi)?;
-            asm.lea(rsi, mem_operand(BaseReg::SimState, *src_offset))?;
-            asm.lea(rdi, mem_operand(BaseReg::SimState, *dst_offset))?;
+            asm.mov(qword_ptr(scratch_operand(2)), rsi)?;
+            asm.mov(qword_ptr(scratch_operand(3)), rdi)?;
+            emit_state_base(asm, rsi)?;
+            asm.mov(rdi, rsi)?;
+            if *src_offset != 0 {
+                asm.add(rsi, *src_offset)?;
+            }
+            if *dst_offset != 0 {
+                asm.add(rdi, *dst_offset)?;
+            }
             if qwords > 0 {
                 asm.mov(rcx, qwords as i64)?;
                 // MOVS has the same forward-copy semantics as the scalar loop
@@ -2817,13 +3045,13 @@ fn emit_inst(
                 asm.mov(al, byte_ptr(rsi))?;
                 asm.mov(byte_ptr(rdi), al)?;
             }
-            asm.pop(rdi)?;
-            asm.pop(rsi)?;
+            asm.mov(rdi, qword_ptr(scratch_operand(3)))?;
+            asm.mov(rsi, qword_ptr(scratch_operand(2)))?;
             if qwords != 0 {
-                asm.pop(rcx)?;
+                asm.mov(rcx, qword_ptr(scratch_operand(1)))?;
             }
             if rem != 0 {
-                asm.pop(rax)?;
+                asm.mov(rax, qword_ptr(scratch_operand(0)))?;
             }
         }
 
@@ -2839,12 +3067,15 @@ fn emit_inst(
             let rem = byte_len % 8;
             let pattern = u64::from(*value) * 0x0101_0101_0101_0101;
 
-            asm.push(rax)?;
+            asm.mov(qword_ptr(scratch_operand(0)), rax)?;
             if qwords != 0 {
-                asm.push(rcx)?;
+                asm.mov(qword_ptr(scratch_operand(1)), rcx)?;
             }
-            asm.push(rdi)?;
-            asm.lea(rdi, mem_operand(BaseReg::SimState, *dst_offset))?;
+            asm.mov(qword_ptr(scratch_operand(2)), rdi)?;
+            emit_state_base(asm, rdi)?;
+            if *dst_offset != 0 {
+                asm.add(rdi, *dst_offset)?;
+            }
             asm.mov(rax, pattern as i64)?;
             if qwords != 0 {
                 asm.mov(rcx, qwords as i64)?;
@@ -2861,11 +3092,11 @@ fn emit_inst(
             if rem % 2 == 1 {
                 asm.mov(byte_ptr(rdi), al)?;
             }
-            asm.pop(rdi)?;
+            asm.mov(rdi, qword_ptr(scratch_operand(2)))?;
             if qwords != 0 {
-                asm.pop(rcx)?;
+                asm.mov(rcx, qword_ptr(scratch_operand(1)))?;
             }
-            asm.pop(rax)?;
+            asm.mov(rax, qword_ptr(scratch_operand(0)))?;
         }
 
         MInst::SparseCommit {
@@ -3330,19 +3561,16 @@ fn emit_inst(
                 .scalar_inputs_for_root(usize::from(*root))
                 .expect("verified sink-local aggregate inputs");
             debug_assert_eq!(input_registers.len(), inputs.len());
-            for input in inputs {
-                asm.push(preg_to_reg64(resolve(assignment, *input)))?;
+            for (index, input) in inputs.iter().enumerate() {
+                asm.mov(
+                    qword_ptr(scratch_operand(index)),
+                    preg_to_reg64(resolve(assignment, *input)),
+                )?;
             }
             let input_stack_offsets = input_registers
                 .into_iter()
                 .enumerate()
-                .map(|(index, register)| {
-                    let reverse = inputs.len() - 1 - index;
-                    (
-                        register,
-                        i32::try_from(reverse * 8).expect("aggregate input stack offset"),
-                    )
-                })
+                .map(|(index, register)| (register, scratch_stack_offset(index)))
                 .collect::<HashMap<_, _>>();
             emit_lane_aggregate_scalar(
                 asm,
@@ -3351,12 +3579,6 @@ fn emit_inst(
                 &input_stack_offsets,
                 resolve(assignment, *dst),
             )?;
-            if !inputs.is_empty() {
-                asm.add(
-                    rsp,
-                    i32::try_from(inputs.len() * 8).expect("aggregate input stack size"),
-                )?;
-            }
         }
 
         MInst::LoadPtrIndexed {
@@ -4151,15 +4373,15 @@ fn emit_shift(
             debug_assert!(r == rcx, "legacy shift rhs must be in RCX");
             if d == rcx && l != rcx {
                 // Moving lhs into RCX first would destroy the count in CL.
-                // Shift a saved copy in place and pop the result into RCX, so
+                // Shift an arena-saved copy in place and reload it into RCX, so
                 // the original lhs register remains untouched.
-                asm.push(l)?;
+                asm.mov(qword_ptr(scratch_operand(0)), l)?;
                 match op {
-                    ShiftOp::Shr => asm.shr(qword_ptr(rsp), cl)?,
-                    ShiftOp::Shl => asm.shl(qword_ptr(rsp), cl)?,
-                    ShiftOp::Sar => asm.sar(qword_ptr(rsp), cl)?,
+                    ShiftOp::Shr => asm.shr(qword_ptr(scratch_operand(0)), cl)?,
+                    ShiftOp::Shl => asm.shl(qword_ptr(scratch_operand(0)), cl)?,
+                    ShiftOp::Sar => asm.sar(qword_ptr(scratch_operand(0)), cl)?,
                 }
-                asm.pop(rcx)?;
+                asm.mov(rcx, qword_ptr(scratch_operand(0)))?;
             } else {
                 if d != l {
                     asm.mov(d, l)?;
@@ -4211,7 +4433,7 @@ fn emit_divrem(
     // Use a stack copy instead of an unmodeled scratch register clobber.
     let rhs_on_stack = r == rax || r == rdx;
     if rhs_on_stack {
-        asm.push(r)?;
+        asm.mov(qword_ptr(scratch_operand(0)), r)?;
     }
 
     if l != rax {
@@ -4224,11 +4446,10 @@ fn emit_divrem(
     }
     if rhs_on_stack {
         if signed {
-            asm.idiv(qword_ptr(rsp))?;
+            asm.idiv(qword_ptr(scratch_operand(0)))?;
         } else {
-            asm.div(qword_ptr(rsp))?;
+            asm.div(qword_ptr(scratch_operand(0)))?;
         }
-        asm.add(rsp, 8)?;
     } else if signed {
         asm.idiv(r)?;
     } else {
@@ -4931,6 +5152,8 @@ fn emit_chained_eu_groups(
     let ra =
         regalloc::run_regalloc_with_label_and_trace(&mut mfunc, label, regalloc_trace.as_mut())?;
     if let (Some(trace), Some(regalloc_trace)) = (trace.as_deref_mut(), regalloc_trace.as_mut()) {
+        trace.mir_after_late_memory_folds =
+            std::mem::take(&mut regalloc_trace.mir_after_late_memory_folds);
         trace.mir_after_scheduling = std::mem::take(&mut regalloc_trace.mir_after_scheduling);
     }
     if let Some(start) = regalloc_start {
@@ -5013,6 +5236,10 @@ fn emit_chained_eu_groups(
         &mfunc,
         &ra.assignment,
         ra.spill_frame_size,
+        layout
+            .merged_total_size
+            .checked_add(layout.triggered_bits_total_size)
+            .expect("native simulation-state size overflow"),
         &ra.ssa_destruction,
     )?;
     if let Some(trace) = trace {
@@ -5679,7 +5906,7 @@ fn log_sir_width_stats(eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsolute
 #[cfg(test)]
 mod shift_encoding_tests {
     use super::*;
-    use crate::backend::native::features::X86Features;
+    use crate::backend::native::features::{StateBaseStrategy, X86Features};
     use crate::backend::native::jit_mem::JitCode;
     use crate::backend::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
@@ -6153,7 +6380,7 @@ mod shift_encoding_tests {
     }
 
     #[test]
-    fn legacy_shift_with_rcx_destination_uses_a_stack_copy() {
+    fn legacy_shift_with_rcx_destination_uses_an_r15_arena_copy() {
         let instructions = decode_shift(
             ShiftOp::Shl,
             VariableShiftEncoding::LegacyCl,
@@ -6167,12 +6394,54 @@ mod shift_encoding_tests {
                 .iter()
                 .map(Instruction::mnemonic)
                 .collect::<Vec<_>>(),
-            vec![Mnemonic::Push, Mnemonic::Shl, Mnemonic::Pop]
+            vec![Mnemonic::Mov, Mnemonic::Shl, Mnemonic::Mov]
         );
-        assert_eq!(instructions[0].op0_register(), Register::R8);
-        assert_eq!(instructions[1].memory_base(), Register::RSP);
+        assert_eq!(instructions[0].op1_register(), Register::R8);
+        assert_eq!(instructions[1].memory_base(), Register::R15);
+        assert_eq!(instructions[1].segment_prefix(), Register::None);
         assert_eq!(instructions[1].op1_register(), Register::CL);
         assert_eq!(instructions[2].op0_register(), Register::RCX);
+    }
+
+    #[test]
+    fn fsgsbase_target_uses_gs_state_addressing_without_reserving_r15() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        func.target_features = X86Features::for_test_with_state_base(false, StateBaseStrategy::Gs);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: value,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let mut assignment = AssignmentMap::default();
+        assignment.set(value, PhysReg::R15);
+
+        let emitted = emit(&func, &assignment, 0).unwrap();
+        let mut decoder =
+            Decoder::new(64, &emitted.code[..emitted.text_size], DecoderOptions::NONE);
+        let mut instructions = Vec::new();
+        while decoder.can_decode() {
+            instructions.push(decoder.decode());
+        }
+
+        assert!(
+            instructions
+                .iter()
+                .any(|inst| inst.mnemonic() == Mnemonic::Rdgsbase)
+        );
+        assert!(instructions.iter().any(|inst| {
+            inst.segment_prefix() == Register::GS && inst.memory_base() == Register::None
+        }));
+        assert!(
+            instructions
+                .iter()
+                .any(|inst| inst.mnemonic() == Mnemonic::Wrgsbase)
+        );
     }
 
     #[test]
@@ -6592,30 +6861,8 @@ mod shift_encoding_tests {
                 _ => {}
             }
         }
-        assert_eq!(
-            pushes,
-            vec![
-                Register::RBX,
-                Register::RBP,
-                Register::R12,
-                Register::R13,
-                Register::R14,
-                Register::R15,
-            ],
-            "the worklist must not emit a second blanket scratch save"
-        );
-        assert_eq!(
-            pops,
-            vec![
-                Register::R15,
-                Register::R14,
-                Register::R13,
-                Register::R12,
-                Register::RBP,
-                Register::RBX,
-            ],
-            "callee-saved scratch registers are restored once in the epilogue"
-        );
+        assert!(pushes.is_empty(), "the JIT arena keeps RSP invariant");
+        assert!(pops.is_empty(), "the JIT arena keeps RSP invariant");
 
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = [0u8; 32];

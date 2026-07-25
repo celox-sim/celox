@@ -89,6 +89,42 @@ fn allocation_boundary_removes_single_use_compare_results() {
     ));
 }
 
+#[test]
+fn trace_captures_regalloc_owned_memory_folds_before_scheduling() {
+    let mut vregs = VRegAllocator::new();
+    let loaded = vregs.alloc();
+    let masked = vregs.alloc();
+    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+    let mut block = MBlock::new(BlockId(0));
+    block.push(MInst::Load {
+        dst: loaded,
+        base: BaseReg::SimState,
+        offset: 37,
+        size: OpSize::S8,
+    });
+    block.push(MInst::AndImm {
+        dst: masked,
+        src: loaded,
+        imm: 0xfc,
+    });
+    block.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 37,
+        src: masked,
+        size: OpSize::S8,
+    });
+    block.push(MInst::Return);
+    func.push_block(block);
+    let mut trace = RegallocTrace::default();
+
+    run_regalloc_with_label_and_trace(&mut func, "late-fold-trace-test", Some(&mut trace)).unwrap();
+
+    assert!(trace.mir_after_late_memory_folds.contains("and_store.i8"));
+    assert!(!trace.mir_after_late_memory_folds.contains("load.i8"));
+    assert!(!trace.mir_after_late_memory_folds.is_empty());
+    assert!(!trace.mir_after_scheduling.is_empty());
+}
+
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
     // Find the max VReg number used in instructions

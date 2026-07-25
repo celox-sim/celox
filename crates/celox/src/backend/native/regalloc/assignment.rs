@@ -30,6 +30,7 @@ pub enum PhysReg {
     R12 = 12,
     R13 = 13,
     R14 = 14,
+    R15 = 15,
 }
 
 impl fmt::Display for PhysReg {
@@ -49,6 +50,7 @@ impl fmt::Display for PhysReg {
             PhysReg::R12 => "r12",
             PhysReg::R13 => "r13",
             PhysReg::R14 => "r14",
+            PhysReg::R15 => "r15",
         };
         write!(f, "{name}")
     }
@@ -91,6 +93,7 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::R12,
     PhysReg::R13,
     PhysReg::R14,
+    PhysReg::R15,
 ];
 
 // ────────────────────────────────────────────────────────────────

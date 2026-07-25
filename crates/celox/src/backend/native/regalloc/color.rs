@@ -1417,8 +1417,12 @@ mod tests {
         func.push_block(block);
 
         let initial_cfg = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, perms) =
-            super::super::legalize::materialize_constraint_perms(&mut func, &initial_cfg).unwrap();
+        let (cfg, perms) = super::super::legalize::materialize_constraint_perms(
+            &mut func,
+            &initial_cfg,
+            super::super::NUM_REGS,
+        )
+        .unwrap();
         let analysis = super::super::analysis::analyze(&func);
         let colored = color_ssa(&func, &cfg, &analysis, &perms, super::super::NUM_REGS).unwrap();
         let boundary = &perms.boundaries[0];

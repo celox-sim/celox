@@ -60,9 +60,10 @@ impl PermError {
 pub(super) fn materialize_constraint_perms(
     func: &mut MFunction,
     initial_cfg: &NormalizedCfg,
+    register_count: usize,
 ) -> Result<(NormalizedCfg, PermModel), PermError> {
     let (cfg, model) = materialize_constraint_perms_unchecked(func, initial_cfg)?;
-    model.verify(func, &cfg, super::NUM_REGS)?;
+    model.verify(func, &cfg, register_count)?;
     Ok((cfg, model))
 }
 
@@ -970,7 +971,8 @@ mod tests {
         func.push_block(block);
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
         let constrained = func
             .blocks
@@ -1012,7 +1014,8 @@ mod tests {
         let original_vregs = func.vregs.count();
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
 
         assert!(model.boundaries.is_empty());
         assert_eq!(func.blocks.len(), 1);
@@ -1042,7 +1045,8 @@ mod tests {
         block.push(MInst::Return);
         func.push_block(block);
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, mut model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, mut model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         model.boundaries[0].rows.pop();
 
         let error = model
@@ -1082,7 +1086,8 @@ mod tests {
         func.blocks = vec![entry, left, other, join];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         let constrained = func
             .blocks
             .iter()
@@ -1139,7 +1144,8 @@ mod tests {
         func.blocks = vec![entry, constrained_arm, other_arm, join];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
 
         let constrained = func
@@ -1225,7 +1231,8 @@ mod tests {
         func.blocks = vec![entry, header, body, exit];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
 
         let constrained = func
@@ -1312,7 +1319,8 @@ mod tests {
 
         let mut post_spill = func.clone();
         let cfg = super::super::cfg::normalize(&mut post_spill).unwrap();
-        let error = materialize_constraint_perms(&mut post_spill, &cfg).unwrap_err();
+        let error = materialize_constraint_perms(&mut post_spill, &cfg, super::super::NUM_REGS)
+            .unwrap_err();
         assert_eq!(error.rule, "PERM.PRESSURE_BOUND");
 
         let mut allocation_input = func;

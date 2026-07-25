@@ -73,6 +73,9 @@ pub struct SharedNativeCode {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventRef>,
     layout: MemoryLayout,
+    /// Simulation-state bytes plus the largest native spill/scratch arena
+    /// required by any compiled function.
+    native_memory_size: usize,
     options: SimulatorOptions,
     /// (offset, byte_size) pairs for 4-state variables that need X initialization.
     four_state_inits: Vec<(usize, usize)>,
@@ -100,6 +103,7 @@ fn codegen_err(msg: String) -> SimulatorError {
 struct CompiledNativeFunction {
     code: jit_mem::JitCode,
     trace: Option<emit::NativeFunctionTrace>,
+    required_state_size: usize,
 }
 
 pub(crate) struct NativeCodegenTrace {
@@ -128,6 +132,7 @@ fn compile_units(
             optimized_sir: "<empty native function>\n".into(),
             state_layout: String::new(),
             mir_before_regalloc: empty_func.to_string(),
+            mir_after_late_memory_folds: empty_func.to_string(),
             mir_after_scheduling: empty_func.to_string(),
             mir_after_regalloc: empty_func.to_string(),
             register_assignment: String::new(),
@@ -136,7 +141,11 @@ fn compile_units(
         });
         let code = jit_mem::JitCode::new_named(&empty_result.code, label)
             .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
-        return Ok(CompiledNativeFunction { code, trace });
+        return Ok(CompiledNativeFunction {
+            code,
+            trace,
+            required_state_size: empty_result.required_state_size as usize,
+        });
     }
 
     // Merge all EUs and compile the exact SIR/MIR function used at runtime.
@@ -162,9 +171,14 @@ fn compile_units(
         );
     }
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
+    let required_state_size = emit_result.required_state_size as usize;
     let code = jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
-    Ok(CompiledNativeFunction { code, trace })
+    Ok(CompiledNativeFunction {
+        code,
+        trace,
+        required_state_size,
+    })
 }
 
 fn compile_comb_eval_apply_units(
@@ -194,9 +208,14 @@ fn compile_comb_eval_apply_units(
     }
     .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
+    let required_state_size = emit_result.required_state_size as usize;
     let code = jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
         .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
-    Ok(CompiledNativeFunction { code, trace })
+    Ok(CompiledNativeFunction {
+        code,
+        trace,
+        required_state_size,
+    })
 }
 
 fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<jit_mem::JitSymbol> {
@@ -346,9 +365,14 @@ fn append_native_function_trace(
             mir.push_str(&format!("  {binding}\n"));
         }
     }
-    mir.push_str("--- MIR after optimization, before register allocation ---\n");
+    mir.push_str("--- MIR after main optimization, before regalloc-owned late folds ---\n");
     mir.push_str(&trace.mir_before_regalloc);
     if !trace.mir_before_regalloc.ends_with('\n') {
+        mir.push('\n');
+    }
+    mir.push_str("--- MIR after late memory folds, before allocation-owned scheduling ---\n");
+    mir.push_str(&trace.mir_after_late_memory_folds);
+    if !trace.mir_after_late_memory_folds.ends_with('\n') {
         mir.push('\n');
     }
     mir.push_str("--- MIR after allocation-owned scheduling, before spill reconstruction ---\n");
@@ -584,6 +608,22 @@ fn compile_program(
             &compile_tasks,
         )
     });
+    let semantic_memory_size = layout
+        .merged_total_size
+        .checked_add(layout.triggered_bits_total_size)
+        .expect("native semantic-memory size overflow");
+    let native_memory_size = std::iter::once(comb_jit.required_state_size)
+        .chain(
+            compiled_ff_codes
+                .values()
+                .map(|compiled| compiled.required_state_size),
+        )
+        .chain(
+            compiled_comb_apply_codes
+                .values()
+                .map(|compiled| compiled.required_state_size),
+        )
+        .fold(semantic_memory_size, usize::max);
     let comb_func = comb_jit.code.fn_ptr;
     let mut all_jit_codes: Vec<jit_mem::JitCode> =
         Vec::with_capacity(1 + compiled_ff_codes.len() + compiled_comb_apply_codes.len());
@@ -748,6 +788,7 @@ fn compile_program(
             id_to_addr,
             id_to_event,
             layout: layout.clone(),
+            native_memory_size,
             options: options.clone(),
             four_state_inits,
         },
@@ -789,8 +830,7 @@ impl NativeBackend {
     /// Create a new backend instance from shared compiled code.
     /// Each instance gets its own simulation state memory.
     pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
-        let mem_size_words =
-            (shared.layout.merged_total_size + shared.layout.triggered_bits_total_size).div_ceil(8);
+        let mem_size_words = shared.native_memory_size.div_ceil(8);
         let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,

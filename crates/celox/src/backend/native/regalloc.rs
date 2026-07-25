@@ -46,12 +46,10 @@ use std::fmt;
 use super::mir::{BaseReg, BlockId, MFunction, MInst, VReg};
 pub use assignment::AssignmentMap;
 
-/// Number of available general-purpose registers for allocation.
-/// x86-64: 16 GPRs - RSP - SimState base = 14.
-///
-/// RBP is callee-saved, but the native backend does not use it as a frame
-/// pointer; spill slots are addressed relative to RSP after the prologue.
-pub const NUM_REGS: usize = 14;
+/// Maximum number of available general-purpose registers for allocation.
+/// x86-64: 16 GPRs - architectural stack pointer = 15. R15 is excluded at
+/// runtime when the host cannot use GS-base instructions.
+pub const NUM_REGS: usize = 15;
 
 /// Enable allocator-internal exhaustive consistency checks.
 ///
@@ -72,6 +70,7 @@ pub struct RegallocResult {
 
 #[derive(Default)]
 pub(crate) struct RegallocTrace {
+    pub mir_after_late_memory_folds: String,
     pub mir_after_scheduling: String,
 }
 
@@ -264,7 +263,7 @@ pub(crate) fn run_regalloc_with_label_and_trace(
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
-    trace: Option<&mut RegallocTrace>,
+    mut trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -310,6 +309,9 @@ fn run_regalloc_in_place(
     let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("late memory-fold verification", error))?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.mir_after_late_memory_folds = func.to_string();
+    }
     if let Some(start) = late_memory_fold_start {
         eprintln!(
             "[regalloc-timing] label={label} late_memory_fold folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",

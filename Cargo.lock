@@ -421,6 +421,7 @@ dependencies = [
  "iced-x86",
  "insta",
  "itertools 0.15.0",
+ "libc",
  "memmap2 0.9.11",
  "miette",
  "num-bigint",

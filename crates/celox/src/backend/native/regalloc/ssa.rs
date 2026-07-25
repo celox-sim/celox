@@ -27,13 +27,14 @@ pub(super) fn allocate(
 ) -> Result<Allocation, super::RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let register_count = func.target_features.allocatable_register_count();
     let phase = timing.then(crate::timing::now);
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
         func,
         cfg,
         next_use,
         planning_recipes,
-        super::NUM_REGS,
+        register_count,
         constraints,
     )
     .map_err(|error| {
@@ -49,7 +50,7 @@ pub(super) fn allocate(
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
-    plan.verify(func, cfg, super::NUM_REGS).map_err(|error| {
+    plan.verify(func, cfg, register_count).map_err(|error| {
         super::RegallocError::new(
             "spill-plan verification",
             error.rule,
@@ -117,7 +118,7 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
-    plan.verify(func, cfg, super::NUM_REGS).map_err(|error| {
+    plan.verify(func, cfg, register_count).map_err(|error| {
         super::RegallocError::new(
             "final spill-plan verification",
             error.rule,
@@ -264,7 +265,7 @@ pub(super) fn allocate(
     // order: reconstruct -> pressure proof -> Perm -> color.
     let phase = timing.then(crate::timing::now);
     let reconstructed_analysis = super::analysis::analyze(func);
-    if let Err(error) = super::pressure::verify(func, &reconstructed_analysis, super::NUM_REGS) {
+    if let Err(error) = super::pressure::verify(func, &reconstructed_analysis, register_count) {
         return Err(super::RegallocError::new(
             "reconstructed pressure verification",
             "PRESSURE.EXCEEDS_CAPACITY",
@@ -283,16 +284,18 @@ pub(super) fn allocate(
 
     let phase = timing.then(crate::timing::now);
     let (color_cfg, perms) =
-        super::legalize::materialize_constraint_perms(func, cfg).map_err(|error| {
-            super::RegallocError::new(
-                "Perm materialization and verification",
-                error.rule,
-                error.block,
-                error.instruction,
-                error.values,
-                error.message,
-            )
-        })?;
+        super::legalize::materialize_constraint_perms(func, cfg, register_count).map_err(
+            |error| {
+                super::RegallocError::new(
+                    "Perm materialization and verification",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            },
+        )?;
     func.verify_result()
         .map_err(|error| super::RegallocError::mir("Perm structural verification", error))?;
     if let Some(start) = phase {
@@ -306,7 +309,7 @@ pub(super) fn allocate(
 
     let phase = timing.then(crate::timing::now);
     let analysis = super::analysis::analyze(func);
-    let coloring = super::color::color_ssa(func, &color_cfg, &analysis, &perms, super::NUM_REGS)
+    let coloring = super::color::color_ssa(func, &color_cfg, &analysis, &perms, register_count)
         .map_err(|error| {
             let message = error.to_string();
             super::RegallocError::new(

@@ -27,12 +27,12 @@ use super::spilling::{SpillSlotAllocator, make_reload, make_spill};
 
 #[derive(Clone)]
 struct RegFile {
-    preg_to_vreg: [Option<VReg>; 14],
+    preg_to_vreg: [Option<VReg>; NUM_REGS],
     vreg_to_preg: HashMap<VReg, PhysReg>,
 }
 
 /// Map a PhysReg discriminant (which may have gaps, e.g. RSI=6) to a dense
-/// index in 0..14 for the preg_to_vreg array.
+/// Index in 0..NUM_REGS for the preg_to_vreg array.
 const fn preg_dense_index(preg: PhysReg) -> usize {
     match preg {
         PhysReg::RAX => 0,
@@ -49,13 +49,14 @@ const fn preg_dense_index(preg: PhysReg) -> usize {
         PhysReg::R12 => 11,
         PhysReg::R13 => 12,
         PhysReg::R14 => 13,
+        PhysReg::R15 => 14,
     }
 }
 
 impl RegFile {
     fn new() -> Self {
         Self {
-            preg_to_vreg: [None; 14],
+            preg_to_vreg: [None; NUM_REGS],
             vreg_to_preg: HashMap::default(),
         }
     }
@@ -459,7 +460,7 @@ pub fn unified_alloc_with_label(
     label: &str,
 ) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
-    let k = NUM_REGS;
+    let k = func.target_features.allocatable_register_count();
     let mut result = AssignmentMap::default();
     let mut slots = SpillSlotAllocator::new();
     let mut trace = RegallocTrace::new_if_enabled(label, func);
