@@ -229,6 +229,7 @@ struct RawSlot {
     ty: Option<RegisterType>,
     invalid: bool,
     has_load: bool,
+    has_commit_use: bool,
     has_store: bool,
     has_effectful_store: bool,
     has_kill: bool,
@@ -453,6 +454,7 @@ impl StateSsa {
             phases,
             false,
             false,
+            false,
         )
     }
 
@@ -467,7 +469,7 @@ impl StateSsa {
         region: u32,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true, false)
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true, false, false)
     }
 
     /// Placement analysis for a two-state native compilation. `bit` and
@@ -480,7 +482,21 @@ impl StateSsa {
         region: u32,
         phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true, true)
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true, true, false)
+    }
+
+    /// Complete state-use graph for a reactive event projection.
+    ///
+    /// A Commit source is a MemorySSA use of the final staged StateVersion,
+    /// even when no ordinary SIR Load reads that fragment.
+    pub fn analyze_event_projection(
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        cfg: &SirCfg,
+        region: u32,
+        phases: &StatePhaseMap,
+        two_state: bool,
+    ) -> Result<Self, StateSsaError> {
+        Self::analyze_selected(eu, cfg, region, None, None, phases, true, two_state, true)
     }
 
     /// Build versions only for exact loads which have a prospective consumer.
@@ -502,6 +518,7 @@ impl StateSsa {
             Some(eligible_loads),
             phases,
             true,
+            false,
             false,
         )
     }
@@ -526,6 +543,7 @@ impl StateSsa {
             phases,
             true,
             true,
+            false,
         )
     }
 
@@ -538,6 +556,7 @@ impl StateSsa {
         phases: &StatePhaseMap,
         include_read_only: bool,
         two_state: bool,
+        include_commit_uses: bool,
     ) -> Result<Self, StateSsaError> {
         let mut raw = HashMap::<StateLocation, RawSlot>::default();
 
@@ -611,8 +630,38 @@ impl StateSsa {
                         .or_default()
                         .record_type(ty, *width, two_state);
                     }
+                    SIRInstruction::Commit(source, _, SIROffset::Static(bit_offset), width, _)
+                        if include_commit_uses && source.region == region =>
+                    {
+                        raw.entry(StateLocation {
+                            addr: *source,
+                            bit_offset: *bit_offset,
+                            width: *width,
+                            dynamic: false,
+                        })
+                        .or_default()
+                        .has_commit_use = true;
+                    }
                     _ => {}
                 }
+            }
+        }
+
+        // Commit has no result register carrying its source type. Prefer an
+        // exact Load/Store type for the same fragment; a commit-only fragment
+        // uses the physical two/four-state compilation mode.
+        for (location, facts) in &mut raw {
+            if facts.has_commit_use && facts.ty.is_none() {
+                facts.ty = Some(if two_state {
+                    RegisterType::Bit {
+                        width: location.width,
+                        signed: false,
+                    }
+                } else {
+                    RegisterType::Logic {
+                        width: location.width,
+                    }
+                });
             }
         }
 
@@ -788,6 +837,7 @@ impl StateSsa {
                                 facts[slot].escapes = true;
                             }
                             if let Some(slot) = exact {
+                                facts[slot].has_load |= include_commit_uses;
                                 instruction_effects.uses.push(UseEffect {
                                     slot,
                                     destination: None,

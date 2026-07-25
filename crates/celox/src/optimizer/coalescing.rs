@@ -54,6 +54,8 @@ mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod placement_analysis;
 #[cfg(target_arch = "x86_64")]
+mod reactive_event_graph;
+#[cfg(target_arch = "x86_64")]
 mod reactive_phase;
 mod shared;
 mod sir_analysis;
@@ -150,6 +152,17 @@ pub(crate) fn verify_fused_phase_cut<A>(
     first_ff_unit: usize,
 ) -> Result<reactive_phase::FusedPhaseCut, String> {
     reactive_phase::verify(eu, provenance, first_ff_unit)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn analyze_reactive_event_projection(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &crate::ir::SirMergeProvenance,
+    cut: &reactive_phase::FusedPhaseCut,
+    four_state: bool,
+) -> Result<String, String> {
+    reactive_event_graph::ReactiveEventProjection::analyze(eu, provenance, cut, four_state)
+        .map(|projection| projection.format_report())
 }
 
 #[cfg(target_arch = "x86_64")]

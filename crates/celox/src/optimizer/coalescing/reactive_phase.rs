@@ -32,6 +32,10 @@ impl FusedPhaseCut {
             .filter(|&&phase| phase == EventPhase::Ff)
             .count()
     }
+
+    pub(crate) fn is_ff_block(&self, block: BlockId) -> bool {
+        self.phase_by_block.get(&block) == Some(&EventPhase::Ff)
+    }
 }
 
 pub(crate) fn verify<A>(

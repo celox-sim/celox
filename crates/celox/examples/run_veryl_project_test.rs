@@ -101,6 +101,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             .format_native_optimized_sir()
             .ok_or("native optimized SIR trace was not captured")?;
         let mir = trace.mir.ok_or("MIR trace was not captured")?;
+        let reactive_graph = trace
+            .reactive_event_graph
+            .ok_or("reactive event graph was not captured")?;
         let state_layout = trace
             .native_state_layout
             .ok_or("native state-layout analysis was not captured")?;
@@ -108,11 +111,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         let sir_path = output_dir.join("post_optimized.sir");
         let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
+        let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
         let state_layout_path = output_dir.join("native_state_layout.txt");
         fs::write(&pre_sir_path, &pre_optimized_sir)?;
         fs::write(&sir_path, &sir)?;
         fs::write(&native_sir_path, &native_sir)?;
         fs::write(&mir_path, &mir)?;
+        fs::write(&reactive_graph_path, &reactive_graph)?;
         fs::write(&state_layout_path, &state_layout)?;
         eprintln!(
             "wrote pre-optimized SIR ({} bytes) to {}",
@@ -133,6 +138,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             "wrote full native MIR ({} bytes) to {}",
             mir.len(),
             mir_path.display()
+        );
+        eprintln!(
+            "wrote reactive event graph ({} bytes) to {}",
+            reactive_graph.len(),
+            reactive_graph_path.display()
         );
         eprintln!(
             "wrote native state-layout analysis ({} bytes) to {}",

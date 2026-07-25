@@ -314,6 +314,54 @@ each projection:
 
 The existing generated SIR/MIR remains the executable reference.
 
+#### Implemented analysis contract
+
+The first projection oracle is now built from the exact merged SIR before any
+merged-chain rewrite. It is captured only by an explicit native IR trace and
+does not add analysis time to ordinary production compilation.
+
+The graph combines:
+
+- exact source-EU and comb/FF block provenance;
+- SIR SSA value and block-parameter edges;
+- sparse StateSSA versions for stable, working, and sparse-working state;
+- exact cross-region Commit copies;
+- FF publication Commit, observable Store, runtime event, capture, and error
+  roots; and
+- live-on-entry, unresolved alias, loop-control, and unsupported-access
+  frontiers.
+
+`Commit(stable -> working)` is a state-copy edge, not a publication root.
+`Commit(working|sparse-working -> stable)` is a publication root. This
+distinction ensures that the projection starts from final published FF
+versions and reaches only the staged definitions which can affect them,
+instead of treating every intermediate working Store as a sink.
+
+The implementation uses one work-list visit per retained SSA instruction and
+control block. It does not revisit a shared producer once per root and does
+not construct full control-dependence or value-by-block matrices.
+
+The native trace writes the complete report to
+`reactive_event_graph.txt`. For the Heliodor Linux workload at
+`7ad830fc0f8506c934b61a853ce2eadfa5926b82`, the clock projection completed
+inside the existing full trace compile and reported:
+
+```text
+units                       37  (1 comb, 36 FF)
+semantic roots             719
+retained blocks           1,131
+retained instructions    13,040
+materialization cutoffs   2,153
+cross-EU state flows         45
+```
+
+The 45 exact cross-EU flows connect the comb EU to FF EUs by state range and
+StateVersion. The cutoff set contains 1,765 live-on-entry sources, 232 real
+memory kills, and 156 loop-control boundaries. These are feasibility facts,
+not a speedup claim: Step C must still turn each admitted frontier into an
+executable materialization source and compare the resulting state/effects
+against the existing fused function.
+
 ### Step C: straight-line static clock projection
 
 Generate code directly for a deliberately small subset:

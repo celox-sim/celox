@@ -706,6 +706,7 @@ pub struct EmitResult {
 #[derive(Default)]
 pub(crate) struct NativeFunctionTrace {
     pub optimized_sir: String,
+    pub reactive_graph: String,
     pub state_layout: String,
     pub mir_before_regalloc: String,
     pub mir_after_late_memory_folds: String,
@@ -4928,6 +4929,18 @@ fn emit_chained_eu_groups(
         ),
     };
     let stable_suffix_entry = fused_phase_cut.as_ref().map(|cut| cut.ff_entry());
+    if let (Some(trace), Some(cut)) = (trace.as_deref_mut(), fused_phase_cut.as_ref()) {
+        trace.reactive_graph = crate::optimizer::coalescing::analyze_reactive_event_projection(
+            &sir_eu,
+            &merge_provenance,
+            cut,
+            four_state,
+        )
+        .map_err(|message| ChainedEmitError::Analysis {
+            phase: "reactive event projection",
+            message,
+        })?;
+    }
     let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
         eu.verify_result()
             .map_err(|error| ChainedEmitError::Sir { phase, error })

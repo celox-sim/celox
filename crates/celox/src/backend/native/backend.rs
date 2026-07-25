@@ -109,6 +109,7 @@ struct CompiledNativeFunction {
 pub(crate) struct NativeCodegenTrace {
     pub optimized_sir: String,
     pub mir: String,
+    pub reactive_graph: String,
     pub state_layout: String,
 }
 
@@ -130,6 +131,7 @@ fn compile_units(
             .map_err(|e| codegen_err(format!("emit error: {e}")))?;
         let trace = capture_trace.then(|| emit::NativeFunctionTrace {
             optimized_sir: "<empty native function>\n".into(),
+            reactive_graph: String::new(),
             state_layout: String::new(),
             mir_before_regalloc: empty_func.to_string(),
             mir_after_late_memory_folds: empty_func.to_string(),
@@ -336,6 +338,7 @@ fn collect_ff_compile_tasks_from<'a>(
 fn append_native_function_trace(
     optimized_sir: &mut String,
     mir: &mut String,
+    reactive_graph: &mut String,
     state_layout: &mut String,
     name: &str,
     bindings: &[String],
@@ -395,6 +398,21 @@ fn append_native_function_trace(
     }
     mir.push('\n');
 
+    if !trace.reactive_graph.is_empty() {
+        reactive_graph.push_str(&format!("=== Native function {name} ===\n"));
+        if !bindings.is_empty() {
+            reactive_graph.push_str("Bindings:\n");
+            for binding in &bindings {
+                reactive_graph.push_str(&format!("  {binding}\n"));
+            }
+        }
+        reactive_graph.push_str(&trace.reactive_graph);
+        if !trace.reactive_graph.ends_with('\n') {
+            reactive_graph.push('\n');
+        }
+        reactive_graph.push('\n');
+    }
+
     if !trace.state_layout.is_empty() {
         state_layout.push_str(&format!("=== Native function {name} ===\n"));
         if !bindings.is_empty() {
@@ -419,11 +437,13 @@ fn format_native_codegen_trace(
 ) -> NativeCodegenTrace {
     let mut optimized_sir = String::from("=== Optimized SIR used by native emission ===\n");
     let mut mir = String::from("=== MIR used by native emission ===\n");
+    let mut reactive_graph = String::from("=== Reactive clock-event projection oracle ===\n");
     let mut state_layout =
         String::from("=== Profile-selected native state-layout feasibility ===\n");
     append_native_function_trace(
         &mut optimized_sir,
         &mut mir,
+        &mut reactive_graph,
         &mut state_layout,
         "eval_comb",
         &[],
@@ -453,6 +473,7 @@ fn format_native_codegen_trace(
         append_native_function_trace(
             &mut optimized_sir,
             &mut mir,
+            &mut reactive_graph,
             &mut state_layout,
             &name,
             &task.bindings,
@@ -486,6 +507,7 @@ fn format_native_codegen_trace(
         append_native_function_trace(
             &mut optimized_sir,
             &mut mir,
+            &mut reactive_graph,
             &mut state_layout,
             &name,
             &bindings,
@@ -499,6 +521,7 @@ fn format_native_codegen_trace(
     NativeCodegenTrace {
         optimized_sir,
         mir,
+        reactive_graph,
         state_layout,
     }
 }

@@ -804,6 +804,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                         )?;
                     trace.native_optimized_sir = Some(native_trace.optimized_sir);
                     trace.mir = Some(native_trace.mir);
+                    trace.reactive_event_graph = Some(native_trace.reactive_graph);
                     trace.native_state_layout = Some(native_trace.state_layout);
                     backend
                 } else {

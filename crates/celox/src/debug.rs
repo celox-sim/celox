@@ -52,6 +52,9 @@ pub struct CompilationTrace {
     pub post_optimized_clif: Option<String>,
     pub native: Option<String>,
     pub mir: Option<String>,
+    /// Sparse FF/comb dependency projection captured before merged-chain
+    /// rewrites, with exact source-EU and StateSSA provenance.
+    pub reactive_event_graph: Option<String>,
     /// Analysis of profile-selected native state accesses captured from the
     /// exact merged SIR used by instruction selection.
     pub native_state_layout: Option<String>,
