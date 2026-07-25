@@ -351,7 +351,7 @@ fn append_native_function_trace(
     if !trace.mir_before_regalloc.ends_with('\n') {
         mir.push('\n');
     }
-    mir.push_str("--- MIR after pressure scheduling, before CSSA and spilling ---\n");
+    mir.push_str("--- MIR after allocation-owned scheduling, before spill reconstruction ---\n");
     mir.push_str(&trace.mir_after_scheduling);
     if !trace.mir_after_scheduling.ends_with('\n') {
         mir.push('\n');

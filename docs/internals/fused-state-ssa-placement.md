@@ -2817,9 +2817,97 @@ execute_ns=62107828216
 
 This removes 33,269 emitted trace lines and the CSSA snapshot phase, but does
 not yet fix the scheduler objective: hot `bb8164` remains 1,002 post-RA lines
-with 405 stack references. The next work is still the integrated
-ready-selection/W/S transition; the CSSA phase is no longer between those two
-decisions.
+with 405 stack references. The CSSA phase is no longer between scheduling and
+allocation, so the remaining order can be selected by the W/S transition
+itself.
+
+##### Allocation-owned ready walk
+
+The standalone pressure schedule has now been removed from the production
+pipeline. Each movable region is represented by one sparse register and
+MemorySSA dependency DAG. One forward walk owns both its ready set and the
+`BlockTransitionPlanner`:
+
+```text
+select dependency-ready instruction
+  -> materialize missing operands
+  -> enforce clobber and pinned-operand capacity
+  -> choose and publish any eviction
+  -> publish the definition in W
+  -> discharge dependency and remaining-use edges
+```
+
+`TransitionPoint` keeps two identities. `source` is stable for next-use and
+MemorySSA recipe lookup; `output` is the final position named by emitted point
+operations. The block is reordered only after the transition succeeds. Thus
+there is no schedule remapping, cloned allocation attempt, or second
+authoritative order.
+
+Ready scores contain only locally updateable facts: deferred-reload legality,
+whether the candidate consumes the previous definition, resident operand
+count, operand count, materialization cost, pressure delta, and source rank.
+A stored score does not contain the current total W size; that value would
+become stale whenever an unrelated candidate spills or reloads. Source-order
+selection is retained while it fits W. At capacity, the same W/S score which
+will perform the transition selects the candidate.
+
+For a single-use value, a bounded dependency-demand stack may follow its only
+consumer backwards to the next ready prerequisite. This closes a local tree
+without assigning an arbitrary preferred use to a shared value. Every frame
+stores its next unvisited dependency, so the walk does not repeatedly rescan a
+cone. A demanded candidate is still accepted only when its projected W
+transition fits; forcing such a tree by evicting unrelated boundary values was
+measured and rejected below.
+
+The complete optimized SIR remained byte-identical to the direct pre-CSSA
+baseline:
+
+```text
+SHA-256
+ec72edfb73efeb4cb609d5ac97178335765ec315e21f041995d4a16f7dd1540d
+```
+
+Complete emitted MIR, rather than planner counters, exposed the ranking
+trade-offs:
+
+```text
+strategy                         bb8164 lines/stack     bb1650 lines/stack
+direct pre-CSSA baseline                 1000 / 404              604 / 20
+current-W pressure choice                 912 / 319              792 / 216
+previous-definition continuation          930 / 339              734 / 144
+global critical-path seed                 1166 / 480              701 / 105
+bounded single-use demand                  958 / 331               682 / 87
+forced single-use demand                   991 / 322               652 / 58
+```
+
+The emitted orders explain each rejection. Global critical-path priority
+constructs the same operation for every lane in `bb8164`, retaining shared
+producers across the entire 32-lane group. Forced single-use demand closes the
+recurrence in `bb1650`, but in `bb8431` it carries entry phi values while
+forcing local trees and grows the post-RA block from 962 to 1,190
+instructions. The bounded single-use form is retained as the structural
+checkpoint; it improves both identified spill-heavy orders without claiming
+the whole-function profitability gate has passed.
+
+This work also exposed a correctness hole in edge coupling. A full
+`W_exit` followed by a spilled-phi home transfer needs one transient register:
+
+```text
+reload source_home
+store destination_home
+```
+
+Treating the pair as a free parallel edge operation reconstructed 15 live
+values on a 14-register target. Edge planning now parks one surviving
+resident before all home transfers and reloads it afterward. Reconstructed
+pressure verification independently caught the original failure and accepts
+the repaired sequence.
+
+The next allocation-quality step is not another global DAG rank. Boundary
+residents and local single-use trees need one comparable marginal value so a
+tree may displace a cheap local value without displacing a valuable
+CFG-coupled entry value. Until that model passes complete emitted-MIR and
+execution gates, the throughput milestone remains open.
 
 ##### Relocated bit-copy reconstruction in mixed OR roots
 
@@ -3008,11 +3096,10 @@ materialization.
 
 ### Milestone 5: scheduling and physical allocation integration
 
-Retain the single pre-CSSA physical order and make any further allocation
-integration conditional on an explicit source-home/destination-value edge
-materialization model. Do not reconstruct a second order after CSSA and do not
-use a preferred-rank side table as a substitute for the order consumed by
-CSSA.
+Use one allocation-owned pre-CSSA ready walk. The exact register/MemorySSA DAG
+provides legality, while the committed W/S transition selects the final order
+and emits its point operations. Do not run an independent pressure scheduler,
+reconstruct a second order, or use a preferred-rank side table.
 
 Verify:
 
@@ -3021,7 +3108,14 @@ Verify:
 - fixed-register and clobber constraints;
 - reconstructed pressure;
 - exact point/edge reloads, including distinct source and destination homes;
+- one-register scratch handling for full-W edge home transfers;
 - final SSA assignment and destruction.
+
+The structural implementation is complete. Whole-function profitability is
+not: bounded single-use demand is better in the two diagnosed blocks but still
+changes other large blocks adversely. The next gate is a common marginal
+value for CFG boundary residency and local-tree completion, followed by the
+full semantic and execution gates.
 
 ### Milestone 6: production and performance gate
 

@@ -1,5 +1,6 @@
-//! Pressure-aware scheduling of side-effect-free machine DAG regions.
+//! Exact dependency DAGs for allocation-owned machine scheduling.
 
+#[cfg(test)]
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 #[cfg(test)]
@@ -10,8 +11,11 @@ use celox_analysis::dependence::MemoryDependencyTracker;
 use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
 #[cfg(test)]
 use crate::backend::native::mir::BlockId;
-use crate::backend::native::mir::{MFunction, MInst, VReg};
+#[cfg(test)]
+use crate::backend::native::mir::MFunction;
+use crate::backend::native::mir::{MInst, VReg};
 
+#[cfg(test)]
 use super::analysis::AnalysisResult;
 #[cfg(test)]
 use super::cfg::NormalizedCfg;
@@ -235,17 +239,18 @@ struct RegionSchedule {
 
 /// Exact register and memory dependency graph for one movable MIR region.
 ///
-/// Both scheduling directions must consume this graph. Reconstructing a
-/// second, weaker dependency model in spill planning would allow the chosen
-/// W/S transition to reorder an effect which the standalone scheduler keeps
-/// fixed.
+/// The W/S transition consumes this graph directly. Reconstructing a second,
+/// weaker dependency model in spill planning would let allocation reorder an
+/// effect which this graph keeps fixed.
 #[derive(Debug)]
 pub(super) struct InstructionDag {
     dependencies: Vec<Vec<usize>>,
     dependents: Vec<Vec<usize>>,
     unique_uses: Vec<Vec<VReg>>,
+    #[cfg(test)]
     definitions: HashMap<VReg, usize>,
     use_candidates: HashMap<VReg, Vec<usize>>,
+    #[cfg(test)]
     dependency_priorities: Vec<(usize, usize)>,
 }
 
@@ -298,13 +303,18 @@ impl InstructionDag {
             }
         }
 
+        #[cfg(test)]
         let dependency_priorities = dependency_priorities(&dependencies)?;
+        #[cfg(not(test))]
+        dependency_priorities(&dependencies)?;
         Some(Self {
             dependencies,
             dependents,
             unique_uses,
+            #[cfg(test)]
             definitions,
             use_candidates,
+            #[cfg(test)]
             dependency_priorities,
         })
     }
@@ -318,7 +328,6 @@ impl InstructionDag {
 /// in S.  Every instruction is inserted into `ready` once and every
 /// dependency edge is discharged once.
 #[derive(Debug)]
-#[cfg(test)]
 pub(super) struct ForwardReadyRegion {
     dag: InstructionDag,
     remaining_dependencies: Vec<usize>,
@@ -329,7 +338,6 @@ pub(super) struct ForwardReadyRegion {
     discharged_edges: usize,
 }
 
-#[cfg(test)]
 impl ForwardReadyRegion {
     pub(super) fn build(region: &[MInst]) -> Option<Self> {
         let dag = InstructionDag::build(region)?;
@@ -366,8 +374,25 @@ impl ForwardReadyRegion {
         self.ready.contains(&instruction)
     }
 
+    #[cfg(test)]
     pub(super) fn remaining_uses(&self, value: VReg) -> usize {
         self.remaining_uses.get(&value).copied().unwrap_or(0)
+    }
+
+    pub(super) fn use_candidates(&self, value: VReg) -> &[usize] {
+        self.dag
+            .use_candidates
+            .get(&value)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn dependencies(&self, instruction: usize) -> &[usize] {
+        &self.dag.dependencies[instruction]
+    }
+
+    pub(super) fn is_emitted(&self, instruction: usize) -> bool {
+        self.emitted[instruction]
     }
 
     /// Commit one ready instruction and return instructions which became
@@ -418,81 +443,12 @@ impl ForwardReadyRegion {
     }
 }
 
-/// Stable pre-CSSA placement identity for every existing block instruction.
-///
-/// CSSA is allowed to append edge snapshots before a terminator, but it must
-/// not force the allocator to rediscover the profitable order from a
-/// different DAG. This side table carries the exact pre-CSSA source order
-/// across that transformation without rewriting MIR.
-pub(super) struct PreCssaPlacement {
-    original_lengths: Vec<usize>,
-    preferred_orders: Vec<Vec<usize>>,
-}
-
-impl PreCssaPlacement {
-    pub(super) fn analyze(
-        func: &MFunction,
-        constraints: &super::constraints::ConstraintModel,
-        liveness: &AnalysisResult,
-        register_capacity: usize,
-    ) -> Option<Self> {
-        if constraints.instructions.len() != func.blocks.len()
-            || liveness.exit_distances.len() != func.blocks.len()
-        {
-            return None;
-        }
-        let mut original_lengths = Vec::with_capacity(func.blocks.len());
-        let mut preferred_orders = Vec::with_capacity(func.blocks.len());
-        for (block, mir_block) in func.blocks.iter().enumerate() {
-            let order = pressure_preferred_block_order(
-                &mir_block.insts,
-                &constraints.instructions[block],
-                liveness.exit_distances[block].keys().copied(),
-                register_capacity,
-            )?;
-            original_lengths.push(mir_block.insts.len());
-            preferred_orders.push(order);
-        }
-        Some(Self {
-            original_lengths,
-            preferred_orders,
-        })
-    }
-
-    pub(super) fn apply(self, func: &mut MFunction) -> Option<()> {
-        if self.original_lengths.len() != func.blocks.len()
-            || self.preferred_orders.len() != func.blocks.len()
-        {
-            return None;
-        }
-        for (block, mir_block) in func.blocks.iter_mut().enumerate() {
-            if mir_block.insts.len() != self.original_lengths[block] {
-                return None;
-            }
-            let original = mir_block.insts.clone();
-            let mut scheduled = Vec::with_capacity(original.len());
-            let mut seen = vec![false; original.len()];
-            for &source in &self.preferred_orders[block] {
-                if source >= original.len() || seen[source] {
-                    return None;
-                }
-                seen[source] = true;
-                scheduled.push(original[source].clone());
-            }
-            if seen.contains(&false) {
-                return None;
-            }
-            mir_block.insts = scheduled;
-        }
-        Some(())
-    }
-}
-
-/// Build a bottom-up pressure order before CSSA rewrites phi edges.
+/// Build a bottom-up pressure preference before the allocation walk.
 ///
 /// Every instruction and dependency edge is visited a constant number of
 /// times. Ready-set operations are logarithmic and all auxiliary tables are
 /// linear in the block DAG.
+#[cfg(test)]
 pub(super) fn pressure_preferred_block_order(
     instructions: &[MInst],
     constraints: &[super::constraints::InstructionConstraints],
@@ -553,6 +509,7 @@ pub(super) fn pressure_preferred_block_order(
     })
 }
 
+#[cfg(test)]
 fn transfer_liveness_at(instructions: &[MInst], source: usize, live: &mut BTreeSet<VReg>) {
     let inst = &instructions[source];
     if let Some(definition) = inst.def() {
@@ -561,6 +518,7 @@ fn transfer_liveness_at(instructions: &[MInst], source: usize, live: &mut BTreeS
     live.extend(inst.uses());
 }
 
+#[cfg(test)]
 fn pressure_preferred_region_order(
     region: &[MInst],
     live: &mut BTreeSet<VReg>,
@@ -621,6 +579,7 @@ fn pressure_preferred_region_order(
     Some(reverse)
 }
 
+#[cfg(test)]
 fn backward_pressure_delta(
     definition: Option<VReg>,
     uses: &[VReg],
@@ -631,6 +590,7 @@ fn backward_pressure_delta(
     missing_uses - live_definition
 }
 
+#[cfg(test)]
 fn update_backward_pressure_candidates(
     value: VReg,
     became_live: bool,
@@ -648,6 +608,7 @@ fn update_backward_pressure_candidates(
     }
 }
 
+#[cfg(test)]
 struct BackwardPressureQueue {
     by_pressure: BTreeSet<(isize, Reverse<usize>, Reverse<usize>, Reverse<usize>)>,
     by_depth: BTreeSet<(Reverse<usize>, Reverse<usize>, isize, Reverse<usize>)>,
@@ -655,6 +616,7 @@ struct BackwardPressureQueue {
     dependency_priorities: Vec<(usize, usize)>,
 }
 
+#[cfg(test)]
 impl BackwardPressureQueue {
     fn new(dependency_priorities: Vec<(usize, usize)>) -> Self {
         let instructions = dependency_priorities.len();
@@ -718,6 +680,7 @@ impl BackwardPressureQueue {
     }
 }
 
+#[cfg(test)]
 fn projected_pressure_signed(current: usize, delta: isize) -> usize {
     if delta < 0 {
         current.saturating_sub(delta.unsigned_abs())
@@ -726,6 +689,7 @@ fn projected_pressure_signed(current: usize, delta: isize) -> usize {
     }
 }
 
+#[cfg(test)]
 fn pressure_cost_for_order(
     instructions: &[MInst],
     order: &[usize],

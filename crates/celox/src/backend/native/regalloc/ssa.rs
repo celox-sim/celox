@@ -22,16 +22,19 @@ pub(super) fn allocate(
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
+    constraints: &super::constraints::ConstraintModel,
+    trace: Option<&mut super::RegallocTrace>,
 ) -> Result<Allocation, super::RegallocError> {
     let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
         || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let phase = timing.then(crate::timing::now);
-    let mut plan = super::spill_plan::plan_with_recipe_costs(
+    let mut plan = super::spill_plan::plan_with_integrated_schedule(
         func,
         cfg,
         next_use,
         planning_recipes,
         super::NUM_REGS,
+        constraints,
     )
     .map_err(|error| {
         super::RegallocError::new(
@@ -43,6 +46,9 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
+    if let Some(trace) = trace {
+        trace.mir_after_scheduling = func.to_string();
+    }
     plan.verify(func, cfg, super::NUM_REGS).map_err(|error| {
         super::RegallocError::new(
             "spill-plan verification",

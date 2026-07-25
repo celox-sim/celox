@@ -316,66 +316,15 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
-    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+    let allocation_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
         .map_err(|error| constraint_error("placement constraint construction", error))?;
-    scheduling_constraints
+    allocation_constraints
         .verify(func)
         .map_err(|error| constraint_error("placement constraint verification", error))?;
-    let scheduling_liveness = analysis::analyze(func);
-    let schedule_start = timing.then(crate::timing::now);
-    let pre_cssa_placement = schedule::PreCssaPlacement::analyze(
-        func,
-        &scheduling_constraints,
-        &scheduling_liveness,
-        NUM_REGS,
-    )
-    .ok_or_else(|| {
-        RegallocError::new(
-            "pre-CSSA placement analysis",
-            "SCHEDULE.DEPENDENCY_ORDER",
-            None,
-            None,
-            Vec::new(),
-            "pre-CSSA placement did not cover every block instruction",
-        )
-    })?;
-    pre_cssa_placement.apply(func).ok_or_else(|| {
-        RegallocError::new(
-            "pre-CSSA placement application",
-            "SCHEDULE.STABLE_IDENTITY",
-            None,
-            None,
-            Vec::new(),
-            "pre-CSSA placement did not name every instruction exactly once",
-        )
-    })?;
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("pre-CSSA placement verification", error))?;
-    if let Some(start) = schedule_start {
-        eprintln!(
-            "[regalloc-timing] label={label} pre_cssa_pressure_schedule elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    if let Some(trace) = trace {
-        trace.mir_after_scheduling = func.to_string();
-    }
-    // W/S planning now owns independent homes for every SSA value and
-    // materializes phi-edge transfers explicitly.  It therefore consumes the
-    // one authoritative pre-CSSA order directly; inserting CSSA snapshots
-    // here would lengthen the very ranges the spill plan is meant to split.
-    let constraint_start = timing.then(crate::timing::now);
-    let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
-        .map_err(|error| constraint_error("allocation constraint construction", error))?;
-    constraints
-        .verify(func)
-        .map_err(|error| constraint_error("allocation constraint verification", error))?;
-    if let Some(start) = constraint_start {
-        eprintln!(
-            "[regalloc-timing] label={label} allocation_constraints elapsed={:?}",
-            start.elapsed()
-        );
-    }
+    // W/S planning owns independent homes, explicit phi-edge transfers, and
+    // the one authoritative dependency-ready instruction order. Inserting
+    // CSSA snapshots before that walk would lengthen the ranges it is meant
+    // to split and would make the snapshot order independently authoritative.
     let reload_recipe_start = timing.then(crate::timing::now);
     let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
         .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
@@ -405,7 +354,14 @@ fn run_regalloc_in_place(
         );
     }
     let alloc_start = timing.then(crate::timing::now);
-    let allocation = ssa::allocate(func, &normalized_cfg, &next_use, &planning_recipes)?;
+    let allocation = ssa::allocate(
+        func,
+        &normalized_cfg,
+        &next_use,
+        &planning_recipes,
+        &allocation_constraints,
+        trace,
+    )?;
     let assignment = allocation.assignment;
     let spill_frame_size = allocation.spill_frame_size;
     if let Some(start) = alloc_start {

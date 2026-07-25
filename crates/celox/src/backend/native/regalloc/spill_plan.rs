@@ -349,12 +349,50 @@ pub(super) fn plan(
     plan_with_recipe_costs(func, cfg, next_use, &planning_recipes, registers)
 }
 
+#[cfg(test)]
 pub(super) fn plan_with_recipe_costs(
     func: &MFunction,
     cfg: &NormalizedCfg,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     registers: usize,
+) -> Result<SpillPlan, SpillPlanError> {
+    let mut working = func.clone();
+    plan_internal(
+        &mut working,
+        cfg,
+        next_use,
+        planning_recipes,
+        registers,
+        None,
+    )
+}
+
+pub(super) fn plan_with_integrated_schedule(
+    func: &mut MFunction,
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    registers: usize,
+    constraints: &super::constraints::ConstraintModel,
+) -> Result<SpillPlan, SpillPlanError> {
+    plan_internal(
+        func,
+        cfg,
+        next_use,
+        planning_recipes,
+        registers,
+        Some(constraints),
+    )
+}
+
+fn plan_internal(
+    func: &mut MFunction,
+    cfg: &NormalizedCfg,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    registers: usize,
+    constraints: Option<&super::constraints::ConstraintModel>,
 ) -> Result<SpillPlan, SpillPlanError> {
     let logical = LogicalValues::build(func);
     let homes = SpillHomes::build(func)?;
@@ -398,7 +436,7 @@ pub(super) fn plan_with_recipe_costs(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let (spilled, transition) = loop {
+        let (spilled, transition, order) = loop {
             // S means that a valid home exists on every path.  Every live
             // value omitted from W_entry therefore requires a home; edge
             // coupling below materializes any missing predecessor store.  A
@@ -406,29 +444,66 @@ pub(super) fn plan_with_recipe_costs(
             // predecessor already has one.
             let spilled =
                 spilled_at_entry(cfg, &result, &edge_translations, block, &live_entry, &entry);
-            let transition = plan_block_transition(
-                func,
-                next_use,
-                planning_recipes,
-                &result.logical,
-                &result.homes,
-                block,
-                registers,
-                &entry,
-                spilled.clone(),
-            )?;
+            let (transition, order) = if let Some(constraints) = constraints {
+                let instruction_constraints =
+                    constraints.instructions.get(block).ok_or_else(|| {
+                        SpillPlanError::new(
+                            "SPILL_PLAN.SCHEDULE_ORDER",
+                            Some(func.blocks[block].id),
+                            None,
+                            Vec::new(),
+                            "allocation constraints do not cover this block",
+                        )
+                    })?;
+                let (transition, order) = plan_scheduled_block_transition(
+                    func,
+                    next_use,
+                    planning_recipes,
+                    &result.logical,
+                    &result.homes,
+                    block,
+                    registers,
+                    &entry,
+                    spilled.clone(),
+                    instruction_constraints,
+                )?;
+                (transition, Some(order))
+            } else {
+                (
+                    plan_block_transition(
+                        func,
+                        next_use,
+                        planning_recipes,
+                        &result.logical,
+                        &result.homes,
+                        block,
+                        registers,
+                        &entry,
+                        spilled.clone(),
+                    )?,
+                    None,
+                )
+            };
             let rejected = entry_residents_evicted_before_first_use(
                 func,
                 next_use,
                 block,
                 &entry,
                 &transition,
+                order.as_deref(),
             );
             if rejected.is_empty() {
-                break (spilled, transition);
+                break (spilled, transition, order);
             }
             entry.retain(|value| !rejected.contains(value));
         };
+        if let Some(order) = order {
+            let original = func.blocks[block].insts.clone();
+            func.blocks[block].insts = order
+                .into_iter()
+                .map(|source| original[source].clone())
+                .collect();
+        }
         result.w_entry[block] = entry;
         result.s_entry[block] = spilled;
         result.point_ops.extend(transition.point_ops);
@@ -451,6 +526,7 @@ pub(super) fn plan_with_recipe_costs(
         for &predecessor in &cfg.predecessors[successor] {
             let mut resident_spills = Vec::new();
             let mut home_transfers = Vec::new();
+            let mut scratch_reloads = Vec::new();
             let mut resident_reloads = Vec::new();
             let predecessor_w = result.w_exit[predecessor].clone();
             let predecessor_s = result.s_exit[predecessor].clone();
@@ -527,11 +603,58 @@ pub(super) fn plan_with_recipe_costs(
                     });
                 }
             }
+            // A reload/store home transfer needs one transient register.
+            // When every successor-resident value already survives in
+            // predecessor W, no ordinary edge spill or reload creates that
+            // slot.  Explicitly park one such value across all home
+            // transfers.  Treating edge operations as free parallel copies
+            // here produces NUM_REGS + 1 live values after reconstruction.
+            if !home_transfers.is_empty() {
+                let surviving_residents = result.w_entry[successor]
+                    .iter()
+                    .copied()
+                    .filter_map(|destination| {
+                        let source =
+                            edge_translations.to_predecessor(predecessor, successor, destination);
+                        predecessor_w
+                            .contains(&source)
+                            .then_some((source, destination))
+                    })
+                    .collect::<Vec<_>>();
+                if surviving_residents.len() == registers {
+                    let (source, destination) = surviving_residents[0];
+                    let destination_home = result.homes.of_logical(destination);
+                    if !resident_spills.iter().any(|operation| {
+                        matches!(
+                            operation,
+                            PlannedEdgeOp::Spill {
+                                source: spill_source,
+                                destination: spill_destination,
+                                destination_home: spill_home,
+                            } if *spill_source == source
+                                && *spill_destination == destination
+                                && *spill_home == destination_home
+                        )
+                    }) {
+                        resident_spills.push(PlannedEdgeOp::Spill {
+                            source,
+                            destination,
+                            destination_home,
+                        });
+                    }
+                    scratch_reloads.push(PlannedEdgeOp::Reload {
+                        source: destination,
+                        source_home: destination_home,
+                        destination,
+                    });
+                }
+            }
             // Consume edge-resident values before introducing reload
             // temporaries or successor live-ins.  Otherwise one transient
             // transfer can raise an already-full W_exit above capacity.
             let mut operations = resident_spills;
             operations.extend(home_transfers);
+            operations.extend(scratch_reloads);
             operations.extend(resident_reloads);
             if !operations.is_empty() {
                 result.edge_ops.insert((predecessor, successor), operations);
@@ -580,16 +703,27 @@ fn entry_residents_evicted_before_first_use(
     block: usize,
     resident: &BTreeSet<LogicalValue>,
     transition: &BlockTransition,
+    order: Option<&[usize]>,
 ) -> BTreeSet<LogicalValue> {
+    let first_use = |value: LogicalValue| {
+        order.map_or_else(
+            || next_use.next_local_use(block, 0, VReg(value.0)),
+            |order| {
+                order.iter().position(|&source| {
+                    func.blocks[block].insts[source]
+                        .uses()
+                        .contains(&VReg(value.0))
+                })
+            },
+        )
+    };
     transition
         .point_ops
         .iter()
         .filter_map(|(point, operation)| match *operation {
             PlannedOp::Spill { value, .. }
                 if resident.contains(&value)
-                    && next_use
-                        .next_local_use(block, 0, VReg(value.0))
-                        .is_none_or(|first_use| point.instruction < first_use) =>
+                    && first_use(value).is_none_or(|first_use| point.instruction < first_use) =>
             {
                 Some(value)
             }
@@ -600,8 +734,7 @@ fn entry_residents_evicted_before_first_use(
                         point.instruction,
                         value,
                     ))
-                    && next_use.next_local_use(block, 0, VReg(value.0))
-                        == Some(point.instruction) =>
+                    && first_use(value) == Some(point.instruction) =>
             {
                 Some(value)
             }
@@ -654,6 +787,326 @@ struct TransitionPoint {
     source: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AllocationCandidateScore {
+    blocked_by_deferred_reload: bool,
+    continuation_tie: std::cmp::Reverse<bool>,
+    resident_operand_tie: std::cmp::Reverse<usize>,
+    operand_tie: std::cmp::Reverse<usize>,
+    materialization_cost: u32,
+    pressure_delta: isize,
+    preferred_rank: usize,
+    source: usize,
+}
+
+struct AllocationReadyQueue {
+    ordered: BTreeSet<(AllocationCandidateScore, usize)>,
+    by_source: BTreeSet<(usize, usize)>,
+    scores: Vec<Option<AllocationCandidateScore>>,
+}
+
+impl AllocationReadyQueue {
+    fn new(instructions: usize) -> Self {
+        Self {
+            ordered: BTreeSet::new(),
+            by_source: BTreeSet::new(),
+            scores: vec![None; instructions],
+        }
+    }
+
+    fn insert(&mut self, instruction: usize, score: AllocationCandidateScore) {
+        debug_assert!(self.scores[instruction].is_none());
+        self.ordered.insert((score, instruction));
+        self.by_source.insert((score.source, instruction));
+        self.scores[instruction] = Some(score);
+    }
+
+    fn refresh(&mut self, instruction: usize, score: AllocationCandidateScore) {
+        let Some(previous) = self.scores[instruction].replace(score) else {
+            return;
+        };
+        self.ordered.remove(&(previous, instruction));
+        self.ordered.insert((score, instruction));
+    }
+
+    fn pop(
+        &mut self,
+        current_resident: usize,
+        register_capacity: usize,
+        demanded: Option<usize>,
+    ) -> Option<(AllocationCandidateScore, usize)> {
+        let &(source, source_instruction) = self.by_source.first()?;
+        let source_score = self.scores[source_instruction]?;
+        debug_assert_eq!(source, source_score.source);
+        let source_projected = if source_score.pressure_delta < 0 {
+            current_resident.saturating_sub(source_score.pressure_delta.unsigned_abs())
+        } else {
+            current_resident.saturating_add(source_score.pressure_delta as usize)
+        };
+        let &(best_score, best_instruction) = self.ordered.first()?;
+        let demanded = demanded.and_then(|instruction| {
+            let score = self.scores[instruction]?;
+            let projected = if score.pressure_delta < 0 {
+                current_resident.saturating_sub(score.pressure_delta.unsigned_abs())
+            } else {
+                current_resident.saturating_add(score.pressure_delta as usize)
+            };
+            (!score.blocked_by_deferred_reload && projected <= register_capacity)
+                .then_some((score, instruction))
+        });
+        let (score, instruction) = if let Some(demanded) = demanded {
+            demanded
+        } else if !best_score.blocked_by_deferred_reload && best_score.continuation_tie.0 {
+            (best_score, best_instruction)
+        } else if !source_score.blocked_by_deferred_reload && source_projected <= register_capacity
+        {
+            (source_score, source_instruction)
+        } else {
+            (best_score, best_instruction)
+        };
+        self.ordered.remove(&(score, instruction));
+        self.by_source.remove(&(score.source, instruction));
+        self.scores[instruction] = None;
+        Some((score, instruction))
+    }
+
+    fn contains(&self, instruction: usize) -> bool {
+        self.scores.get(instruction).is_some_and(Option::is_some)
+    }
+}
+
+struct DependencyDemandFrame {
+    instruction: usize,
+    next_dependency: usize,
+}
+
+struct DependencyDemand {
+    target: usize,
+    stack: Vec<DependencyDemandFrame>,
+}
+
+impl DependencyDemand {
+    fn new(target: usize) -> Self {
+        Self {
+            target,
+            stack: vec![DependencyDemandFrame {
+                instruction: target,
+                next_dependency: 0,
+            }],
+        }
+    }
+
+    /// Follow one unfinished use cluster backwards until its next ready
+    /// prerequisite. Each dependency edge in this demand is scanned once.
+    fn next_ready(&mut self, region: &super::schedule::ForwardReadyRegion) -> Option<usize> {
+        loop {
+            let frame_index = self.stack.len().checked_sub(1)?;
+            let instruction = self.stack[frame_index].instruction;
+            if region.is_emitted(instruction) {
+                self.stack.pop();
+                continue;
+            }
+            let dependency = {
+                let dependencies = region.dependencies(instruction);
+                let frame = &mut self.stack[frame_index];
+                let mut dependency = None;
+                while frame.next_dependency != dependencies.len() {
+                    let candidate = dependencies[frame.next_dependency];
+                    frame.next_dependency += 1;
+                    if !region.is_emitted(candidate) {
+                        dependency = Some(candidate);
+                        break;
+                    }
+                }
+                dependency
+            };
+            if let Some(dependency) = dependency {
+                self.stack.push(DependencyDemandFrame {
+                    instruction: dependency,
+                    next_dependency: 0,
+                });
+                continue;
+            }
+            return region.is_ready(instruction).then_some(instruction);
+        }
+    }
+}
+
+struct ScheduledStepDelta {
+    resident: Vec<LogicalValue>,
+    deferred: Vec<LogicalValue>,
+    remaining_uses: Vec<LogicalValue>,
+    continuation: Vec<LogicalValue>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_scheduled_block_transition(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    logical: &LogicalValues,
+    homes: &SpillHomes,
+    block: usize,
+    registers: usize,
+    w_entry: &BTreeSet<LogicalValue>,
+    spilled: BTreeSet<LogicalValue>,
+    constraints: &[super::constraints::InstructionConstraints],
+) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
+    let instructions = &func.blocks[block].insts;
+    if instructions.len() != constraints.len() {
+        return Err(SpillPlanError::new(
+            "SPILL_PLAN.SCHEDULE_ORDER",
+            Some(func.blocks[block].id),
+            None,
+            Vec::new(),
+            "allocation constraints do not cover every block instruction",
+        ));
+    }
+    let mut remaining = RemainingBlockUses::build(func, next_use, logical, block)?;
+    let mut planner = BlockTransitionPlanner::new(
+        func,
+        next_use,
+        planning_recipes,
+        logical,
+        homes,
+        block,
+        registers,
+        w_entry,
+        spilled,
+    )?;
+    let mut order = Vec::with_capacity(instructions.len());
+    let mut cursor = 0usize;
+    while cursor != instructions.len() {
+        if !super::schedule::is_allocation_schedulable_at(instructions, constraints, cursor) {
+            let output = order.len();
+            planner.step_scheduled(
+                TransitionPoint {
+                    output,
+                    source: cursor,
+                },
+                &instructions[cursor],
+                &mut remaining,
+            )?;
+            order.push(cursor);
+            cursor += 1;
+            continue;
+        }
+
+        let start = cursor;
+        while cursor != instructions.len()
+            && super::schedule::is_allocation_schedulable_at(instructions, constraints, cursor)
+        {
+            cursor += 1;
+        }
+        let end = cursor;
+        let region = &instructions[start..end];
+        let mut ready = super::schedule::ForwardReadyRegion::build(region).ok_or_else(|| {
+            SpillPlanError::new(
+                "SPILL_PLAN.SCHEDULE_DEPENDENCY",
+                Some(func.blocks[block].id),
+                Some(start),
+                Vec::new(),
+                "movable region does not have a forward dependency order",
+            )
+        })?;
+        let mut queue = AllocationReadyQueue::new(region.len());
+        let mut demand = None::<DependencyDemand>;
+        for &local in ready.ready() {
+            let source = start + local;
+            queue.insert(
+                local,
+                planner.candidate_score(source, &instructions[source], &remaining)?,
+            );
+        }
+        while !ready.is_complete() {
+            let demanded = demand.as_mut().and_then(|demand| demand.next_ready(&ready));
+            let Some((score, local)) =
+                queue.pop(planner.resident.len(), planner.registers, demanded)
+            else {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.SCHEDULE_DEPENDENCY",
+                    Some(func.blocks[block].id),
+                    Some(start),
+                    Vec::new(),
+                    "movable region has no dependency-ready allocation candidate",
+                ));
+            };
+            let source = start + local;
+            if score.blocked_by_deferred_reload {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.RECIPE_RELOAD_ORDER",
+                    Some(func.blocks[block].id),
+                    Some(source),
+                    instructions[source].uses().to_vec(),
+                    "every dependency-ready instruction precedes an allocator-selected recipe reload point",
+                ));
+            }
+            let output = order.len();
+            let delta = planner.step_scheduled(
+                TransitionPoint { output, source },
+                &instructions[source],
+                &mut remaining,
+            )?;
+            let newly_ready = ready.emit(local).ok_or_else(|| {
+                SpillPlanError::new(
+                    "SPILL_PLAN.SCHEDULE_DEPENDENCY",
+                    Some(func.blocks[block].id),
+                    Some(source),
+                    Vec::new(),
+                    "selected instruction was not dependency-ready",
+                )
+            })?;
+            order.push(source);
+            if demand.as_ref().is_some_and(|demand| demand.target == local) {
+                demand = None;
+            }
+            if demand.is_none()
+                && let Some(definition) = instructions[source].def()
+            {
+                let mut users = ready
+                    .use_candidates(definition)
+                    .iter()
+                    .copied()
+                    .filter(|&candidate| !ready.is_emitted(candidate));
+                if let Some(target) = users.next()
+                    && users.next().is_none()
+                {
+                    demand = Some(DependencyDemand::new(target));
+                }
+            }
+
+            let mut refresh = BTreeSet::<usize>::new();
+            for local in newly_ready {
+                refresh.insert(local);
+            }
+            for value in delta
+                .resident
+                .into_iter()
+                .chain(delta.deferred)
+                .chain(delta.remaining_uses)
+                .chain(delta.continuation)
+            {
+                for &candidate in ready.use_candidates(VReg(value.0)) {
+                    if ready.is_ready(candidate) {
+                        refresh.insert(candidate);
+                    }
+                }
+            }
+            for local in refresh {
+                let source = start + local;
+                let candidate =
+                    planner.candidate_score(source, &instructions[source], &remaining)?;
+                if queue.contains(local) {
+                    queue.refresh(local, candidate);
+                } else {
+                    queue.insert(local, candidate);
+                }
+            }
+        }
+    }
+    Ok((planner.finish()?, order))
+}
+
 struct BlockTransitionPlanner<'a> {
     func: &'a MFunction,
     next_use: &'a NextUseAnalysis,
@@ -666,6 +1119,7 @@ struct BlockTransitionPlanner<'a> {
     resident: BTreeSet<LogicalValue>,
     spilled: BTreeSet<LogicalValue>,
     deferred_recipe_reloads: BTreeMap<LogicalValue, PointUse>,
+    last_definition: Option<LogicalValue>,
 }
 
 impl<'a> BlockTransitionPlanner<'a> {
@@ -717,10 +1171,160 @@ impl<'a> BlockTransitionPlanner<'a> {
             resident,
             spilled,
             deferred_recipe_reloads: BTreeMap::new(),
+            last_definition: None,
         })
     }
 
     fn step(&mut self, point: TransitionPoint, inst: &MInst) -> Result<(), SpillPlanError> {
+        let before = LinearFutureUses {
+            func: self.func,
+            next_use: self.next_use,
+            block: self.block,
+            instruction: point.source,
+        };
+        let uses = self.begin_step(point, inst, &before)?;
+        let after = LinearFutureUses {
+            func: self.func,
+            next_use: self.next_use,
+            block: self.block,
+            instruction: point.source + 1,
+        };
+        self.finish_step(point, inst, &uses, &after)
+    }
+
+    fn step_scheduled(
+        &mut self,
+        point: TransitionPoint,
+        inst: &MInst,
+        remaining: &mut RemainingBlockUses,
+    ) -> Result<ScheduledStepDelta, SpillPlanError> {
+        let resident_before = self.resident.clone();
+        let deferred_before = self.deferred_recipe_reloads.clone();
+        let last_definition_before = self.last_definition;
+        let uses = {
+            let before = DynamicFutureUses(remaining);
+            self.begin_step(point, inst, &before)?
+        };
+        let remaining_uses = remaining.emit(point.source, inst, self.logical)?;
+        {
+            let after = DynamicFutureUses(remaining);
+            self.finish_step(point, inst, &uses, &after)?;
+        }
+        let resident = resident_before
+            .symmetric_difference(&self.resident)
+            .copied()
+            .collect();
+        let deferred = deferred_before
+            .keys()
+            .chain(self.deferred_recipe_reloads.keys())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|value| deferred_before.get(value) != self.deferred_recipe_reloads.get(value))
+            .collect();
+        let continuation = [last_definition_before, self.last_definition]
+            .into_iter()
+            .flatten()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(ScheduledStepDelta {
+            resident,
+            deferred,
+            remaining_uses,
+            continuation,
+        })
+    }
+
+    fn candidate_score(
+        &self,
+        source: usize,
+        inst: &MInst,
+        remaining: &RemainingBlockUses,
+    ) -> Result<AllocationCandidateScore, SpillPlanError> {
+        let block_id = self.func.blocks[self.block].id;
+        let uses = inst
+            .uses()
+            .iter()
+            .copied()
+            .map(|value| self.logical.checked_of(value, Some(block_id), Some(source)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut blocked_by_deferred_reload = false;
+        let mut missing = 0usize;
+        let mut resident_operands = 0usize;
+        let mut materialization_cost = 0u32;
+        let costs = super::cost::MachineSpillCosts::with_recipes(self.func, self.planning_recipes);
+        for &value in &uses {
+            if self.resident.contains(&value) {
+                resident_operands += 1;
+                continue;
+            }
+            missing += 1;
+            let point = PointUse {
+                block: block_id,
+                instruction: source,
+                value: VReg(value.0),
+            };
+            if let Some(&expected) = self.deferred_recipe_reloads.get(&value) {
+                if expected != point {
+                    blocked_by_deferred_reload = true;
+                    continue;
+                }
+                materialization_cost = materialization_cost.saturating_add(u32::from(
+                    self.planning_recipes
+                        .point_specific_materialization_cost(point)
+                        .unwrap_or_else(|| costs.persistent_reload(VReg(value.0))),
+                ));
+            } else {
+                materialization_cost = materialization_cost
+                    .saturating_add(u32::from(costs.persistent_reload(VReg(value.0))));
+            }
+        }
+        let dying = uses
+            .iter()
+            .filter(|&&value| remaining.remaining_uses(value) == 1 && !remaining.is_live_out(value))
+            .count();
+        let definition_live = inst
+            .def()
+            .map(|value| self.logical.checked_of(value, Some(block_id), Some(source)))
+            .transpose()?
+            .is_some_and(|value| {
+                remaining.remaining_uses(value) != 0 || remaining.is_live_out(value)
+            });
+        let pressure_delta = isize::try_from(missing + usize::from(definition_live))
+            .unwrap_or(isize::MAX)
+            .saturating_sub(isize::try_from(dying).unwrap_or(isize::MAX));
+        Ok(AllocationCandidateScore {
+            blocked_by_deferred_reload,
+            continuation_tie: std::cmp::Reverse(
+                self.last_definition
+                    .is_some_and(|value| uses.contains(&value)),
+            ),
+            // Reusing an operand already in W closes the residency cluster
+            // which made that value worth keeping.  Rank this before a new
+            // root with no operands; otherwise a stream of cheap Loads fills
+            // W, spills those very results, and only then visits their uses.
+            resident_operand_tie: std::cmp::Reverse(resident_operands),
+            // Once W is full, an operand-bearing instruction closes existing
+            // work (resident, spilled, or rematerializable).  A zero-input
+            // root only creates another value which must displace such work.
+            operand_tie: std::cmp::Reverse(uses.len()),
+            materialization_cost,
+            pressure_delta,
+            // Preserve the incoming ISel order as the deterministic final
+            // tie-breaker after dependency locality and the current W/S
+            // transition have made no distinction.
+            preferred_rank: source,
+            source,
+        })
+    }
+
+    fn begin_step(
+        &mut self,
+        point: TransitionPoint,
+        inst: &MInst,
+        future_uses: &impl FutureUses,
+    ) -> Result<BTreeSet<LogicalValue>, SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
         let uses = inst
             .uses()
@@ -768,20 +1372,29 @@ impl<'a> BlockTransitionPlanner<'a> {
         }
         limit(
             self.func,
-            self.next_use,
             self.planning_recipes,
-            self.logical,
             self.homes,
             &mut self.transition.point_ops,
             self.block,
             point.output,
-            point.source,
             self.registers,
             &uses,
             &mut self.resident,
             &mut self.spilled,
             &mut self.deferred_recipe_reloads,
+            future_uses,
         )?;
+        Ok(uses)
+    }
+
+    fn finish_step(
+        &mut self,
+        point: TransitionPoint,
+        inst: &MInst,
+        uses: &BTreeSet<LogicalValue>,
+        future_uses: &impl FutureUses,
+    ) -> Result<(), SpillPlanError> {
+        let block_id = self.func.blocks[self.block].id;
         let clobbered = clobbers(inst).len();
         if clobbered > self.registers {
             return Err(SpillPlanError::new(
@@ -798,18 +1411,16 @@ impl<'a> BlockTransitionPlanner<'a> {
         if clobbered != 0 {
             limit_live_through_clobber(
                 self.func,
-                self.next_use,
                 self.planning_recipes,
-                self.logical,
                 self.homes,
                 &mut self.transition.point_ops,
                 self.block,
                 point.output,
-                point.source,
                 self.registers.saturating_sub(clobbered),
                 &mut self.resident,
                 &mut self.spilled,
                 &mut self.deferred_recipe_reloads,
+                future_uses,
             )?;
         }
         if let Some(definition) = inst.def() {
@@ -828,34 +1439,26 @@ impl<'a> BlockTransitionPlanner<'a> {
                 };
                 limit(
                     self.func,
-                    self.next_use,
                     self.planning_recipes,
-                    self.logical,
                     self.homes,
                     &mut self.transition.point_ops,
                     self.block,
                     point.output,
-                    point.source + 1,
                     maximum,
-                    &uses,
+                    uses,
                     &mut self.resident,
                     &mut self.spilled,
                     &mut self.deferred_recipe_reloads,
+                    future_uses,
                 )?;
             }
             self.resident.insert(definition);
+            self.last_definition = Some(definition);
+        } else {
+            self.last_definition = None;
         }
-        self.resident.retain(|value| {
-            !logical_distance_at(
-                self.func,
-                self.next_use,
-                self.logical,
-                self.block,
-                point.source + 1,
-                *value,
-            )
-            .is_dead()
-        });
+        self.resident
+            .retain(|value| !future_uses.distance(*value).is_dead());
         Ok(())
     }
 
@@ -881,65 +1484,31 @@ impl<'a> BlockTransitionPlanner<'a> {
 #[allow(clippy::too_many_arguments)]
 fn limit_live_through_clobber(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    logical: &LogicalValues,
     homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
-    distance_instruction: usize,
     capacity: usize,
     resident: &mut BTreeSet<LogicalValue>,
     spilled: &mut BTreeSet<LogicalValue>,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
+    future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     let mut live_through = resident
         .iter()
         .copied()
-        .filter(|value| {
-            !logical_distance_at(
-                func,
-                next_use,
-                logical,
-                block,
-                distance_instruction + 1,
-                *value,
-            )
-            .is_dead()
-        })
+        .filter(|value| !future_uses.distance(*value).is_dead())
         .collect::<BTreeSet<_>>();
     while live_through.len() > capacity {
         let Some(victim) = live_through.iter().copied().max_by(|left, right| {
             compare_eviction_candidates(
                 func,
-                next_use,
                 planning_recipes,
                 spilled,
-                block,
-                distance_instruction + 1,
-                (
-                    *left,
-                    logical_distance_at(
-                        func,
-                        next_use,
-                        logical,
-                        block,
-                        distance_instruction + 1,
-                        *left,
-                    ),
-                ),
-                (
-                    *right,
-                    logical_distance_at(
-                        func,
-                        next_use,
-                        logical,
-                        block,
-                        distance_instruction + 1,
-                        *right,
-                    ),
-                ),
+                future_uses,
+                (*left, future_uses.distance(*left)),
+                (*right, future_uses.distance(*right)),
             )
         }) else {
             return Err(SpillPlanError::new(
@@ -952,16 +1521,15 @@ fn limit_live_through_clobber(
         };
         evict_value(
             func,
-            next_use,
             planning_recipes,
             homes,
             point_ops,
             block,
             point_instruction,
-            distance_instruction + 1,
             victim,
             spilled,
             deferred_recipe_reloads,
+            future_uses,
         )?;
         live_through.remove(&victim);
         resident.remove(&victim);
@@ -1131,22 +1699,194 @@ fn init_loop_region(
         .collect())
 }
 
+trait FutureUses {
+    fn distance(&self, value: LogicalValue) -> NextUseDistance;
+    fn next_point(&self, value: LogicalValue) -> Option<PointUse>;
+}
+
+struct LinearFutureUses<'a> {
+    func: &'a MFunction,
+    next_use: &'a NextUseAnalysis,
+    block: usize,
+    instruction: usize,
+}
+
+impl FutureUses for LinearFutureUses<'_> {
+    fn distance(&self, value: LogicalValue) -> NextUseDistance {
+        self.next_use
+            .distance_at(self.func, self.block, self.instruction, VReg(value.0))
+    }
+
+    fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
+        let instruction =
+            self.next_use
+                .next_local_use(self.block, self.instruction, VReg(value.0))?;
+        Some(PointUse {
+            block: self.func.blocks[self.block].id,
+            instruction,
+            value: VReg(value.0),
+        })
+    }
+}
+
+struct RemainingBlockUses {
+    block: BlockId,
+    preferred_rank: Vec<usize>,
+    remaining: HashMap<LogicalValue, BTreeSet<(usize, usize)>>,
+    exit: HashMap<LogicalValue, NextUseDistance>,
+    emitted: Vec<bool>,
+    emitted_count: usize,
+}
+
+impl RemainingBlockUses {
+    fn build(
+        func: &MFunction,
+        next_use: &NextUseAnalysis,
+        logical: &LogicalValues,
+        block: usize,
+    ) -> Result<Self, SpillPlanError> {
+        let instructions = func.blocks[block].insts.len();
+        let preferred_rank = (0..instructions).collect::<Vec<_>>();
+        let mut remaining = HashMap::<LogicalValue, BTreeSet<(usize, usize)>>::new();
+        for (source, inst) in func.blocks[block].insts.iter().enumerate() {
+            let mut uses = inst.uses().to_vec();
+            uses.sort_unstable();
+            uses.dedup();
+            for value in uses {
+                let value = logical.checked_of(value, Some(func.blocks[block].id), Some(source))?;
+                remaining
+                    .entry(value)
+                    .or_default()
+                    .insert((preferred_rank[source], source));
+            }
+        }
+        let exit = next_use.exit[block]
+            .iter()
+            .map(|(&value, &distance)| {
+                logical
+                    .checked_of(value, Some(func.blocks[block].id), Some(instructions))
+                    .map(|value| (value, distance))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Ok(Self {
+            block: func.blocks[block].id,
+            preferred_rank,
+            remaining,
+            exit,
+            emitted: vec![false; instructions],
+            emitted_count: 0,
+        })
+    }
+
+    fn emit(
+        &mut self,
+        source: usize,
+        inst: &MInst,
+        logical: &LogicalValues,
+    ) -> Result<Vec<LogicalValue>, SpillPlanError> {
+        if source >= self.emitted.len() || std::mem::replace(&mut self.emitted[source], true) {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.SCHEDULE_ORDER",
+                Some(self.block),
+                Some(source),
+                Vec::new(),
+                "a source instruction was committed more than once",
+            ));
+        }
+        self.emitted_count += 1;
+        let mut uses = inst.uses().to_vec();
+        uses.sort_unstable();
+        uses.dedup();
+        let mut changed = Vec::with_capacity(uses.len());
+        for value in uses {
+            let value = logical.checked_of(value, Some(self.block), Some(source))?;
+            let points = self.remaining.get_mut(&value).ok_or_else(|| {
+                SpillPlanError::new(
+                    "SPILL_PLAN.SCHEDULE_ORDER",
+                    Some(self.block),
+                    Some(source),
+                    vec![VReg(value.0)],
+                    "committed use has no remaining-use entry",
+                )
+            })?;
+            if !points.remove(&(self.preferred_rank[source], source)) {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.SCHEDULE_ORDER",
+                    Some(self.block),
+                    Some(source),
+                    vec![VReg(value.0)],
+                    "committed use was absent from its remaining-use set",
+                ));
+            }
+            changed.push(value);
+        }
+        Ok(changed)
+    }
+
+    fn remaining_uses(&self, value: LogicalValue) -> usize {
+        self.remaining.get(&value).map_or(0, BTreeSet::len)
+    }
+
+    fn is_live_out(&self, value: LogicalValue) -> bool {
+        self.exit.contains_key(&value)
+    }
+
+    fn distance(&self, value: LogicalValue) -> NextUseDistance {
+        if let Some(&(rank, _)) = self.remaining.get(&value).and_then(BTreeSet::first) {
+            return NextUseDistance::Finite {
+                loop_exits: 0,
+                instructions: rank.saturating_sub(self.emitted_count),
+            };
+        }
+        let remaining_instructions = self.emitted.len().saturating_sub(self.emitted_count);
+        match self.exit.get(&value).copied() {
+            Some(NextUseDistance::Finite {
+                loop_exits,
+                instructions,
+            }) => NextUseDistance::Finite {
+                loop_exits,
+                instructions: instructions.saturating_add(remaining_instructions),
+            },
+            _ => NextUseDistance::Dead,
+        }
+    }
+
+    fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
+        let &(_, instruction) = self.remaining.get(&value)?.first()?;
+        Some(PointUse {
+            block: self.block,
+            instruction,
+            value: VReg(value.0),
+        })
+    }
+}
+
+struct DynamicFutureUses<'a>(&'a RemainingBlockUses);
+
+impl FutureUses for DynamicFutureUses<'_> {
+    fn distance(&self, value: LogicalValue) -> NextUseDistance {
+        self.0.distance(value)
+    }
+
+    fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
+        self.0.next_point(value)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn limit(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    logical: &LogicalValues,
     homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
-    distance_instruction: usize,
     maximum: usize,
     pinned: &BTreeSet<LogicalValue>,
     resident: &mut BTreeSet<LogicalValue>,
     spilled: &mut BTreeSet<LogicalValue>,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
+    future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     while resident.len() > maximum {
         let Some(victim) = resident
@@ -1156,33 +1896,11 @@ fn limit(
             .max_by(|left, right| {
                 compare_eviction_candidates(
                     func,
-                    next_use,
                     planning_recipes,
                     spilled,
-                    block,
-                    distance_instruction,
-                    (
-                        *left,
-                        logical_distance_at(
-                            func,
-                            next_use,
-                            logical,
-                            block,
-                            distance_instruction,
-                            *left,
-                        ),
-                    ),
-                    (
-                        *right,
-                        logical_distance_at(
-                            func,
-                            next_use,
-                            logical,
-                            block,
-                            distance_instruction,
-                            *right,
-                        ),
-                    ),
+                    future_uses,
+                    (*left, future_uses.distance(*left)),
+                    (*right, future_uses.distance(*right)),
                 )
             })
         else {
@@ -1199,16 +1917,15 @@ fn limit(
         };
         evict_value(
             func,
-            next_use,
             planning_recipes,
             homes,
             point_ops,
             block,
             point_instruction,
-            distance_instruction,
             victim,
             spilled,
             deferred_recipe_reloads,
+            future_uses,
         )?;
         resident.remove(&victim);
     }
@@ -1218,28 +1935,21 @@ fn limit(
 #[allow(clippy::too_many_arguments)]
 fn evict_value(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
-    distance_instruction: usize,
     value: LogicalValue,
     spilled: &mut BTreeSet<LogicalValue>,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
+    future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     if spilled.contains(&value) {
         return Ok(());
     }
-    if let Some((point, recipe_cost)) = next_use_point_recipe(
-        func,
-        next_use,
-        planning_recipes,
-        block,
-        distance_instruction,
-        value,
-    ) {
+    if let Some((point, recipe_cost)) = next_use_point_recipe(planning_recipes, value, future_uses)
+    {
         let stack_cost =
             spill_cost(func, value).saturating_add(reload_cost(func, planning_recipes, value));
         if recipe_cost < stack_cost {
@@ -1278,20 +1988,11 @@ fn evict_value(
 /// eviction makes a fresh home decision against the MemorySSA version at that
 /// later use.
 fn next_use_point_recipe(
-    func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    block: usize,
-    instruction: usize,
     value: LogicalValue,
+    future_uses: &impl FutureUses,
 ) -> Option<(PointUse, u16)> {
-    let value = VReg(value.0);
-    let instruction = next_use.next_local_use(block, instruction, value)?;
-    let point = PointUse {
-        block: func.blocks[block].id,
-        instruction,
-        value,
-    };
+    let point = future_uses.next_point(value)?;
     planning_recipes
         .point_specific_materialization_cost(point)
         .map(|cost| (point, cost))
@@ -1305,11 +2006,9 @@ fn next_use_point_recipe(
 /// and the denominator is the register occupancy until that use.
 fn compare_eviction_candidates(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     spilled: &BTreeSet<LogicalValue>,
-    block: usize,
-    instruction: usize,
+    future_uses: &impl FutureUses,
     left: (LogicalValue, NextUseDistance),
     right: (LogicalValue, NextUseDistance),
 ) -> Ordering {
@@ -1327,24 +2026,10 @@ fn compare_eviction_candidates(
                 instructions: right_instructions,
             },
         ) => left_exits.cmp(&right_exits).then_with(|| {
-            let left_cost = eviction_cost(
-                func,
-                next_use,
-                planning_recipes,
-                spilled,
-                block,
-                instruction,
-                left.0,
-            ) as u128;
-            let right_cost = eviction_cost(
-                func,
-                next_use,
-                planning_recipes,
-                spilled,
-                block,
-                instruction,
-                right.0,
-            ) as u128;
+            let left_cost =
+                eviction_cost(func, planning_recipes, spilled, left.0, future_uses) as u128;
+            let right_cost =
+                eviction_cost(func, planning_recipes, spilled, right.0, future_uses) as u128;
             let left_span = left_instructions as u128 + 1;
             let right_span = right_instructions as u128 + 1;
             // Lower avoided-cost density is the better eviction candidate.
@@ -1360,25 +2045,22 @@ fn compare_eviction_candidates(
 
 fn eviction_cost(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     spilled: &BTreeSet<LogicalValue>,
-    block: usize,
-    instruction: usize,
     value: LogicalValue,
+    future_uses: &impl FutureUses,
 ) -> u16 {
     let has_persistent_home = spilled.contains(&value);
-    let persistent_cost =
-        reload_cost_at_next_local_use(func, next_use, planning_recipes, block, instruction, value)
-            .saturating_add(if has_persistent_home {
-                0
-            } else {
-                spill_cost(func, value)
-            });
+    let persistent_cost = reload_cost_at_next_local_use(func, planning_recipes, value, future_uses)
+        .saturating_add(if has_persistent_home {
+            0
+        } else {
+            spill_cost(func, value)
+        });
     if has_persistent_home {
         return persistent_cost;
     }
-    next_use_point_recipe(func, next_use, planning_recipes, block, instruction, value)
+    next_use_point_recipe(planning_recipes, value, future_uses)
         .map_or(persistent_cost, |(_, recipe_cost)| {
             persistent_cost.min(recipe_cost)
         })
@@ -1386,22 +2068,15 @@ fn eviction_cost(
 
 fn reload_cost_at_next_local_use(
     func: &MFunction,
-    next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    block: usize,
-    instruction: usize,
     value: LogicalValue,
+    future_uses: &impl FutureUses,
 ) -> u16 {
-    let value = VReg(value.0);
     let costs = super::cost::MachineSpillCosts::with_recipes(func, planning_recipes);
-    if let Some(instruction) = next_use.next_local_use(block, instruction, value) {
-        return costs.reload_at_point(PointUse {
-            block: func.blocks[block].id,
-            instruction,
-            value,
-        });
+    if let Some(point) = future_uses.next_point(value) {
+        return costs.reload_at_point(point);
     }
-    costs.persistent_reload(value)
+    costs.persistent_reload(VReg(value.0))
 }
 
 /// Cost the complete guaranteed straight-line use cluster for a value which
@@ -1464,18 +2139,6 @@ fn logical_entry_distance(
     value: LogicalValue,
 ) -> NextUseDistance {
     next_use.distance_at(func, block, 0, VReg(value.0))
-}
-
-fn logical_distance_at(
-    func: &MFunction,
-    next_use: &NextUseAnalysis,
-    logical: &LogicalValues,
-    block: usize,
-    instruction: usize,
-    value: LogicalValue,
-) -> NextUseDistance {
-    let _ = logical;
-    next_use.distance_at(func, block, instruction, VReg(value.0))
 }
 
 impl SpillPlan {
@@ -2101,6 +2764,72 @@ mod tests {
     };
 
     #[test]
+    fn integrated_ready_walk_closes_resident_lanes_before_starting_new_roots() {
+        const LANES: usize = 32;
+        let mut vregs = VRegAllocator::new();
+        let roots = (0..LANES).map(|_| vregs.alloc()).collect::<Vec<_>>();
+        let results = (0..LANES).map(|_| vregs.alloc()).collect::<Vec<_>>();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); LANES * 2]);
+        let mut block = MBlock::new(BlockId(0));
+        for (lane, &root) in roots.iter().enumerate() {
+            block.push(MInst::LoadImm {
+                dst: root,
+                value: lane as u64,
+            });
+        }
+        for (&root, &result) in roots.iter().zip(&results) {
+            block.push(MInst::AndImm {
+                dst: result,
+                src: root,
+                imm: 1,
+            });
+        }
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = super::super::constraints::ConstraintModel::build(&func, &cfg).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = SpillHomes::build(&func).unwrap();
+        let recipes = PlanningRecipes::stack_only(func.vregs.count());
+        let (_, order) = plan_scheduled_block_transition(
+            &func,
+            &next_use,
+            &recipes,
+            &logical,
+            &homes,
+            0,
+            4,
+            &BTreeSet::new(),
+            BTreeSet::new(),
+            &constraints.instructions[0],
+        )
+        .unwrap();
+
+        let mut outstanding = BTreeSet::new();
+        assert!(
+            order
+                .iter()
+                .position(|source| *source >= LANES)
+                .is_some_and(|position| position <= 4),
+            "a direct consumer must run no later than the resident-capacity boundary"
+        );
+        for &source in &order[..order.len() - 1] {
+            if source < LANES {
+                outstanding.insert(source);
+            } else {
+                assert!(
+                    outstanding.remove(&(source - LANES)),
+                    "a lane consumer must follow its root"
+                );
+            }
+        }
+        assert!(outstanding.is_empty());
+        assert_eq!(order.last(), Some(&(LANES * 2)));
+    }
+
+    #[test]
     fn entry_value_evicted_before_first_use_is_planned_as_a_memory_phi() {
         let mut vregs = VRegAllocator::new();
         let initial = vregs.alloc();
@@ -2575,6 +3304,12 @@ mod tests {
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
         let spilled = BTreeSet::new();
+        let future = LinearFutureUses {
+            func: &func,
+            next_use: &next_use,
+            block: 0,
+            instruction: 0,
+        };
         let local = |instructions| NextUseDistance::Finite {
             loop_exits: 0,
             instructions,
@@ -2583,11 +3318,9 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
-                &next_use,
                 &planning_recipes,
                 &spilled,
-                0,
-                0,
+                &future,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(1)),
             ),
@@ -2597,11 +3330,9 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &func,
-                &next_use,
                 &planning_recipes,
                 &spilled,
-                0,
-                0,
+                &future,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(15)),
             ),
@@ -2619,14 +3350,18 @@ mod tests {
         let equal_cfg = super::super::cfg::normalize(&mut equal_cost).unwrap();
         let equal_next_use = super::super::next_use::analyze(&equal_cost, &equal_cfg).unwrap();
         let equal_recipes = PlanningRecipes::stack_only(equal_cost.vregs.count());
+        let equal_future = LinearFutureUses {
+            func: &equal_cost,
+            next_use: &equal_next_use,
+            block: 0,
+            instruction: 0,
+        };
         assert_eq!(
             compare_eviction_candidates(
                 &equal_cost,
-                &equal_next_use,
                 &equal_recipes,
                 &spilled,
-                0,
-                0,
+                &equal_future,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(8)),
             ),
@@ -2637,11 +3372,9 @@ mod tests {
         assert_eq!(
             compare_eviction_candidates(
                 &equal_cost,
-                &equal_next_use,
                 &exact_recipes,
                 &spilled,
-                0,
-                0,
+                &equal_future,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(2)),
             ),
