@@ -626,9 +626,24 @@ fn plan_block_transition(
         spilled,
     )?;
     for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
-        planner.step(instruction, inst)?;
+        planner.step(
+            TransitionPoint {
+                output: instruction,
+                source: instruction,
+            },
+            inst,
+        )?;
     }
     planner.finish()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransitionPoint {
+    /// Instruction position in the final block order.
+    output: usize,
+    /// Stable position in the order consumed by next-use and planning-recipe
+    /// analysis.
+    source: usize,
 }
 
 struct BlockTransitionPlanner<'a> {
@@ -697,14 +712,14 @@ impl<'a> BlockTransitionPlanner<'a> {
         })
     }
 
-    fn step(&mut self, instruction: usize, inst: &MInst) -> Result<(), SpillPlanError> {
+    fn step(&mut self, point: TransitionPoint, inst: &MInst) -> Result<(), SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
         let uses = inst
             .uses()
             .into_iter()
             .map(|value| {
                 self.logical
-                    .checked_of(value, Some(block_id), Some(instruction))
+                    .checked_of(value, Some(block_id), Some(point.output))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
         for &value in &uses {
@@ -712,14 +727,14 @@ impl<'a> BlockTransitionPlanner<'a> {
                 if let Some(expected) = self.deferred_recipe_reloads.remove(&value) {
                     let actual = PointUse {
                         block: block_id,
-                        instruction,
+                        instruction: point.source,
                         value: VReg(value.0),
                     };
                     if expected != actual {
                         return Err(SpillPlanError::new(
                             "SPILL_PLAN.RECIPE_RELOAD_POINT",
                             Some(block_id),
-                            Some(instruction),
+                            Some(point.output),
                             vec![VReg(value.0)],
                             format!(
                                 "deferred recipe reload expected {expected:?} but reached {actual:?}"
@@ -728,12 +743,12 @@ impl<'a> BlockTransitionPlanner<'a> {
                     }
                     self.transition
                         .recipe_reloads
-                        .insert((block_id, instruction, value));
+                        .insert((block_id, point.output, value));
                 }
                 self.transition.point_ops.push((
                     ProgramPoint {
                         block: block_id,
-                        instruction,
+                        instruction: point.output,
                         side: PointSide::Before,
                     },
                     PlannedOp::Reload {
@@ -751,8 +766,8 @@ impl<'a> BlockTransitionPlanner<'a> {
             self.homes,
             &mut self.transition.point_ops,
             self.block,
-            instruction,
-            instruction,
+            point.output,
+            point.source,
             self.registers,
             &uses,
             &mut self.resident,
@@ -764,7 +779,7 @@ impl<'a> BlockTransitionPlanner<'a> {
             return Err(SpillPlanError::new(
                 "SPILL_PLAN.CLOBBER_CAPACITY",
                 Some(block_id),
-                Some(instruction),
+                Some(point.output),
                 inst.uses().to_vec(),
                 format!(
                     "instruction clobbers {clobbered} registers but the allocator has only {}",
@@ -781,7 +796,8 @@ impl<'a> BlockTransitionPlanner<'a> {
                 self.homes,
                 &mut self.transition.point_ops,
                 self.block,
-                instruction,
+                point.output,
+                point.source,
                 self.registers.saturating_sub(clobbered),
                 &mut self.resident,
                 &mut self.spilled,
@@ -791,13 +807,13 @@ impl<'a> BlockTransitionPlanner<'a> {
         if let Some(definition) = inst.def() {
             let definition =
                 self.logical
-                    .checked_of(definition, Some(block_id), Some(instruction))?;
+                    .checked_of(definition, Some(block_id), Some(point.output))?;
             if !self.resident.contains(&definition) && self.resident.len() == self.registers {
                 let Some(maximum) = self.registers.checked_sub(1) else {
                     return Err(SpillPlanError::new(
                         "SPILL_PLAN.OPERAND_PRESSURE",
                         Some(block_id),
-                        Some(instruction),
+                        Some(point.output),
                         vec![VReg(definition.0)],
                         "an instruction result requires a register but no registers are available",
                     ));
@@ -810,8 +826,8 @@ impl<'a> BlockTransitionPlanner<'a> {
                     self.homes,
                     &mut self.transition.point_ops,
                     self.block,
-                    instruction,
-                    instruction + 1,
+                    point.output,
+                    point.source + 1,
                     maximum,
                     &uses,
                     &mut self.resident,
@@ -827,7 +843,7 @@ impl<'a> BlockTransitionPlanner<'a> {
                 self.next_use,
                 self.logical,
                 self.block,
-                instruction + 1,
+                point.source + 1,
                 *value,
             )
             .is_dead()
@@ -863,7 +879,8 @@ fn limit_live_through_clobber(
     homes: &PhiCongruenceClasses,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
-    instruction: usize,
+    point_instruction: usize,
+    distance_instruction: usize,
     capacity: usize,
     resident: &mut BTreeSet<LogicalValue>,
     spilled: &mut BTreeSet<LogicalValue>,
@@ -873,7 +890,15 @@ fn limit_live_through_clobber(
         .iter()
         .copied()
         .filter(|value| {
-            !logical_distance_at(func, next_use, logical, block, instruction + 1, *value).is_dead()
+            !logical_distance_at(
+                func,
+                next_use,
+                logical,
+                block,
+                distance_instruction + 1,
+                *value,
+            )
+            .is_dead()
         })
         .collect::<BTreeSet<_>>();
     while live_through.len() > capacity {
@@ -884,21 +909,35 @@ fn limit_live_through_clobber(
                 planning_recipes,
                 spilled,
                 block,
-                instruction + 1,
+                distance_instruction + 1,
                 (
                     *left,
-                    logical_distance_at(func, next_use, logical, block, instruction + 1, *left),
+                    logical_distance_at(
+                        func,
+                        next_use,
+                        logical,
+                        block,
+                        distance_instruction + 1,
+                        *left,
+                    ),
                 ),
                 (
                     *right,
-                    logical_distance_at(func, next_use, logical, block, instruction + 1, *right),
+                    logical_distance_at(
+                        func,
+                        next_use,
+                        logical,
+                        block,
+                        distance_instruction + 1,
+                        *right,
+                    ),
                 ),
             )
         }) else {
             return Err(SpillPlanError::new(
                 "SPILL_PLAN.MIN_VICTIM",
                 Some(func.blocks[block].id),
-                Some(instruction),
+                Some(point_instruction),
                 Vec::new(),
                 "clobber pressure exceeded capacity but MIN had no live-through victim",
             ));
@@ -910,8 +949,8 @@ fn limit_live_through_clobber(
             homes,
             point_ops,
             block,
-            instruction,
-            instruction + 1,
+            point_instruction,
+            distance_instruction + 1,
             victim,
             spilled,
             deferred_recipe_reloads,
@@ -2716,6 +2755,83 @@ mod tests {
                     operation,
                     PlannedOp::Spill { value, .. } if *value == LogicalValue(stored.0)
                 )
+        }));
+    }
+
+    #[test]
+    fn stable_recipe_identity_materializes_at_the_output_position() {
+        let mut vregs = VRegAllocator::new();
+        let stored = vregs.alloc();
+        let pressure = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: stored,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 40,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: pressure,
+            base: BaseReg::StackFrame,
+            offset: 8,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 16,
+            src: pressure,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 24,
+            src: stored,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let mut planner = BlockTransitionPlanner::new(
+            &func,
+            &next_use,
+            &recipes,
+            &logical,
+            &homes,
+            0,
+            1,
+            &BTreeSet::new(),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        for (source, inst) in func.blocks[0].insts.iter().enumerate() {
+            planner
+                .step(
+                    TransitionPoint {
+                        output: if source >= 4 { source + 3 } else { source },
+                        source,
+                    },
+                    inst,
+                )
+                .unwrap();
+        }
+        let transition = planner.finish().unwrap();
+        let stored = LogicalValue(stored.0);
+
+        assert!(transition.recipe_reloads.contains(&(BlockId(0), 7, stored)));
+        assert!(transition.point_ops.iter().any(|(point, operation)| {
+            point.instruction == 7
+                && matches!(operation, PlannedOp::Reload { value, .. } if *value == stored)
         }));
     }
 
