@@ -217,6 +217,83 @@ struct RegionSchedule {
     work: RegionWork,
 }
 
+/// Exact register and memory dependency graph for one movable MIR region.
+///
+/// Both scheduling directions must consume this graph. Reconstructing a
+/// second, weaker dependency model in spill planning would allow the chosen
+/// W/S transition to reorder an effect which the standalone scheduler keeps
+/// fixed.
+pub(super) struct InstructionDag {
+    dependencies: Vec<Vec<usize>>,
+    dependents: Vec<Vec<usize>>,
+    unique_uses: Vec<Vec<VReg>>,
+    definitions: HashMap<VReg, usize>,
+    use_candidates: HashMap<VReg, Vec<usize>>,
+    dependency_priorities: Vec<(usize, usize)>,
+}
+
+impl InstructionDag {
+    pub(super) fn build(region: &[MInst]) -> Option<Self> {
+        let definitions = region
+            .iter()
+            .enumerate()
+            .filter_map(|(index, inst)| inst.def().map(|value| (value, index)))
+            .collect::<HashMap<_, _>>();
+        let unique_uses = region
+            .iter()
+            .map(|inst| {
+                let mut result = Vec::with_capacity(inst.uses().len());
+                for value in inst.uses() {
+                    if !result.contains(&value) {
+                        result.push(value);
+                    }
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+        let mut dependencies = vec![Vec::<usize>::new(); region.len()];
+        let mut dependents = vec![Vec::<usize>::new(); region.len()];
+        let mut use_candidates = HashMap::<VReg, Vec<usize>>::new();
+        for (user, uses) in unique_uses.iter().enumerate() {
+            for &used in uses {
+                use_candidates.entry(used).or_default().push(user);
+                if let Some(&definition) = definitions.get(&used) {
+                    add_dependency(&mut dependencies, &mut dependents, user, definition);
+                }
+            }
+        }
+
+        // Preserve RAW, WAR, and WAW without inventing read-after-read edges.
+        // The sparse interval partition scales with effect endpoints rather
+        // than the physical byte length of wide state ranges.
+        let mut memory = MemoryDependencyTracker::<MemoryObject, usize>::default();
+        for (instruction, inst) in region.iter().enumerate() {
+            let mut memory_dependencies = BTreeSet::new();
+            let reads = memory_effect::reads(inst);
+            let writes = memory_effect::writes(inst);
+            memory.add_event(
+                instruction,
+                analysis_effects(&reads),
+                analysis_effects(&writes),
+                &mut memory_dependencies,
+            );
+            for dependency in memory_dependencies {
+                add_dependency(&mut dependencies, &mut dependents, instruction, dependency);
+            }
+        }
+
+        let dependency_priorities = dependency_priorities(&dependencies)?;
+        Some(Self {
+            dependencies,
+            dependents,
+            unique_uses,
+            definitions,
+            use_candidates,
+            dependency_priorities,
+        })
+    }
+}
+
 fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule {
     if region.len() < 2 {
         if let Some(inst) = region.first() {
@@ -229,55 +306,7 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
             work: RegionWork::default(),
         };
     }
-    let definitions = region
-        .iter()
-        .enumerate()
-        .filter_map(|(index, inst)| inst.def().map(|value| (value, index)))
-        .collect::<HashMap<_, _>>();
-    let unique_uses = region
-        .iter()
-        .map(|inst| {
-            let mut result = Vec::with_capacity(inst.uses().len());
-            for value in inst.uses() {
-                if !result.contains(&value) {
-                    result.push(value);
-                }
-            }
-            result
-        })
-        .collect::<Vec<_>>();
-    let mut dependencies = vec![Vec::<usize>::new(); region.len()];
-    let mut users = vec![0usize; region.len()];
-    let mut use_candidates = HashMap::<VReg, Vec<usize>>::new();
-    for (user, uses) in unique_uses.iter().enumerate() {
-        for &used in uses {
-            use_candidates.entry(used).or_default().push(user);
-            if let Some(&definition) = definitions.get(&used) {
-                add_dependency(&mut dependencies, &mut users, user, definition);
-            }
-        }
-    }
-
-    // Preserve RAW, WAR, and WAW without inventing read-after-read edges.
-    // The sparse interval partition scales with effect endpoints rather than
-    // the physical byte length of wide state ranges.
-    let mut memory = MemoryDependencyTracker::<MemoryObject, usize>::default();
-    for (instruction, inst) in region.iter().enumerate() {
-        let mut memory_dependencies = BTreeSet::new();
-        let reads = memory_effect::reads(inst);
-        let writes = memory_effect::writes(inst);
-        memory.add_event(
-            instruction,
-            analysis_effects(&reads),
-            analysis_effects(&writes),
-            &mut memory_dependencies,
-        );
-        for dependency in memory_dependencies {
-            add_dependency(&mut dependencies, &mut users, instruction, dependency);
-        }
-    }
-
-    let Some(dependency_priorities) = dependency_priorities(&dependencies) else {
+    let Some(dag) = InstructionDag::build(region) else {
         return RegionSchedule {
             instructions: Vec::new(),
             dependency_verified: false,
@@ -286,10 +315,18 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         };
     };
     let mut work = RegionWork::default();
-    let mut ready = IndexedReadyQueue::new(dependency_priorities);
-    for (index, &count) in users.iter().enumerate() {
+    let mut remaining_users = dag.dependents.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut ready = IndexedReadyQueue::new(dag.dependency_priorities.clone());
+    for (index, &count) in remaining_users.iter().enumerate() {
         if count == 0 {
-            enqueue_ready(&mut ready, index, region, &unique_uses, &live, &mut work);
+            enqueue_ready(
+                &mut ready,
+                index,
+                region,
+                &dag.unique_uses,
+                &live,
+                &mut work,
+            );
         }
     }
     let mut reverse = Vec::with_capacity(region.len());
@@ -309,32 +346,32 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
             update_priorities_for_value(
                 definition,
                 false,
-                &use_candidates,
-                &definitions,
+                &dag.use_candidates,
+                &dag.definitions,
                 &mut ready,
                 &mut work,
             );
         }
-        for &value in &unique_uses[candidate] {
+        for &value in &dag.unique_uses[candidate] {
             if live.insert(value) {
                 update_priorities_for_value(
                     value,
                     true,
-                    &use_candidates,
-                    &definitions,
+                    &dag.use_candidates,
+                    &dag.definitions,
                     &mut ready,
                     &mut work,
                 );
             }
         }
-        for &dependency in &dependencies[candidate] {
-            users[dependency] -= 1;
-            if users[dependency] == 0 {
+        for &dependency in &dag.dependencies[candidate] {
+            remaining_users[dependency] -= 1;
+            if remaining_users[dependency] == 0 {
                 enqueue_ready(
                     &mut ready,
                     dependency,
                     region,
-                    &unique_uses,
+                    &dag.unique_uses,
                     &live,
                     &mut work,
                 );
@@ -343,7 +380,7 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
         reverse.push(candidate);
     }
     reverse.reverse();
-    let dependency_verified = dependency_order_valid(&dependencies, &reverse);
+    let dependency_verified = dependency_order_valid(&dag.dependencies, &reverse);
     let instructions = if dependency_verified {
         reverse.iter().map(|&index| region[index].clone()).collect()
     } else {
@@ -359,13 +396,13 @@ fn schedule_region(region: &[MInst], mut live: BTreeSet<VReg>) -> RegionSchedule
 
 fn add_dependency(
     dependencies: &mut [Vec<usize>],
-    users: &mut [usize],
+    dependents: &mut [Vec<usize>],
     instruction: usize,
     dependency: usize,
 ) {
     if instruction != dependency && !dependencies[instruction].contains(&dependency) {
         dependencies[instruction].push(dependency);
-        users[dependency] += 1;
+        dependents[dependency].push(instruction);
     }
 }
 
