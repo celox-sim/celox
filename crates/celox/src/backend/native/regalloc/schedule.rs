@@ -330,6 +330,7 @@ impl InstructionDag {
 #[derive(Debug)]
 pub(super) struct ForwardReadyRegion {
     dag: InstructionDag,
+    sinks: Vec<usize>,
     remaining_dependencies: Vec<usize>,
     remaining_uses: HashMap<VReg, usize>,
     ready: BTreeSet<usize>,
@@ -341,6 +342,12 @@ pub(super) struct ForwardReadyRegion {
 impl ForwardReadyRegion {
     pub(super) fn build(region: &[MInst]) -> Option<Self> {
         let dag = InstructionDag::build(region)?;
+        let sinks = dag
+            .dependents
+            .iter()
+            .enumerate()
+            .filter_map(|(instruction, dependents)| dependents.is_empty().then_some(instruction))
+            .collect();
         let remaining_dependencies = dag.dependencies.iter().map(Vec::len).collect::<Vec<_>>();
         let ready = remaining_dependencies
             .iter()
@@ -357,6 +364,7 @@ impl ForwardReadyRegion {
         let instructions = remaining_dependencies.len();
         Some(Self {
             dag,
+            sinks,
             remaining_dependencies,
             remaining_uses,
             ready,
@@ -368,6 +376,12 @@ impl ForwardReadyRegion {
 
     pub(super) fn ready(&self) -> &BTreeSet<usize> {
         &self.ready
+    }
+
+    /// Original-order roots of the reverse dependency DAG. Every instruction
+    /// in an acyclic region reaches at least one such sink.
+    pub(super) fn sinks(&self) -> &[usize] {
+        &self.sinks
     }
 
     pub(super) fn is_ready(&self, instruction: usize) -> bool {

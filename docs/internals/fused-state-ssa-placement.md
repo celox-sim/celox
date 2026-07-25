@@ -2909,7 +2909,7 @@ tree may displace a cheap local value without displacing a valuable
 CFG-coupled entry value. Until that model passes complete emitted-MIR and
 execution gates, the throughput milestone remains open.
 
-##### Definition completion span and direct-edge price
+##### Rejected definition completion span and direct-edge price
 
 The next experiment replaced the remaining source-order preference with a
 sink-side occupancy fact. For every dependency-ready definition, the
@@ -2969,15 +2969,33 @@ compile_ns=61608555255
 execute_ns=72656615748
 ```
 
-This proves deterministic generation and semantics for the checkpoint. It does
+This proves deterministic generation and semantics for the checkpoint. It did
 not establish an instruction-count or throughput improvement over bounded
-demand. That comparison requires rebuilding the parent runner and generating
-both complete traces from their corresponding source, rather than comparing
-new source against a stale executable.
+demand. The parent runner was consequently rebuilt and both complete traces
+were generated from their corresponding source.
 
-The implementation remains deliberately incomplete at CFG boundaries.
-Summing immediate successor reloads is a valid local eviction price but not
-the missing global contract:
+All SIR stages were byte-identical. Relative to parent `2079440c8`,
+direct-edge prices alone added 42 final x86 instructions. Adding the
+completion-span rank added another 213. The complete candidate was therefore
+255 x86 instructions worse than its parent:
+
+```text
+                                      parent     edge price   + completion span
+complete MIR lines                  1,597,887     1,597,872           1,598,109
+complete MIR bytes                 45,436,879    45,446,065          45,455,513
+final x86 instructions                408,036       408,078             408,291
+```
+
+A source rank is not a dependency closure. It can prefer a definition whose
+nominal final-use position is near while starting unrelated prerequisites and
+retaining shared values across other sinks. Both scalar additions are rejected
+as an allocation objective. Immediate-edge prices may eventually contribute
+to CFG boundary allocation, but they are not independently profitable and are
+not evidence for the missing join contract.
+
+The experiment was also deliberately incomplete at CFG boundaries. Summing
+immediate successor reloads is at most one local eviction price, not the
+missing global contract:
 
 - it cannot price which K values a join should receive from all predecessors;
 - an unweighted edge sum can overvalue mutually exclusive successors;
@@ -2986,14 +3004,116 @@ the missing global contract:
 - blocks are committed in layout order, so a predecessor cannot consume a
   successor's final W-entry decision.
 
-The retained completion span is the first sink-side component of the common
-marginal value, and the direct-edge sum is a bounded fallback when no local use
-remains. Neither is claimed as complete boundary allocation. The next design
-must expose a sparse boundary demand before the forward W/S walk, then let the
-existing edge-coupling verifier reconcile the committed exits. It must remain
-bounded by the target register count or by hash-consed demand frontiers; a
-dense block-by-value solution and whole-function scheduling retry remain
-forbidden.
+The completion-span rank and direct-edge sum are not retained. Their
+replacement below uses the actual dependency closure inside each movable
+region. CFG boundary allocation still requires a sparse boundary demand before
+the forward W/S walk and reconciliation by the existing edge-coupling
+verifier. It must remain bounded by the target register count or by hash-consed
+demand frontiers; a dense block-by-value solution and whole-function
+scheduling retry remain forbidden.
+
+##### Bounded sink-directed allocation packets
+
+Each movable region now enumerates sinks of the exact sparse dependency DAG
+already owned by the W/S transition. For the earliest unfinished sink, a
+persistent reverse-dependency stack asks for the next ready prerequisite:
+
+```text
+earliest unfinished sink
+  -> next unissued dependency
+  -> ... until a dependency-ready instruction
+  -> commit the same W/S transition
+```
+
+The requested instruction is selected only if its projected resident set fits
+the physical register capacity. Otherwise the normal
+source/continuation/W/S choice may make progress, and the same demand resumes
+afterward. This is a bounded sink-directed packet, not an indivisible packet:
+it never forces an unrelated CFG-boundary resident out merely to complete a
+cone.
+
+Every instruction is inserted into and removed from the ready queue once.
+Each DAG edge is discharged once by the forward walk and scanned at most once
+by the active reverse demand which can first reach it. Once a shared producer
+has been emitted for one sink, a later sink stops at that emitted dependency
+instead of traversing or materializing it again. The resulting bound remains:
+
+```text
+time   O(I log I + E)
+space  O(I + E)
+```
+
+There is no dense block-by-value table, cloned allocation attempt, second
+scheduler, or retry. Memory writes remain region barriers, so the traversal
+does not weaken the existing MemorySSA ordering contract.
+
+The current runner was rebuilt from the source under review and saved with
+SHA-256
+`8948a80fe9c5419076033ad91e48c3ce07648efba7082a469745cc6a0bff6723`.
+Two complete traces were byte-identical:
+
+```text
+pre-optimized SIR SHA-256
+031bb3d5b40ae13da961017e7346195bbe08bf45ab104d241c9aae4cc830efe7
+
+post-optimized SIR SHA-256
+65fb1fda44bbf99a93a0dc4263f37851aa9a30b9518ae3bb1c1753df9e8b3d26
+
+native optimized SIR SHA-256
+a3af7989a9549d9c451b5f5741395da98ee3539a2b062a2f3dd277cf096e481d
+
+complete MIR SHA-256
+701af4e445da6bf88f680eb937505762d95ca1971b3c27c0672c5011fae66c43
+
+complete MIR lines / bytes
+1,596,136 / 45,388,275
+```
+
+Against the exact parent trace, the bounded sink-directed walk removes 711
+post-RA MIR instructions and 279 final x86 instructions:
+
+```text
+function                    parent post-RA   packet post-RA   parent x86   packet x86
+eval_comb                           85,009           84,915      108,050      107,951
+apply_ff                             2,939            2,939       38,181       38,181
+eval_apply_ff                       33,927           33,774       40,576       40,525
+eval_only_ff                        62,526           62,437       75,552       75,567
+eval_comb_apply_ff                 115,637          115,262      145,677      145,533
+total                              300,038          299,327      408,036      407,757
+```
+
+The result is not uniformly better. In `eval_comb`, spill-heavy `bb8178`
+falls from 958 instructions and 331 stack accesses to 839 and 250; `bb8424`
+falls from 701/261 to 634/219. Conversely, `bb1650` grows from 682/87 to
+704/104. The whole-function result passes the static gate, while the local
+regression shows that sink order alone is not the final allocation objective.
+
+All 1,125 library tests and 60 enabled native-testbench tests pass (one
+upstream fixture remains ignored). Formatting and strict Clippy pass. The
+normal-display Heliodor workload reaches kernel power-down and the exact
+marker:
+
+```text
+reboot: Power down
+v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1
+compile_ns=65259336436
+execute_ns=71537158111
+```
+
+This runtime value is not used as a speed claim. The same saved predecessor
+binary and byte-identical complete MIR were observed at 79.798 and 63.289
+seconds in adjacent host conditions; code generation moved from 83.244 to
+58.760 seconds. Generated-code comparisons therefore use complete artifacts,
+and future timing gates must bracket a candidate with the same saved baseline
+binary.
+
+The bounded sink walk is retained as a structural improvement. The remaining
+CFG problem is still open: local sink packets do not decide which values a
+join should receive from all predecessors, price mutually exclusive edges by
+profile weight, or expose reconvergent demand frontiers before a predecessor
+commits `W_exit`. The next design step is a sparse, bounded boundary-demand
+relation consumed by the same single W/S walk, not another local rank or a
+whole-function allocation retry.
 
 ##### Relocated bit-copy reconstruction in mixed OR roots
 

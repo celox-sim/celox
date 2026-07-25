@@ -854,8 +854,6 @@ struct TransitionPoint {
 struct AllocationCandidateScore {
     blocked_by_deferred_reload: bool,
     continuation_tie: std::cmp::Reverse<bool>,
-    definition_live_out: bool,
-    definition_span: usize,
     resident_operand_tie: std::cmp::Reverse<usize>,
     operand_tie: std::cmp::Reverse<usize>,
     materialization_cost: u32,
@@ -909,11 +907,6 @@ impl AllocationReadyQueue {
             current_resident.saturating_add(source_score.pressure_delta as usize)
         };
         let &(best_score, best_instruction) = self.ordered.first()?;
-        let best_projected = if best_score.pressure_delta < 0 {
-            current_resident.saturating_sub(best_score.pressure_delta.unsigned_abs())
-        } else {
-            current_resident.saturating_add(best_score.pressure_delta as usize)
-        };
         let demanded = demanded.and_then(|instruction| {
             let score = self.scores[instruction]?;
             let projected = if score.pressure_delta < 0 {
@@ -926,7 +919,7 @@ impl AllocationReadyQueue {
         });
         let (score, instruction) = if let Some(demanded) = demanded {
             demanded
-        } else if !best_score.blocked_by_deferred_reload && best_projected <= register_capacity {
+        } else if !best_score.blocked_by_deferred_reload && best_score.continuation_tie.0 {
             (best_score, best_instruction)
         } else if !source_score.blocked_by_deferred_reload && source_projected <= register_capacity
         {
@@ -966,7 +959,7 @@ impl DependencyDemand {
         }
     }
 
-    /// Follow one unfinished use cluster backwards until its next ready
+    /// Follow one unfinished sink packet backwards until its next ready
     /// prerequisite. Each dependency edge in this demand is scanned once.
     fn next_ready(&mut self, region: &super::schedule::ForwardReadyRegion) -> Option<usize> {
         loop {
@@ -1082,7 +1075,9 @@ fn plan_scheduled_block_transition(
             )
         })?;
         let mut queue = AllocationReadyQueue::new(region.len());
-        let mut demand = None::<DependencyDemand>;
+        let sinks = ready.sinks().to_vec();
+        let mut next_sink = 0usize;
+        let mut demand = sinks.first().copied().map(DependencyDemand::new);
         for &local in ready.ready() {
             let source = start + local;
             queue.insert(
@@ -1130,21 +1125,14 @@ fn plan_scheduled_block_transition(
             })?;
             order.push(source);
             if demand.as_ref().is_some_and(|demand| demand.target == local) {
-                demand = None;
-            }
-            if demand.is_none()
-                && let Some(definition) = instructions[source].def()
-            {
-                let mut users = ready
-                    .use_candidates(definition)
-                    .iter()
-                    .copied()
-                    .filter(|&candidate| !ready.is_emitted(candidate));
-                if let Some(target) = users.next()
-                    && users.next().is_none()
+                next_sink += 1;
+                while sinks
+                    .get(next_sink)
+                    .is_some_and(|&sink| ready.is_emitted(sink))
                 {
-                    demand = Some(DependencyDemand::new(target));
+                    next_sink += 1;
                 }
+                demand = sinks.get(next_sink).copied().map(DependencyDemand::new);
             }
 
             let mut refresh = BTreeSet::<usize>::new();
@@ -1366,23 +1354,12 @@ impl<'a> BlockTransitionPlanner<'a> {
         let pressure_delta = isize::try_from(missing + usize::from(definition_live))
             .unwrap_or(isize::MAX)
             .saturating_sub(isize::try_from(dying).unwrap_or(isize::MAX));
-        let (definition_live_out, definition_span) = inst
-            .def()
-            .map(|value| {
-                self.logical
-                    .checked_of(value, Some(block_id), Some(source))
-                    .map(|value| remaining.completion_span(value))
-            })
-            .transpose()?
-            .unwrap_or((false, 0));
         Ok(AllocationCandidateScore {
             blocked_by_deferred_reload,
             continuation_tie: std::cmp::Reverse(
                 self.last_definition
                     .is_some_and(|value| uses.contains(&value)),
             ),
-            definition_live_out,
-            definition_span,
             // Reusing an operand already in W closes the residency cluster
             // which made that value worth keeping.  Rank this before a new
             // root with no operands; otherwise a stream of cheap Loads fills
@@ -1918,15 +1895,6 @@ impl RemainingBlockUses {
 
     fn is_live_out(&self, value: LogicalValue) -> bool {
         self.exit.contains_key(&value)
-    }
-
-    fn completion_span(&self, value: LogicalValue) -> (bool, usize) {
-        let last_local_rank = self
-            .remaining
-            .get(&value)
-            .and_then(BTreeSet::last)
-            .map_or(0, |&(rank, _)| rank.saturating_sub(self.emitted_count));
-        (self.is_live_out(value), last_local_rank)
     }
 
     fn distance(&self, value: LogicalValue) -> NextUseDistance {
@@ -2945,7 +2913,7 @@ mod tests {
     }
 
     #[test]
-    fn integrated_ready_walk_starts_the_definition_with_the_shorter_completion_span() {
+    fn integrated_ready_walk_builds_the_earliest_bounded_sink_packet() {
         let mut vregs = VRegAllocator::new();
         let long_root = vregs.alloc();
         let short_root = vregs.alloc();
@@ -2955,9 +2923,10 @@ mod tests {
         let long_result = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
         let mut block = MBlock::new(BlockId(0));
-        // Source order alone starts `long_root` and keeps it resident while
-        // the independent short cluster executes. Completion-span order
-        // starts and closes the short cluster first.
+        // Root source order starts `long_root` and keeps it resident while
+        // the independent short cluster executes. Sink-directed order starts
+        // from the earliest result and first tries to close its dependency
+        // cone without exceeding the physical register capacity.
         block.push(MInst::LoadImm {
             dst: long_root,
             value: 1,
@@ -3015,6 +2984,79 @@ mod tests {
                 < order.iter().position(|source| *source == 5)
         );
         assert_eq!(order.last(), Some(&6));
+    }
+
+    #[test]
+    fn bounded_sink_packet_materializes_a_shared_producer_once_for_adjacent_sinks() {
+        let mut vregs = VRegAllocator::new();
+        let distant_root = vregs.alloc();
+        let shared_root = vregs.alloc();
+        let first_result = vregs.alloc();
+        let second_result = vregs.alloc();
+        let filler_root = vregs.alloc();
+        let filler_result = vregs.alloc();
+        let distant_result = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 7]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: distant_root,
+            value: 1,
+        });
+        block.push(MInst::LoadImm {
+            dst: shared_root,
+            value: 2,
+        });
+        block.push(MInst::AndImm {
+            dst: first_result,
+            src: shared_root,
+            imm: 1,
+        });
+        block.push(MInst::AndImm {
+            dst: second_result,
+            src: shared_root,
+            imm: 2,
+        });
+        block.push(MInst::LoadImm {
+            dst: filler_root,
+            value: 3,
+        });
+        block.push(MInst::AndImm {
+            dst: filler_result,
+            src: filler_root,
+            imm: 1,
+        });
+        block.push(MInst::AndImm {
+            dst: distant_result,
+            src: distant_root,
+            imm: 1,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let constraints = super::super::constraints::ConstraintModel::build(&func, &cfg).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let homes = SpillHomes::build(&func).unwrap();
+        let recipes = PlanningRecipes::stack_only(func.vregs.count());
+        let (_, order) = plan_scheduled_block_transition(
+            &func,
+            &next_use,
+            &recipes,
+            &logical,
+            &homes,
+            0,
+            4,
+            &BTreeSet::new(),
+            BTreeSet::new(),
+            &constraints.instructions[0],
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(&order[..3], &[1, 2, 3]);
+        assert_eq!(order.iter().filter(|&&source| source == 1).count(), 1);
+        assert_eq!(order.last(), Some(&7));
     }
 
     #[test]
