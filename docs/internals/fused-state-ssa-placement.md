@@ -2739,6 +2739,57 @@ then, pre-CSSA physical scheduling followed by linear post-CSSA W/S planning
 is the executable boundary. A preferred-rank overlay or a second ready-list
 walk is explicitly rejected.
 
+##### Per-value spill homes and explicit edge transfers
+
+The prerequisite above is now implemented in the production SSA allocator.
+`SpillHome` is per logical SSA value; register phi webs are no longer unioned
+into one implicit stack home. Edge coupling carries endpoint identity
+explicitly:
+
+```text
+EdgeReload {
+    source,
+    source_home,
+    destination,
+}
+
+EdgeSpill {
+    source,
+    destination,
+    destination_home,
+}
+```
+
+An edge reload is queried, verified, colored, and materialized from
+`source_home`. An edge spill publishes `destination_home`. A spilled phi whose
+predecessor value is already in a different home becomes one atomic,
+edge-local transfer:
+
+```text
+load source_home
+store destination_home
+```
+
+The temporary is tagged with the destination logical identity and does not
+become a block-wide resident. Standalone edge spills are materialized by the
+same `planned_spills` expansion as point spills; edge reconstruction no longer
+emits a duplicate Store.
+
+The exact gates now passing are:
+
+- every logical value has an independent home, including a 50,000-member phi
+  chain;
+- diamond execution with 32 spilled phi results reads predecessor homes and
+  publishes distinct destination homes without exceeding 14 GPRs;
+- loop entry and normalized backedge transfers explicitly name the loop-phi
+  destination home;
+- all 1,121 library tests and all 60 enabled native testbench tests pass.
+
+This completes the edge-transfer prerequisite. It does not by itself move W/S
+planning before CSSA. The remaining phase-order work must preserve the one
+authoritative pre-CSSA dependency order while making W/S decisions before CSSA
+creates edge snapshots.
+
 ##### Relocated bit-copy reconstruction in mixed OR roots
 
 Inspection of the complete pre-RA MIR, post-RA MIR, and disassembly found a

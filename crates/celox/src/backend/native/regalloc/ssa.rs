@@ -8,7 +8,7 @@ use super::assignment::AssignmentMap;
 use super::cfg::NormalizedCfg;
 use super::next_use::NextUseAnalysis;
 use super::reload::{PlanningRecipes, PointUse};
-use super::spill_plan::{PlannedOp, SpillPlan};
+use super::spill_plan::{PlannedEdgeOp, PlannedOp, SpillPlan};
 
 pub(super) struct Allocation {
     pub assignment: AssignmentMap,
@@ -353,7 +353,7 @@ pub(super) fn planner_reload_queries(
     for (&(predecessor, successor), operations) in &plan.edge_ops {
         if !operations
             .iter()
-            .any(|operation| matches!(operation, PlannedOp::Reload { .. }))
+            .any(|operation| matches!(operation, PlannedEdgeOp::Reload { .. }))
         {
             continue;
         }
@@ -390,13 +390,13 @@ pub(super) fn planner_reload_queries(
             ));
         }
         for operation in operations {
-            let PlannedOp::Reload { value, .. } = operation else {
+            let PlannedEdgeOp::Reload { source, .. } = operation else {
                 continue;
             };
             requested.insert(PointUse {
                 block: block.id,
                 instruction: insertion.instruction,
-                value: VReg(value.0),
+                value: VReg(source.0),
             });
         }
     }

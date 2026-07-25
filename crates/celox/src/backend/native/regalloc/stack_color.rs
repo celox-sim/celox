@@ -17,7 +17,7 @@ use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalU
 use super::live_interval::{
     LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram, analyze_program,
 };
-use super::spill_plan::{LogicalValue, PlannedOp, SpillHome, SpillPlan};
+use super::spill_plan::{LogicalValue, PlannedEdgeOp, PlannedOp, SpillHome, SpillPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StackColorError {
@@ -416,16 +416,21 @@ fn collect_planned_stack_events(
             })?;
         let block = &func.blocks[insertion.block];
         for &operation in operations {
-            let PlannedOp::Reload { value, home } = operation else {
+            let PlannedEdgeOp::Reload {
+                source,
+                source_home,
+                ..
+            } = operation
+            else {
                 continue;
             };
-            if !is_edge_stack_reload(func, plan, value, home) {
+            if !is_edge_stack_reload(func, plan, source, source_home) {
                 continue;
             }
             events[insertion.block].push(PlannedStackEvent {
                 instruction: insertion.instruction,
                 sequence,
-                home,
+                home: source_home,
                 kind: PlannedStackEventKind::Reload,
                 definition: None,
                 reaching: None,
@@ -435,7 +440,7 @@ fn collect_planned_stack_events(
                     "STACK_COLOR.PLANNED_EVENT_RANGE",
                     Some(block.id),
                     Some(insertion.instruction),
-                    [StackHomeId(home.0)],
+                    [StackHomeId(source_home.0)],
                     "production stack-event count exceeds usize",
                 )
             })?;

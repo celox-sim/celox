@@ -44,12 +44,33 @@ pub(super) enum PlannedOp {
     },
 }
 
+/// Materialization on one CFG edge.
+///
+/// A point operation reads or writes the home of one logical SSA value.  A
+/// phi edge is different: it transfers a predecessor value into the
+/// successor's logical identity.  Keeping both identities explicit prevents
+/// a reload from accidentally reading the successor home when only the
+/// predecessor home is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlannedEdgeOp {
+    Spill {
+        source: LogicalValue,
+        destination: LogicalValue,
+        destination_home: SpillHome,
+    },
+    Reload {
+        source: LogicalValue,
+        source_home: SpillHome,
+        destination: LogicalValue,
+    },
+}
+
 #[derive(Debug)]
 pub(super) struct SpillPlan {
     pub logical: LogicalValues,
-    pub homes: PhiCongruenceClasses,
+    pub homes: SpillHomes,
     pub point_ops: Vec<(ProgramPoint, PlannedOp)>,
-    pub edge_ops: BTreeMap<(usize, usize), Vec<PlannedOp>>,
+    pub edge_ops: BTreeMap<(usize, usize), Vec<PlannedEdgeOp>>,
     /// Point reloads whose value is supplied by an independently verified
     /// path-specific MemorySSA recipe rather than a persistent spill home.
     pub recipe_reloads: BTreeSet<(BlockId, usize, LogicalValue)>,
@@ -144,15 +165,13 @@ impl LogicalValues {
 }
 
 #[derive(Debug)]
-pub(super) struct PhiCongruenceClasses {
-    home_for_vreg: Vec<SpillHome>,
-    nontrivial_members: HashMap<SpillHome, Vec<VReg>>,
+pub(super) struct SpillHomes {
+    count: u32,
 }
 
-impl PhiCongruenceClasses {
+impl SpillHomes {
     fn build(func: &MFunction) -> Result<Self, SpillPlanError> {
         let count = func.vregs.count() as usize;
-        let mut classes = DisjointSets::new(count);
         for block in &func.blocks {
             for phi in &block.phis {
                 if phi.dst.0 as usize >= count {
@@ -180,101 +199,26 @@ impl PhiCongruenceClasses {
                             ),
                         ));
                     }
-                    classes.union(phi.dst.0, source.0);
                 }
             }
         }
-        let home_for_vreg = (0..count as u32)
-            .map(|value| SpillHome(classes.minimum(value)))
-            .collect::<Vec<_>>();
-        let mut counts = vec![0u32; count];
-        for &home in &home_for_vreg {
-            counts[home.0 as usize] += 1;
-        }
-        let mut nontrivial_members = HashMap::<SpillHome, Vec<VReg>>::new();
-        for (value, &home) in home_for_vreg.iter().enumerate() {
-            if counts[home.0 as usize] > 1 {
-                nontrivial_members
-                    .entry(home)
-                    .or_default()
-                    .push(VReg(value as u32));
-            }
-        }
         Ok(Self {
-            home_for_vreg,
-            nontrivial_members,
+            count: count as u32,
         })
     }
 
     pub(super) fn of_vreg(&self, value: VReg) -> SpillHome {
-        self.home_for_vreg[value.0 as usize]
+        debug_assert!(value.0 < self.count);
+        SpillHome(value.0)
     }
 
     pub(super) fn of_logical(&self, value: LogicalValue) -> SpillHome {
-        self.home_for_vreg[value.0 as usize]
+        debug_assert!(value.0 < self.count);
+        SpillHome(value.0)
     }
 
     pub(super) fn members(&self, home: SpillHome) -> impl Iterator<Item = VReg> + '_ {
-        self.nontrivial_members
-            .get(&home)
-            .into_iter()
-            .flatten()
-            .copied()
-            .chain((!self.nontrivial_members.contains_key(&home)).then_some(VReg(home.0)))
-    }
-}
-
-/// Iterative union--find whose balanced tree shape is independent from the
-/// externally visible (minimum-VReg) spill-home identifier.
-struct DisjointSets {
-    parent: Vec<u32>,
-    size: Vec<u32>,
-    minimum: Vec<u32>,
-}
-
-impl DisjointSets {
-    fn new(count: usize) -> Self {
-        Self {
-            parent: (0..count as u32).collect(),
-            size: vec![1; count],
-            minimum: (0..count as u32).collect(),
-        }
-    }
-
-    fn root(&mut self, value: u32) -> u32 {
-        let mut root = value;
-        while self.parent[root as usize] != root {
-            root = self.parent[root as usize];
-        }
-
-        let mut current = value;
-        while self.parent[current as usize] != current {
-            let next = self.parent[current as usize];
-            self.parent[current as usize] = root;
-            current = next;
-        }
-        root
-    }
-
-    fn union(&mut self, left: u32, right: u32) {
-        let mut left = self.root(left);
-        let mut right = self.root(right);
-        if left == right {
-            return;
-        }
-        if self.size[left as usize] < self.size[right as usize] {
-            std::mem::swap(&mut left, &mut right);
-        }
-        let combined_size = self.size[left as usize] + self.size[right as usize];
-        let combined_minimum = self.minimum[left as usize].min(self.minimum[right as usize]);
-        self.parent[right as usize] = left;
-        self.size[left as usize] = combined_size;
-        self.minimum[left as usize] = combined_minimum;
-    }
-
-    fn minimum(&mut self, value: u32) -> u32 {
-        let root = self.root(value);
-        self.minimum[root as usize]
+        (home.0 < self.count).then_some(VReg(home.0)).into_iter()
     }
 }
 
@@ -418,7 +362,7 @@ pub(super) fn plan_with_recipe_costs(
     registers: usize,
 ) -> Result<SpillPlan, SpillPlanError> {
     let logical = LogicalValues::build(func);
-    let homes = PhiCongruenceClasses::build(func)?;
+    let homes = SpillHomes::build(func)?;
     let edge_translations = EdgeTranslations::build(func, cfg, &logical)?;
     let mut result = SpillPlan {
         logical,
@@ -500,31 +444,100 @@ pub(super) fn plan_with_recipe_costs(
 
     // Section 4.3.  Delaying this until every W/S exit is known is equivalent
     // to the paper's deferred handling of not-yet-processed backedges.
+    let spilled_phis = result
+        .point_ops
+        .iter()
+        .filter_map(|(_, operation)| match operation {
+            PlannedOp::SpillPhi { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for successor in 0..func.blocks.len() {
         for &predecessor in &cfg.predecessors[successor] {
-            let mut operations = Vec::new();
+            let mut resident_spills = Vec::new();
+            let mut home_transfers = Vec::new();
+            let mut resident_reloads = Vec::new();
             let predecessor_w = result.w_exit[predecessor].clone();
             let predecessor_s = result.s_exit[predecessor].clone();
             for &successor_value in &result.w_entry[successor] {
                 let value =
                     edge_translations.to_predecessor(predecessor, successor, successor_value);
                 if !predecessor_w.contains(&value) {
-                    operations.push(PlannedOp::Reload {
-                        value,
-                        home: result.homes.of_logical(successor_value),
+                    resident_reloads.push(PlannedEdgeOp::Reload {
+                        source: value,
+                        source_home: result.homes.of_logical(value),
+                        destination: successor_value,
                     });
                 }
             }
             for &successor_value in &result.s_entry[successor] {
                 let value =
                     edge_translations.to_predecessor(predecessor, successor, successor_value);
-                if !predecessor_s.contains(&value) && predecessor_w.contains(&value) {
-                    operations.push(PlannedOp::Spill {
-                        value,
-                        home: result.homes.of_logical(successor_value),
+                let source_home = result.homes.of_logical(value);
+                let destination_home = result.homes.of_logical(successor_value);
+                if source_home == destination_home && predecessor_s.contains(&value) {
+                    continue;
+                }
+                if predecessor_w.contains(&value) {
+                    resident_spills.push(PlannedEdgeOp::Spill {
+                        source: value,
+                        destination: successor_value,
+                        destination_home,
+                    });
+                } else if predecessor_s.contains(&value) {
+                    // A phi transfer between independent homes is a short
+                    // edge-local reload/store pair.  Keeping the predecessor
+                    // SSA value live merely to copy its successor home would
+                    // recreate the phi-web live range this representation is
+                    // intended to remove.
+                    home_transfers.push(PlannedEdgeOp::Reload {
+                        source: value,
+                        source_home,
+                        destination: successor_value,
+                    });
+                    home_transfers.push(PlannedEdgeOp::Spill {
+                        source: successor_value,
+                        destination: successor_value,
+                        destination_home,
                     });
                 }
             }
+            for phi in &func.blocks[successor].phis {
+                let destination = result.logical.of(phi.dst);
+                if !spilled_phis.contains(&destination) {
+                    continue;
+                }
+                let source = edge_translations.to_predecessor(predecessor, successor, destination);
+                let source_home = result.homes.of_logical(source);
+                let destination_home = result.homes.of_logical(destination);
+                if source_home == destination_home && predecessor_s.contains(&source) {
+                    continue;
+                }
+                if predecessor_w.contains(&source) {
+                    resident_spills.push(PlannedEdgeOp::Spill {
+                        source,
+                        destination,
+                        destination_home,
+                    });
+                } else if predecessor_s.contains(&source) {
+                    home_transfers.push(PlannedEdgeOp::Reload {
+                        source,
+                        source_home,
+                        destination,
+                    });
+                    home_transfers.push(PlannedEdgeOp::Spill {
+                        source: destination,
+                        destination,
+                        destination_home,
+                    });
+                }
+            }
+            // Consume edge-resident values before introducing reload
+            // temporaries or successor live-ins.  Otherwise one transient
+            // transfer can raise an already-full W_exit above capacity.
+            let mut operations = resident_spills;
+            operations.extend(home_transfers);
+            operations.extend(resident_reloads);
             if !operations.is_empty() {
                 result.edge_ops.insert((predecessor, successor), operations);
             }
@@ -608,7 +621,7 @@ fn plan_block_transition(
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     logical: &LogicalValues,
-    homes: &PhiCongruenceClasses,
+    homes: &SpillHomes,
     block: usize,
     registers: usize,
     w_entry: &BTreeSet<LogicalValue>,
@@ -651,7 +664,7 @@ struct BlockTransitionPlanner<'a> {
     next_use: &'a NextUseAnalysis,
     planning_recipes: &'a PlanningRecipes,
     logical: &'a LogicalValues,
-    homes: &'a PhiCongruenceClasses,
+    homes: &'a SpillHomes,
     block: usize,
     registers: usize,
     transition: BlockTransition,
@@ -667,7 +680,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         next_use: &'a NextUseAnalysis,
         planning_recipes: &'a PlanningRecipes,
         logical: &'a LogicalValues,
-        homes: &'a PhiCongruenceClasses,
+        homes: &'a SpillHomes,
         block: usize,
         registers: usize,
         w_entry: &BTreeSet<LogicalValue>,
@@ -876,7 +889,7 @@ fn limit_live_through_clobber(
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     logical: &LogicalValues,
-    homes: &PhiCongruenceClasses,
+    homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
@@ -1128,7 +1141,7 @@ fn limit(
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
     logical: &LogicalValues,
-    homes: &PhiCongruenceClasses,
+    homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
@@ -1211,7 +1224,7 @@ fn evict_value(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     planning_recipes: &PlanningRecipes,
-    homes: &PhiCongruenceClasses,
+    homes: &SpillHomes,
     point_ops: &mut Vec<(ProgramPoint, PlannedOp)>,
     block: usize,
     point_instruction: usize,
@@ -1605,38 +1618,37 @@ impl SpillPlan {
             }
             for &operation in operations {
                 match operation {
-                    PlannedOp::Reload { value, home } => {
-                        candidates.insert(home);
-                        let total = baseline_costs.entry(home).or_default();
+                    PlannedEdgeOp::Reload {
+                        source,
+                        source_home,
+                        ..
+                    } => {
+                        candidates.insert(source_home);
+                        let total = baseline_costs.entry(source_home).or_default();
                         *total = total.saturating_add(u128::from(
-                            base_costs.persistent_reload(VReg(value.0)),
+                            base_costs.persistent_reload(VReg(source.0)),
                         ));
                         let query = PointUse {
                             block: insertion_block.id,
                             instruction: insertion.instruction,
-                            value: VReg(value.0),
+                            value: VReg(source.0),
                         };
                         if let Some(recipe) = analysis.resolved_recipe_at_point(query) {
                             let cost = u128::try_from(recipe.steps.len().saturating_add(1))
                                 .unwrap_or(u128::MAX);
-                            let total = recipe_costs.entry(home).or_default();
+                            let total = recipe_costs.entry(source_home).or_default();
                             *total = total.saturating_add(cost);
                         } else {
-                            rejected.insert(home);
+                            rejected.insert(source_home);
                         }
                     }
-                    PlannedOp::Spill { value, home } => {
-                        let total = baseline_costs.entry(home).or_default();
-                        *total = total.saturating_add(u128::from(spill_cost(func, value)));
-                    }
-                    PlannedOp::SpillPhi { .. } => {
-                        return Err(SpillPlanError::new(
-                            "SPILL_PLAN.RECIPE_HOME_EDGE",
-                            Some(predecessor_block.id),
-                            None,
-                            Vec::new(),
-                            "SpillPhi cannot be an edge operation",
-                        ));
+                    PlannedEdgeOp::Spill {
+                        source,
+                        destination_home,
+                        ..
+                    } => {
+                        let total = baseline_costs.entry(destination_home).or_default();
+                        *total = total.saturating_add(u128::from(spill_cost(func, source)));
                     }
                 }
             }
@@ -1720,9 +1732,10 @@ impl SpillPlan {
                     })?;
                 let insertion_block = &func.blocks[insertion.block];
                 for &operation in operations {
-                    let PlannedOp::Reload {
-                        value,
-                        home: reload_home,
+                    let PlannedEdgeOp::Reload {
+                        source,
+                        source_home: reload_home,
+                        ..
                     } = operation
                     else {
                         continue;
@@ -1734,14 +1747,14 @@ impl SpillPlan {
                     let query = PointUse {
                         block: insertion_block.id,
                         instruction: insertion.instruction,
-                        value: VReg(value.0),
+                        value: VReg(source.0),
                     };
                     if analysis.resolved_recipe_at_point(query).is_none() {
                         return Err(SpillPlanError::new(
                             "SPILL_PLAN.RECIPE_HOME_EDGE",
                             Some(predecessor_block.id),
                             None,
-                            vec![VReg(value.0)],
+                            vec![VReg(source.0)],
                             format!(
                                 "recipe home {home:?} has no exact recipe on edge {} -> {}",
                                 predecessor_block.id, successor_block.id
@@ -1789,9 +1802,7 @@ impl SpillPlan {
                 ),
             ));
         }
-        if self.logical.count != func.vregs.count()
-            || self.homes.home_for_vreg.len() != self.logical.count as usize
-        {
+        if self.logical.count != func.vregs.count() || self.homes.count != self.logical.count {
             return Err(SpillPlanError::new(
                 "SPILL_PLAN.STATE_SHAPE",
                 None,
@@ -1800,7 +1811,7 @@ impl SpillPlan {
                 format!(
                     "spill-plan value tables cover {} logical values and {} homes, but the function has {} virtual registers",
                     self.logical.count,
-                    self.homes.home_for_vreg.len(),
+                    self.homes.count,
                     func.vregs.count()
                 ),
             ));
@@ -1862,21 +1873,6 @@ impl SpillPlan {
             }
         }
 
-        for (value, &home) in self.homes.home_for_vreg.iter().enumerate() {
-            if home.0 >= self.logical.count {
-                return Err(SpillPlanError::new(
-                    "SPILL_PLAN.VALUE_RANGE",
-                    None,
-                    None,
-                    vec![VReg(value as u32)],
-                    format!(
-                        "logical value {value} has out-of-range spill home {}",
-                        home.0
-                    ),
-                ));
-            }
-        }
-
         for (&(predecessor, successor), operations) in &self.edge_ops {
             let Some(predecessor_block) = func.blocks.get(predecessor) else {
                 return Err(SpillPlanError::new(
@@ -1930,7 +1926,7 @@ impl SpillPlan {
                 ));
             }
             for &operation in operations {
-                self.verify_operation(operation, Some(predecessor_block.id), None)?;
+                self.verify_edge_operation(operation, Some(predecessor_block.id))?;
             }
         }
         for &(point, operation) in &self.point_ops {
@@ -1989,10 +1985,11 @@ impl SpillPlan {
             let has_reload = self
                 .point_ops
                 .iter()
-                .map(|(_, operation)| operation)
-                .chain(self.edge_ops.values().flatten())
-                .any(|operation| {
+                .any(|(_, operation)| {
                     matches!(operation, PlannedOp::Reload { home: reload_home, .. } if *reload_home == home)
+                })
+                || self.edge_ops.values().flatten().any(|operation| {
+                    matches!(operation, PlannedEdgeOp::Reload { source_home, .. } if *source_home == home)
                 });
             if !has_reload {
                 return Err(SpillPlanError::new(
@@ -2041,6 +2038,59 @@ impl SpillPlan {
                     "planned operation uses spill home {} but logical value {} belongs to home {}",
                     home.0, value.0, expected.0
                 ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_edge_operation(
+        &self,
+        operation: PlannedEdgeOp,
+        block: Option<BlockId>,
+    ) -> Result<(), SpillPlanError> {
+        let (source, destination, home, expected_home) = match operation {
+            PlannedEdgeOp::Reload {
+                source,
+                source_home,
+                destination,
+            } => (
+                source,
+                destination,
+                source_home,
+                self.homes.of_logical(source),
+            ),
+            PlannedEdgeOp::Spill {
+                source,
+                destination,
+                destination_home,
+            } => (
+                source,
+                destination,
+                destination_home,
+                self.homes.of_logical(destination),
+            ),
+        };
+        for value in [source, destination] {
+            if value.0 >= self.logical.count {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.VALUE_RANGE",
+                    block,
+                    None,
+                    vec![VReg(value.0)],
+                    format!(
+                        "planned edge operation references logical value {} but the plan contains {} values",
+                        value.0, self.logical.count
+                    ),
+                ));
+            }
+        }
+        if home != expected_home {
+            return Err(SpillPlanError::new(
+                "SPILL_PLAN.HOME_CLASS",
+                block,
+                None,
+                vec![VReg(source.0), VReg(destination.0)],
+                format!("planned edge operation names home {home:?}, expected {expected_home:?}"),
             ));
         }
         Ok(())
@@ -2141,6 +2191,26 @@ mod tests {
             point.block != BlockId(1)
                 || !matches!(operation, PlannedOp::Spill { value, .. } if *value == merged)
         }));
+        let merged_home = plan.homes.of_logical(merged);
+        for &(predecessor_id, source) in &func.blocks[header].phis[0].sources {
+            let predecessor = cfg.block_index[&predecessor_id];
+            assert!(
+                plan.edge_ops
+                    .get(&(predecessor, header))
+                    .is_some_and(|operations| operations.iter().any(|operation| {
+                        matches!(
+                            operation,
+                            PlannedEdgeOp::Spill {
+                                destination,
+                                destination_home,
+                                ..
+                            } if *destination == merged && *destination_home == merged_home
+                        )
+                    })),
+                "missing explicit transfer into the loop-phi home: {plan:#?}"
+            );
+            assert_ne!(plan.homes.of_vreg(source), merged_home);
+        }
     }
 
     #[test]
@@ -2162,7 +2232,7 @@ mod tests {
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let logical = LogicalValues::build(&func);
-        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let homes = SpillHomes::build(&func).unwrap();
         let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
         let mut plan = SpillPlan {
             logical,
@@ -2260,7 +2330,7 @@ mod tests {
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         next_use.verify(&func, &cfg).unwrap();
         let logical = LogicalValues::build(&func);
-        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let homes = SpillHomes::build(&func).unwrap();
         let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
         let mut plan = SpillPlan {
             logical,
@@ -2352,7 +2422,7 @@ mod tests {
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let logical = LogicalValues::build(&func);
-        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let homes = SpillHomes::build(&func).unwrap();
         let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
         let mut plan = SpillPlan {
             logical,
@@ -2801,7 +2871,7 @@ mod tests {
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
         let logical = LogicalValues::build(&func);
-        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let homes = SpillHomes::build(&func).unwrap();
         let mut planner = BlockTransitionPlanner::new(
             &func,
             &next_use,
@@ -3132,7 +3202,7 @@ mod tests {
     }
 
     #[test]
-    fn descending_large_phi_web_builds_one_stable_home_without_recursion() {
+    fn descending_large_phi_web_keeps_independent_homes_without_recursion() {
         const MEMBERS: u32 = 50_000;
 
         let mut vregs = VRegAllocator::new();
@@ -3149,11 +3219,11 @@ mod tests {
         }
         func.blocks.push(block);
 
-        let homes = PhiCongruenceClasses::build(&func).unwrap();
+        let homes = SpillHomes::build(&func).unwrap();
 
         assert_eq!(homes.of_vreg(VReg(0)), SpillHome(0));
-        assert_eq!(homes.of_vreg(VReg(MEMBERS - 1)), SpillHome(0));
-        assert_eq!(homes.members(SpillHome(0)).count(), MEMBERS as usize);
+        assert_eq!(homes.of_vreg(VReg(MEMBERS - 1)), SpillHome(MEMBERS - 1));
+        assert_eq!(homes.members(SpillHome(0)).count(), 1);
     }
 
     #[test]

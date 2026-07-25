@@ -14,7 +14,7 @@ use crate::backend::native::mir::{
 
 use super::cfg::NormalizedCfg;
 use super::reload::{PointUse, ResolvedBase, ResolvedRecipe};
-use super::spill_plan::{LogicalValue, PlannedOp, SpillHome, SpillPlan};
+use super::spill_plan::{LogicalValue, PlannedEdgeOp, PlannedOp, SpillHome, SpillPlan};
 
 type ReloadKey = (BlockId, usize, LogicalValue);
 type SpillInsertion = (LogicalValue, SpillHome);
@@ -25,6 +25,10 @@ pub(super) struct PlannedSpillInsertion {
     pub instruction: usize,
     pub value: LogicalValue,
     pub home: SpillHome,
+    /// Reconstruction emits this store as part of an atomic source-home to
+    /// destination-home transfer; consumers still count the destination home
+    /// definition, but must not emit a second standalone store.
+    pub edge_transfer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,11 +367,17 @@ fn reload_locations(
             })?;
         let block = &func.blocks[insertion.block];
         for &operation in operations {
-            if let PlannedOp::Reload { value, home } = operation {
-                result
-                    .entry(home)
-                    .or_default()
-                    .insert((block.id, insertion.instruction, value));
+            if let PlannedEdgeOp::Reload {
+                source,
+                source_home,
+                ..
+            } = operation
+            {
+                result.entry(source_home).or_default().insert((
+                    block.id,
+                    insertion.instruction,
+                    source,
+                ));
             }
         }
     }
@@ -413,7 +423,27 @@ pub(super) fn planned_spills(
                     )
                 })?;
                 let source = plan.logical.of(source);
-                if plan.s_exit[predecessor].contains(&source) {
+                let has_explicit_transfer = plan
+                    .edge_ops
+                    .get(&(predecessor, successor))
+                    .is_some_and(|operations| {
+                        operations.iter().any(|operation| {
+                            matches!(
+                                operation,
+                                PlannedEdgeOp::Spill {
+                                    destination,
+                                    destination_home,
+                                    ..
+                                } if *destination == logical && *destination_home == home
+                            )
+                        })
+                    });
+                if has_explicit_transfer {
+                    continue;
+                }
+                if plan.homes.of_logical(source) == home
+                    && plan.s_exit[predecessor].contains(&source)
+                {
                     continue;
                 }
                 let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
@@ -431,6 +461,7 @@ pub(super) fn planned_spills(
                     instruction: insertion.instruction,
                     value: source,
                     home,
+                    edge_transfer: false,
                 });
             }
         }
@@ -453,6 +484,7 @@ pub(super) fn planned_spills(
             instruction: point.instruction,
             value,
             home,
+            edge_transfer: false,
         });
     }
     for (&(predecessor, successor), operations) in &plan.edge_ops {
@@ -466,24 +498,30 @@ pub(super) fn planned_spills(
                     "spill edge has no single-edge materialization point",
                 )
             })?;
-        for &operation in operations {
+        for (operation_index, &operation) in operations.iter().enumerate() {
             match operation {
-                PlannedOp::Spill { value, home } => result.push(PlannedSpillInsertion {
-                    block: insertion.block,
-                    instruction: insertion.instruction,
-                    value,
-                    home,
-                }),
-                PlannedOp::SpillPhi { value, .. } => {
-                    return Err(StateHomeError::new(
-                        "STATE_HOME.EDGE_SPILL_PHI",
-                        func.blocks.get(predecessor).map(|block| block.id),
-                        None,
-                        vec![VReg(value.0)],
-                        "SpillPhi cannot be an edge operation",
-                    ));
+                PlannedEdgeOp::Spill {
+                    source,
+                    destination,
+                    destination_home,
+                } => {
+                    let is_home_transfer = operation_index != 0
+                        && matches!(
+                            operations[operation_index - 1],
+                            PlannedEdgeOp::Reload {
+                                destination: reload_destination,
+                                ..
+                            } if reload_destination == destination && source == destination
+                        );
+                    result.push(PlannedSpillInsertion {
+                        block: insertion.block,
+                        instruction: insertion.instruction,
+                        value: source,
+                        home: destination_home,
+                        edge_transfer: is_home_transfer,
+                    });
                 }
-                PlannedOp::Reload { .. } => {}
+                PlannedEdgeOp::Reload { .. } => {}
             }
         }
     }
@@ -499,6 +537,13 @@ fn build_probe(
 ) -> Result<Probe, StateHomeError> {
     let mut insertions = HashMap::<(usize, usize), Vec<SpillInsertion>>::new();
     for spill in planned_spills(func, cfg, plan)? {
+        if spill.edge_transfer {
+            // The probe has no synthetic VReg for the atomic source-home
+            // reload.  Conservatively leave this destination out of the
+            // deferred-state candidate proof instead of pretending its
+            // successor logical value is resident on the predecessor edge.
+            continue;
+        }
         if homes.contains_key(&spill.home) {
             insertions
                 .entry((spill.block, spill.instruction))
@@ -710,13 +755,15 @@ mod tests {
         plan.edge_ops.insert(
             (entry, successor),
             vec![
-                PlannedOp::Spill {
-                    value: logical,
-                    home: spill_home,
+                PlannedEdgeOp::Spill {
+                    source: logical,
+                    destination: logical,
+                    destination_home: spill_home,
                 },
-                PlannedOp::Reload {
-                    value: logical,
-                    home: spill_home,
+                PlannedEdgeOp::Reload {
+                    source: logical,
+                    source_home: spill_home,
+                    destination: logical,
                 },
             ],
         );
@@ -728,6 +775,7 @@ mod tests {
                 instruction: 0,
                 value: logical,
                 home: spill_home,
+                edge_transfer: false,
             }]
         );
         let queries = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();

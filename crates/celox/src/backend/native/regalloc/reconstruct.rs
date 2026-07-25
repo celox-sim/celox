@@ -14,7 +14,9 @@ use super::reload::{
     ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, PureStep, ReloadRecipeAnalysis,
     ResolvedBase, ResolvedRecipe, materialize_pure_step,
 };
-use super::spill_plan::{LogicalValue, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan};
+use super::spill_plan::{
+    LogicalValue, PlannedEdgeOp, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan,
+};
 
 pub(super) struct ReconstructionResult {
     pub frame_size: u32,
@@ -77,6 +79,14 @@ enum MaterializedOp {
         fresh: VReg,
         recipe: Option<PreparedRecipe>,
     },
+    HomeTransfer {
+        source: LogicalValue,
+        source_home: SpillHome,
+        destination: LogicalValue,
+        destination_home: SpillHome,
+        fresh: VReg,
+        recipe: Option<PreparedRecipe>,
+    },
 }
 
 #[derive(Clone)]
@@ -113,8 +123,9 @@ enum ReloadMaterialization {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EdgeReloadShape {
-    value: LogicalValue,
-    home: SpillHome,
+    source: LogicalValue,
+    source_home: SpillHome,
+    destination: LogicalValue,
     materialization: ReloadMaterialization,
 }
 
@@ -174,6 +185,9 @@ pub(super) fn reconstruct(
             error.message,
         )
     })? {
+        if spill.edge_transfer {
+            continue;
+        }
         insertions
             .entry((spill.block, spill.instruction))
             .or_default()
@@ -259,23 +273,55 @@ pub(super) fn reconstruct(
         };
         let mut reloads_only = true;
         let mut recipe_cache = PreparedRecipeCache::default();
-        for &operation in operations {
-            match operation {
-                PlannedOp::Spill { .. } => {
-                    reloads_only = false;
-                    continue;
-                }
-                PlannedOp::SpillPhi { value, .. } => {
-                    return Err(ReconstructError::new(
-                        "RECONSTRUCT.EDGE_SPILL_PHI",
-                        Some(predecessor_id),
-                        None,
-                        vec![VReg(value.0)],
-                        "SpillPhi cannot be an edge operation",
-                    ));
-                }
-                PlannedOp::Reload { .. } => {}
+        let mut operation_index = 0usize;
+        while operation_index < operations.len() {
+            let operation = operations[operation_index];
+            if let PlannedEdgeOp::Reload {
+                source,
+                source_home,
+                destination,
+            } = operation
+                && let Some(PlannedEdgeOp::Spill {
+                    source: spill_source,
+                    destination: spill_destination,
+                    destination_home,
+                }) = operations.get(operation_index + 1).copied()
+                && spill_source == destination
+                && spill_destination == destination
+            {
+                reloads_only = false;
+                let recipe = reload_recipe_on_edge(
+                    func,
+                    reload_recipes,
+                    predecessor,
+                    successor,
+                    insertion,
+                    operation,
+                    plan,
+                )?;
+                materialize_edge_home_transfer(
+                    func,
+                    insertion.block,
+                    insertion.instruction,
+                    source,
+                    source_home,
+                    destination,
+                    destination_home,
+                    &mut logical_for_vreg,
+                    &mut insertions,
+                    recipe,
+                    &mut recipe_cache,
+                )?;
+                operation_index += 2;
+                continue;
             }
+            let is_reload = match operation {
+                PlannedEdgeOp::Spill { .. } => {
+                    reloads_only = false;
+                    false
+                }
+                PlannedEdgeOp::Reload { .. } => true,
+            };
             let recipe = reload_recipe_on_edge(
                 func,
                 reload_recipes,
@@ -285,7 +331,7 @@ pub(super) fn reconstruct(
                 operation,
                 plan,
             )?;
-            let materialized = materialize_operation(
+            let materialized = materialize_edge_operation(
                 func,
                 plan,
                 insertion.block,
@@ -297,12 +343,17 @@ pub(super) fn reconstruct(
                 recipe,
                 &mut recipe_cache,
             )?;
+            if !is_reload {
+                debug_assert!(materialized.is_none());
+                operation_index += 1;
+                continue;
+            }
             let Some(materialized) = materialized else {
                 return Err(ReconstructError::new(
                     "RECONSTRUCT.EDGE_RELOAD_MATERIALIZED",
                     Some(predecessor_id),
                     None,
-                    vec![VReg(planned_value(operation).0)],
+                    vec![VReg(edge_source(operation).0)],
                     "edge reload did not produce a materialization",
                 ));
             };
@@ -321,6 +372,7 @@ pub(super) fn reconstruct(
                         "materialized edge-reload bundle exceeds addressable MIR size",
                     )
                 })?;
+            operation_index += 1;
         }
         // Bundle sharing rewrites a predecessor suffix. Successor-entry edge
         // operations are already shared by that one edge block and have no
@@ -496,10 +548,15 @@ fn reload_recipe_on_edge(
     predecessor: usize,
     successor: usize,
     insertion: super::cfg::EdgeInsertionPoint,
-    operation: PlannedOp,
+    operation: PlannedEdgeOp,
     plan: &SpillPlan,
 ) -> Result<Option<ResolvedRecipe>, ReconstructError> {
-    let PlannedOp::Reload { value, home } = operation else {
+    let PlannedEdgeOp::Reload {
+        source,
+        source_home,
+        ..
+    } = operation
+    else {
         return Ok(None);
     };
     let predecessor_id = func.blocks[predecessor].id;
@@ -510,25 +567,25 @@ fn reload_recipe_on_edge(
         instruction: insertion.instruction,
         side: PointSide::Before,
     };
-    let key = (point.block, point.instruction, value);
+    let key = (point.block, point.instruction, source);
     if let Some(recipe) = plan.state_reload_recipes.get(&key) {
         return Ok(Some(recipe.clone()));
     }
-    if plan.state_homes.contains_key(&home) {
+    if plan.state_homes.contains_key(&source_home) {
         return Err(ReconstructError::new(
             "RECONSTRUCT.EDGE_STATE_HOME_RECIPE",
             Some(predecessor_id),
             None,
-            vec![VReg(value.0)],
+            vec![VReg(source.0)],
             format!(
-                "selected state home {home:?} has no exact recipe on edge {predecessor_id} -> {successor_id}"
+                "selected state home {source_home:?} has no exact recipe on edge {predecessor_id} -> {successor_id}"
             ),
         ));
     }
-    if !plan.recipe_homes.contains(&home) {
+    if !plan.recipe_homes.contains(&source_home) {
         return Ok(None);
     }
-    available_recipe_at_point(analysis, point, value)
+    available_recipe_at_point(analysis, point, source)
         .cloned()
         .map(Some)
         .ok_or_else(|| {
@@ -536,7 +593,7 @@ fn reload_recipe_on_edge(
                 "RECONSTRUCT.EDGE_RECIPE_STABLE",
                 Some(predecessor_id),
                 None,
-                vec![VReg(value.0)],
+                vec![VReg(source.0)],
                 format!("state recipe disappeared on edge {predecessor_id} -> {successor_id}"),
             )
         })
@@ -718,21 +775,25 @@ fn verify_reload_homes(
     }
     for (&edge, operations) in &plan.edge_ops {
         for &operation in operations {
-            if let PlannedOp::Reload { value, home } = operation
-                && rematerialized_logical_value(func, value).is_none()
-                && !recipe_homes.contains(&home)
-                && !plan.state_homes.contains_key(&home)
+            if let PlannedEdgeOp::Reload {
+                source,
+                source_home,
+                ..
+            } = operation
+                && rematerialized_logical_value(func, source).is_none()
+                && !recipe_homes.contains(&source_home)
+                && !plan.state_homes.contains_key(&source_home)
             {
-                if !stack_offsets.contains_key(&home) {
+                if !stack_offsets.contains_key(&source_home) {
                     let block = func.blocks.get(edge.0).map(|block| block.id);
                     return Err(ReconstructError::new(
                         "RECONSTRUCT.RELOAD_HOME_EXISTS",
                         block,
                         None,
-                        vec![VReg(value.0)],
+                        vec![VReg(source.0)],
                         format!(
-                            "edge reload has no spill home {home:?}; {}",
-                            describe_missing_home(func, plan, value, home)
+                            "edge reload has no source home {source_home:?}; {}",
+                            describe_missing_home(func, plan, source, source_home)
                         ),
                     ));
                 }
@@ -854,8 +915,9 @@ fn materialize_operation(
                 },
                 Some(MaterializedReload {
                     shape: EdgeReloadShape {
-                        value,
-                        home,
+                        source: value,
+                        source_home: home,
+                        destination: value,
                         materialization,
                     },
                     final_definition: fresh,
@@ -871,6 +933,121 @@ fn materialize_operation(
         .or_default()
         .push(operation);
     Ok(reload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_edge_operation(
+    func: &mut MFunction,
+    plan: &SpillPlan,
+    block: usize,
+    instruction: usize,
+    operation: PlannedEdgeOp,
+    logical_for_vreg: &mut Vec<LogicalValue>,
+    insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
+    reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
+    recipe: Option<ResolvedRecipe>,
+    recipe_cache: &mut PreparedRecipeCache,
+) -> Result<Option<MaterializedReload>, ReconstructError> {
+    if matches!(operation, PlannedEdgeOp::Spill { .. }) {
+        // All standalone point and edge spills come from the one
+        // `planned_spills` expansion.  Materializing them again here would
+        // duplicate every edge store.  Reload+spill home transfers are
+        // recognized and emitted atomically by the caller.
+        return Ok(None);
+    }
+    let (materialized, reload) = match operation {
+        PlannedEdgeOp::Spill { .. } => unreachable!(),
+        PlannedEdgeOp::Reload {
+            source,
+            source_home,
+            destination,
+        } => {
+            let materialization = recipe.as_ref().map_or_else(
+                || {
+                    rematerialized_logical_value(func, source).map_or(
+                        ReloadMaterialization::Stack,
+                        ReloadMaterialization::Immediate,
+                    )
+                },
+                |recipe| ReloadMaterialization::Recipe(recipe.clone()),
+            );
+            let (fresh, prepared, definitions, instruction_count) = if let Some(recipe) = recipe {
+                let (fresh, prepared) =
+                    prepare_recipe(func, logical_for_vreg, source, recipe, recipe_cache)?;
+                let definitions = prepared
+                    .instructions
+                    .iter()
+                    .filter_map(MInst::def)
+                    .collect::<Vec<_>>();
+                let instruction_count = prepared.instructions.len();
+                (fresh, Some(prepared), definitions, instruction_count)
+            } else {
+                let fresh = alloc_fresh(func, logical_for_vreg, source)?;
+                (fresh, None, vec![fresh], 1)
+            };
+            reload_blocks.entry(source).or_default().insert(block);
+            (
+                MaterializedOp::Reload {
+                    value: source,
+                    home: source_home,
+                    fresh,
+                    recipe: prepared,
+                },
+                Some(MaterializedReload {
+                    shape: EdgeReloadShape {
+                        source,
+                        source_home,
+                        destination,
+                        materialization,
+                    },
+                    final_definition: fresh,
+                    definitions,
+                    instruction_count,
+                }),
+            )
+        }
+    };
+    let _ = plan;
+    insertions
+        .entry((block, instruction))
+        .or_default()
+        .push(materialized);
+    Ok(reload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_edge_home_transfer(
+    func: &mut MFunction,
+    block: usize,
+    instruction: usize,
+    source: LogicalValue,
+    source_home: SpillHome,
+    destination: LogicalValue,
+    destination_home: SpillHome,
+    logical_for_vreg: &mut Vec<LogicalValue>,
+    insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
+    recipe: Option<ResolvedRecipe>,
+    recipe_cache: &mut PreparedRecipeCache,
+) -> Result<(), ReconstructError> {
+    let (fresh, recipe) = if let Some(recipe) = recipe {
+        let (fresh, prepared) =
+            prepare_recipe(func, logical_for_vreg, destination, recipe, recipe_cache)?;
+        (fresh, Some(prepared))
+    } else {
+        (alloc_fresh(func, logical_for_vreg, destination)?, None)
+    };
+    insertions
+        .entry((block, instruction))
+        .or_default()
+        .push(MaterializedOp::HomeTransfer {
+            source,
+            source_home,
+            destination,
+            destination_home,
+            fresh,
+            recipe,
+        });
+    Ok(())
 }
 
 fn prepare_recipe(
@@ -1363,7 +1540,8 @@ fn emit_insertions(
     // evictions must free their registers before operand reloads consume them.
     operations.sort_by_key(|operation| match operation {
         MaterializedOp::Spill { .. } => 0,
-        MaterializedOp::Reload { .. } => 1,
+        MaterializedOp::HomeTransfer { .. } => 1,
+        MaterializedOp::Reload { .. } => 2,
     });
     for operation in operations {
         match operation {
@@ -1485,6 +1663,109 @@ fn emit_insertions(
                 stacks.entry(logical).or_default().push(fresh);
                 pushed.push(logical);
             }
+            MaterializedOp::HomeTransfer {
+                source,
+                source_home,
+                destination,
+                destination_home,
+                fresh,
+                recipe,
+            } => {
+                if let Some(recipe) = recipe {
+                    let Some(definition) = recipe.instructions.last().and_then(MInst::def) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RECIPE_FINAL_DEFINITION",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(source.0), VReg(destination.0), fresh],
+                            "prepared edge-transfer recipe has no final MIR definition",
+                        ));
+                    };
+                    if definition != fresh {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RECIPE_FINAL_IDENTITY",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(source.0), VReg(destination.0), fresh, definition],
+                            "prepared edge-transfer recipe final definition changed",
+                        ));
+                    }
+                    if let Some(physical) = plan.state_homes.get(&source_home) {
+                        state_reloads.push(MaterializedStateReload {
+                            reload: fresh,
+                            home: *physical,
+                        });
+                    } else {
+                        recipe_reloads.push(ExpectedMaterializedReload {
+                            reload: fresh,
+                            expected: recipe.expected,
+                            planned_use: Some(PointUse {
+                                block: func.blocks[block].id,
+                                instruction,
+                                value: VReg(source.0),
+                            }),
+                        });
+                    }
+                    output.extend(recipe.instructions);
+                } else if let Some(value) = rematerialized_logical_value(func, source) {
+                    output.push(MInst::LoadImm { dst: fresh, value });
+                } else {
+                    let Some(&offset) = stack_offsets.get(&source_home) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.RELOAD_HOME_EXISTS",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(source.0), VReg(destination.0)],
+                            format!(
+                                "edge transfer source home {source_home:?} has no frame offset"
+                            ),
+                        ));
+                    };
+                    output.push(MInst::Load {
+                        dst: fresh,
+                        base: BaseReg::StackFrame,
+                        offset,
+                        size: OpSize::S64,
+                    });
+                }
+
+                if is_rematerializable(func, plan, destination_home)
+                    || recipe_homes.contains(&destination_home)
+                {
+                    continue;
+                }
+                if let Some(physical) = plan.state_homes.get(&destination_home) {
+                    pending_state_stores.push(PendingStateStore {
+                        block,
+                        instruction: output.len(),
+                        home: *physical,
+                    });
+                    output.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: physical.offset,
+                        src: fresh,
+                        size: physical.size,
+                    });
+                } else {
+                    let Some(&offset) = stack_offsets.get(&destination_home) else {
+                        return Err(ReconstructError::new(
+                            "RECONSTRUCT.SPILL_HOME_EXISTS",
+                            func.blocks.get(block).map(|block| block.id),
+                            Some(instruction),
+                            vec![VReg(source.0), VReg(destination.0)],
+                            format!(
+                                "edge transfer destination home {destination_home:?} has no frame offset"
+                            ),
+                        ));
+                    };
+                    output.push(MInst::Store {
+                        base: BaseReg::StackFrame,
+                        offset,
+                        src: fresh,
+                        size: OpSize::S64,
+                    });
+                }
+            }
         }
     }
     let _ = logical_for_vreg;
@@ -1543,6 +1824,12 @@ fn planned_value(operation: PlannedOp) -> LogicalValue {
         PlannedOp::Spill { value, .. }
         | PlannedOp::Reload { value, .. }
         | PlannedOp::SpillPhi { value, .. } => value,
+    }
+}
+
+fn edge_source(operation: PlannedEdgeOp) -> LogicalValue {
+    match operation {
+        PlannedEdgeOp::Spill { source, .. } | PlannedEdgeOp::Reload { source, .. } => source,
     }
 }
 
@@ -1900,8 +2187,9 @@ mod tests {
         func.verify();
 
         let shape = EdgeReloadShape {
-            value: LogicalValue(original.0),
-            home: SpillHome(original.0),
+            source: LogicalValue(original.0),
+            source_home: SpillHome(original.0),
+            destination: LogicalValue(original.0),
             materialization: ReloadMaterialization::Stack,
         };
         let bundles = vec![
@@ -2347,7 +2635,7 @@ mod tests {
             plan.edge_ops
                 .get(&(right_edge, right))
                 .is_some_and(|operations| operations.iter().any(|operation| {
-                    matches!(operation, PlannedOp::Spill { value, .. } if *value == stored)
+                    matches!(operation, PlannedEdgeOp::Spill { source, .. } if *source == stored)
                 }))
         );
 
@@ -2622,7 +2910,7 @@ mod tests {
         assert!(
             plan.edge_ops.values().flatten().any(|operation| matches!(
                 operation,
-                PlannedOp::Reload { value, .. } if *value == LogicalValue(stored.0)
+                PlannedEdgeOp::Reload { source, .. } if *source == LogicalValue(stored.0)
             )),
             "{plan:#?}"
         );
