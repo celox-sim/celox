@@ -166,6 +166,11 @@ pub struct Program {
     /// Shared event-level combinational definition graph. Recipe node IDs
     /// refer to `arena`; both are immutable after flattening.
     pub comb_graph: std::sync::Arc<crate::event_ir::CombGraph>,
+    /// Canonical EIR graph for each primary clock domain.
+    pub clock_event_irs: HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
+    /// Trigger signal to the primary clock-domain EIR graphs activated by it.
+    /// A shared asynchronous reset can activate more than one clock domain.
+    pub clock_event_triggers: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -763,6 +768,7 @@ pub struct SimModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    pub(crate) ff_eir_processes: Vec<crate::parser::ff::ModuleFfEirProcess>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
     pub comb_observers: Vec<CombObserver<VarId>>,
@@ -784,6 +790,7 @@ impl fmt::Debug for SimModule {
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
+            .field("ff_eir_processes", &self.ff_eir_processes.len())
             .field("glue_blocks", &self.glue_blocks)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_boundaries", &self.comb_boundaries)

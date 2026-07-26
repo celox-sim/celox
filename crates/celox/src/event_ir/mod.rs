@@ -133,6 +133,64 @@ impl ObjectRange {
     }
 }
 
+/// Logical bit offset retained before simulator-memory layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueOffset {
+    Static(usize),
+    Dynamic(ValueId),
+    Element {
+        index: ValueId,
+        element_width: usize,
+        bit_offset: usize,
+        dynamic_bit_offset: Option<ValueId>,
+    },
+}
+
+impl ValueOffset {
+    pub fn visit_value_operands(&self, mut visit: impl FnMut(ValueId)) {
+        match self {
+            Self::Static(_) => {}
+            Self::Dynamic(value) => visit(*value),
+            Self::Element {
+                index,
+                dynamic_bit_offset,
+                ..
+            } => {
+                visit(*index);
+                if let Some(offset) = dynamic_bit_offset {
+                    visit(*offset);
+                }
+            }
+        }
+    }
+}
+
+/// One static or dynamic logical access to an elaborated RTL object.
+///
+/// `alias` is the conservative range touched by a dynamic access; for a
+/// static access it is the exact range. It is semantic bit-range metadata,
+/// not a byte-layout approximation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectAccess {
+    pub object: AbsoluteAddr,
+    pub offset: ValueOffset,
+    pub width: usize,
+    pub alias: BitAccess,
+}
+
+impl From<ObjectRange> for ObjectAccess {
+    fn from(range: ObjectRange) -> Self {
+        Self {
+            object: range.object,
+            offset: ValueOffset::Static(range.access.lsb),
+            width: range
+                .width()
+                .expect("ObjectRange converted to ObjectAccess has a valid width"),
+            alias: range.access,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ValueScope {
     Event,
@@ -250,6 +308,11 @@ pub enum ValueKind {
         op: UnaryOp,
         input: ValueId,
     },
+    /// Width/state-kind conversion whose destination semantics are carried by
+    /// the enclosing [`ValueType`].
+    Resize {
+        input: ValueId,
+    },
     Binary {
         op: BinaryOp,
         lhs: ValueId,
@@ -270,7 +333,15 @@ pub enum ValueKind {
     },
     DynamicSelect {
         source: ValueId,
-        bit_offset: ValueId,
+        offset: ValueOffset,
+        width: usize,
+    },
+    /// Process-local SSA update. The result has the complete `base` type;
+    /// `value` replaces only the selected range.
+    UpdateRange {
+        base: ValueId,
+        offset: ValueOffset,
+        value: ValueId,
         width: usize,
     },
     ProcessPhi {
@@ -292,6 +363,7 @@ impl ValueKind {
             | Self::ReadCombDefinition { .. } => {}
             Self::ReadPersistentMemory { offset, .. } => visit(*offset),
             Self::Unary { input, .. } => visit(*input),
+            Self::Resize { input } => visit(*input),
             Self::Binary { lhs, rhs, .. } => {
                 visit(*lhs);
                 visit(*rhs);
@@ -309,11 +381,19 @@ impl ValueKind {
             Self::Concat { parts } | Self::ProcessPhi { inputs: parts } => {
                 parts.iter().copied().for_each(&mut visit);
             }
-            Self::DynamicSelect {
-                source, bit_offset, ..
-            } => {
+            Self::DynamicSelect { source, offset, .. } => {
                 visit(*source);
-                visit(*bit_offset);
+                offset.visit_value_operands(&mut visit);
+            }
+            Self::UpdateRange {
+                base,
+                offset,
+                value,
+                ..
+            } => {
+                visit(*base);
+                offset.visit_value_operands(&mut visit);
+                visit(*value);
             }
             Self::LoopValue { initial, update } => {
                 visit(*initial);
@@ -343,7 +423,7 @@ pub struct Effect {
 pub enum EffectKind {
     StageNextFf {
         process: ProcessId,
-        target: ObjectRange,
+        target: ObjectAccess,
         value: ValueId,
         guard: Option<ValueId>,
         priority: usize,
@@ -379,11 +459,17 @@ impl EffectKind {
     /// Visit value operands without allocating a temporary vector per effect.
     pub fn visit_value_operands(&self, mut visit: impl FnMut(ValueId)) {
         match self {
-            Self::StageNextFf { value, guard, .. } => {
+            Self::StageNextFf {
+                target,
+                value,
+                guard,
+                ..
+            } => {
                 visit(*value);
                 if let Some(guard) = guard {
                     visit(*guard);
                 }
+                target.offset.visit_value_operands(&mut visit);
             }
             Self::WritePersistentMemory {
                 offset,

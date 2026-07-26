@@ -371,6 +371,41 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
 }
 
 #[test]
+fn constructs_verified_clock_eir_during_flattening() {
+    let program = setup_and_parse(
+        r#"
+module Top (
+    clk: input clock,
+    enable: input logic,
+    data: input logic<8>,
+    q: output logic<8>,
+) {
+    always_ff (clk) {
+        if enable {
+            q = data + 8'd1;
+        } else {
+            q = q;
+        }
+    }
+}
+"#,
+        "Top",
+    );
+
+    assert_eq!(program.clock_event_irs.len(), 1);
+    let event = program.clock_event_irs.values().next().unwrap();
+    assert_eq!(event.processes().len(), 1);
+    assert_eq!(
+        event
+            .effects()
+            .iter()
+            .filter(|effect| matches!(effect.kind, crate::event_ir::EffectKind::StageNextFf { .. }))
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn test_instances_inherit_module_boundaries() {
     let code = r#"
     module Child (

@@ -148,17 +148,20 @@ through `CommitFFState`.
 Initial EIR value nodes are:
 
 ```text
+BlockParameter
 Constant
 ReadClockSnapshot(object, range)
 ReadPersistentMemory(object, access)
 ReadCombDefinition(definition, range)
 Unary
+Resize
 Binary
 Compare
 Mux
 Slice
 Concat
-DynamicSelect
+DynamicSelect(source, logical_offset)
+UpdateRange(base, logical_offset, value)
 ProcessPhi
 LoopValue
 ```
@@ -170,6 +173,27 @@ version even when a combinational definition exists.
 
 AIR expression lowering produces the same EIR value operations while using
 the current `ProcessLocal` environment.
+
+`Resize` makes width, signedness, and state-kind changes explicit. A
+four-state to two-state conversion is always represented by `ToTwoState`;
+`Resize` may promote a two-state value to four-state with an all-known mask,
+but may not silently discard unknown state.
+
+Value `Mux` retains the source HDL condition width and four-state truth
+semantics. Only a process CFG `Branch` is normalized to a one-bit two-state
+condition.
+
+Dynamic accesses retain a logical offset:
+
+```text
+Static(bit)
+Dynamic(value)
+Element(index, element_width, static_bit_offset, dynamic_bit_offset)
+```
+
+The offset value may itself be four-state. EIR preserves that fact and the
+element geometry; it does not prematurely replace an element access with
+`index * width + offset` in a two-state temporary.
 
 ### Effects
 
@@ -219,6 +243,12 @@ For one FF process:
 Each FF process gets a separate local environment. Joining all FF AIR into one
 mutable SymbolicStore is invalid because it can expose one process's staged
 write to another process during the same event.
+
+Each AIR process is imported as an explicit process-local CFG. EIR block
+parameters represent both AIR expression merges and sparse live-in
+`ProcessLocal` versions. Every edge supplies a typed argument for every
+parameter. Type changes formerly implicit in a SIR block edge are materialized
+on that edge before EIR verification.
 
 Partial writes construct an explicit update recipe:
 
@@ -353,4 +383,5 @@ Implementation and cutover proceed as follows:
 7. Delete the direct AIR-to-SIR and SLT-to-SIR construction paths.
 
 Failure to construct or verify EIR is a compile error. The implementation
-must not mix EIR and legacy writes or select a lowering path by event group.
+must not mix EIR and direct AIR/SLT writes or select a lowering path by event
+group.

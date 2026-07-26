@@ -91,6 +91,7 @@ pub struct CombGraph {
     slt_node_count: usize,
     recipes: Vec<CombRecipe>,
     definitions: Vec<CombDefinition>,
+    definition_index: DisjointIntervalMap<AbsoluteAddr, CombDefinitionId>,
     convergence_regions: Vec<CombConvergenceRegion>,
 }
 
@@ -109,6 +110,29 @@ impl CombGraph {
 
     pub fn slt_node_count(&self) -> usize {
         self.slt_node_count
+    }
+
+    pub fn overlapping_definitions(
+        &self,
+        range: ObjectRange,
+    ) -> Result<Vec<CombDefinitionId>, CombImportError> {
+        let Some(width) = range.width() else {
+            return Err(CombImportError::new(
+                CombImportInvariant::SourceRange,
+                None,
+                "requested combinational range is invalid",
+            ));
+        };
+        self.definition_index
+            .overlapping(&range.object, range.access.lsb, width)
+            .map(|definitions| definitions.collect())
+            .map_err(|_| {
+                CombImportError::new(
+                    CombImportInvariant::SourceRange,
+                    None,
+                    "requested combinational range overflows",
+                )
+            })
     }
 
     /// Import all flattened LogicPaths. Construction is `O((P + E) log P)`
@@ -360,6 +384,7 @@ impl CombGraph {
             slt_node_count: arena.len(),
             recipes,
             definitions,
+            definition_index,
             convergence_regions,
         };
         graph.verify()?;
@@ -388,6 +413,13 @@ impl CombGraph {
                     CombImportInvariant::DefinitionRange,
                     Some(definition.recipe.0),
                     "definition range is invalid",
+                ));
+            }
+            if self.overlapping_definitions(definition.target)? != [definition_id] {
+                return Err(CombImportError::new(
+                    CombImportInvariant::DefinitionRange,
+                    Some(definition.recipe.0),
+                    "definition interval index is inconsistent",
                 ));
             }
         }

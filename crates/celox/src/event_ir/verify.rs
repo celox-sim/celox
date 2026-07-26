@@ -317,7 +317,9 @@ fn verify_terminator(
                 ),
             ));
         }
-        for (argument, parameter) in arguments.iter().zip(&target_block.parameters) {
+        for (index, (argument, parameter)) in
+            arguments.iter().zip(&target_block.parameters).enumerate()
+        {
             let Some(argument_value) = ir.values().get(argument.0) else {
                 return Err(EventIrError::new(
                     EventIrInvariant::ControlEdge,
@@ -339,7 +341,12 @@ fn verify_terminator(
                 return Err(EventIrError::new(
                     EventIrInvariant::ControlEdge,
                     Some(block.to_string()),
-                    format!("edge argument {argument} has the wrong parameter type"),
+                    format!(
+                        "edge to {target} argument {index} {argument} ({:?}) does not match \
+                         parameter {parameter} ({:?})",
+                        argument_value.ty,
+                        ir.values()[parameter.0].ty
+                    ),
                 ));
             }
         }
@@ -511,17 +518,14 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
                 return Err(fail("snapshot read is not event-scoped"));
             }
         }
-        ValueKind::ReadPersistentMemory { offset, width, .. } => {
+        ValueKind::ReadPersistentMemory { width, .. } => {
             if *width != current.ty.width {
                 return Err(fail("memory read width does not match value type"));
-            }
-            if get_value(ir, *offset).ty.four_state {
-                return Err(fail("persistent-memory offset is four-state"));
             }
         }
         ValueKind::DynamicSelect {
             source,
-            bit_offset,
+            offset,
             width,
         } => {
             if *width != current.ty.width {
@@ -530,9 +534,34 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
             if *width > get_value(ir, *source).ty.width {
                 return Err(fail("dynamic selection is wider than its source"));
             }
-            if get_value(ir, *bit_offset).ty.four_state {
-                return Err(fail("dynamic bit offset is four-state"));
+            verify_value_offset(ir, offset, Some(get_value(ir, *source).ty.width), *width)
+                .map_err(|message| {
+                    EventIrError::new(
+                        EventIrInvariant::ValueType,
+                        Some(id.to_string()),
+                        format!("invalid dynamic selection offset: {message}"),
+                    )
+                })?;
+        }
+        ValueKind::UpdateRange {
+            base,
+            offset,
+            value,
+            width,
+        } => {
+            if get_value(ir, *base).ty != current.ty {
+                return Err(fail("range update result does not match its base type"));
             }
+            if *width == 0 || get_value(ir, *value).ty.width != *width {
+                return Err(fail("range update value width is invalid"));
+            }
+            verify_value_offset(ir, offset, Some(current.ty.width), *width).map_err(|message| {
+                EventIrError::new(
+                    EventIrInvariant::ValueType,
+                    Some(id.to_string()),
+                    format!("invalid range update offset: {message}"),
+                )
+            })?;
         }
         ValueKind::ReadCombDefinition { definition, access } => {
             let width = access
@@ -580,8 +609,21 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
                     return Err(fail("ToTwoState has a four-state result"));
                 }
             } else if current.ty.four_state != get_value(ir, *input).ty.four_state {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ValueType,
+                    Some(id.to_string()),
+                    format!(
+                        "{op} changes state kind from {:?} to {:?} without an explicit conversion",
+                        get_value(ir, *input).ty,
+                        current.ty
+                    ),
+                ));
+            }
+        }
+        ValueKind::Resize { input } => {
+            if get_value(ir, *input).ty.four_state && !current.ty.four_state {
                 return Err(fail(
-                    "unary operation changes state kind without a conversion",
+                    "Resize drops unknown state without an explicit ToTwoState conversion",
                 ));
             }
         }
@@ -602,39 +644,26 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
                     | BinaryOp::NeWildcard
             );
             let logical = matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr);
-            let expected = if comparison || logical {
-                1
-            } else {
-                get_value(ir, *lhs).ty.width
-            };
-            if current.ty.width != expected {
-                return Err(fail(
-                    "binary result width does not match operation semantics",
-                ));
+            if (comparison || logical) && current.ty.width != 1 {
+                return Err(fail("comparison or logical result is not one bit"));
             }
             if comparison && get_value(ir, *lhs).ty.width != get_value(ir, *rhs).ty.width {
                 return Err(fail("comparison operand widths differ"));
             }
-            if !matches!(
+            if matches!(
                 op,
-                BinaryOp::Shl
-                    | BinaryOp::Shr
-                    | BinaryOp::Sar
-                    | BinaryOp::LogicAnd
-                    | BinaryOp::LogicOr
-            ) && get_value(ir, *lhs).ty.width != get_value(ir, *rhs).ty.width
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+            ) && (current.ty.width != get_value(ir, *lhs).ty.width
+                || current.ty.width != get_value(ir, *rhs).ty.width)
             {
-                return Err(fail("binary operand widths differ"));
+                return Err(fail("division or remainder result/operand widths differ"));
             }
         }
         ValueKind::Mux {
-            condition,
+            condition: _,
             then_value,
             else_value,
         } => {
-            if get_value(ir, *condition).ty.width != 1 {
-                return Err(fail("Mux condition is not one bit"));
-            }
             if get_value(ir, *then_value).ty != current.ty
                 || get_value(ir, *else_value).ty != current.ty
             {
@@ -661,6 +690,59 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
         ValueKind::LoopValue { initial, update } => {
             if get_value(ir, *initial).ty != current.ty || get_value(ir, *update).ty != current.ty {
                 return Err(fail("LoopValue inputs do not match its result type"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_value_offset(
+    ir: &EventIr,
+    offset: &super::ValueOffset,
+    container_width: Option<usize>,
+    access_width: usize,
+) -> Result<(), &'static str> {
+    if access_width == 0 {
+        return Err("zero-width access");
+    }
+    match offset {
+        super::ValueOffset::Static(bit_offset) => {
+            if container_width.is_some_and(|container| {
+                bit_offset
+                    .checked_add(access_width)
+                    .is_none_or(|end| end > container)
+            }) {
+                return Err("static access lies outside its container");
+            }
+        }
+        super::ValueOffset::Dynamic(value) => {
+            if ir.values().get(value.0).is_none() {
+                return Err("dynamic offset names an absent value");
+            }
+            if container_width.is_some_and(|container| access_width > container) {
+                return Err("dynamic access is wider than its container");
+            }
+        }
+        super::ValueOffset::Element {
+            index,
+            element_width,
+            bit_offset,
+            dynamic_bit_offset,
+        } => {
+            if *element_width == 0
+                || bit_offset
+                    .checked_add(access_width)
+                    .is_none_or(|end| end > *element_width)
+            {
+                return Err("element offset metadata is invalid");
+            }
+            if ir.values().get(index.0).is_none() {
+                return Err("element index names an absent value");
+            }
+            if let Some(dynamic) = dynamic_bit_offset {
+                if ir.values().get(dynamic.0).is_none() {
+                    return Err("element bit offset names an absent value");
+                }
             }
         }
     }
@@ -762,12 +844,30 @@ fn verify_effects(ir: &EventIr) -> Result<(), EventIrError> {
                 if matches!(
                     get_value(ir, *value).scope,
                     ValueScope::Process(owner) if owner != *process
-                ) || target.width() != Some(get_value(ir, *value).ty.width)
+                ) || target.width != get_value(ir, *value).ty.width
                 {
                     return Err(EventIrError::new(
                         EventIrInvariant::StageType,
                         Some(id.to_string()),
                         "stage value scope or target width is invalid",
+                    ));
+                }
+                if target.alias.msb < target.alias.lsb
+                    || verify_value_offset(ir, &target.offset, None, target.width).is_err()
+                    || matches!(
+                        &target.offset,
+                        super::ValueOffset::Static(offset)
+                            if target.alias
+                                != super::BitAccess::new(
+                                    *offset,
+                                    offset.saturating_add(target.width).saturating_sub(1),
+                                )
+                    )
+                {
+                    return Err(EventIrError::new(
+                        EventIrInvariant::StageType,
+                        Some(id.to_string()),
+                        "stage target offset or conservative alias range is invalid",
                     ));
                 }
                 if let Some(guard) = guard
@@ -953,7 +1053,7 @@ mod tests {
             predecessors: Vec::new(),
             kind: EffectKind::StageNextFf {
                 process,
-                target: object(1, 0, 7),
+                target: object(1, 0, 7).into(),
                 value: next,
                 guard: None,
                 priority: 0,
@@ -1039,7 +1139,7 @@ mod tests {
             predecessors: Vec::new(),
             kind: EffectKind::StageNextFf {
                 process,
-                target: object(1, 0, 0),
+                target: object(1, 0, 0).into(),
                 value: next,
                 guard: None,
                 priority: 0,

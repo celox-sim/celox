@@ -38,9 +38,17 @@ struct Entry<V> {
     value: V,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DisjointIntervalMap<O, V> {
     objects: BTreeMap<O, Vec<Entry<V>>>,
+}
+
+impl<O, V> Default for DisjointIntervalMap<O, V> {
+    fn default() -> Self {
+        Self {
+            objects: BTreeMap::new(),
+        }
+    }
 }
 
 impl<O: Ord, V: Copy> DisjointIntervalMap<O, V> {

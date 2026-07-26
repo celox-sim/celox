@@ -19,7 +19,7 @@ use crate::parser::{
         PartSelectGeometry, eval_var_select, get_access_width, is_static_access, select_geometry,
     },
     bitslicer::BitSlicer,
-    ff::FfParser,
+    ff::{FfEirBuilder, FfParser, ModuleFfEirProcess},
     loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
     resolve_total_width,
@@ -1002,15 +1002,26 @@ impl<'a> ModuleParser<'a> {
     }
 
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
-        let mut ff_groups: HashMap<TriggerSet<VarId>, Vec<&veryl_analyzer::ir::FfDeclaration>> =
-            HashMap::default();
+        let mut ff_groups: HashMap<
+            TriggerSet<VarId>,
+            Vec<(usize, &veryl_analyzer::ir::FfDeclaration)>,
+        > = HashMap::default();
+        let mut ff_group_order = Vec::new();
+        let mut ff_source_order = 0usize;
 
         // 1. Parse all declarations
         for decl in self.module.declarations.iter() {
             match decl {
                 Declaration::Ff(ff_decl) => {
                     let trigger_set = self.ff_parser.detect_trigger_set(ff_decl);
-                    ff_groups.entry(trigger_set).or_default().push(ff_decl);
+                    if !ff_groups.contains_key(&trigger_set) {
+                        ff_group_order.push(trigger_set.clone());
+                    }
+                    ff_groups
+                        .entry(trigger_set)
+                        .or_default()
+                        .push((ff_source_order, ff_decl));
+                    ff_source_order += 1;
                     // Build reset -> clock mapping
                     if let Some(reset) = &ff_decl.reset {
                         self.reset_clock_map.insert(reset.id, ff_decl.clock.id);
@@ -1040,16 +1051,34 @@ impl<'a> ModuleParser<'a> {
         let mut eval_only_ff_blocks = HashMap::default();
         let mut apply_ff_blocks = HashMap::default();
         let mut eval_apply_ff_blocks = HashMap::default();
+        let mut ff_eir_processes = Vec::new();
 
-        for (trigger_set, decls) in &ff_groups {
+        for trigger_set in ff_group_order {
+            let decls = &ff_groups[&trigger_set];
             // --- eval_only and eval_apply ---
-            // Run parse_ff_group once. Clone the builder before sealing so that
-            // eval_only and eval_apply are produced from independent builder states,
-            // each with their own register namespace (no shared RegisterIds).
+            // Preserve the current grouped executable CFG until the atomic EIR
+            // projection cutover. EIR construction is mandatory and retains
+            // one process-local graph per source declaration.
             let mut builder = SIRBuilder::new();
-            let ff_group = self.ff_parser.parse_ff_group(decls, &mut builder)?;
+            let grouped_declarations = decls
+                .iter()
+                .map(|(_, declaration)| *declaration)
+                .collect::<Vec<_>>();
+            let ff_group = self
+                .ff_parser
+                .parse_ff_group(&grouped_declarations, &mut builder)?;
             let targets = ff_group.targets;
             let dynamic_write_vars = ff_group.dynamic_write_vars;
+            for &(source_order, declaration) in decls {
+                let mut event_builder = FfEirBuilder::new();
+                self.ff_parser
+                    .parse_ff_group(&[declaration], &mut event_builder)?;
+                ff_eir_processes.push(ModuleFfEirProcess {
+                    trigger_set: trigger_set.clone(),
+                    source_order,
+                    builder: event_builder,
+                });
+            }
             let mut commits = build_ff_region_copies_skipping(
                 &targets,
                 WORKING_REGION,
@@ -1117,7 +1146,7 @@ impl<'a> ModuleParser<'a> {
 
             eval_only_ff_blocks.insert(trigger_set.clone(), eval_only_eu);
             apply_ff_blocks.insert(trigger_set.clone(), apply_eu);
-            eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply_eu);
+            eval_apply_ff_blocks.insert(trigger_set, eval_apply_eu);
         }
 
         // Keep both boundary sources:
@@ -1157,6 +1186,7 @@ impl<'a> ModuleParser<'a> {
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            ff_eir_processes,
             comb_blocks: self.comb_blocks,
             comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),

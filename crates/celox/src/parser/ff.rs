@@ -202,10 +202,12 @@ mod signed_div_rem_tests {
 }
 
 mod builder;
+mod eir_builder;
 mod expression;
 mod function_call;
 
 use builder::{FfBuildOp, FfBuilder, FfTerminator, FfWriteTarget};
+pub(crate) use eir_builder::{FfEirBuildError, FfEirBuilder};
 
 pub enum Domain {
     Ff, // TODO: add clock
@@ -215,6 +217,13 @@ pub enum Domain {
 pub struct FfGroupParseResult {
     pub targets: Vec<VarAtomBase<crate::ir::RegionedVarAddr>>,
     pub dynamic_write_vars: HashSet<VarId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleFfEirProcess {
+    pub trigger_set: TriggerSet<VarId>,
+    pub source_order: usize,
+    pub builder: FfEirBuilder,
 }
 
 pub struct FfParser<'a> {
