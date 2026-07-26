@@ -37,6 +37,7 @@ macro_rules! entity_id {
 entity_id!(ValueId, "v");
 entity_id!(RegionId, "region");
 entity_id!(ProcessId, "process");
+entity_id!(ControlBlockId, "block");
 entity_id!(EffectId, "effect");
 entity_id!(CombDefinitionId, "comb");
 entity_id!(CombRecipeId, "recipe");
@@ -150,9 +151,10 @@ pub struct Region {
 pub enum RegionKind {
     EventRoot,
     FfProcess(ProcessId),
-    BranchArm,
-    Loop,
-    EffectInterval,
+    ControlBlock {
+        process: ProcessId,
+        block: ControlBlockId,
+    },
 }
 
 /// One AIR process. Every process has an independent local value namespace.
@@ -160,6 +162,60 @@ pub enum RegionKind {
 pub struct Process {
     pub region: RegionId,
     pub source_order: usize,
+    pub entry: ControlBlockId,
+    pub blocks: Vec<ControlBlockId>,
+}
+
+/// One process-local control block.
+///
+/// Block parameters are EIR's explicit phi representation. Incoming edge
+/// arguments, rather than a value-node backedge, represent loop-carried
+/// values. This keeps the value arena topological even when the process CFG
+/// is cyclic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlBlock {
+    pub process: ProcessId,
+    pub region: RegionId,
+    pub parameters: Vec<ValueId>,
+    pub terminator: Option<ControlTerminator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlTerminator {
+    Jump {
+        target: ControlBlockId,
+        arguments: Vec<ValueId>,
+    },
+    Branch {
+        condition: ValueId,
+        true_target: ControlBlockId,
+        true_arguments: Vec<ValueId>,
+        false_target: ControlBlockId,
+        false_arguments: Vec<ValueId>,
+    },
+    Return,
+    Error(i64),
+}
+
+impl ControlTerminator {
+    pub fn visit_value_operands(&self, mut visit: impl FnMut(ValueId)) {
+        match self {
+            Self::Jump { arguments, .. } => {
+                arguments.iter().copied().for_each(&mut visit);
+            }
+            Self::Branch {
+                condition,
+                true_arguments,
+                false_arguments,
+                ..
+            } => {
+                visit(*condition);
+                true_arguments.iter().copied().for_each(&mut visit);
+                false_arguments.iter().copied().for_each(&mut visit);
+            }
+            Self::Return | Self::Error(_) => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +228,10 @@ pub struct Value {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueKind {
+    BlockParameter {
+        block: ControlBlockId,
+        index: usize,
+    },
     Constant {
         value: BigUint,
         unknown: BigUint,
@@ -226,7 +286,8 @@ impl ValueKind {
     /// Visit operands without allocating a temporary vector per value.
     pub fn visit_operands(&self, mut visit: impl FnMut(ValueId)) {
         match self {
-            Self::Constant { .. }
+            Self::BlockParameter { .. }
+            | Self::Constant { .. }
             | Self::ReadClockSnapshot(_)
             | Self::ReadCombDefinition { .. } => {}
             Self::ReadPersistentMemory { offset, .. } => visit(*offset),
@@ -367,6 +428,7 @@ pub struct EventIr {
     comb: Arc<CombGraph>,
     regions: Vec<Region>,
     processes: Vec<Process>,
+    blocks: Vec<ControlBlock>,
     values: Vec<Value>,
     effects: Vec<Effect>,
 }
@@ -381,6 +443,7 @@ impl EventIr {
                 kind: RegionKind::EventRoot,
             }],
             processes: Vec::new(),
+            blocks: Vec::new(),
             values: Vec::new(),
             effects: Vec::new(),
         }
@@ -404,6 +467,10 @@ impl EventIr {
 
     pub fn processes(&self) -> &[Process] {
         &self.processes
+    }
+
+    pub fn blocks(&self) -> &[ControlBlock] {
+        &self.blocks
     }
 
     pub fn values(&self) -> &[Value] {
@@ -433,8 +500,46 @@ impl EventIr {
         self.processes.push(Process {
             region,
             source_order,
+            entry: ControlBlockId(usize::MAX),
+            blocks: Vec::new(),
         });
+        let entry = self.add_control_block(process);
+        self.processes[process.0].entry = entry;
         process
+    }
+
+    pub fn add_control_block(&mut self, process: ProcessId) -> ControlBlockId {
+        let process_region = self.processes[process.0].region;
+        let block = ControlBlockId(self.blocks.len());
+        let region = self.add_region(process_region, RegionKind::ControlBlock { process, block });
+        self.blocks.push(ControlBlock {
+            process,
+            region,
+            parameters: Vec::new(),
+            terminator: None,
+        });
+        self.processes[process.0].blocks.push(block);
+        block
+    }
+
+    pub fn add_block_parameter(&mut self, block: ControlBlockId, ty: ValueType) -> ValueId {
+        let control_block = &self.blocks[block.0];
+        let process = control_block.process;
+        let region = control_block.region;
+        let index = control_block.parameters.len();
+        let value = self.add_value(Value {
+            ty,
+            scope: ValueScope::Process(process),
+            region,
+            kind: ValueKind::BlockParameter { block, index },
+        });
+        self.blocks[block.0].parameters.push(value);
+        value
+    }
+
+    pub fn set_terminator(&mut self, block: ControlBlockId, terminator: ControlTerminator) {
+        let previous = self.blocks[block.0].terminator.replace(terminator);
+        assert!(previous.is_none(), "{block} already has a terminator");
     }
 
     pub fn add_value(&mut self, value: Value) -> ValueId {

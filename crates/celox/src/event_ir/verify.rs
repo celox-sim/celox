@@ -1,6 +1,6 @@
 use super::{
-    BinaryOp, EffectId, EffectKind, EventDomain, EventIr, ProcessId, RegionId, RegionKind, ValueId,
-    ValueKind, ValueScope,
+    BinaryOp, ControlBlockId, ControlTerminator, EffectId, EffectKind, EventDomain, EventIr,
+    ProcessId, RegionId, RegionKind, ValueId, ValueKind, ValueScope,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,6 +8,10 @@ pub enum EventIrInvariant {
     RootRegion,
     RegionParent,
     ProcessRegion,
+    ProcessBlocks,
+    ControlBlock,
+    ControlEdge,
+    ControlTerminator,
     ValueRegion,
     ValueOperand,
     ValueScope,
@@ -60,6 +64,7 @@ impl std::error::Error for EventIrError {}
 pub(super) fn verify(ir: &EventIr) -> Result<(), EventIrError> {
     verify_regions(ir)?;
     verify_processes(ir)?;
+    verify_blocks(ir)?;
     verify_values(ir)?;
     verify_comb_definitions(ir)?;
     verify_effects(ir)
@@ -101,6 +106,7 @@ fn verify_regions(ir: &EventIr) -> Result<(), EventIrError> {
 }
 
 fn verify_processes(ir: &EventIr) -> Result<(), EventIrError> {
+    let mut block_owner = vec![None; ir.blocks().len()];
     for (index, process) in ir.processes().iter().enumerate() {
         let id = ProcessId(index);
         let Some(region) = ir.regions().get(process.region.0) else {
@@ -117,8 +123,254 @@ fn verify_processes(ir: &EventIr) -> Result<(), EventIrError> {
                 format!("{} is not this process's root region", process.region),
             ));
         }
+        if !process.blocks.contains(&process.entry) {
+            return Err(EventIrError::new(
+                EventIrInvariant::ProcessBlocks,
+                Some(id.to_string()),
+                format!("entry {} is not owned by the process", process.entry),
+            ));
+        }
+        for block in &process.blocks {
+            let Some(owner) = block_owner.get_mut(block.0) else {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ProcessBlocks,
+                    Some(id.to_string()),
+                    format!("names absent {block}"),
+                ));
+            };
+            if let Some(previous) = owner.replace(id) {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ProcessBlocks,
+                    Some(id.to_string()),
+                    format!("{block} is also owned by {previous}"),
+                ));
+            }
+        }
+    }
+    if let Some((index, _)) = block_owner
+        .iter()
+        .enumerate()
+        .find(|(_, owner)| owner.is_none())
+    {
+        return Err(EventIrError::new(
+            EventIrInvariant::ProcessBlocks,
+            Some(ControlBlockId(index).to_string()),
+            "control block is not listed by any process",
+        ));
     }
     Ok(())
+}
+
+fn verify_blocks(ir: &EventIr) -> Result<(), EventIrError> {
+    for (index, block) in ir.blocks().iter().enumerate() {
+        let id = ControlBlockId(index);
+        let Some(process) = ir.processes().get(block.process.0) else {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlBlock,
+                Some(id.to_string()),
+                format!("names absent {}", block.process),
+            ));
+        };
+        if !process.blocks.contains(&id) {
+            return Err(EventIrError::new(
+                EventIrInvariant::ProcessBlocks,
+                Some(id.to_string()),
+                format!("is not listed by {}", block.process),
+            ));
+        }
+        let Some(region) = ir.regions().get(block.region.0) else {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlBlock,
+                Some(id.to_string()),
+                format!("names absent {}", block.region),
+            ));
+        };
+        if region.parent != Some(process.region)
+            || region.kind
+                != (RegionKind::ControlBlock {
+                    process: block.process,
+                    block: id,
+                })
+        {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlBlock,
+                Some(id.to_string()),
+                format!("{} is not this block's process-local region", block.region),
+            ));
+        }
+        for (parameter_index, parameter) in block.parameters.iter().enumerate() {
+            let Some(value) = ir.values().get(parameter.0) else {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlBlock,
+                    Some(id.to_string()),
+                    format!("names absent parameter {parameter}"),
+                ));
+            };
+            if value.scope != ValueScope::Process(block.process)
+                || value.region != block.region
+                || value.kind
+                    != (ValueKind::BlockParameter {
+                        block: id,
+                        index: parameter_index,
+                    })
+            {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlBlock,
+                    Some(id.to_string()),
+                    format!("{parameter} is not parameter {parameter_index} of this block"),
+                ));
+            }
+        }
+        let Some(terminator) = &block.terminator else {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlTerminator,
+                Some(id.to_string()),
+                "control block is not terminated",
+            ));
+        };
+        verify_terminator(ir, id, block.process, terminator)?;
+    }
+
+    for (process_index, process) in ir.processes().iter().enumerate() {
+        let process_id = ProcessId(process_index);
+        let mut reachable = vec![false; ir.blocks().len()];
+        let mut worklist = vec![process.entry];
+        while let Some(block) = worklist.pop() {
+            if reachable[block.0] {
+                continue;
+            }
+            reachable[block.0] = true;
+            match ir.blocks()[block.0]
+                .terminator
+                .as_ref()
+                .expect("termination checked above")
+            {
+                ControlTerminator::Jump { target, .. } => worklist.push(*target),
+                ControlTerminator::Branch {
+                    true_target,
+                    false_target,
+                    ..
+                } => {
+                    worklist.push(*true_target);
+                    worklist.push(*false_target);
+                }
+                ControlTerminator::Return | ControlTerminator::Error(_) => {}
+            }
+        }
+        if let Some(block) = process.blocks.iter().find(|block| !reachable[block.0]) {
+            return Err(EventIrError::new(
+                EventIrInvariant::ProcessBlocks,
+                Some(process_id.to_string()),
+                format!("owns unreachable {block}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_terminator(
+    ir: &EventIr,
+    block: ControlBlockId,
+    process: ProcessId,
+    terminator: &ControlTerminator,
+) -> Result<(), EventIrError> {
+    if let ControlTerminator::Branch { condition, .. } = terminator {
+        let Some(value) = ir.values().get(condition.0) else {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlTerminator,
+                Some(block.to_string()),
+                format!("names absent branch condition {condition}"),
+            ));
+        };
+        if value.ty.width != 1 || value.ty.four_state {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlTerminator,
+                Some(block.to_string()),
+                "branch condition is not a one-bit two-state value",
+            ));
+        }
+    }
+
+    let verify_edge = |target: ControlBlockId, arguments: &[ValueId]| -> Result<(), EventIrError> {
+        let Some(target_block) = ir.blocks().get(target.0) else {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlEdge,
+                Some(block.to_string()),
+                format!("names absent target {target}"),
+            ));
+        };
+        if target_block.process != process {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlEdge,
+                Some(block.to_string()),
+                format!("edge crosses from {process} to {}", target_block.process),
+            ));
+        }
+        if arguments.len() != target_block.parameters.len() {
+            return Err(EventIrError::new(
+                EventIrInvariant::ControlEdge,
+                Some(block.to_string()),
+                format!(
+                    "edge to {target} has {} arguments for {} parameters",
+                    arguments.len(),
+                    target_block.parameters.len()
+                ),
+            ));
+        }
+        for (argument, parameter) in arguments.iter().zip(&target_block.parameters) {
+            let Some(argument_value) = ir.values().get(argument.0) else {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlEdge,
+                    Some(block.to_string()),
+                    format!("names absent edge argument {argument}"),
+                ));
+            };
+            if matches!(
+                argument_value.scope,
+                ValueScope::Process(owner) if owner != process
+            ) {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlEdge,
+                    Some(block.to_string()),
+                    format!("edge argument {argument} belongs to another process"),
+                ));
+            }
+            if argument_value.ty != ir.values()[parameter.0].ty {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlEdge,
+                    Some(block.to_string()),
+                    format!("edge argument {argument} has the wrong parameter type"),
+                ));
+            }
+        }
+        Ok(())
+    };
+
+    match terminator {
+        ControlTerminator::Jump { target, arguments } => verify_edge(*target, arguments),
+        ControlTerminator::Branch {
+            condition,
+            true_target,
+            true_arguments,
+            false_target,
+            false_arguments,
+        } => {
+            let condition_value = &ir.values()[condition.0];
+            if matches!(
+                condition_value.scope,
+                ValueScope::Process(owner) if owner != process
+            ) {
+                return Err(EventIrError::new(
+                    EventIrInvariant::ControlTerminator,
+                    Some(block.to_string()),
+                    format!("branch condition {condition} belongs to another process"),
+                ));
+            }
+            verify_edge(*true_target, true_arguments)?;
+            verify_edge(*false_target, false_arguments)
+        }
+        ControlTerminator::Return | ControlTerminator::Error(_) => Ok(()),
+    }
 }
 
 fn region_process(ir: &EventIr, mut region: RegionId) -> Option<ProcessId> {
@@ -231,6 +483,16 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
     let fail =
         |message| EventIrError::new(EventIrInvariant::ValueType, Some(id.to_string()), message);
     match &current.kind {
+        ValueKind::BlockParameter { block, index } => {
+            let Some(control_block) = ir.blocks().get(block.0) else {
+                return Err(fail("block parameter names an absent control block"));
+            };
+            if control_block.parameters.get(*index) != Some(&id) {
+                return Err(fail(
+                    "block parameter index does not refer back to this value",
+                ));
+            }
+        }
         ValueKind::Constant { value, unknown } => {
             if value.bits() > current.ty.width as u64 || unknown.bits() > current.ty.width as u64 {
                 return Err(fail(
@@ -643,6 +905,11 @@ mod tests {
         )
     }
 
+    fn terminate_process(ir: &mut EventIr, process: ProcessId) {
+        let entry = ir.processes()[process.0].entry;
+        ir.set_terminator(entry, ControlTerminator::Return);
+    }
+
     #[test]
     fn verifies_snapshot_process_stage_and_commit_phase_separation() {
         let clock = object(0, 0, 0).object;
@@ -654,6 +921,7 @@ mod tests {
             Arc::new(CombGraph::default()),
         );
         let process = ir.add_process(0);
+        terminate_process(&mut ir, process);
         let region = ir.process_region(process).unwrap();
         let snapshot = ir.add_value(Value {
             ty: ValueType::bit(8, false),
@@ -714,6 +982,8 @@ mod tests {
         );
         let producer = ir.add_process(0);
         let consumer = ir.add_process(1);
+        terminate_process(&mut ir, producer);
+        terminate_process(&mut ir, consumer);
         let produced = ir.add_value(Value {
             ty: ValueType::bit(1, false),
             scope: ValueScope::Process(producer),
@@ -753,6 +1023,7 @@ mod tests {
             Arc::new(CombGraph::default()),
         );
         let process = ir.add_process(0);
+        terminate_process(&mut ir, process);
         let region = ir.process_region(process).unwrap();
         let next = ir.add_value(Value {
             ty: ValueType::bit(1, false),
@@ -787,5 +1058,93 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn verifies_loop_backedge_through_block_parameter() {
+        let clock = object(0, 0, 0).object;
+        let mut ir = EventIr::new(
+            EventDomain::Clock {
+                clock,
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let process = ir.add_process(0);
+        let entry = ir.processes()[process.0].entry;
+        let header = ir.add_control_block(process);
+        let body = ir.add_control_block(process);
+        let exit = ir.add_control_block(process);
+        let counter = ir.add_block_parameter(header, ValueType::bit(8, false));
+        let zero = ir.add_value(Value {
+            ty: ValueType::bit(8, false),
+            scope: ValueScope::Event,
+            region: ir.root_region(),
+            kind: ValueKind::Constant {
+                value: BigUint::from(0u8),
+                unknown: BigUint::from(0u8),
+            },
+        });
+        let one = ir.add_value(Value {
+            ty: ValueType::bit(8, false),
+            scope: ValueScope::Event,
+            region: ir.root_region(),
+            kind: ValueKind::Constant {
+                value: BigUint::from(1u8),
+                unknown: BigUint::from(0u8),
+            },
+        });
+        let condition = ir.add_value(Value {
+            ty: ValueType::bit(1, false),
+            scope: ValueScope::Process(process),
+            region: ir.blocks()[header.0].region,
+            kind: ValueKind::Binary {
+                op: BinaryOp::LtU,
+                lhs: counter,
+                rhs: one,
+            },
+        });
+        let update = ir.add_value(Value {
+            ty: ValueType::bit(8, false),
+            scope: ValueScope::Process(process),
+            region: ir.blocks()[body.0].region,
+            kind: ValueKind::Binary {
+                op: BinaryOp::Add,
+                lhs: counter,
+                rhs: one,
+            },
+        });
+        ir.set_terminator(
+            entry,
+            ControlTerminator::Jump {
+                target: header,
+                arguments: vec![zero],
+            },
+        );
+        ir.set_terminator(
+            header,
+            ControlTerminator::Branch {
+                condition,
+                true_target: body,
+                true_arguments: Vec::new(),
+                false_target: exit,
+                false_arguments: Vec::new(),
+            },
+        );
+        ir.set_terminator(
+            body,
+            ControlTerminator::Jump {
+                target: header,
+                arguments: vec![update],
+            },
+        );
+        ir.set_terminator(exit, ControlTerminator::Return);
+        ir.add_effect(Effect {
+            region: ir.root_region(),
+            predecessors: Vec::new(),
+            kind: EffectKind::CommitFfState { stages: Vec::new() },
+        });
+
+        assert_eq!(ir.verify(), Ok(()));
     }
 }
