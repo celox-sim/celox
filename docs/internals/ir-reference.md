@@ -1,7 +1,21 @@
 # SIR Intermediate Representation Reference
 
 SIR (Simulator Intermediate Representation) is the execution IR for Celox.
-It lowers Veryl analysis results into a register-based instruction sequence that serves as input to the compilation backends (native x86-64 or Cranelift JIT).
+It is lowered from [Event IR (EIR)](./event-ir.md) into a register-based
+instruction sequence that serves as input to the compilation backends
+(native x86-64 or Cranelift JIT).
+
+The representation relationship is:
+
+```text
+AIR --combinational symbolic lowering--> SLT/LogicPath
+AIR + SLT/LogicPath -------------------> EIR
+EIR ----------------------------------> SIR
+SIR ----------------------------------> MIR/native code
+```
+
+SLT is not the representation of all AIR, and SIR must not be used to recover
+ordinary AIR/SLT value relationships which EIR can retain explicitly.
 
 ## Overview
 

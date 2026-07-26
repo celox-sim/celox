@@ -15,13 +15,14 @@ This simulator is designed with the goal of **maximizing verification efficiency
 The transformation from Veryl source code to execution consists of the following three major phases.
 
 1.  **Frontend (Parser/Analyzer)**:
-    -   Parses Veryl source and generates the analyzer IR.
-    -   `parser::parse_ir` takes this as input and converts each module into a `SimModule` (a struct containing SLT (logic expressions) and SIR (instruction sequences)).
+    -   Parses Veryl source and generates AIR (the analyzer IR).
+    -   Combinational AIR is converted into SLT value recipes and range-qualified `LogicPath` definitions. FF procedural AIR remains a separate semantic input; AIR as a whole does not pass through SLT.
 
 2.  **Middle-end (Flattening/Scheduling/Optimization)**:
     -   **Flattening**: Flattens the instance hierarchy and converts module-local `VarId`s into global `AbsoluteAddr`s. Port connections are converted into `LogicPath`s.
     -   **Atomization**: Splits `LogicPath`s at bit boundaries (atoms) to analyze dependencies at bit-level precision.
     -   **Scheduling**: Topologically sorts the split atoms to determine the execution order of combinational logic. Detects SCCs via Tarjan's algorithm and handles cycles with static unrolling or dynamic convergence loops.
+    -   **Event IR (EIR)**: Combines flattened SLT/LogicPath definitions with AIR process control, immutable event-entry state, process-local versions, staged FF updates, effects, and commit barriers. EIR is the semantic input to new SIR construction; it is not recovered from SIR memory traffic.
     -   **SIR Optimization**: Applies per-pass optimization (store-load forwarding, commit sinking, dead store elimination, instruction scheduling, etc.) controlled by `OptimizeOptions`.
 
 3.  **Backend (Code Generation)**:

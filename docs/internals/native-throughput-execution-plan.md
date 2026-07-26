@@ -6786,7 +6786,8 @@ the library suite 1,057/1,057. All three complete SIR stages and the
 ## Related design records
 
 - [Simulator architecture](./architecture.md)
-- [Reactive SSA lowering](./reactive-ssa-lowering.md)
+- [Event IR (EIR)](./event-ir.md)
+- [Historical Reactive SSA lowering](./reactive-ssa-lowering.md)
 - [Native register allocation](./native-register-allocation.md)
 - [Fused StateSSA and code placement](./fused-state-ssa-placement.md)
 - [Branch-aware mux lowering](./branch-aware-mux-lowering.md)

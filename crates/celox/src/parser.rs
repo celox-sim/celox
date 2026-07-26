@@ -31,14 +31,14 @@ fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
         })
 }
 
-fn verify_slt_roots<A>(
-    arena: &SLTNodeArena<A>,
+fn verify_slt_roots<'arena, A>(
+    arena: &'arena SLTNodeArena<A>,
     paths: &[LogicPath<A>],
     observers: &[CombObserver<A>],
     variable_widths: &HashMap<A, usize>,
     variable_signedness: &HashMap<A, bool>,
     phase: &'static str,
-) -> Result<(), ParserError>
+) -> Result<SLTNodeFacts<'arena, A>, ParserError>
 where
     A: Hash + Eq + Clone,
 {
@@ -356,7 +356,7 @@ where
         }
     }
 
-    Ok(())
+    Ok(facts)
 }
 
 #[cfg(test)]
@@ -644,6 +644,9 @@ pub enum ParserError {
 
     #[error("SLT construction failed: {0}")]
     SltConstruction(#[from] crate::logic_tree::SLTNodeFactsError),
+
+    #[error("EIR combinational import failed: {0}")]
+    EirCombImport(#[from] crate::event_ir::CombImportError),
 }
 
 impl ParserError {
@@ -711,6 +714,7 @@ impl miette::Diagnostic for ParserError {
             ParserError::SltVerify { .. } | ParserError::SltConstruction(_) => {
                 Some(Box::new("slt_verify"))
             }
+            ParserError::EirCombImport(_) => Some(Box::new("eir_comb_import")),
         }
     }
 
@@ -1280,7 +1284,7 @@ pub(crate) fn flatten(
             });
     }
 
-    verify_slt_roots(
+    let slt_facts = verify_slt_roots(
         &global_arena,
         &comb_blocks,
         &comb_observers,
@@ -1288,6 +1292,11 @@ pub(crate) fn flatten(
         &var_signedness,
         "after flattening symbolic logic",
     )?;
+    let comb_graph = std::sync::Arc::new(crate::event_ir::CombGraph::import(
+        &comb_blocks,
+        &global_arena,
+        &slt_facts,
+    )?);
 
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = match scheduler::sort(
@@ -1303,6 +1312,7 @@ pub(crate) fn flatten(
         Err(error) => {
             let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
             let program = Program {
+                comb_graph: std::sync::Arc::new(crate::event_ir::CombGraph::default()),
                 eval_apply_ffs: HashMap::default(),
                 eval_only_ffs: HashMap::default(),
                 apply_ffs: HashMap::default(),
@@ -1433,6 +1443,7 @@ pub(crate) fn flatten(
         })
         .collect();
     let program = Program {
+        comb_graph,
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,

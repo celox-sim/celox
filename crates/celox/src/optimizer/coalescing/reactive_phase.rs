@@ -13,7 +13,7 @@ enum EventPhase {
 /// Explicit phase cut retained by the fused clock-event path.
 ///
 /// The complete per-block map is intentionally kept even though the current
-/// backend consumes only `ff_entry`: Reactive SSA projection will use the same
+/// backend consumes only `ff_entry`: EIR projection will use the same
 /// verified ownership instead of reconstructing it from block numbering.
 #[derive(Debug)]
 pub(crate) struct FusedPhaseCut {

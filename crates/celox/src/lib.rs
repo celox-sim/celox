@@ -4,6 +4,7 @@ mod context_width;
 mod debug;
 #[cfg(not(target_arch = "wasm32"))]
 mod display_format;
+pub mod event_ir;
 mod flatting;
 mod ir;
 #[cfg(target_arch = "x86_64")]

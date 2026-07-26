@@ -163,6 +163,9 @@ pub struct CombObserver<A = AbsoluteAddr> {
 
 #[derive(Clone)]
 pub struct Program {
+    /// Shared event-level combinational definition graph. Recipe node IDs
+    /// refer to `arena`; both are immutable after flattening.
+    pub comb_graph: std::sync::Arc<crate::event_ir::CombGraph>,
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,

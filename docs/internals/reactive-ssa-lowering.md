@@ -1,6 +1,11 @@
 # Reactive SSA lowering
 
-> **Status:** architecture proposal and migration contract with the first
+> **Status:** superseded as the construction architecture by
+> [Event IR (EIR)](./event-ir.md). This document records the earlier
+> SIR-derived investigation and its measurements. In particular, its proposal
+> to derive the semantic graph from merged SIR is not the target pipeline.
+>
+> **Historical status:** architecture proposal and migration contract with the first
 > production sink-local rewrite enabled. The current native backend still
 > composes the combinational and FF SIR CFGs sequentially; the admitted
 > two-state static subset removes individually proved Store/Load round trips

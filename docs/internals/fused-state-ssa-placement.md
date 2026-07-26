@@ -1,5 +1,11 @@
 # Fused state SSA and code placement
 
+> **Architecture note:** new semantic construction belongs to
+> [Event IR (EIR)](./event-ir.md). The StateSSA/MemorySSA machinery described
+> here remains useful for true memory/effect verification and records earlier
+> feasibility work, but it is not the primary bridge from comb SLT values to
+> FF AIR.
+>
 > **Status:** Milestone 0 and the analysis-only Milestone 1 contract are
 > complete. Demand-local forwarding alone failed its profile-weighted gate.
 > A later shared lane-aggregate plan passed a post-allocation static gate, and
@@ -3459,7 +3465,8 @@ moving a syntactic source-level dispatch earlier in the generic pipeline.
 
 ## Related documents
 
-- [Reactive SSA lowering](./reactive-ssa-lowering.md)
+- [Event IR (EIR)](./event-ir.md)
+- [Historical Reactive SSA lowering](./reactive-ssa-lowering.md)
 - [Native throughput execution plan](./native-throughput-execution-plan.md)
 - [Native register allocation](./native-register-allocation.md)
 - [Simulator architecture](./architecture.md)
