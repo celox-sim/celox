@@ -110,8 +110,8 @@ impl SirCfg {
             index,
             successors,
         } = index_sir_graph(eu)?;
-        let analysis = ForwardControlFlowGraph::analyze_structure(successors, 0)
-            .map_err(map_analysis_error)?;
+        let analysis =
+            ForwardControlFlowGraph::analyze(successors, 0).map_err(map_analysis_error)?;
         let dom_children = analysis.dominators.children.clone();
         let blocks = block_ids.len();
         Ok(Self {
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_analysis_omits_dense_control_tables() {
+    fn forward_analysis_keeps_ssa_frontiers_and_omits_dense_control_tables() {
         let condition = crate::ir::RegisterId(0);
         let mut unit = eu(
             0,
@@ -479,8 +479,8 @@ mod tests {
         let forward = SirCfg::analyze_forward(&unit).unwrap();
         assert_eq!(forward.block_ids, full.block_ids);
         assert_eq!(forward.dominators, full.dominators);
+        assert_eq!(forward.dominance_frontier, full.dominance_frontier);
         assert_eq!(forward.sccs, full.sccs);
-        assert!(forward.dominance_frontier.iter().all(Vec::is_empty));
         assert!(forward.postdominators.is_none());
         assert!(forward.controllers.iter().all(Vec::is_empty));
         assert!(forward.control_dependents.iter().all(Vec::is_empty));

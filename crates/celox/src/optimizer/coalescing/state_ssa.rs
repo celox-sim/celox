@@ -191,7 +191,12 @@ pub(super) enum MemoryAccessKind {
         source: RegisterId,
         observable: bool,
     },
-    Kill,
+    /// An overlapping write whose exact value recipe is unavailable for this
+    /// slot. Unlike a full exact definition, the resulting fragment may still
+    /// contain bits from the previously reaching version.
+    Kill {
+        reaching: MemoryVersionId,
+    },
     Phi {
         incoming: Vec<(BlockId, MemoryVersionId)>,
     },
@@ -1098,7 +1103,9 @@ impl StateSsa {
                         DefEffectKind::Exact { source, observable } => {
                             MemoryAccessKind::Def { source, observable }
                         }
-                        DefEffectKind::Kill => MemoryAccessKind::Kill,
+                        DefEffectKind::Kill => MemoryAccessKind::Kill {
+                            reaching: live_versions[effect.slot],
+                        },
                     };
                     let id = self.push_access(
                         effect.slot,
@@ -1179,6 +1186,16 @@ impl StateSsa {
                         }
                         for access in accesses.defs {
                             let slot = self.accesses[access.0].slot;
+                            if let MemoryAccessKind::Kill { reaching } =
+                                &mut self.accesses[access.0].kind
+                            {
+                                *reaching = versions[slot].last().copied().ok_or(
+                                    StateSsaError::MissingReachingVersion {
+                                        block: block_id,
+                                        slot,
+                                    },
+                                )?;
+                            }
                             versions[slot].push(access);
                             pushed.push(slot);
                         }
@@ -1330,9 +1347,42 @@ impl StateSsa {
                         }
                     }
                 }
-                MemoryAccessKind::LiveOnEntry
-                | MemoryAccessKind::Def { .. }
-                | MemoryAccessKind::Kill => {}
+                MemoryAccessKind::Kill { reaching } => {
+                    let Some(definition) = self.accesses.get(reaching.0) else {
+                        return Err(StateSsaError::InvalidAccess(
+                            "kill reaches an absent definition",
+                        ));
+                    };
+                    if definition.slot != access.slot || !definition.kind.defines_version() {
+                        return Err(StateSsaError::InvalidAccess(
+                            "kill reaches a different slot or a use",
+                        ));
+                    }
+                    let (Some(kill_block), Some(kill_instruction)) =
+                        (access.block, access.instruction)
+                    else {
+                        return Err(StateSsaError::InvalidAccess(
+                            "kill has no instruction location",
+                        ));
+                    };
+                    if let Some(def_block) = definition.block {
+                        if def_block == kill_block {
+                            if definition
+                                .instruction
+                                .is_some_and(|definition| definition >= kill_instruction)
+                            {
+                                return Err(StateSsaError::InvalidAccess(
+                                    "same-block definition does not precede its kill",
+                                ));
+                            }
+                        } else if !cfg.dominates(def_block, kill_block) {
+                            return Err(StateSsaError::InvalidAccess(
+                                "reaching definition does not dominate its kill",
+                            ));
+                        }
+                    }
+                }
+                MemoryAccessKind::LiveOnEntry | MemoryAccessKind::Def { .. } => {}
             }
         }
         Ok(())
@@ -1708,16 +1758,94 @@ mod tests {
         let MemoryAccessKind::Phi { incoming } = &phi.kind else {
             unreachable!()
         };
-        assert!(
-            incoming.iter().any(|(_, version)| matches!(
-                state.accesses[version.0].kind,
-                MemoryAccessKind::Kill
-            ))
-        );
+        assert!(incoming.iter().any(|(_, version)| matches!(
+            state.accesses[version.0].kind,
+            MemoryAccessKind::Kill { .. }
+        )));
         assert!(incoming.iter().any(|(_, version)| matches!(
             state.accesses[version.0].kind,
             MemoryAccessKind::Def { .. }
         )));
+    }
+
+    #[test]
+    fn forward_cfg_keeps_branch_store_phi_inputs() {
+        let stable = address(STABLE_REGION, 0);
+        let eu = unit(
+            vec![
+                block(
+                    0,
+                    Vec::new(),
+                    SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(
+                    1,
+                    vec![SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        64,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), Vec::new()),
+                ),
+                block(
+                    2,
+                    vec![SIRInstruction::Store(
+                        stable,
+                        SIROffset::Static(0),
+                        64,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Jump(BlockId(3), Vec::new()),
+                ),
+                block(
+                    3,
+                    vec![SIRInstruction::Load(
+                        RegisterId(3),
+                        stable,
+                        SIROffset::Static(0),
+                        64,
+                    )],
+                    SIRTerminator::Return,
+                ),
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(64)),
+                (RegisterId(2), bit(64)),
+                (RegisterId(3), bit(64)),
+            ],
+        );
+        let cfg = SirCfg::analyze_forward(&eu).unwrap();
+        let state =
+            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+
+        assert_eq!(state.slots[0].phi_blocks, [cfg.index[&BlockId(3)]]);
+        let phi = state
+            .accesses
+            .iter()
+            .find(|access| matches!(access.kind, MemoryAccessKind::Phi { .. }))
+            .expect("the branch definitions must merge");
+        let MemoryAccessKind::Phi { incoming } = &phi.kind else {
+            unreachable!()
+        };
+        assert_eq!(incoming.len(), 2);
+        assert!(incoming.iter().all(|(_, version)| matches!(
+            state.accesses[version.0].kind,
+            MemoryAccessKind::Def { .. }
+        )));
+        assert!(matches!(
+            use_access(&state, RegisterId(3)).kind,
+            MemoryAccessKind::Use { reaching, .. } if reaching == phi.id
+        ));
     }
 
     #[test]
@@ -1785,7 +1913,23 @@ mod tests {
         assert!(matches!(
             use_access(&state, RegisterId(3)).kind,
             MemoryAccessKind::Use { reaching, .. }
-                if matches!(state.accesses[reaching.0].kind, MemoryAccessKind::Kill)
+                if matches!(
+                    state.accesses[reaching.0].kind,
+                    MemoryAccessKind::Kill { .. }
+                )
+        ));
+        let MemoryAccessKind::Use { reaching, .. } = use_access(&state, RegisterId(3)).kind else {
+            unreachable!()
+        };
+        let MemoryAccessKind::Kill {
+            reaching: before_kill,
+        } = state.accesses[reaching.0].kind
+        else {
+            unreachable!()
+        };
+        assert!(matches!(
+            state.accesses[before_kill.0].kind,
+            MemoryAccessKind::Def { .. }
         ));
         assert!(matches!(
             use_access(&state, RegisterId(5)).kind,

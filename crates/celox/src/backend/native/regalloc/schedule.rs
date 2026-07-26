@@ -1119,6 +1119,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::Load { .. }
         | MInst::LoadIndexed { .. }
         | MInst::PackedLaneCompare { .. }
+        | MInst::PackedByteAffineCompare { .. }
         | MInst::Store { .. }
         | MInst::StoreIndexed { .. }
         | MInst::OrStoreIndexed { .. }

@@ -3377,6 +3377,7 @@ fn algebraic_simplify(func: &mut MFunction) {
     // Build def map for constant lookups
     let mut consts: HashMap<VReg, u64> = HashMap::new();
     let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::new();
+    let mut and_immediates32: HashMap<VReg, (VReg, u32)> = HashMap::new();
     for block in &func.blocks {
         for inst in &block.insts {
             match inst {
@@ -3385,6 +3386,9 @@ fn algebraic_simplify(func: &mut MFunction) {
                 }
                 MInst::AndImm { dst, src, imm } => {
                     and_immediates.insert(*dst, (*src, *imm));
+                }
+                MInst::AndImm32 { dst, src, imm } => {
+                    and_immediates32.insert(*dst, (*src, *imm));
                 }
                 _ => {}
             }
@@ -3542,6 +3546,27 @@ fn algebraic_simplify(func: &mut MFunction) {
                         Some(Simplification::Mov(*dst, *src))
                     } else if *imm == 0 {
                         Some(Simplification::Const(*dst, 0))
+                    } else if let Some(&(original, previous)) = and_immediates.get(src) {
+                        let combined = previous & *imm;
+                        if combined == 0 {
+                            Some(Simplification::Const(*dst, 0))
+                        } else if combined == u64::MAX {
+                            Some(Simplification::Mov(*dst, original))
+                        } else {
+                            Some(Simplification::AndImm(*dst, original, combined))
+                        }
+                    } else if let Some(&(original, previous)) = and_immediates32.get(src) {
+                        // A 32-bit definition has already zero-extended the
+                        // high half. Preserve that fact by keeping the
+                        // replacement in the 32-bit instruction domain.
+                        let combined = previous & (*imm as u32);
+                        if combined == 0 {
+                            Some(Simplification::Const(*dst, 0))
+                        } else if combined == u32::MAX {
+                            Some(Simplification::Mov32(*dst, original))
+                        } else {
+                            Some(Simplification::AndImm32(*dst, original, combined))
+                        }
                     } else {
                         None
                     }
@@ -3551,6 +3576,27 @@ fn algebraic_simplify(func: &mut MFunction) {
                         Some(Simplification::Mov32(*dst, *src))
                     } else if *imm == 0 {
                         Some(Simplification::Const(*dst, 0))
+                    } else if let Some(&(original, previous)) = and_immediates32.get(src) {
+                        let combined = previous & *imm;
+                        if combined == 0 {
+                            Some(Simplification::Const(*dst, 0))
+                        } else if combined == u32::MAX {
+                            Some(Simplification::Mov32(*dst, original))
+                        } else {
+                            Some(Simplification::AndImm32(*dst, original, combined))
+                        }
+                    } else if let Some(&(original, previous)) = and_immediates.get(src) {
+                        // And32 observes only the low 32 bits and
+                        // zero-extends its result, regardless of the producer
+                        // width.
+                        let combined = (previous as u32) & *imm;
+                        if combined == 0 {
+                            Some(Simplification::Const(*dst, 0))
+                        } else if combined == u32::MAX {
+                            Some(Simplification::Mov32(*dst, original))
+                        } else {
+                            Some(Simplification::AndImm32(*dst, original, combined))
+                        }
                     } else {
                         None
                     }
@@ -3630,6 +3676,12 @@ fn algebraic_simplify(func: &mut MFunction) {
                     }
                     Simplification::OrImm(dst, src, imm) => {
                         *inst = MInst::OrImm { dst, src, imm };
+                    }
+                    Simplification::AndImm(dst, src, imm) => {
+                        *inst = MInst::AndImm { dst, src, imm };
+                    }
+                    Simplification::AndImm32(dst, src, imm) => {
+                        *inst = MInst::AndImm32 { dst, src, imm };
                     }
                 }
             }
@@ -3887,6 +3939,8 @@ enum Simplification {
     Const(VReg, u64),
     Shl(VReg, VReg, u8),
     OrImm(VReg, VReg, u64),
+    AndImm(VReg, VReg, u64),
+    AndImm32(VReg, VReg, u32),
 }
 
 fn const32(consts: &HashMap<VReg, u64>, value: VReg) -> Option<u32> {
@@ -3949,36 +4003,60 @@ fn simplify_cfg(func: &mut MFunction) {
         }
     }
 
-    if redirect.is_empty() {
-        return;
+    if !redirect.is_empty() {
+        // Transitively resolve redirects
+        let mut resolved: HashMap<BlockId, BlockId> = HashMap::new();
+        for &src in redirect.keys() {
+            let mut target = src;
+            let mut seen = std::collections::HashSet::new();
+            while let Some(&next) = redirect.get(&target) {
+                if !seen.insert(next) {
+                    break;
+                } // cycle
+                target = next;
+            }
+            if target != src {
+                resolved.insert(src, target);
+            }
+        }
+
+        // Rewrite all jump/branch targets
+        for block in &mut func.blocks {
+            for inst in &mut block.insts {
+                inst.rewrite_successors(|target| resolved.get(&target).copied().unwrap_or(target));
+            }
+        }
+
+        // Remove empty blocks that are now unreachable (keep entry block)
+        func.blocks
+            .retain(|block| Some(block.id) == entry || !resolved.contains_key(&block.id));
     }
 
-    // Transitively resolve redirects
-    let mut resolved: HashMap<BlockId, BlockId> = HashMap::new();
-    for &src in redirect.keys() {
-        let mut target = src;
-        let mut seen = std::collections::HashSet::new();
-        while let Some(&next) = redirect.get(&target) {
-            if !seen.insert(next) {
-                break;
-            } // cycle
-            target = next;
-        }
-        if target != src {
-            resolved.insert(src, target);
-        }
-    }
-
-    // Rewrite all jump/branch targets
+    // Target threading can turn both arms, or every jump-table entry, into the
+    // same edge.  Canonicalize those terminators immediately: retaining the
+    // dead predicate/index graph until allocation creates pressure for values
+    // which the emitted control flow cannot observe.
     for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_successors(|target| resolved.get(&target).copied().unwrap_or(target));
+        let Some(terminator) = block.insts.last_mut() else {
+            continue;
+        };
+        let target = match terminator {
+            MInst::Branch {
+                true_bb, false_bb, ..
+            }
+            | MInst::BranchPred {
+                true_bb, false_bb, ..
+            } if true_bb == false_bb => Some(*true_bb),
+            MInst::JumpTable { targets, .. } => targets
+                .first()
+                .copied()
+                .filter(|target| targets.iter().all(|candidate| candidate == target)),
+            _ => None,
+        };
+        if let Some(target) = target {
+            *terminator = MInst::Jump { target };
         }
     }
-
-    // Remove empty blocks that are now unreachable (keep entry block)
-    func.blocks
-        .retain(|block| Some(block.id) == entry || !resolved.contains_key(&block.id));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -4051,6 +4129,84 @@ fn lower_to_imm_forms(func: &mut MFunction) {
                 };
                 *inst = folded;
                 break;
+            }
+        }
+    }
+}
+
+/// Close serial immediate-mask chains after all target bit-pack rewrites.
+///
+/// Some late bit-range folds reconstruct an And64/And32 chain after the main
+/// algebraic pass. The 32-bit operation is a zero-extending machine
+/// operation, so mixed-width composition must retain an And32 result.
+fn fold_late_serial_and_immediates(func: &mut MFunction) {
+    let mut and64 = HashMap::<VReg, (VReg, u64)>::new();
+    let mut and32 = HashMap::<VReg, (VReg, u32)>::new();
+    for block in &func.blocks {
+        for instruction in &block.insts {
+            match instruction {
+                MInst::AndImm { dst, src, imm } => {
+                    and64.insert(*dst, (*src, *imm));
+                }
+                MInst::AndImm32 { dst, src, imm } => {
+                    and32.insert(*dst, (*src, *imm));
+                }
+                _ => {}
+            }
+        }
+    }
+    for block in &mut func.blocks {
+        for instruction in &mut block.insts {
+            let replacement = match *instruction {
+                MInst::AndImm { dst, src, imm } => {
+                    if let Some(&(original, previous)) = and64.get(&src) {
+                        let combined = previous & imm;
+                        Some(if combined == 0 {
+                            MInst::LoadImm { dst, value: 0 }
+                        } else {
+                            MInst::AndImm {
+                                dst,
+                                src: original,
+                                imm: combined,
+                            }
+                        })
+                    } else if let Some(&(original, previous)) = and32.get(&src) {
+                        let combined = previous & (imm as u32);
+                        Some(if combined == 0 {
+                            MInst::LoadImm { dst, value: 0 }
+                        } else {
+                            MInst::AndImm32 {
+                                dst,
+                                src: original,
+                                imm: combined,
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                }
+                MInst::AndImm32 { dst, src, imm } => {
+                    let source = and32
+                        .get(&src)
+                        .copied()
+                        .or_else(|| and64.get(&src).map(|&(source, mask)| (source, mask as u32)));
+                    source.map(|(original, previous)| {
+                        let combined = previous & imm;
+                        if combined == 0 {
+                            MInst::LoadImm { dst, value: 0 }
+                        } else {
+                            MInst::AndImm32 {
+                                dst,
+                                src: original,
+                                imm: combined,
+                            }
+                        }
+                    })
+                }
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
             }
         }
     }
@@ -7921,6 +8077,128 @@ mod tests {
                 .count(),
             1
         );
+        func.verify();
+    }
+
+    #[test]
+    fn algebraic_simplify_combines_serial_masks_across_widths() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::AndImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: !0x3f,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 0x3f,
+                },
+                MInst::AndImm32 {
+                    dst: VReg(3),
+                    src: VReg(0),
+                    imm: 0x00ff_ffff,
+                },
+                MInst::AndImm {
+                    dst: VReg(4),
+                    src: VReg(3),
+                    imm: 0xffff_ffff_ff00_ffff,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(4),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            5,
+        );
+
+        algebraic_simplify(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 0
+            }
+        )));
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::AndImm32 {
+                dst: VReg(4),
+                src: VReg(0),
+                imm: 0x0000_ffff,
+            }
+        )));
+        func.verify();
+    }
+
+    #[test]
+    fn optimize_combines_serial_masks_exposed_by_immediate_lowering() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: !0x3f,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::LoadImm {
+                    dst: VReg(3),
+                    value: 0x3f,
+                },
+                MInst::And32 {
+                    dst: VReg(4),
+                    lhs: VReg(2),
+                    rhs: VReg(3),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(4),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            64,
+        );
+
+        optimize(&mut func);
+
+        assert!(func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::LoadImm {
+                dst: VReg(4),
+                value: 0
+            }
+        )));
+        assert!(!func.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::AndImm { .. } | MInst::AndImm32 { .. }
+        )));
         func.verify();
     }
 
@@ -13609,5 +13887,76 @@ mod tests {
 
         assert_eq!(func.verify_result(), Ok(()));
         assert_eq!(func.blocks.len(), 4);
+    }
+
+    #[test]
+    fn simplify_cfg_folds_a_jump_table_whose_redirected_targets_are_equal() {
+        let mut func = make_func(Vec::new(), 3);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 0,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(2),
+            value: 0,
+        });
+        entry.push(MInst::JumpTable {
+            index: VReg(0),
+            table_base: VReg(1),
+            target: VReg(2),
+            targets: vec![BlockId(1), BlockId(2)].into_boxed_slice(),
+        });
+        let mut case_a = MBlock::new(BlockId(1));
+        case_a.push(MInst::Jump { target: BlockId(3) });
+        let mut case_b = MBlock::new(BlockId(2));
+        case_b.push(MInst::Jump { target: BlockId(3) });
+        let mut target = MBlock::new(BlockId(3));
+        target.push(MInst::Return);
+        func.blocks = vec![entry, case_a, case_b, target];
+
+        simplify_cfg(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert_eq!(func.verify_result(), Ok(()));
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [MInst::Jump { target: BlockId(3) }]
+        ));
+        assert_eq!(func.blocks.len(), 2);
+    }
+
+    #[test]
+    fn simplify_cfg_folds_an_equal_target_branch_without_redirects() {
+        let mut func = make_func(
+            vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 1,
+                },
+                MInst::Branch {
+                    cond: VReg(0),
+                    true_bb: BlockId(1),
+                    false_bb: BlockId(1),
+                },
+            ],
+            1,
+        );
+        let mut target = MBlock::new(BlockId(1));
+        target.push(MInst::Return);
+        func.blocks.push(target);
+
+        simplify_cfg(&mut func);
+        dead_code_eliminate(&mut func);
+
+        assert_eq!(func.verify_result(), Ok(()));
+        assert!(matches!(
+            func.blocks[0].insts.as_slice(),
+            [MInst::Jump { target: BlockId(1) }]
+        ));
     }
 }

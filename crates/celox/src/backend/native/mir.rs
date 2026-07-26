@@ -720,6 +720,14 @@ pub enum MInst {
         field_width: u8,
         alias_range: Option<MemoryAliasRange>,
     },
+    /// Compare the byte lanes `(base + 0..15) mod 256` with one scalar byte
+    /// and return the sixteen predicate bits in `dst`.
+    PackedByteAffineCompare {
+        dst: VReg,
+        base: VReg,
+        rhs: VReg,
+        kind: CmpKind,
+    },
     /// Execute one sink-local root of a verified lane-aggregate plan.
     ///
     /// The operation owns all allocatable GPRs while it emits its internal
@@ -1088,6 +1096,15 @@ impl fmt::Display for MInst {
                 f,
                 "{dst} = packed_lane_compare.{kind:?} [sim + {offset}], {rhs:?}, lanes={lane_count}, stride={element_stride}, field={bit_offset}:{field_width}"
             ),
+            MInst::PackedByteAffineCompare {
+                dst,
+                base,
+                rhs,
+                kind,
+            } => write!(
+                f,
+                "{dst} = packed_byte_affine_compare.{kind:?} base={base}, rhs={rhs}, lanes=16"
+            ),
             MInst::StoreIndexed {
                 base,
                 offset,
@@ -1382,6 +1399,7 @@ impl MInst {
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
             | MInst::PackedLaneCompare { dst, .. }
+            | MInst::PackedByteAffineCompare { dst, .. }
             | MInst::LaneAggregate { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
@@ -1480,6 +1498,7 @@ impl MInst {
                 rhs: PackedLaneCompareRhs::Memory { .. },
                 ..
             } => Uses::none(),
+            MInst::PackedByteAffineCompare { base, rhs, .. } => Uses::two(*base, *rhs),
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 Uses::two(*index, *src)
             }
@@ -1628,6 +1647,14 @@ impl MInst {
                 rhs: PackedLaneCompareRhs::Memory { .. },
                 ..
             } => {}
+            MInst::PackedByteAffineCompare { base, rhs, .. } => {
+                if *base == old {
+                    *base = new;
+                }
+                if *rhs == old {
+                    *rhs = new;
+                }
+            }
             MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 if *index == old {
                     *index = new;

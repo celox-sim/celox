@@ -3548,6 +3548,79 @@ fn emit_inst(
             asm.movq(d64, xmm2)?;
         }
 
+        MInst::PackedByteAffineCompare {
+            dst,
+            base,
+            rhs,
+            kind,
+        } => {
+            let d64 = preg_to_reg64(resolve(assignment, *dst));
+            let d32 = preg_to_reg32(resolve(assignment, *dst));
+            let base32 = preg_to_reg32(resolve(assignment, *base));
+            let rhs32 = preg_to_reg32(resolve(assignment, *rhs));
+
+            // Read both inputs before using the output register as scratch:
+            // allocation may coalesce a dying input with this definition.
+            asm.movd(xmm3, base32)?;
+            asm.punpcklbw(xmm3, xmm3)?;
+            asm.punpcklwd(xmm3, xmm3)?;
+            asm.pshufd(xmm3, xmm3, 0)?;
+            asm.movd(xmm4, rhs32)?;
+            asm.punpcklbw(xmm4, xmm4)?;
+            asm.punpcklwd(xmm4, xmm4)?;
+            asm.pshufd(xmm4, xmm4, 0)?;
+
+            asm.mov(d64, 0x0706_0504_0302_0100_i64)?;
+            asm.movq(xmm0, d64)?;
+            asm.mov(d64, 0x0f0e_0d0c_0b0a_0908_i64)?;
+            asm.movq(xmm2, d64)?;
+            asm.punpcklqdq(xmm0, xmm2)?;
+            asm.paddb(xmm0, xmm3)?;
+
+            let invert = match kind {
+                CmpKind::Eq => {
+                    asm.pcmpeqb(xmm0, xmm4)?;
+                    false
+                }
+                CmpKind::Ne => {
+                    asm.pcmpeqb(xmm0, xmm4)?;
+                    true
+                }
+                CmpKind::LtU | CmpKind::GeU => {
+                    // Saturated rhs-lhs is nonzero exactly when lhs < rhs.
+                    asm.movdqa(xmm2, xmm4)?;
+                    asm.psubusb(xmm2, xmm0)?;
+                    asm.pxor(xmm1, xmm1)?;
+                    asm.pcmpeqb(xmm2, xmm1)?;
+                    asm.movdqa(xmm0, xmm2)?;
+                    matches!(kind, CmpKind::LtU)
+                }
+                CmpKind::GtU | CmpKind::LeU => {
+                    // Saturated lhs-rhs is nonzero exactly when lhs > rhs.
+                    asm.movdqa(xmm2, xmm0)?;
+                    asm.psubusb(xmm2, xmm4)?;
+                    asm.pxor(xmm1, xmm1)?;
+                    asm.pcmpeqb(xmm2, xmm1)?;
+                    asm.movdqa(xmm0, xmm2)?;
+                    matches!(kind, CmpKind::GtU)
+                }
+                CmpKind::LtS | CmpKind::GeS => {
+                    asm.movdqa(xmm2, xmm4)?;
+                    asm.pcmpgtb(xmm2, xmm0)?;
+                    asm.movdqa(xmm0, xmm2)?;
+                    matches!(kind, CmpKind::GeS)
+                }
+                CmpKind::GtS | CmpKind::LeS => {
+                    asm.pcmpgtb(xmm0, xmm4)?;
+                    matches!(kind, CmpKind::LeS)
+                }
+            };
+            asm.pmovmskb(d32, xmm0)?;
+            if invert {
+                asm.xor(d32, 0xffff)?;
+            }
+        }
+
         MInst::LaneAggregate {
             dst,
             plan,
@@ -5543,7 +5616,9 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::SarImm { .. }
                 | MInst::AddImm { .. }
                 | MInst::SubImm { .. } => alu_imm += 1,
-                MInst::Cmp { .. } | MInst::CmpImm { .. } => cmp += 1,
+                MInst::Cmp { .. }
+                | MInst::CmpImm { .. }
+                | MInst::PackedByteAffineCompare { .. } => cmp += 1,
                 MInst::UDiv { .. }
                 | MInst::URem { .. }
                 | MInst::SDiv { .. }
@@ -7617,6 +7692,97 @@ mod shift_encoding_tests {
                         "stride={stride} kind={kind:?} memory_rhs={memory_rhs}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_byte_affine_compare_executes_all_relations_and_wraps() {
+        const BASE_OFFSET: usize = 0;
+        const RHS_OFFSET: usize = 1;
+        const RESULT_OFFSET: usize = 8;
+        const KINDS: [CmpKind; 10] = [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LtS,
+            CmpKind::LeU,
+            CmpKind::LeS,
+            CmpKind::GtU,
+            CmpKind::GtS,
+            CmpKind::GeU,
+            CmpKind::GeS,
+        ];
+
+        fn relation(kind: CmpKind, lhs: u8, rhs: u8) -> bool {
+            match kind {
+                CmpKind::Eq => lhs == rhs,
+                CmpKind::Ne => lhs != rhs,
+                CmpKind::LtU => lhs < rhs,
+                CmpKind::LtS => (lhs as i8) < (rhs as i8),
+                CmpKind::LeU => lhs <= rhs,
+                CmpKind::LeS => (lhs as i8) <= (rhs as i8),
+                CmpKind::GtU => lhs > rhs,
+                CmpKind::GtS => (lhs as i8) > (rhs as i8),
+                CmpKind::GeU => lhs >= rhs,
+                CmpKind::GeS => (lhs as i8) >= (rhs as i8),
+            }
+        }
+
+        for kind in KINDS {
+            let mut vregs = VRegAllocator::new();
+            let base = vregs.alloc();
+            let rhs = vregs.alloc();
+            let result = vregs.alloc();
+            let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: base,
+                base: BaseReg::SimState,
+                offset: BASE_OFFSET as i32,
+                size: OpSize::S8,
+            });
+            block.push(MInst::Load {
+                dst: rhs,
+                base: BaseReg::SimState,
+                offset: RHS_OFFSET as i32,
+                size: OpSize::S8,
+            });
+            block.push(MInst::PackedByteAffineCompare {
+                dst: result,
+                base,
+                rhs,
+                kind,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: RESULT_OFFSET as i32,
+                src: result,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+
+            mir_legalize::legalize(&mut func);
+            mir_opt::optimize(&mut func);
+            let allocation = regalloc::run_regalloc(&mut func).unwrap();
+            let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            for (base_value, rhs_value) in [(0u8, 7u8), (120, 128), (248, 3), (255, 255)] {
+                let mut state = [0u8; 16];
+                state[BASE_OFFSET] = base_value;
+                state[RHS_OFFSET] = rhs_value;
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                let actual =
+                    u64::from_le_bytes(state[RESULT_OFFSET..RESULT_OFFSET + 8].try_into().unwrap());
+                let expected = (0..16).fold(0u64, |mask, lane| {
+                    mask | (u64::from(relation(kind, base_value.wrapping_add(lane), rhs_value))
+                        << lane)
+                });
+                assert_eq!(
+                    actual, expected,
+                    "kind={kind:?} base={base_value} rhs={rhs_value}"
+                );
             }
         }
     }

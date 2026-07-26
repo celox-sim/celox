@@ -157,6 +157,21 @@ struct PackedLaneComparePlans {
 }
 
 #[derive(Debug, Clone)]
+struct PackedByteAffineComparePlan {
+    dst: RegisterId,
+    base: RegisterId,
+    rhs: RegisterId,
+    kind: CmpKind,
+    covered_indices: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct PackedByteAffineComparePlans {
+    roots: HashMap<usize, PackedByteAffineComparePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Debug, Clone)]
 struct PackedBitStorePlan {
     source: RegisterId,
     address: RegionedAbsoluteAddr,
@@ -417,6 +432,213 @@ fn swap_compare_kind(kind: CmpKind) -> CmpKind {
         CmpKind::GeU => CmpKind::LeU,
         CmpKind::GeS => CmpKind::LeS,
     }
+}
+
+fn byte_affine_lane(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    register: RegisterId,
+    lane: usize,
+) -> Option<(RegisterId, usize)> {
+    fn constant_in_block(
+        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        defs: &HashMap<RegisterId, usize>,
+        constants: &HashMap<RegisterId, ExactSirConstant>,
+        register_types: &HashMap<RegisterId, RegisterType>,
+        register: RegisterId,
+        active: &mut HashSet<RegisterId>,
+    ) -> Option<u64> {
+        if let Some(value) = constants.get(&register) {
+            return Some(value.value);
+        }
+        if !active.insert(register) {
+            return None;
+        }
+        let definition = *defs.get(&register)?;
+        let value = match block.instructions.get(definition)? {
+            SIRInstruction::Imm(_, value) => exact_sir_constant(value)?.value,
+            SIRInstruction::Binary(_, lhs, operation, rhs) => {
+                let lhs = constant_in_block(block, defs, constants, register_types, *lhs, active)?;
+                let rhs = constant_in_block(block, defs, constants, register_types, *rhs, active)?;
+                match operation {
+                    BinaryOp::Add => lhs.wrapping_add(rhs),
+                    BinaryOp::Sub => lhs.wrapping_sub(rhs),
+                    BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                    BinaryOp::And => lhs & rhs,
+                    BinaryOp::Or => lhs | rhs,
+                    BinaryOp::Xor => lhs ^ rhs,
+                    BinaryOp::Shr => u32::try_from(rhs)
+                        .ok()
+                        .and_then(|rhs| lhs.checked_shr(rhs))
+                        .unwrap_or(0),
+                    BinaryOp::Shl => u32::try_from(rhs)
+                        .ok()
+                        .and_then(|rhs| lhs.checked_shl(rhs))
+                        .unwrap_or(0),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        active.remove(&register);
+        let width = register_types.get(&register)?.width();
+        if width > 64 {
+            return None;
+        }
+        Some(if width == 64 {
+            value
+        } else {
+            value & ((1_u64 << width) - 1)
+        })
+    }
+
+    if register_types.get(&register)?.width() != 8 {
+        return None;
+    }
+    let definition = *defs.get(&register)?;
+    let SIRInstruction::Binary(dst, lhs, BinaryOp::Add, rhs) =
+        block.instructions.get(definition)?
+    else {
+        return None;
+    };
+    if *dst != register {
+        return None;
+    }
+    let lhs_constant = constant_in_block(
+        block,
+        defs,
+        constants,
+        register_types,
+        *lhs,
+        &mut HashSet::default(),
+    );
+    let rhs_constant = constant_in_block(
+        block,
+        defs,
+        constants,
+        register_types,
+        *rhs,
+        &mut HashSet::default(),
+    );
+    let (base, increment) = match (lhs_constant, rhs_constant) {
+        (None, Some(increment)) => (*lhs, increment),
+        (Some(increment), None) => (*rhs, increment),
+        _ => return None,
+    };
+    if register_types.get(&base)?.width() != 8 || increment != lane as u64 {
+        return None;
+    }
+    Some((base, definition))
+}
+
+/// Recognize a complete 16-bit predicate pack whose lanes compare
+/// `(base + lane) mod 256` with one scalar byte. This common HDL array-bound
+/// shape is one byte-vector operation; scalarizing every lane creates a long
+/// compare/shift/or chain and unnecessary register pressure.
+fn find_packed_byte_affine_compare_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> PackedByteAffineComparePlans {
+    let mut result = PackedByteAffineComparePlans::default();
+    let defs = collect_sir_defs(block);
+    for (root_idx, instruction) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Concat(dst, predicates) = instruction else {
+            continue;
+        };
+        if predicates.len() != 16 || register_types[dst].width() != 16 {
+            continue;
+        }
+        let mut base = None;
+        let mut rhs_scalar = None;
+        let mut kind = None;
+        let mut covered = vec![root_idx];
+        let mut valid = true;
+        for (position, &predicate) in predicates.iter().enumerate() {
+            let lane = predicates.len() - position - 1;
+            let Some(&compare_idx) = defs.get(&predicate).filter(|&&idx| idx < root_idx) else {
+                valid = false;
+                break;
+            };
+            let SIRInstruction::Binary(compare_dst, lhs, operation, rhs) =
+                &block.instructions[compare_idx]
+            else {
+                valid = false;
+                break;
+            };
+            if *compare_dst != predicate
+                || uses.get(compare_dst).is_none_or(|sites| sites.len() != 1)
+            {
+                valid = false;
+                break;
+            }
+            let Some(compare_kind) = packed_compare_kind(*operation) else {
+                valid = false;
+                break;
+            };
+            let lhs_affine = byte_affine_lane(block, &defs, constants, register_types, *lhs, lane);
+            let rhs_affine = byte_affine_lane(block, &defs, constants, register_types, *rhs, lane);
+            let (lane_base, add_idx, scalar, compare_kind) = match (lhs_affine, rhs_affine) {
+                (Some((lane_base, add_idx)), None) => (lane_base, add_idx, *rhs, compare_kind),
+                (None, Some((lane_base, add_idx))) => {
+                    (lane_base, add_idx, *lhs, swap_compare_kind(compare_kind))
+                }
+                _ => {
+                    valid = false;
+                    break;
+                }
+            };
+            if register_types.get(&scalar).map(RegisterType::width) != Some(8)
+                || base.is_some_and(|previous| previous != lane_base)
+                || rhs_scalar.is_some_and(|previous| previous != scalar)
+                || kind.is_some_and(|previous| previous != compare_kind)
+            {
+                valid = false;
+                break;
+            }
+            base = Some(lane_base);
+            rhs_scalar = Some(scalar);
+            kind = Some(compare_kind);
+            covered.extend([add_idx, compare_idx]);
+        }
+        if valid {
+            result.roots.insert(
+                root_idx,
+                PackedByteAffineComparePlan {
+                    dst: *dst,
+                    base: base.expect("nonempty affine compare pack has a base"),
+                    rhs: rhs_scalar.expect("nonempty affine compare pack has a scalar RHS"),
+                    kind: kind.expect("nonempty affine compare pack has a comparison kind"),
+                    covered_indices: covered,
+                },
+            );
+        }
+    }
+    let covered = result
+        .roots
+        .values()
+        .flat_map(|plan| plan.covered_indices.iter().copied())
+        .collect::<HashSet<_>>();
+    for &index in &covered {
+        let is_root = result.roots.contains_key(&index);
+        let all_uses_covered = sir_def_reg(&block.instructions[index]).is_some_and(|definition| {
+            uses.get(&definition).is_none_or(|sites| {
+                sites.iter().all(|site| {
+                    site.block == block.id
+                        && site
+                            .inst_idx
+                            .is_some_and(|use_idx| covered.contains(&use_idx))
+                })
+            })
+        });
+        if is_root || all_uses_covered {
+            result.skip_indices.insert(index);
+        }
+    }
+    result
 }
 
 /// Recognize the canonical SIR representation of a lane-wise array compare:
@@ -1050,6 +1272,20 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         } else {
             PackedLaneComparePlans::default()
         };
+        let packed_byte_affine_compare_plans = if !four_state {
+            find_packed_byte_affine_compare_plans(
+                sir_block,
+                &eu.register_map,
+                exact_constants
+                    .as_ref()
+                    .expect("two-state packed compares must collect exact constants"),
+                sir_use_sites
+                    .as_ref()
+                    .expect("two-state packed compares must collect SIR uses"),
+            )
+        } else {
+            PackedByteAffineComparePlans::default()
+        };
         let aggregate_roots = match (
             lane_aggregate_plan_id,
             lane_aggregate_lowering_plan.as_ref(),
@@ -1148,6 +1384,21 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
                     });
                     ctx.known_bits
                         .insert(ctx.reg_map.get(plan.dst), plan.lane_count);
+                }
+                continue;
+            }
+            if packed_byte_affine_compare_plans
+                .skip_indices
+                .contains(&inst_idx)
+            {
+                if let Some(plan) = packed_byte_affine_compare_plans.roots.get(&inst_idx) {
+                    mblock.push(MInst::PackedByteAffineCompare {
+                        dst: ctx.reg_map.get(plan.dst),
+                        base: ctx.reg_map.get(plan.base),
+                        rhs: ctx.reg_map.get(plan.rhs),
+                        kind: plan.kind,
+                    });
+                    ctx.known_bits.insert(ctx.reg_map.get(plan.dst), 16);
                 }
                 continue;
             }
@@ -11804,6 +12055,16 @@ fn lower_dense_branch_table(
     block: &mut MBlock,
     plan: &DenseBranchTablePlan,
 ) {
+    if plan
+        .targets
+        .first()
+        .is_some_and(|target| plan.targets.iter().all(|candidate| candidate == target))
+    {
+        block.push(MInst::Jump {
+            target: BlockId(plan.targets[0].0 as u32),
+        });
+        return;
+    }
     let selector = ctx.reg_map.get(plan.selector);
     let normalized = ctx.alloc_vreg(SpillDesc::transient());
     ctx.emit_and_imm(
@@ -11861,9 +12122,6 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
         } => {
             let selector_width = ctx.sir_width(selector);
             debug_assert!((1..=8).contains(&selector_width));
-            let selector = ctx.reg_map.get(*selector);
-            let normalized = ctx.alloc_vreg(SpillDesc::transient());
-            ctx.emit_and_imm(block, normalized, selector, mask_for_width(selector_width));
             let mut targets = vec![BlockId(default.0 as u32); 1usize << selector_width];
             for case in cases {
                 let digits = case.value.to_u64_digits();
@@ -11874,6 +12132,16 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
                 };
                 targets[index] = BlockId(case.target.0 as u32);
             }
+            if targets
+                .first()
+                .is_some_and(|target| targets.iter().all(|candidate| candidate == target))
+            {
+                block.push(MInst::Jump { target: targets[0] });
+                return;
+            }
+            let selector = ctx.reg_map.get(*selector);
+            let normalized = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, normalized, selector, mask_for_width(selector_width));
             let table_base = ctx.alloc_vreg(SpillDesc::transient());
             let target = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Scratch { dst: table_base });
@@ -13786,6 +14054,82 @@ mod tests {
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: vec![],
         }
+    }
+
+    #[test]
+    fn selects_complete_byte_affine_predicate_pack() {
+        let base = RegisterId(0);
+        let rhs = RegisterId(1);
+        let packed = RegisterId(2);
+        let byte_type = RegisterType::Bit {
+            width: 8,
+            signed: false,
+        };
+        let predicate_type = RegisterType::Bit {
+            width: 1,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        register_map.insert(base, byte_type.clone());
+        register_map.insert(rhs, byte_type.clone());
+        register_map.insert(
+            packed,
+            RegisterType::Bit {
+                width: 16,
+                signed: false,
+            },
+        );
+        let mut instructions = Vec::new();
+        let mut predicates = Vec::new();
+        let mut next_register = 3usize;
+        for lane in 0..16 {
+            let increment = RegisterId(next_register);
+            let affine = RegisterId(next_register + 1);
+            let predicate = RegisterId(next_register + 2);
+            next_register += 3;
+            register_map.insert(increment, byte_type.clone());
+            register_map.insert(affine, byte_type.clone());
+            register_map.insert(predicate, predicate_type.clone());
+            instructions.push(SIRInstruction::Imm(increment, SIRValue::new(lane as u8)));
+            instructions.push(SIRInstruction::Binary(
+                affine,
+                base,
+                BinaryOp::Add,
+                increment,
+            ));
+            instructions.push(SIRInstruction::Binary(
+                predicate,
+                affine,
+                BinaryOp::LtU,
+                rhs,
+            ));
+            predicates.push(predicate);
+        }
+        predicates.reverse();
+        instructions.push(SIRInstruction::Concat(packed, predicates));
+        let block = BasicBlock {
+            id: SirBlockId(0),
+            params: vec![base, rhs],
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        let mut blocks = HashMap::default();
+        blocks.insert(SirBlockId(0), block);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map,
+        };
+        unit.verify();
+
+        let function = lower_execution_unit(&unit, &empty_layout(), false);
+        let affine_compares = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .filter(|instruction| matches!(instruction, MInst::PackedByteAffineCompare { .. }))
+            .count();
+        assert_eq!(affine_compares, 1);
     }
 
     #[test]
@@ -16935,6 +17279,71 @@ mod tests {
                 .collect()
         );
         assert_eq!(plan.skip_indices, [1, 2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn lowers_a_single_target_switch_to_an_unconditional_jump() {
+        let selector = RegisterId(0);
+        let blocks = [
+            (
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Imm(selector, SIRValue::new(0_u8))],
+                    terminator: SIRTerminator::Switch {
+                        selector,
+                        cases: vec![
+                            crate::ir::SIRSwitchCase {
+                                value: BigUint::from(1_u8),
+                                target: SirBlockId(1),
+                            },
+                            crate::ir::SIRSwitchCase {
+                                value: BigUint::from(7_u8),
+                                target: SirBlockId(1),
+                            },
+                        ],
+                        default: SirBlockId(1),
+                    },
+                },
+            ),
+            (
+                SirBlockId(1),
+                BasicBlock {
+                    id: SirBlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map: [(
+                selector,
+                RegisterType::Bit {
+                    width: 7,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let function = lower_execution_unit(&eu, &empty_layout(), false);
+        assert!(matches!(
+            function.blocks[0].insts.last(),
+            Some(MInst::Jump { target: BlockId(1) })
+        ));
+        assert!(
+            !function.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(instruction, MInst::JumpTable { .. }))
+        );
     }
 
     #[test]

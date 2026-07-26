@@ -25,8 +25,8 @@ pub(crate) struct InstructionSite {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum RootKind {
-    CommitFfState,
-    ObservableStore,
+    PersistentFfStateWrite,
+    ObservableStateEffect,
     RuntimeEvent,
     CombCapture,
     Error,
@@ -404,7 +404,7 @@ impl ReactiveEventProjection {
                                 });
                             }
                         }
-                        MemoryAccessKind::Kill => {
+                        MemoryAccessKind::Kill { reaching } => {
                             let definition = access
                                 .block
                                 .zip(access.instruction)
@@ -429,6 +429,11 @@ impl ReactiveEventProjection {
                                     work.push(Work::Instruction(definition));
                                 }
                             }
+                            work.push(Work::Memory {
+                                model,
+                                version: *reaching,
+                                consumer,
+                            });
                         }
                         MemoryAccessKind::Use { reaching, .. } => {
                             work.push(Work::Memory {
@@ -943,7 +948,22 @@ fn collect_cluster_memory(
                 summary.unsupported_frontiers += 1;
             }
         }
-        MemoryAccessKind::Kill => summary.unsupported_frontiers += 1,
+        MemoryAccessKind::Kill { reaching } => {
+            summary.unsupported_frontiers += 1;
+            collect_cluster_memory(
+                eu,
+                provenance,
+                model,
+                *reaching,
+                definitions,
+                phase_by_unit,
+                memory_seen,
+                value_seen,
+                region_index,
+                semantic_regions,
+                summary,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1008,17 +1028,24 @@ fn projection_roots(
                 SIRInstruction::Store(_, _, _, _, triggers, captures)
                     if !triggers.is_empty() || !captures.is_empty() =>
                 {
-                    Some(RootKind::ObservableStore)
+                    Some(RootKind::ObservableStateEffect)
+                }
+                SIRInstruction::Store(destination, _, _, _, _, _)
+                    if cut.is_ff_block(block_id) && destination.region == STABLE_REGION =>
+                {
+                    // FF lowering may write persistent state directly instead
+                    // of staging it in WORKING followed by a Commit.
+                    Some(RootKind::PersistentFfStateWrite)
                 }
                 SIRInstruction::Commit(source, destination, _, _, _)
                     if cut.is_ff_block(block_id)
                         && destination.region == STABLE_REGION
                         && matches!(source.region, WORKING_REGION | SPARSE_WORKING_REGION) =>
                 {
-                    Some(RootKind::CommitFfState)
+                    Some(RootKind::PersistentFfStateWrite)
                 }
                 SIRInstruction::Commit(_, _, _, _, triggers) if !triggers.is_empty() => {
-                    Some(RootKind::ObservableStore)
+                    Some(RootKind::ObservableStateEffect)
                 }
                 SIRInstruction::RuntimeEvent { .. } => Some(RootKind::RuntimeEvent),
                 SIRInstruction::CombCaptureEvent { .. }
@@ -1176,7 +1203,7 @@ fn static_fragment(
     ))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StaticClusterRewrite {
     consumer: InstructionSite,
     producer: InstructionSite,
@@ -1228,8 +1255,7 @@ pub(crate) fn materialize_static_clusters(
         .iter()
         .map(|&entry| cut.is_ff_block(entry))
         .collect::<Vec<_>>();
-    let mut rewrites = Vec::new();
-    let mut claimed_consumers = HashSet::default();
+    let mut candidates = Vec::new();
     let mut considered_pairs = HashSet::default();
 
     for (&consumer, uses) in &state_uses {
@@ -1317,26 +1343,7 @@ pub(crate) fn materialize_static_clusters(
             if cone.len() > 16 {
                 continue;
             }
-            let dead_cone = dead_cone_instruction_count(eu, &cone, producer, &register_uses);
-            if cone.len() > dead_cone.saturating_add(2) {
-                continue;
-            }
-            if !store_atomically_feeds_load(&models, uses, producer, consumer, source) {
-                continue;
-            }
-            if has_other_overlapping_read(
-                &static_reads,
-                *producer_address,
-                producer_offset,
-                *producer_width,
-                consumer,
-            ) {
-                continue;
-            }
-            if !claimed_consumers.insert(consumer) {
-                continue;
-            }
-            rewrites.push(StaticClusterRewrite {
+            candidates.push(StaticClusterRewrite {
                 consumer,
                 producer,
                 source,
@@ -1344,6 +1351,50 @@ pub(crate) fn materialize_static_clusters(
                 cone,
             });
         }
+    }
+    candidates.sort_unstable_by_key(|rewrite| (rewrite.producer, rewrite.consumer));
+    let mut rewrites = Vec::new();
+    let mut claimed_consumers = HashSet::default();
+    let mut first = 0;
+    while first < candidates.len() {
+        let producer = candidates[first].producer;
+        let mut end = first + 1;
+        while end < candidates.len() && candidates[end].producer == producer {
+            end += 1;
+        }
+        let group = &candidates[first..end];
+        let consumers = group
+            .iter()
+            .map(|rewrite| rewrite.consumer)
+            .collect::<HashSet<_>>();
+        let SIRInstruction::Store(address, offset, width, source, ..) =
+            &eu.blocks[&producer.block].instructions[producer.instruction]
+        else {
+            first = end;
+            continue;
+        };
+        let same_cone = group
+            .iter()
+            .all(|rewrite| rewrite.source == *source && rewrite.cone == group[0].cone);
+        let dead_cone = dead_cone_instruction_count(eu, &group[0].cone, producer, &register_uses);
+        let cloned_instructions = group
+            .iter()
+            .map(|rewrite| rewrite.cone.len())
+            .sum::<usize>();
+        let profitable =
+            cloned_instructions <= dead_cone.saturating_add(1).saturating_add(group.len());
+        if same_cone
+            && profitable
+            && store_atomically_feeds_consumers(&models, producer, *source, &consumers)
+            && !has_unadmitted_overlapping_read(&static_reads, *address, offset, *width, &consumers)
+            && consumers
+                .iter()
+                .all(|consumer| !claimed_consumers.contains(consumer))
+        {
+            claimed_consumers.extend(consumers);
+            rewrites.extend(group.iter().cloned());
+        }
+        first = end;
     }
     if rewrites.is_empty() {
         return Ok(0);
@@ -1479,19 +1530,19 @@ fn index_static_reads(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> StaticReadInd
     reads
 }
 
-fn has_other_overlapping_read(
+fn has_unadmitted_overlapping_read(
     reads: &StaticReadIndex,
     address: RegionedAbsoluteAddr,
     offset: &SIROffset,
     width: usize,
-    admitted_consumer: InstructionSite,
+    admitted_consumers: &HashSet<InstructionSite>,
 ) -> bool {
     let SIROffset::Static(offset) = offset else {
         return true;
     };
     reads.get(&address).is_some_and(|reads| {
         reads.iter().any(|&(site, read_offset, read_width)| {
-            site != admitted_consumer
+            !admitted_consumers.contains(&site)
                 && read_offset.is_none_or(|read_offset| {
                     ranges_overlap(*offset, width, read_offset, read_width)
                 })
@@ -1509,55 +1560,55 @@ fn ranges_overlap(
         && rhs_offset < lhs_offset.saturating_add(lhs_width)
 }
 
-fn store_atomically_feeds_load(
+fn store_atomically_feeds_consumers(
     models: &[StateSsa],
-    uses: &[StateUse],
     producer: InstructionSite,
-    consumer: InstructionSite,
     source: RegisterId,
+    consumers: &HashSet<InstructionSite>,
 ) -> bool {
-    !uses.is_empty()
-        && uses.iter().all(|state_use| {
-            let model = &models[state_use.model];
-            let access = &model.accesses[state_use.version.0];
-            matches!(
-                access.kind,
-                MemoryAccessKind::Def {
-                    source: definition_source,
-                    observable: false,
-                } if definition_source == source
-            ) && access.block == Some(producer.block)
-                && access.instruction == Some(producer.instruction)
-                && state_definition_has_only_use(model, access.id, consumer)
-        })
-}
-
-fn state_definition_has_only_use(
-    model: &StateSsa,
-    definition: MemoryAccessId,
-    consumer: InstructionSite,
-) -> bool {
-    let mut found = false;
-    for access in &model.accesses {
-        match &access.kind {
-            MemoryAccessKind::Use { reaching, .. } if *reaching == definition => {
-                if access.block != Some(consumer.block)
-                    || access.instruction != Some(consumer.instruction)
-                    || found
-                {
-                    return false;
-                }
-                found = true;
-            }
-            MemoryAccessKind::Phi { incoming }
-                if incoming.iter().any(|(_, version)| *version == definition) =>
+    let mut found_definition = false;
+    for model in models {
+        for definition in &model.accesses {
+            if definition.block != Some(producer.block)
+                || definition.instruction != Some(producer.instruction)
+                || !matches!(
+                    definition.kind,
+                    MemoryAccessKind::Def {
+                        source: definition_source,
+                        observable: false,
+                    } if definition_source == source
+                )
             {
-                return false;
+                continue;
             }
-            _ => {}
+            found_definition = true;
+            for access in &model.accesses {
+                match &access.kind {
+                    MemoryAccessKind::Use { reaching, .. } if *reaching == definition.id => {
+                        let (Some(block), Some(instruction)) = (access.block, access.instruction)
+                        else {
+                            return false;
+                        };
+                        if !consumers.contains(&InstructionSite { block, instruction }) {
+                            return false;
+                        }
+                    }
+                    MemoryAccessKind::Phi { incoming }
+                        if incoming
+                            .iter()
+                            .any(|(_, version)| *version == definition.id) =>
+                    {
+                        return false;
+                    }
+                    MemoryAccessKind::Kill { reaching } if *reaching == definition.id => {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
-    found
+    found_definition
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1576,8 +1627,11 @@ fn collect_static_clone_cone(
     if !seen.insert(value) {
         return Ok(());
     }
-    let Some(ValueDefinition::Instruction(site)) = definitions.get(&value) else {
+    let Some(definition) = definitions.get(&value) else {
         return Err("cone-missing-definition");
+    };
+    let ValueDefinition::Instruction(site) = definition else {
+        return Err("cone-block-parameter");
     };
     let instruction = &eu.blocks[&site.block].instructions[site.instruction];
     match instruction {
@@ -1626,7 +1680,19 @@ fn collect_static_clone_cone(
                 return Err("cone-load-physical-version-changed");
             }
         }
-        _ => return Err("cone-unsupported-instruction"),
+        SIRInstruction::Load(_, _, SIROffset::Dynamic(_), _) => {
+            return Err("cone-dynamic-load");
+        }
+        SIRInstruction::Load(_, _, SIROffset::Element { .. }, _) => {
+            return Err("cone-element-load");
+        }
+        SIRInstruction::Store(..)
+        | SIRInstruction::Commit(..)
+        | SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
+            return Err("cone-effectful-instruction");
+        }
     }
     cone.push(*site);
     Ok(())
@@ -2105,6 +2171,88 @@ mod tests {
     }
 
     #[test]
+    fn static_materialization_groups_all_exact_store_consumers() {
+        let signal = address(STABLE_REGION, 0);
+        let input = address(STABLE_REGION, 1);
+        let next_a = address(WORKING_REGION, 2);
+        let next_b = address(WORKING_REGION, 3);
+        let comb = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), input, SIROffset::Static(0), 8),
+                SIRInstruction::Unary(RegisterId(1), crate::ir::UnaryOp::Ident, RegisterId(0)),
+                SIRInstruction::Store(
+                    signal,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+        let ff_a = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), signal, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    next_a,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8)],
+        );
+        let ff_b = unit(
+            vec![
+                SIRInstruction::Load(RegisterId(0), signal, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    next_b,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    vec![],
+                    vec![],
+                ),
+            ],
+            &[(0, 8)],
+        );
+        let (merged, provenance) =
+            crate::ir::merge_sir_eu_refs_with_provenance(&[&comb, &ff_a, &ff_b]);
+        let cut = super::super::reactive_phase::verify(&merged, &provenance, 1).unwrap();
+        let mut materialized = merged.clone();
+
+        assert_eq!(
+            materialize_static_clusters(&mut materialized, &provenance, &cut, false).unwrap(),
+            2
+        );
+        assert!(!materialized.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                        if *address == signal
+                )
+            })
+        }));
+        for value in [0, 1, 0x55, 0xff] {
+            let mut reference = TestMemory::default();
+            reference.insert((input, 0, 8), value);
+            reference.insert((signal, 0, 8), 0);
+            reference.insert((next_a, 0, 8), 0);
+            reference.insert((next_b, 0, 8), 0);
+            let mut actual = reference.clone();
+            execute_straight_line(&merged, &mut reference);
+            execute_straight_line(&materialized, &mut actual);
+            execute_straight_line(&comb, &mut reference);
+            execute_straight_line(&comb, &mut actual);
+            assert_eq!(actual, reference);
+        }
+    }
+
+    #[test]
     fn unobserved_comb_store_is_not_a_projection_root() {
         let signal = address(STABLE_REGION, 0);
         let unrelated = address(STABLE_REGION, 1);
@@ -2153,7 +2301,7 @@ mod tests {
             projection
                 .roots
                 .iter()
-                .filter(|root| root.kind == RootKind::CommitFfState)
+                .filter(|root| root.kind == RootKind::PersistentFfStateWrite)
                 .count(),
             1
         );
@@ -2281,7 +2429,7 @@ mod tests {
             projection
                 .roots
                 .iter()
-                .any(|root| root.kind == RootKind::ObservableStore)
+                .any(|root| root.kind == RootKind::ObservableStateEffect)
         );
         assert!(projection.retained_instructions.contains(&InstructionSite {
             block: provenance.unit_entries[0],
@@ -2312,7 +2460,7 @@ mod tests {
             projection
                 .roots
                 .iter()
-                .filter(|root| root.kind == RootKind::CommitFfState)
+                .filter(|root| root.kind == RootKind::PersistentFfStateWrite)
                 .count(),
             1
         );

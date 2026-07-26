@@ -172,8 +172,13 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
         fold_contiguous_memory_copies,
     );
     runner.run("fold_scaled_indexed_loads", fold_scaled_indexed_loads);
+    runner.run(
+        "fold_late_serial_and_immediates",
+        fold_late_serial_and_immediates,
+    );
     runner.run("final_dead_code_eliminate", dead_code_eliminate);
     runner.run("simplify_cfg", simplify_cfg);
+    runner.run("post_cfg_dead_code_eliminate", dead_code_eliminate);
     // CFG simplification concatenates linear blocks. Re-place constants only
     // after that concatenation, otherwise a block-local constant can acquire a
     // very long artificial live range in the merged block.
