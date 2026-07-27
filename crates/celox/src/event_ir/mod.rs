@@ -6,6 +6,8 @@
 //! value flow from SIR Store/Load pairs.
 
 mod comb;
+mod comb_value_graph;
+mod lower;
 mod verify;
 
 use num_bigint::BigUint;
@@ -17,6 +19,7 @@ pub use comb::{
     CombImportInvariant, CombLocalInput, CombRecipe, CombRecipeTarget, CombSnapshotInput,
     CombSnapshotKind,
 };
+pub use lower::{EventProjectionError, lower_event_projection};
 pub use verify::{EventIrError, EventIrInvariant};
 
 use crate::ir::AbsoluteAddr;
@@ -220,6 +223,9 @@ pub enum RegionKind {
 pub struct Process {
     pub region: RegionId,
     pub source_order: usize,
+    /// Asynchronous reset events which activate this process in addition to
+    /// the primary clock named by the enclosing event domain.
+    pub resets: Vec<AbsoluteAddr>,
     pub entry: ControlBlockId,
     pub blocks: Vec<ControlBlockId>,
 }
@@ -297,7 +303,9 @@ pub enum ValueKind {
     ReadClockSnapshot(ObjectRange),
     ReadPersistentMemory {
         object: AbsoluteAddr,
-        offset: ValueId,
+        /// Logical event-entry address. Keeping element metadata here avoids
+        /// turning a narrow dynamic memory read into a whole-object SSA value.
+        offset: ValueOffset,
         width: usize,
     },
     ReadCombDefinition {
@@ -361,7 +369,9 @@ impl ValueKind {
             | Self::Constant { .. }
             | Self::ReadClockSnapshot(_)
             | Self::ReadCombDefinition { .. } => {}
-            Self::ReadPersistentMemory { offset, .. } => visit(*offset),
+            Self::ReadPersistentMemory { offset, .. } => {
+                offset.visit_value_operands(&mut visit);
+            }
             Self::Unary { input, .. } => visit(*input),
             Self::Resize { input } => visit(*input),
             Self::Binary { lhs, rhs, .. } => {
@@ -581,11 +591,22 @@ impl EventIr {
     }
 
     pub fn add_process(&mut self, source_order: usize) -> ProcessId {
+        self.add_process_with_resets(source_order, Vec::new())
+    }
+
+    pub fn add_process_with_resets(
+        &mut self,
+        source_order: usize,
+        mut resets: Vec<AbsoluteAddr>,
+    ) -> ProcessId {
+        resets.sort_unstable();
+        resets.dedup();
         let process = ProcessId(self.processes.len());
         let region = self.add_region(self.root_region(), RegionKind::FfProcess(process));
         self.processes.push(Process {
             region,
             source_order,
+            resets,
             entry: ControlBlockId(usize::MAX),
             blocks: Vec::new(),
         });

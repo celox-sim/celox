@@ -8,6 +8,7 @@ pub enum EventIrInvariant {
     RootRegion,
     RegionParent,
     ProcessRegion,
+    ProcessTriggers,
     ProcessBlocks,
     ControlBlock,
     ControlEdge,
@@ -109,6 +110,20 @@ fn verify_processes(ir: &EventIr) -> Result<(), EventIrError> {
     let mut block_owner = vec![None; ir.blocks().len()];
     for (index, process) in ir.processes().iter().enumerate() {
         let id = ProcessId(index);
+        let valid_resets = match ir.domain() {
+            EventDomain::Clock { resets, .. } => {
+                process.resets.windows(2).all(|pair| pair[0] < pair[1])
+                    && process.resets.iter().all(|reset| resets.contains(reset))
+            }
+            EventDomain::Combinational => process.resets.is_empty(),
+        };
+        if !valid_resets {
+            return Err(EventIrError::new(
+                EventIrInvariant::ProcessTriggers,
+                Some(id.to_string()),
+                "process resets are not a sorted subset of its event domain",
+            ));
+        }
         let Some(region) = ir.regions().get(process.region.0) else {
             return Err(EventIrError::new(
                 EventIrInvariant::ProcessRegion,
@@ -518,10 +533,17 @@ fn verify_value_type(ir: &EventIr, id: ValueId) -> Result<(), EventIrError> {
                 return Err(fail("snapshot read is not event-scoped"));
             }
         }
-        ValueKind::ReadPersistentMemory { width, .. } => {
+        ValueKind::ReadPersistentMemory { offset, width, .. } => {
             if *width != current.ty.width {
                 return Err(fail("memory read width does not match value type"));
             }
+            verify_value_offset(ir, offset, None, *width).map_err(|message| {
+                EventIrError::new(
+                    EventIrInvariant::ValueType,
+                    Some(id.to_string()),
+                    format!("invalid persistent-memory offset: {message}"),
+                )
+            })?;
         }
         ValueKind::DynamicSelect {
             source,

@@ -6,6 +6,7 @@
 //! the closed backward slice which would remain. It does not rewrite SIR.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::fmt;
 
 use num_bigint::BigUint;
@@ -14,7 +15,7 @@ use num_traits::Zero;
 use super::cost_model::estimate_clif_cost;
 use super::shared::def_reg;
 use super::sir_analysis::{UseSite, collect_uses, instruction_uses};
-use super::state_ssa::{StatePhaseMap, StateSsa};
+use super::state_ssa::StateSsa;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
@@ -22,6 +23,7 @@ use crate::ir::{
 };
 use crate::{HashMap, HashSet};
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectorRegionFact {
     pub block: BlockId,
@@ -45,6 +47,7 @@ pub(crate) struct SelectorRegionFact {
     pub sink_recipe_pairs: Vec<SelectorSinkRecipePairFact>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectorSinkRecipeFact {
     pub sink: (BlockId, usize),
@@ -65,6 +68,7 @@ pub(crate) struct SelectorSinkRecipeFact {
     pub case_summary: SelectorSinkCaseSummaryFact,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SelectorSinkCaseSummaryFact {
     pub alternatives: usize,
@@ -113,6 +117,7 @@ pub(crate) struct SelectorSinkCaseSummaryFact {
     pub maximum_cost_loop_cutoffs: Vec<RegisterId>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathLocalPlacementFact {
     pub case: String,
@@ -125,6 +130,7 @@ pub(crate) struct PathLocalPlacementFact {
     pub unversioned_load_frontier: Vec<RegisterId>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectorSinkRecipePairFact {
     pub left_sink: (BlockId, usize),
@@ -140,6 +146,7 @@ pub(crate) struct SelectorSinkRecipePairFact {
     pub common_frontier_values: usize,
 }
 
+#[cfg(test)]
 impl SelectorRegionFact {
     fn worst_saving(&self) -> usize {
         self.baseline_cost.saturating_sub(self.worst_case_cost)
@@ -150,6 +157,7 @@ impl SelectorRegionFact {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ControlRegionFeasibilityReport {
     pub selected_blocks: usize,
@@ -162,166 +170,7 @@ pub(crate) struct ControlRegionFeasibilityReport {
     facts: Vec<SelectorRegionFact>,
 }
 
-impl ControlRegionFeasibilityReport {
-    pub(crate) fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
-        self.facts.iter().map(|fact| {
-            let sink_recipes = fact
-                .sink_recipes
-                .iter()
-                .map(SelectorSinkRecipeFact::summary)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            let sink_recipe_pairs = fact
-                .sink_recipe_pairs
-                .iter()
-                .map(SelectorSinkRecipePairFact::summary)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            format!(
-                "block=b{} samples={} selector=r{} cases={} instructions={} \
-                 baseline_cost={} worst_case_cost={} mean_case_cost={} \
-                 minimum_skipped_instructions={} maximum_skipped_instructions={} \
-                 live_outputs={} effects={} cross_block_affected_instructions={} \
-                 cross_block_affected_blocks={} cross_block_effect_sinks={} \
-                 cross_block_branch_conditions={} cross_block_effect_sites={:?} \
-                 sink_recipes=[{}] \
-                 sink_recipe_pairs=[{}] \
-                 weighted_worst_saving={}",
-                fact.block.0,
-                fact.samples,
-                fact.selector.0,
-                fact.explicit_cases,
-                fact.block_instructions,
-                fact.baseline_cost,
-                fact.worst_case_cost,
-                fact.mean_case_cost,
-                fact.minimum_skipped_instructions,
-                fact.maximum_skipped_instructions,
-                fact.live_outputs,
-                fact.effects,
-                fact.cross_block_affected_instructions,
-                fact.cross_block_affected_blocks,
-                fact.cross_block_effect_sinks,
-                fact.cross_block_branch_conditions,
-                fact.cross_block_effect_sites,
-                sink_recipes,
-                sink_recipe_pairs,
-                fact.profile_weighted_worst_saving(),
-            )
-        })
-    }
-
-    pub(crate) fn recipe_detail_lines(&self) -> impl Iterator<Item = String> + '_ {
-        self.facts.iter().flat_map(|fact| {
-            fact.sink_recipes.iter().map(move |recipe| {
-                format!(
-                    "origin=b{} selector=r{} recipe={recipe:?}",
-                    fact.block.0, fact.selector.0
-                )
-            })
-        })
-    }
-}
-
-impl SelectorSinkRecipeFact {
-    fn summary(&self) -> String {
-        format!(
-            "sink=b{}:{} source=r{} effect={:?} publication={:?} recipe_instructions={} \
-             recipe_blocks={} selector_control_blocks={} entering_edges={} \
-             continuations={:?} frontier_constants={} frontier_loads={} \
-             frontier_shared_ssa={} frontier_external={} control_merges={} \
-             loop_cutoffs={} case_alternatives={} case_reachable={} \
-             case_instructions={}/{}/{} case_cost={}/{}/{} \
-             case_maximum_blocks={} case_maximum_load_frontier={} \
-             case_maximum_dominating_ssa_frontier={} \
-             case_maximum_external_frontier={} case_maximum_control_merges={} \
-             case_maximum_non_dominating_control_merges={} \
-             case_maximum_loop_cutoffs={} case_maximum_instructions={} \
-             case_maximum_cost={} case_maximum_cost_instructions={} \
-             case_unique_load_frontier={} case_unique_dominating_ssa_frontier={} \
-             case_unique_external_frontier={} case_unique_control_merges={} \
-             case_unique_non_dominating_control_merges={} \
-             case_non_dominating_control_merge_cases={:?} \
-             case_path_local_placements={:?} \
-             case_unique_loop_cutoffs={} case_stable_load_frontier={} \
-             case_unstable_load_frontier={} case_unversioned_load_frontier={} \
-             case_maximum_unstable_loads={} case_maximum_unversioned_loads={}",
-            self.sink.0.0,
-            self.sink.1,
-            self.source.0,
-            self.effect,
-            self.publication,
-            self.recipe_instructions.len(),
-            self.recipe_blocks.len(),
-            self.selector_control_blocks.len(),
-            self.entering_edges.len(),
-            self.continuations,
-            self.constant_frontier.len(),
-            self.load_frontier.len(),
-            self.shared_ssa_frontier.len(),
-            self.external_frontier.len(),
-            self.control_merges.len(),
-            self.loop_cutoffs.len(),
-            self.case_summary.alternatives,
-            self.case_summary.reachable_alternatives,
-            self.case_summary.minimum_instructions,
-            self.case_summary.mean_instructions,
-            self.case_summary.maximum_instructions,
-            self.case_summary.minimum_cost,
-            self.case_summary.mean_cost,
-            self.case_summary.maximum_cost,
-            self.case_summary.maximum_blocks,
-            self.case_summary.maximum_load_frontier,
-            self.case_summary.maximum_dominating_ssa_frontier,
-            self.case_summary.maximum_external_frontier,
-            self.case_summary.maximum_control_merges,
-            self.case_summary.maximum_non_dominating_control_merges,
-            self.case_summary.maximum_loop_cutoffs,
-            self.case_summary.maximum_instruction_case,
-            self.case_summary.maximum_cost_case,
-            self.case_summary.maximum_cost_instructions,
-            self.case_summary.all_load_frontier.len(),
-            self.case_summary.all_dominating_ssa_frontier.len(),
-            self.case_summary.all_external_frontier.len(),
-            self.case_summary.all_control_merges.len(),
-            self.case_summary.all_non_dominating_control_merges.len(),
-            self.case_summary.non_dominating_control_merge_cases,
-            self.case_summary.path_local_placements,
-            self.case_summary.all_loop_cutoffs.len(),
-            self.case_summary.stable_load_frontier.len(),
-            self.case_summary.unstable_load_frontier.len(),
-            self.case_summary.unversioned_load_frontier.len(),
-            self.case_summary.maximum_unstable_loads_per_case,
-            self.case_summary.maximum_unversioned_loads_per_case,
-        )
-    }
-}
-
-impl SelectorSinkRecipePairFact {
-    fn summary(&self) -> String {
-        format!(
-            "sinks=b{}:{}/b{}:{} same_publication={} same_continuation={} \
-             common_instructions={} left_only_instructions={} \
-             right_only_instructions={} common_blocks={} \
-             common_frontier_values={} common_dominator={:?} \
-             common_postdominator={:?}",
-            self.left_sink.0.0,
-            self.left_sink.1,
-            self.right_sink.0.0,
-            self.right_sink.1,
-            self.same_publication,
-            self.same_continuation,
-            self.common_instructions,
-            self.left_only_instructions,
-            self.right_only_instructions,
-            self.common_blocks,
-            self.common_frontier_values,
-            self.common_dominator,
-            self.common_postdominator,
-        )
-    }
-}
-
+#[cfg(test)]
 impl fmt::Display for ControlRegionFeasibilityReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -386,10 +235,13 @@ struct SinkRecipe {
     instructions: BTreeSet<(BlockId, usize)>,
     blocks: BTreeSet<BlockId>,
     selector_control_blocks: BTreeSet<BlockId>,
+    #[cfg(test)]
     entering_edges: BTreeSet<(BlockId, BlockId)>,
+    #[cfg(test)]
     continuations: BTreeSet<BlockId>,
     constant_frontier: BTreeSet<RegisterId>,
     load_frontier: BTreeSet<RegisterId>,
+    #[cfg(test)]
     shared_ssa_frontier: BTreeSet<RegisterId>,
     dominating_ssa_frontier: BTreeSet<RegisterId>,
     external_frontier: BTreeSet<RegisterId>,
@@ -401,6 +253,7 @@ struct SinkRecipe {
     known_values: BTreeMap<RegisterId, bool>,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct CaseSinkRecipe {
     label: String,
@@ -411,6 +264,7 @@ struct CaseSinkRecipe {
 
 #[derive(Debug)]
 struct SelectorCaseContext {
+    #[cfg(test)]
     label: String,
     selected_case: Option<BigUint>,
     known: HashMap<RegisterId, bool>,
@@ -452,6 +306,7 @@ pub(crate) struct EffectCaseRewritePlan {
     pub estimated_saving: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     profile_blocks: &[(BlockId, u64)],
@@ -571,6 +426,7 @@ enum LoadFrontierVersion {
     Unversioned,
 }
 
+#[cfg(test)]
 fn annotate_load_frontier_versions(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
@@ -598,15 +454,9 @@ fn annotate_load_frontier_versions(
     let states = loads_by_region
         .into_iter()
         .filter_map(|(region, loads)| {
-            StateSsa::analyze_selected_loads_two_state(
-                eu,
-                cfg,
-                region,
-                &loads,
-                &StatePhaseMap::default(),
-            )
-            .ok()
-            .map(|state| (region, state))
+            StateSsa::analyze_selected_loads_two_state(eu, cfg, region, &loads)
+                .ok()
+                .map(|state| (region, state))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -709,6 +559,7 @@ fn load_frontier_version(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn analyze_group(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
@@ -832,6 +683,7 @@ fn analyze_group(
     })
 }
 
+#[cfg(test)]
 fn selector_dispatch_cost(explicit_cases: usize) -> usize {
     // Selector normalization, bounds/table operation and indirect transfer.
     3usize.saturating_add(explicit_cases.ilog2() as usize)
@@ -1080,6 +932,7 @@ enum RecipeWalk {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn analyze_sink_recipe(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     case_contexts: &[SelectorCaseContext],
@@ -1233,6 +1086,7 @@ fn analyze_sink_recipe(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn analyze_case_sink_recipes(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     case_contexts: &[SelectorCaseContext],
@@ -1746,14 +1600,15 @@ fn build_selector_case_contexts(
 ) -> Vec<SelectorCaseContext> {
     cases
         .iter()
-        .map(|selected| (selected.to_string(), Some(selected)))
-        .chain(std::iter::once(("default".to_owned(), None)))
-        .map(|(label, selected)| {
+        .map(Some)
+        .chain(std::iter::once(None))
+        .map(|selected| {
             let known =
                 propagate_selector_facts(eu, &eu.blocks[&origin], selector, selected, constants);
             let reachable = selector_reachable_blocks_until_sinks(eu, origin, &known, sinks);
             SelectorCaseContext {
-                label,
+                #[cfg(test)]
+                label: selected.map_or_else(|| "default".to_owned(), ToString::to_string),
                 selected_case: selected.cloned(),
                 known,
                 reachable,
@@ -1804,6 +1659,7 @@ fn specialized_successors(
     }
 }
 
+#[cfg(test)]
 fn compare_sink_recipes(
     recipes: &[SelectorSinkRecipeFact],
     cfg: Option<&SirCfg>,
@@ -1846,6 +1702,7 @@ fn compare_sink_recipes(
     result
 }
 
+#[cfg(test)]
 fn sink_recipe_frontier(recipe: &SelectorSinkRecipeFact) -> BTreeSet<RegisterId> {
     recipe
         .constant_frontier
@@ -2450,15 +2307,9 @@ fn loads_are_stable_at(
     let states = by_region
         .iter()
         .map(|(&region, selected)| {
-            StateSsa::analyze_selected_loads_two_state(
-                eu,
-                cfg,
-                region,
-                selected,
-                &StatePhaseMap::default(),
-            )
-            .ok()
-            .map(|state| (region, state))
+            StateSsa::analyze_selected_loads_two_state(eu, cfg, region, selected)
+                .ok()
+                .map(|state| (region, state))
         })
         .collect::<Option<BTreeMap<_, _>>>();
     let Some(states) = states else {

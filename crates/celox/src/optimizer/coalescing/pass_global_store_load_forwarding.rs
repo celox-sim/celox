@@ -7,7 +7,7 @@
 //! non-escaping, definitely-defined combinational slots and removes their stores.
 
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
-use super::state_ssa::{StateFragment, StatePhaseMap, StateSsa};
+use super::state_ssa::{StateFragment, StateSsa};
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::{HashMap, HashSet};
@@ -79,28 +79,6 @@ fn forward_stable_static_slots(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
         PromotionPolicy::Exact(&no_promotions),
         &HashMap::default(),
         None,
-        &StatePhaseMap::default(),
-    )
-}
-
-pub(crate) fn forward_stable_static_slots_from(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    entry: BlockId,
-) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
-        return false;
-    };
-    let Ok(phases) = StatePhaseMap::fused(eu, &cfg, entry) else {
-        return false;
-    };
-    let no_promotions = HashSet::default();
-    rewrite_global_static_slots(
-        eu,
-        STABLE_REGION,
-        PromotionPolicy::Exact(&no_promotions),
-        &HashMap::default(),
-        phases.ff_blocks(),
-        &phases,
     )
 }
 
@@ -109,13 +87,13 @@ enum PromotionPolicy<'a> {
     Exact(&'a HashSet<StateFragment>),
 }
 
+#[cfg(test)]
 fn rewrite_global_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     region: u32,
     promotion: PromotionPolicy<'_>,
     fallback_definitions: &HashMap<RegisterId, StateFragment>,
     eligible_load_blocks: Option<&HashSet<BlockId>>,
-    phases: &StatePhaseMap,
 ) -> bool {
     let mut rewritten = eu.clone();
     let mut stable_passthroughs = HashMap::default();
@@ -125,7 +103,6 @@ fn rewrite_global_static_slots(
         promotion,
         fallback_definitions,
         eligible_load_blocks,
-        phases,
         &mut stable_passthroughs,
     ) else {
         return false;
@@ -143,11 +120,10 @@ fn rewrite_global_static_slots_in_place(
     promotion: PromotionPolicy<'_>,
     fallback_definitions: &HashMap<RegisterId, StateFragment>,
     eligible_load_blocks: Option<&HashSet<BlockId>>,
-    phases: &StatePhaseMap,
     stable_passthroughs: &mut HashMap<RegisterId, StateFragment>,
 ) -> Option<bool> {
     let cfg = SirCfg::analyze(eu).ok()?;
-    let state = StateSsa::analyze(eu, &cfg, region, eligible_load_blocks, phases).ok()?;
+    let state = StateSsa::analyze(eu, &cfg, region, eligible_load_blocks).ok()?;
     let mut candidates = state
         .slots
         .iter()
@@ -599,19 +575,9 @@ fn normalize_working_commits(
 /// escaping, or effectful next-state storage keeps its memory representation.
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    ff_entry: Option<BlockId>,
 ) -> bool {
     let Ok(cfg) = SirCfg::analyze(eu) else {
         return false;
-    };
-    let phases = match ff_entry {
-        Some(entry) => {
-            let Ok(phases) = StatePhaseMap::fused(eu, &cfg, entry) else {
-                return false;
-            };
-            phases
-        }
-        None => StatePhaseMap::default(),
     };
     let mut facts = HashMap::<WorkingRoundTripKey, WorkingRoundTripFacts>::default();
     let mut invalid_addresses = HashSet::<AbsoluteAddr>::default();
@@ -631,9 +597,6 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                         .entry(key)
                         .or_default()
                         .record_type(&eu.register_map[destination], *width);
-                    if !phases.allows_ff_optimization(block_id) {
-                        invalid_addresses.insert(address.absolute_addr());
-                    }
                 }
                 SIRInstruction::Store(
                     address,
@@ -652,9 +615,6 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     entry.record_type(&eu.register_map[source], *width);
                     entry.has_store = true;
                     entry.invalid |= !triggers.is_empty() || !capture_sites.is_empty();
-                    if !phases.allows_ff_optimization(block_id) {
-                        invalid_addresses.insert(address.absolute_addr());
-                    }
                 }
                 SIRInstruction::Commit(
                     source,
@@ -674,9 +634,6 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     let entry = facts.entry(key).or_default();
                     entry.has_seed = true;
                     entry.invalid |= *width == 0 || !triggers.is_empty();
-                    if !phases.allows_ff_optimization(block_id) {
-                        invalid_addresses.insert(destination.absolute_addr());
-                    }
                 }
                 SIRInstruction::Commit(
                     source,
@@ -696,9 +653,6 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     let entry = facts.entry(key).or_default();
                     entry.has_apply = true;
                     entry.invalid |= *width == 0;
-                    if !phases.allows_ff_optimization(block_id) {
-                        invalid_addresses.insert(source.absolute_addr());
-                    }
                 }
                 SIRInstruction::Load(_, address, _, _)
                 | SIRInstruction::Store(address, _, _, _, _, _)
@@ -764,13 +718,7 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     let Ok(preview_cfg) = SirCfg::analyze(&preview) else {
         return false;
     };
-    let Ok(preview_state) = StateSsa::analyze(
-        &preview,
-        &preview_cfg,
-        WORKING_REGION,
-        phases.ff_blocks(),
-        &phases,
-    ) else {
+    let Ok(preview_state) = StateSsa::analyze(&preview, &preview_cfg, WORKING_REGION, None) else {
         return false;
     };
     let slots = preview_state
@@ -801,8 +749,7 @@ pub(crate) fn promote_eval_apply_working_round_trips(
         WORKING_REGION,
         PromotionPolicy::Exact(&slots),
         &fallback_definitions,
-        phases.ff_blocks(),
-        &phases,
+        None,
         &mut stable_passthroughs,
     ) else {
         return false;
@@ -1420,53 +1367,6 @@ mod tests {
     }
 
     #[test]
-    fn suffix_forwarding_keeps_comb_loads_outside_the_ff_region() {
-        let addr = address(0);
-        let mut eu = unit(
-            [
-                BasicBlock {
-                    id: BlockId(0),
-                    params: vec![RegisterId(0)],
-                    instructions: vec![
-                        SIRInstruction::Store(
-                            addr,
-                            SIROffset::Static(0),
-                            8,
-                            RegisterId(0),
-                            Vec::new(),
-                            Vec::new(),
-                        ),
-                        SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
-                        SIRInstruction::Unary(RegisterId(2), UnaryOp::Ident, RegisterId(1)),
-                    ],
-                    terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
-                },
-                BasicBlock {
-                    id: BlockId(1),
-                    params: Vec::new(),
-                    instructions: vec![
-                        SIRInstruction::Load(RegisterId(3), addr, SIROffset::Static(0), 8),
-                        SIRInstruction::Unary(RegisterId(4), UnaryOp::Ident, RegisterId(3)),
-                    ],
-                    terminator: SIRTerminator::Return,
-                },
-            ],
-            (0..5).map(|register| (RegisterId(register), bit(8))),
-        );
-
-        assert!(forward_stable_static_slots_from(&mut eu, BlockId(1)));
-        eu.verify_result().unwrap();
-        assert!(matches!(
-            eu.blocks[&BlockId(0)].instructions[1],
-            SIRInstruction::Load(RegisterId(1), _, SIROffset::Static(0), 8)
-        ));
-        assert!(matches!(
-            eu.blocks[&BlockId(1)].instructions[0],
-            SIRInstruction::Unary(_, UnaryOp::Ident, RegisterId(0))
-        ));
-    }
-
-    #[test]
     fn overlapping_fragment_store_kills_the_wider_slot() {
         let addr = address(0);
         let mut eu = unit(
@@ -1576,7 +1476,7 @@ mod tests {
             [(RegisterId(0), bit(8))],
         );
 
-        assert!(promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
         eu.verify_result().unwrap();
         assert!(
             eu.blocks[&BlockId(0)]
@@ -1662,7 +1562,7 @@ mod tests {
             [(RegisterId(0), bit(1)), (RegisterId(1), bit(8))],
         );
 
-        assert!(promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
         eu.verify_result().unwrap();
         assert!(eu.blocks[&BlockId(3)].params.is_empty());
         assert!(eu.blocks[&BlockId(3)].instructions.is_empty());
@@ -1981,73 +1881,12 @@ mod tests {
             [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))],
         );
 
-        assert!(promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
         eu.verify_result().unwrap();
         assert_eq!(eu.blocks[&BlockId(0)].instructions.len(), 2);
         assert!(eu.blocks[&BlockId(0)].instructions.iter().all(|instruction| {
             matches!(instruction, SIRInstruction::Store(addr, _, 8, _, _, _) if addr.region == STABLE_REGION)
         }));
-    }
-
-    #[test]
-    fn phase_external_working_access_rejects_promotion_atomically() {
-        let stable = address(0);
-        let mut working = stable;
-        working.region = WORKING_REGION;
-        let mut eu = unit(
-            [
-                BasicBlock {
-                    id: BlockId(0),
-                    params: Vec::new(),
-                    instructions: vec![SIRInstruction::Load(
-                        RegisterId(0),
-                        working,
-                        SIROffset::Static(0),
-                        8,
-                    )],
-                    terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
-                },
-                BasicBlock {
-                    id: BlockId(1),
-                    params: vec![RegisterId(1)],
-                    instructions: vec![
-                        SIRInstruction::Commit(
-                            stable,
-                            working,
-                            SIROffset::Static(0),
-                            8,
-                            Vec::new(),
-                        ),
-                        SIRInstruction::Store(
-                            working,
-                            SIROffset::Static(0),
-                            8,
-                            RegisterId(1),
-                            Vec::new(),
-                            Vec::new(),
-                        ),
-                        SIRInstruction::Commit(
-                            working,
-                            stable,
-                            SIROffset::Static(0),
-                            8,
-                            Vec::new(),
-                        ),
-                    ],
-                    terminator: SIRTerminator::Return,
-                },
-            ],
-            [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))],
-        );
-        let before = eu.blocks.clone();
-        let registers_before = eu.register_map.clone();
-
-        assert!(!promote_eval_apply_working_round_trips(
-            &mut eu,
-            Some(BlockId(1))
-        ));
-        assert_eq!(eu.blocks, before);
-        assert_eq!(eu.register_map, registers_before);
     }
 
     #[test]
@@ -2082,7 +1921,7 @@ mod tests {
             ],
         );
 
-        assert!(promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
         eu.verify_result().unwrap();
         let instructions = &eu.blocks[&BlockId(0)].instructions;
         let old_read = instructions
@@ -2128,7 +1967,7 @@ mod tests {
         let before = eu.blocks.clone();
         let registers_before = eu.register_map.clone();
 
-        assert!(!promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(!promote_eval_apply_working_round_trips(&mut eu));
         assert_eq!(eu.blocks, before);
         assert_eq!(eu.register_map, registers_before);
     }
@@ -2200,7 +2039,7 @@ mod tests {
             ],
         );
 
-        assert!(promote_eval_apply_working_round_trips(&mut eu, None));
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
         eu.verify_result().unwrap();
         assert!(eu.blocks[&BlockId(1)].params.len() == 1);
         assert!(

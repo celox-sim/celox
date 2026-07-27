@@ -83,9 +83,6 @@ pub fn flatting(
     Ok(RelocationModule {
         #[cfg(test)]
         variables: module.variables.clone(),
-        eval_apply_ff_blocks: HashMap::default(),
-        eval_only_ff_blocks: HashMap::default(),
-        apply_ff_blocks: HashMap::default(),
         comb_blocks: atomized_comb_blocks,
         comb_observers,
     })

@@ -4860,16 +4860,7 @@ pub fn emit_chained_eus(
     four_state: bool,
     label: &str,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(
-        &[units],
-        layout,
-        four_state,
-        label,
-        ChainedFunctionShape::Generic,
-        None,
-        None,
-        None,
-    )
+    emit_chained_eu_list(units, layout, four_state, label, None)
 }
 
 pub(crate) fn emit_chained_eus_with_trace(
@@ -4879,109 +4870,19 @@ pub(crate) fn emit_chained_eus_with_trace(
     label: &str,
     trace: &mut NativeFunctionTrace,
 ) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_groups(
-        &[units],
-        layout,
-        four_state,
-        label,
-        ChainedFunctionShape::Generic,
-        Some(trace),
-        None,
-        None,
-    )
+    emit_chained_eu_list(units, layout, four_state, label, Some(trace))
 }
 
-// Cross-phase stable forwarding deliberately stays staged until the allocator
-// can split a forwarded value and rematerialize it from a still-valid state
-// version. Enabling it earlier removes loads but turns cheap state homes into
-// whole-function live ranges, which is a compile-time and spill regression on
-// large fused CFGs. StateSSA itself and working-state promotion remain active.
-const ENABLE_CROSS_PHASE_STABLE_FORWARDING: bool = false;
-
-#[derive(Debug, Clone, Copy)]
-enum ChainedFunctionShape {
-    Generic,
-    ClockEvent { first_ff_unit: usize },
-}
-
-/// Compile combinational evaluation followed by one eval/apply FF domain as
-/// one SIR/MIR function.
-pub fn emit_comb_eval_apply_eus(
-    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+fn emit_chained_eu_list(
+    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
-    semantic_regions: &crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>,
-) -> Result<EmitResult, ChainedEmitError> {
-    let shape = if ff_units.is_empty() {
-        ChainedFunctionShape::Generic
-    } else {
-        ChainedFunctionShape::ClockEvent {
-            first_ff_unit: comb_units.len(),
-        }
-    };
-    emit_chained_eu_groups(
-        &[comb_units, ff_units],
-        layout,
-        four_state,
-        label,
-        shape,
-        None,
-        None,
-        Some(semantic_regions),
-    )
-}
-
-pub(crate) fn emit_comb_eval_apply_eus_with_trace(
-    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    trace: &mut NativeFunctionTrace,
-    program_facts: &crate::optimizer::coalescing::ProgramStateAccessSummary,
-    profile_blocks: &[(crate::ir::BlockId, u64)],
-    semantic_regions: &crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>,
-) -> Result<EmitResult, ChainedEmitError> {
-    let shape = if ff_units.is_empty() {
-        ChainedFunctionShape::Generic
-    } else {
-        ChainedFunctionShape::ClockEvent {
-            first_ff_unit: comb_units.len(),
-        }
-    };
-    emit_chained_eu_groups(
-        &[comb_units, ff_units],
-        layout,
-        four_state,
-        label,
-        shape,
-        Some(trace),
-        Some((program_facts, profile_blocks)),
-        Some(semantic_regions),
-    )
-}
-
-fn emit_chained_eu_groups(
-    groups: &[&[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>]],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    shape: ChainedFunctionShape,
     mut trace: Option<&mut NativeFunctionTrace>,
-    state_layout_profile: Option<(
-        &crate::optimizer::coalescing::ProgramStateAccessSummary,
-        &[(crate::ir::BlockId, u64)],
-    )>,
-    semantic_regions: Option<&crate::HashMap<crate::ir::VarAtomBase<crate::ir::AbsoluteAddr>, u64>>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
-    let units = groups
-        .iter()
-        .flat_map(|group| group.iter())
-        .collect::<Vec<_>>();
     assert!(!units.is_empty(), "cannot emit an empty chained EU list");
+    let unit_refs = units.iter().collect::<Vec<_>>();
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
     let copy_stats = timing
@@ -4992,150 +4893,26 @@ fn emit_chained_eu_groups(
 
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
-    let (mut sir_eu, merge_provenance) = crate::ir::merge_sir_eu_refs_with_provenance(&units);
-    let sir_boundaries = merge_provenance.unit_entries[1..].to_vec();
-    let fused_phase_cut = match shape {
-        ChainedFunctionShape::Generic => None,
-        ChainedFunctionShape::ClockEvent { first_ff_unit } => Some(
-            crate::optimizer::coalescing::verify_fused_phase_cut(
-                &sir_eu,
-                &merge_provenance,
-                first_ff_unit,
-            )
-            .map_err(|message| ChainedEmitError::Analysis {
-                phase: "fused phase-cut verification",
-                message,
-            })?,
-        ),
-    };
-    let stable_suffix_entry = fused_phase_cut.as_ref().map(|cut| cut.ff_entry());
-    if let (Some(trace), Some(cut)) = (trace.as_deref_mut(), fused_phase_cut.as_ref()) {
-        trace.reactive_graph = crate::optimizer::coalescing::analyze_reactive_event_projection(
-            &sir_eu,
-            &merge_provenance,
-            cut,
-            four_state,
-            semantic_regions,
-        )
-        .map_err(|message| ChainedEmitError::Analysis {
-            phase: "reactive event projection",
-            message,
-        })?;
-    }
+    let (mut sir_eu, sir_boundaries) = crate::ir::merge_sir_eu_refs(&unit_refs);
     let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
         eu.verify_result()
             .map_err(|error| ChainedEmitError::Sir { phase, error })
     };
     verify_sir(&sir_eu, "before native StateSSA")?;
-    if let Some(cut) = fused_phase_cut.as_ref() {
-        let materialized = crate::optimizer::coalescing::materialize_static_event_clusters(
-            &mut sir_eu,
-            &merge_provenance,
-            cut,
-            four_state,
-        )
-        .map_err(|message| ChainedEmitError::Analysis {
-            phase: "static event materialization",
-            message,
-        })?;
-        if let Some(trace) = trace.as_deref_mut() {
-            trace
-                .reactive_graph
-                .push_str(&format!("static_materialized_clusters={materialized}\n"));
-        }
-        verify_sir(&sir_eu, "after static event materialization")?;
-    }
-    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(
-        &mut sir_eu,
-        stable_suffix_entry,
-    ) {
+    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
         verify_sir(&sir_eu, "after native working StateSSA")?;
         crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
         verify_sir(&sir_eu, "after native working StateSSA DCE")?;
     }
-    // Keep the older direct-memory rewrite only for non-promotable round trips.
+    // Eliminate exact local round trips which do not require global StateSSA.
     crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &sir_boundaries,
     );
     verify_sir(&sir_eu, "after native direct working rewrite")?;
-    if let Some(suffix_entry) = stable_suffix_entry {
-        let removed = crate::optimizer::coalescing::eliminate_unread_fused_comb_stores(
-            &mut sir_eu,
-            suffix_entry,
-        )
-        .map_err(|message| ChainedEmitError::Analysis {
-            phase: "fused dirty-exit store elimination",
-            message,
-        })?;
-        if removed != 0 {
-            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-            verify_sir(&sir_eu, "after fused dirty-exit Store DCE")?;
-        }
-    }
-    if ENABLE_CROSS_PHASE_STABLE_FORWARDING && let Some(suffix_entry) = stable_suffix_entry {
-        if crate::optimizer::coalescing::forward_stable_static_slots_from(&mut sir_eu, suffix_entry)
-        {
-            verify_sir(&sir_eu, "after native stable StateSSA")?;
-            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-            verify_sir(&sir_eu, "after native stable StateSSA DCE")?;
-        }
-    }
-    if let Some(feasibility_mode) = std::env::var_os("CELOX_FUSED_STATE_SSA_FEASIBILITY")
-        && let Some(suffix_entry) = stable_suffix_entry
-    {
-        let start = crate::timing::now();
-        let mut report =
-            crate::optimizer::coalescing::analyze_fused_state_feasibility(&sir_eu, suffix_entry)
-                .map_err(|message| ChainedEmitError::Analysis {
-                    phase: "fused StateSSA feasibility",
-                    message,
-                })?;
-        report.record_post_drop_memory();
-        eprintln!(
-            "[fused-state-ssa-feasibility] label={label} {report} elapsed={:?}",
-            start.elapsed()
-        );
-        if feasibility_mode != "summary" {
-            for detail in report.detail_lines() {
-                if feasibility_mode == "profile" && !detail.starts_with("kind=plan-block ") {
-                    continue;
-                }
-                eprintln!("[fused-state-ssa-feasibility-range] label={label} {detail}");
-            }
-        }
-    }
     crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
         .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
-    if let Some(control_region_mode) = std::env::var_os("CELOX_CONTROL_REGION_FEASIBILITY")
-        && let Some((_, profile_blocks)) = state_layout_profile
-        && !profile_blocks.is_empty()
-    {
-        let start = crate::timing::now();
-        let report = crate::optimizer::coalescing::analyze_control_region_feasibility(
-            &sir_eu,
-            profile_blocks,
-        );
-        eprintln!(
-            "[control-region-feasibility] label={label} {report} elapsed={:?}",
-            start.elapsed()
-        );
-        if control_region_mode != "summary" {
-            let maximum_details = (control_region_mode == "top").then_some(10);
-            for detail in report
-                .detail_lines()
-                .take(maximum_details.unwrap_or(usize::MAX))
-            {
-                eprintln!("[control-region-feasibility-detail] label={label} {detail}");
-            }
-            if control_region_mode == "full" {
-                for detail in report.recipe_detail_lines() {
-                    eprintln!("[control-region-feasibility-recipe] label={label} {detail}");
-                }
-            }
-        }
-    }
     let mut lane_aggregate_coverage = None;
     let mut lane_aggregate_codegen_plan = None;
     let lane_aggregate_codegen =
@@ -5180,17 +4957,6 @@ fn emit_chained_eu_groups(
     }
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
-        if let Some((program_facts, profile_blocks)) = state_layout_profile
-            && !profile_blocks.is_empty()
-        {
-            trace.state_layout = crate::optimizer::coalescing::analyze_native_state_layout(
-                &sir_eu,
-                layout,
-                program_facts,
-                profile_blocks,
-            )
-            .to_string();
-        }
     }
     if let Some(start) = merge_start {
         let sir_insts: usize = sir_eu
@@ -5203,9 +4969,7 @@ fn emit_chained_eu_groups(
             units.len(),
             sir_eu.blocks.len(),
             sir_insts,
-            fused_phase_cut
-                .as_ref()
-                .map_or(0, |cut| cut.ff_block_count()),
+            0,
             start.elapsed()
         );
     }
@@ -5269,6 +5033,17 @@ fn emit_chained_eu_groups(
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
             mfunc.vregs.count(),
+            start.elapsed()
+        );
+    }
+    let compact_start = timing.then(crate::timing::now);
+    let compacted = super::mir_opt::compact_vregs(&mut mfunc);
+    if let Some(start) = compact_start {
+        eprintln!(
+            "[native-timing] emit_chained compact_vregs before={} after={} removed={} elapsed={:?}",
+            compacted.before,
+            compacted.after,
+            compacted.before - compacted.after,
             start.elapsed()
         );
     }
@@ -5988,7 +5763,10 @@ fn log_sir_width_stats(eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsolute
     let mut wide_slices = 0usize;
     let mut est_chunks = 0usize;
     let mut examples = Vec::new();
-    for block in eu.blocks.values() {
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable();
+    for block_id in block_ids {
+        let block = &eu.blocks[&block_id];
         for inst in &block.instructions {
             match inst {
                 SIRInstruction::Load(_, addr, offset, width) => {

@@ -1,6 +1,5 @@
 use crate::ir::*;
 use crate::optimizer::{PassOptions, ProgramPass, SirPass};
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 mod block_opt;
@@ -10,13 +9,7 @@ mod control_region_feasibility;
 pub mod cost_model;
 mod dead_working_stores;
 #[cfg(target_arch = "x86_64")]
-mod fused_state_feasibility;
-#[cfg(target_arch = "x86_64")]
-mod fused_state_plan;
-#[cfg(target_arch = "x86_64")]
 mod lane_aggregate_feasibility;
-#[cfg(target_arch = "x86_64")]
-mod native_state_layout_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
@@ -53,40 +46,11 @@ pub(crate) mod pass_tail_call_split;
 mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod placement_analysis;
-#[cfg(target_arch = "x86_64")]
-mod reactive_event_graph;
-#[cfg(target_arch = "x86_64")]
-mod reactive_phase;
 mod shared;
 mod sir_analysis;
 mod state_ssa;
 
 pub use pass_tail_call_split::TailCallChunk;
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) use native_state_layout_feasibility::{
-    ProgramStateAccessSummary, analyze_native_state_layout,
-};
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn analyze_control_region_feasibility(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    profile_blocks: &[(BlockId, u64)],
-) -> control_region_feasibility::ControlRegionFeasibilityReport {
-    control_region_feasibility::analyze(eu, profile_blocks)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn resident_memory_kib() -> Option<(usize, usize)> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let value = |name: &str| {
-        status.lines().find_map(|line| {
-            let value = line.strip_prefix(name)?;
-            value.split_ascii_whitespace().next()?.parse::<usize>().ok()
-        })
-    };
-    Some((value("VmRSS:")?, value("VmHWM:")?))
-}
 
 /// Keep explicit scalar stores only for small register-like arrays. Large
 /// arrays must remain free to coalesce reset/initialization runs before the
@@ -103,30 +67,13 @@ fn preserve_native_element_boundaries(
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    ff_entry: Option<BlockId>,
 ) -> bool {
-    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu, ff_entry)
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn forward_stable_static_slots_from(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    entry: BlockId,
-) -> bool {
-    pass_global_store_load_forwarding::forward_stable_static_slots_from(eu, entry)
+    pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
 }
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     pass_vectorize_concat::remove_dead_definitions(eu);
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn analyze_fused_state_feasibility(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    ff_entry: BlockId,
-) -> Result<fused_state_feasibility::FeasibilityReport, String> {
-    fused_state_feasibility::analyze(eu, ff_entry).map_err(|error| error.to_string())
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -136,50 +83,6 @@ pub(crate) fn analyze_lane_aggregate_feasibility(
     four_state: bool,
 ) -> Result<lane_aggregate_feasibility::LaneAggregateFeasibilityReport, String> {
     lane_aggregate_feasibility::analyze(eu, layout, four_state)
-}
-
-pub(crate) fn eliminate_unread_fused_comb_stores(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    ff_entry: BlockId,
-) -> Result<usize, String> {
-    pass_dead_store_elimination::eliminate_unread_fused_comb_stores(eu, ff_entry)
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn verify_fused_phase_cut<A>(
-    eu: &ExecutionUnit<A>,
-    provenance: &crate::ir::SirMergeProvenance,
-    first_ff_unit: usize,
-) -> Result<reactive_phase::FusedPhaseCut, String> {
-    reactive_phase::verify(eu, provenance, first_ff_unit)
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn analyze_reactive_event_projection(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    provenance: &crate::ir::SirMergeProvenance,
-    cut: &reactive_phase::FusedPhaseCut,
-    four_state: bool,
-    semantic_regions: Option<&crate::HashMap<crate::ir::VarAtomBase<AbsoluteAddr>, u64>>,
-) -> Result<String, String> {
-    reactive_event_graph::ReactiveEventProjection::analyze(
-        eu,
-        provenance,
-        cut,
-        four_state,
-        semantic_regions,
-    )
-    .map(|projection| projection.format_report())
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn materialize_static_event_clusters(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    provenance: &crate::ir::SirMergeProvenance,
-    cut: &reactive_phase::FusedPhaseCut,
-    four_state: bool,
-) -> Result<usize, String> {
-    reactive_event_graph::materialize_static_clusters(eu, provenance, cut, four_state)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -373,27 +276,48 @@ fn optimize_unit_groups_cached(
     passes: &ExecutionUnitPassManager,
     options: &PassOptions,
 ) {
-    let mut cache: crate::HashMap<String, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct UnitShape {
+        entry: BlockId,
+        blocks: usize,
+        registers: usize,
+        instructions: usize,
+    }
+
+    fn shape(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> Vec<UnitShape> {
+        units
+            .iter()
+            .map(|unit| UnitShape {
+                entry: unit.entry_block_id,
+                blocks: unit.blocks.len(),
+                registers: unit.register_map.len(),
+                instructions: unit
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum(),
+            })
+            .collect()
+    }
+
+    type UnitGroup = Vec<ExecutionUnit<RegionedAbsoluteAddr>>;
+    let mut cache: crate::HashMap<Vec<UnitShape>, Vec<(UnitGroup, UnitGroup)>> =
         crate::HashMap::default();
     for units in groups.values_mut() {
-        let key = unit_group_key(units);
-        if let Some(cached) = cache.get(&key) {
-            *units = cached.clone();
+        let key = shape(units);
+        if let Some((_, optimized)) = cache
+            .get(&key)
+            .and_then(|candidates| candidates.iter().find(|(source, _)| source == units))
+        {
+            *units = optimized.clone();
             continue;
         }
+        let source = units.clone();
         for eu in units.iter_mut() {
             passes.run(eu, options);
         }
-        cache.insert(key, units.clone());
+        cache.entry(key).or_default().push((source, units.clone()));
     }
-}
-
-fn unit_group_key(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> String {
-    let mut key = String::new();
-    for unit in units {
-        let _ = write!(&mut key, "{unit}");
-    }
-    key
 }
 
 fn optimize_unified_commit_groups(

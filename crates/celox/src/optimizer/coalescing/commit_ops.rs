@@ -83,6 +83,53 @@ fn resolve_forward_src_from_pred(
     None
 }
 
+#[derive(Default)]
+struct CommitMergePredecessors {
+    jump: Vec<BlockId>,
+    has_non_jump: bool,
+}
+
+fn commit_merge_predecessors(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<BlockId, CommitMergePredecessors> {
+    let mut result: HashMap<BlockId, CommitMergePredecessors> = HashMap::default();
+    for (&predecessor, block) in &eu.blocks {
+        match &block.terminator {
+            SIRTerminator::Jump(target, _) if *target != predecessor => {
+                result.entry(*target).or_default().jump.push(predecessor);
+            }
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                for target in [true_block.0, false_block.0] {
+                    if target != predecessor {
+                        result.entry(target).or_default().has_non_jump = true;
+                    }
+                }
+            }
+            SIRTerminator::Switch { cases, default, .. } => {
+                for target in cases
+                    .iter()
+                    .map(|case| case.target)
+                    .chain(std::iter::once(*default))
+                {
+                    if target != predecessor {
+                        result.entry(target).or_default().has_non_jump = true;
+                    }
+                }
+            }
+            SIRTerminator::Jump(..) | SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    for predecessors in result.values_mut() {
+        predecessors.jump.sort_unstable();
+        predecessors.jump.dedup();
+    }
+    result
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct DirectStableStoreHazards {
     ranges: HashMap<AbsoluteAddr, Vec<(usize, usize)>>,
@@ -496,34 +543,19 @@ pub(crate) fn inline_commit_forwarding_with_hazards(
 
 pub(super) fn split_wide_commits(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
+    let predecessors = commit_merge_predecessors(eu);
 
     for merge_id in block_ids {
         let Some(merge_block) = eu.blocks.get(&merge_id) else {
             continue;
         };
-
-        let mut jump_preds = Vec::new();
-        let mut has_non_jump_pred = false;
-        for (pred_id, pred_block) in &eu.blocks {
-            if *pred_id == merge_id {
-                continue;
-            }
-            match &pred_block.terminator {
-                SIRTerminator::Jump(dst, _) if *dst == merge_id => jump_preds.push(*pred_id),
-                SIRTerminator::Branch {
-                    true_block,
-                    false_block,
-                    ..
-                } if true_block.0 == merge_id || false_block.0 == merge_id => {
-                    has_non_jump_pred = true;
-                }
-                _ => {}
-            }
-        }
-
-        if has_non_jump_pred || jump_preds.is_empty() {
+        let Some(predecessors) = predecessors.get(&merge_id) else {
+            continue;
+        };
+        if predecessors.has_non_jump || predecessors.jump.is_empty() {
             continue;
         }
+        let jump_preds = &predecessors.jump;
 
         let mut replacements: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)> = Vec::new();
 
@@ -647,35 +679,19 @@ pub(crate) fn optimize_commit_sinking_with_hazards(
     hazards: &DirectStableStoreHazards,
 ) {
     let block_ids: Vec<_> = eu.blocks.keys().copied().collect();
+    let predecessors = commit_merge_predecessors(eu);
 
     for merge_id in block_ids {
         let Some(merge_block) = eu.blocks.get(&merge_id) else {
             continue;
         };
-
-        let mut has_non_jump_pred = false;
-        let mut jump_preds = Vec::new();
-
-        for (pred_id, pred_block) in &eu.blocks {
-            if *pred_id == merge_id {
-                continue;
-            }
-            match &pred_block.terminator {
-                SIRTerminator::Jump(dst, _) if *dst == merge_id => jump_preds.push(*pred_id),
-                SIRTerminator::Branch {
-                    true_block,
-                    false_block,
-                    ..
-                } if true_block.0 == merge_id || false_block.0 == merge_id => {
-                    has_non_jump_pred = true;
-                }
-                _ => {}
-            }
-        }
-
-        if has_non_jump_pred || jump_preds.is_empty() {
+        let Some(predecessors) = predecessors.get(&merge_id) else {
+            continue;
+        };
+        if predecessors.has_non_jump || predecessors.jump.is_empty() {
             continue;
         }
+        let jump_preds = &predecessors.jump;
 
         let mut sinkable = Vec::new();
 
@@ -696,7 +712,7 @@ pub(crate) fn optimize_commit_sinking_with_hazards(
             let mut pred_sources = Vec::new();
             let mut ok = true;
 
-            for pred_id in &jump_preds {
+            for pred_id in jump_preds {
                 let Some(pred_block) = eu.blocks.get(pred_id) else {
                     ok = false;
                     break;
@@ -754,6 +770,7 @@ pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_bigint::BigUint;
     use veryl_analyzer::ir::VarId;
 
     fn addr(region: u32) -> RegionedAbsoluteAddr {
@@ -963,5 +980,78 @@ mod tests {
         ];
 
         assert!(direct_stable_store_hazards(&eu).overlaps(stable.absolute_addr(), 0, 8));
+    }
+
+    #[test]
+    fn switch_predecessor_prevents_commit_sinking() {
+        let stable = addr(STABLE_REGION);
+        let working = addr(WORKING_REGION);
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Switch {
+                    selector: RegisterId(0),
+                    cases: vec![SIRSwitchCase {
+                        value: BigUint::from(0u8),
+                        target: BlockId(2),
+                    }],
+                    default: BlockId(1),
+                },
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: vec![SIRInstruction::Store(
+                    working,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(1),
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                terminator: SIRTerminator::Jump(BlockId(2), Vec::new()),
+            },
+        );
+        let commit = SIRInstruction::Commit(working, stable, SIROffset::Static(0), 8, Vec::new());
+        blocks.insert(
+            BlockId(2),
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: vec![commit.clone()],
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map: [
+                (
+                    RegisterId(0),
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (RegisterId(1), RegisterType::Logic { width: 8 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        optimize_commit_sinking(&mut eu);
+
+        assert_eq!(eu.blocks[&BlockId(2)].instructions, vec![commit]);
+        assert!(matches!(
+            eu.blocks[&BlockId(1)].instructions.as_slice(),
+            [SIRInstruction::Store(address, ..)] if address.region == WORKING_REGION
+        ));
     }
 }

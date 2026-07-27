@@ -114,9 +114,10 @@ impl FfEirBuilder {
         module: &Module,
         instance_id: InstanceId,
         source_order: usize,
+        resets: Vec<crate::ir::AbsoluteAddr>,
     ) -> Result<Vec<EffectId>, FfEirBuildError> {
         self.finish_recording()?;
-        let process = ir.add_process(source_order);
+        let process = ir.add_process_with_resets(source_order, resets);
         let process_blocks = self.create_control_blocks(ir, process);
         let local_dataflow = self.analyze_local_liveness(module)?;
         let mut register_values = vec![None; self.registers.len()];
@@ -550,6 +551,23 @@ impl FfEirBuilder {
             }
             SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                 let object_ty = object_type(module, object)?;
+                let complete_range = object_range(instance_id, object, 0, object_ty.width)?;
+                if ir
+                    .comb_graph()
+                    .overlapping_definitions(complete_range)?
+                    .is_empty()
+                {
+                    return Ok(ir.add_value(Value {
+                        ty,
+                        scope: ValueScope::Process(process),
+                        region,
+                        kind: ValueKind::ReadPersistentMemory {
+                            object: complete_range.object,
+                            offset: lower_value_offset(offset, register_values)?,
+                            width,
+                        },
+                    }));
+                }
                 let base = self.lower_settled_static_range(
                     ir,
                     instance_id,
@@ -1230,7 +1248,7 @@ mod tests {
 
     use veryl_analyzer::{
         Analyzer, Context, attribute_table,
-        ir::{Component, Declaration, Ir},
+        ir::{Component, Declaration, Ir, Module},
         symbol_table,
     };
     use veryl_metadata::Metadata;
@@ -1238,14 +1256,40 @@ mod tests {
 
     use super::*;
     use crate::{
-        event_ir::{CombGraph, EventDomain},
+        event_ir::{CombGraph, EventDomain, EventProjection, lower_event_projection},
+        ir::SIRInstruction,
+        logic_tree::SLTNodeArena,
         parser::{BuildConfig, ff::FfParser},
     };
 
-    #[test]
-    fn lowers_air_branch_reads_and_stages_directly_to_verified_eir() {
+    fn analyze_module(code: &str) -> Module {
         symbol_table::clear();
         attribute_table::clear();
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut analyzer_ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut analyzer_ir),)
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&analyzer_ir).is_empty());
+        analyzer_ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn lowers_air_branch_reads_and_stages_directly_to_verified_eir() {
         let code = r#"
 module Top (
     clk: input clock,
@@ -1262,28 +1306,7 @@ module Top (
     }
 }
 "#;
-        let metadata = Metadata::create_default("prj").unwrap();
-        let parsed = Parser::parse(code, &"").unwrap();
-        let analyzer = Analyzer::new(&metadata);
-        let mut context = Context::default();
-        let mut analyzer_ir = Ir::default();
-        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
-        assert!(Analyzer::analyze_post_pass1().is_empty());
-        assert!(
-            analyzer
-                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut analyzer_ir),)
-                .is_empty()
-        );
-        assert!(Analyzer::analyze_post_pass2(&analyzer_ir).is_empty());
-
-        let module = analyzer_ir
-            .components
-            .into_iter()
-            .find_map(|component| match component {
-                Component::Module(module) => Some(module),
-                _ => None,
-            })
-            .unwrap();
+        let module = analyze_module(code);
         let declaration = module
             .declarations
             .iter()
@@ -1309,7 +1332,7 @@ module Top (
             Arc::new(CombGraph::default()),
         );
         let stages = builder
-            .lower_into(&mut event, &module, instance_id, 0)
+            .lower_into(&mut event, &module, instance_id, 0, Vec::new())
             .unwrap();
         event.add_effect(Effect {
             region: event.root_region(),
@@ -1332,6 +1355,108 @@ module Top (
                 .values()
                 .iter()
                 .any(|value| matches!(value.kind, ValueKind::ReadClockSnapshot(_)))
+        );
+    }
+
+    #[test]
+    fn dynamic_snapshot_memory_read_remains_a_narrow_element_load() {
+        let code = r#"
+module Top (
+    clk : input  clock,
+    addr: input  logic<20>,
+    q   : output logic<32>,
+) {
+    var mem: logic<32> [1048576];
+    always_ff (clk) {
+        q = mem[addr];
+    }
+}
+"#;
+        let module = analyze_module(code);
+        let declaration = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = FfEirBuilder::new();
+        parser.parse_ff_group(&[declaration], &mut builder).unwrap();
+
+        let instance_id = InstanceId(0);
+        let clock = AbsoluteAddr {
+            instance_id,
+            var_id: declaration.clock.id,
+        };
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock,
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let stages = builder
+            .lower_into(&mut event, &module, instance_id, 0, Vec::new())
+            .unwrap();
+        event.add_effect(Effect {
+            region: event.root_region(),
+            predecessors: stages.clone(),
+            kind: EffectKind::CommitFfState { stages },
+        });
+        event.verify().unwrap();
+
+        let memory = event
+            .values()
+            .iter()
+            .find_map(|value| match &value.kind {
+                ValueKind::ReadPersistentMemory {
+                    object,
+                    offset:
+                        ValueOffset::Element {
+                            element_width: 32, ..
+                        },
+                    width: 32,
+                } => Some(object.var_id),
+                _ => None,
+            })
+            .expect("dynamic array read must remain an element-addressed memory read");
+        assert!(
+            event.values().iter().all(|value| value.ty.width <= 64),
+            "the complete 32-Mibit memory must not become an EIR SSA value"
+        );
+
+        let sir = lower_event_projection(
+            &event,
+            EventProjection::FusedClock,
+            &SLTNodeArena::new(),
+            false,
+            clock,
+        )
+        .unwrap();
+        assert!(
+            sir.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Load(
+                        _,
+                        address,
+                        SIROffset::Element {
+                            element_width: 32,
+                            ..
+                        },
+                        32,
+                    ) if address.var_id == memory
+                ))
+        );
+        assert!(
+            sir.register_map
+                .values()
+                .all(|register| register.width() <= 64),
+            "the complete 32-Mibit memory must not become a SIR register"
         );
     }
 }

@@ -1468,6 +1468,91 @@ impl MInst {
         }
     }
 
+    /// Returns the destination VReg by mutable reference, if any.
+    ///
+    /// This is used by whole-function VReg renumbering. Keeping destination
+    /// mutation beside [`Self::def`] makes it impossible for the compactor to
+    /// silently omit a defining opcode while still compiling successfully.
+    pub fn def_mut(&mut self) -> Option<&mut VReg> {
+        match self {
+            MInst::Mov { dst, .. }
+            | MInst::Mov32 { dst, .. }
+            | MInst::LoadImm { dst, .. }
+            | MInst::Scratch { dst }
+            | MInst::LoadConstantTableAddr { dst, .. }
+            | MInst::Load { dst, .. }
+            | MInst::LoadPtr { dst, .. }
+            | MInst::LoadIndexed { dst, .. }
+            | MInst::PackedLaneCompare { dst, .. }
+            | MInst::PackedByteAffineCompare { dst, .. }
+            | MInst::LaneAggregate { dst, .. }
+            | MInst::LoadPtrIndexed { dst, .. }
+            | MInst::Add { dst, .. }
+            | MInst::Add32 { dst, .. }
+            | MInst::Sub { dst, .. }
+            | MInst::Sub32 { dst, .. }
+            | MInst::Mul { dst, .. }
+            | MInst::Mul32 { dst, .. }
+            | MInst::UMulHi { dst, .. }
+            | MInst::And { dst, .. }
+            | MInst::And32 { dst, .. }
+            | MInst::Or { dst, .. }
+            | MInst::Or32 { dst, .. }
+            | MInst::Xor { dst, .. }
+            | MInst::Xor32 { dst, .. }
+            | MInst::Shr { dst, .. }
+            | MInst::Shl { dst, .. }
+            | MInst::Sar { dst, .. }
+            | MInst::AndImm { dst, .. }
+            | MInst::AndImm32 { dst, .. }
+            | MInst::OrImm { dst, .. }
+            | MInst::ShrImm { dst, .. }
+            | MInst::ShlImm { dst, .. }
+            | MInst::SarImm { dst, .. }
+            | MInst::AddImm { dst, .. }
+            | MInst::SubImm { dst, .. }
+            | MInst::Cmp { dst, .. }
+            | MInst::CmpImm { dst, .. }
+            | MInst::UDiv { dst, .. }
+            | MInst::URem { dst, .. }
+            | MInst::SDiv { dst, .. }
+            | MInst::SRem { dst, .. }
+            | MInst::BitNot { dst, .. }
+            | MInst::Neg { dst, .. }
+            | MInst::Popcnt { dst, .. }
+            | MInst::Bsf { dst, .. }
+            | MInst::Bsr { dst, .. }
+            | MInst::BsrOr { dst, .. }
+            | MInst::Pext { dst, .. }
+            | MInst::Pdep { dst, .. }
+            | MInst::Select { dst, .. }
+            | MInst::CmpSelect { dst, .. }
+            | MInst::CmpImmSelect { dst, .. }
+            | MInst::GuardedCmpSelect { dst, .. } => Some(dst),
+
+            MInst::Store { .. }
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
+            | MInst::StorePtr { .. }
+            | MInst::ReleaseStorePtr { .. }
+            | MInst::StoreIndexed { .. }
+            | MInst::OrStoreIndexed { .. }
+            | MInst::StorePtrIndexed { .. }
+            | MInst::ReleaseStorePtrIndexed { .. }
+            | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
+            | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
+            | MInst::SparseCommitWorklist { .. }
+            | MInst::Branch { .. }
+            | MInst::BranchPred { .. }
+            | MInst::JumpTable { .. }
+            | MInst::Jump { .. }
+            | MInst::Return
+            | MInst::ReturnError { .. } => None,
+        }
+    }
+
     /// Returns all VRegs used (read) by this instruction.
     /// Returns the VRegs used by this instruction (max 3, no heap allocation).
     pub fn uses(&self) -> Uses {

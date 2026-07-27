@@ -406,6 +406,64 @@ module Top (
 }
 
 #[test]
+fn clock_eir_comb_memory_demand_lowers_to_a_narrow_element_load() {
+    let program = setup_and_parse(
+        r#"
+module Top (
+    clk  : input  clock,
+    we   : input  logic,
+    waddr: input  logic<20>,
+    raddr: input  logic<20>,
+    din  : input  logic<32>,
+    q    : output logic<32>,
+) {
+    var mem : logic<32> [1048576];
+    let read: logic<32> = mem[raddr];
+
+    always_ff (clk) {
+        if we {
+            mem[waddr] = din;
+        }
+        q = read;
+    }
+}
+"#,
+        "Top",
+    );
+
+    let units = program
+        .eval_apply_ffs
+        .values()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(units.len(), 1);
+    let unit = units[0];
+    assert!(
+        unit.register_map
+            .values()
+            .all(|register| register.width() <= 64),
+        "a conservative memory dependency must not materialize the complete 32-Mibit array"
+    );
+    assert!(
+        unit.blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                instruction,
+                crate::ir::SIRInstruction::Load(
+                    _,
+                    _,
+                    crate::ir::SIROffset::Element {
+                        element_width: 32,
+                        ..
+                    },
+                    32,
+                )
+            ))
+    );
+}
+
+#[test]
 fn test_instances_inherit_module_boundaries() {
     let code = r#"
     module Child (

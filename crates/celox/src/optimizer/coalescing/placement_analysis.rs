@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use super::shared::def_reg;
-use super::state_ssa::{MemoryVersionId, StateFragment, StatePhaseMap, StateSsa, StateSsaError};
+use super::state_ssa::{MemoryVersionId, StateFragment, StateSsa, StateSsaError};
 use crate::HashMap;
 use crate::ir::cfg::{SirCfg, SirCfgError};
 use crate::ir::{
@@ -757,14 +757,9 @@ fn analyze_state_versions(
             Ok((
                 region,
                 if two_state {
-                    StateSsa::analyze_all_loads_two_state(
-                        eu,
-                        cfg,
-                        region,
-                        &StatePhaseMap::default(),
-                    )?
+                    StateSsa::analyze_all_loads_two_state(eu, cfg, region)?
                 } else {
-                    StateSsa::analyze_all_loads(eu, cfg, region, &StatePhaseMap::default())?
+                    StateSsa::analyze_all_loads(eu, cfg, region)?
                 },
             ))
         })

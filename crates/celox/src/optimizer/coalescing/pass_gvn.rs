@@ -10,7 +10,7 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
-use super::state_ssa::{MemoryVersionId, StateFragment, StatePhaseMap, StateSsa};
+use super::state_ssa::{MemoryVersionId, StateFragment, StateSsa};
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
@@ -67,9 +67,7 @@ fn structural_load_versions(
     regions.sort_unstable();
     for region in regions {
         let eligible = &candidates[&region];
-        let Ok(state) =
-            StateSsa::analyze_selected_loads(eu, cfg, region, eligible, &StatePhaseMap::default())
-        else {
+        let Ok(state) = StateSsa::analyze_selected_loads(eu, cfg, region, eligible) else {
             continue;
         };
         for &block_id in &cfg.block_ids {

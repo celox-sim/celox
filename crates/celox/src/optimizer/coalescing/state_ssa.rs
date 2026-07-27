@@ -1,4 +1,4 @@
-//! Phase-aware MemorySSA facts for exact SIR state fragments.
+//! MemorySSA facts for exact SIR state fragments.
 //!
 //! SIR registers carry one logical value.  A `Logic` register therefore moves
 //! the value and unknown-mask planes atomically; the plane tag below records
@@ -82,99 +82,6 @@ impl StateFragment {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StatePhase {
-    Unclassified,
-    Comb,
-    FfStableInput,
-    FfWorking,
-    FfStableApply,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum AccessRole {
-    Read,
-    Write,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct StatePhaseMap {
-    ff_blocks: HashSet<BlockId>,
-    classified: bool,
-}
-
-impl StatePhaseMap {
-    pub fn fused(
-        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        cfg: &SirCfg,
-        ff_entry: BlockId,
-    ) -> Result<Self, StateSsaError> {
-        let Some(ff_entry_index) = cfg.block_index(ff_entry) else {
-            return Err(StateSsaError::MissingPhaseEntry(ff_entry));
-        };
-        let mut ff_indices = vec![false; cfg.block_ids.len()];
-        let mut work = vec![ff_entry_index];
-        ff_indices[ff_entry_index] = true;
-        while let Some(block) = work.pop() {
-            for &successor in &cfg.successors[block] {
-                if !ff_indices[successor] {
-                    ff_indices[successor] = true;
-                    work.push(successor);
-                }
-            }
-        }
-
-        // The phase boundary may have several incoming comb returns, but no
-        // later FF block may be entered by bypassing that boundary.
-        for (block, &is_ff) in ff_indices.iter().enumerate() {
-            if !is_ff || block == ff_entry_index {
-                continue;
-            }
-            if cfg.predecessors[block]
-                .iter()
-                .any(|predecessor| !ff_indices[*predecessor])
-            {
-                return Err(StateSsaError::PhaseBypass(cfg.block_ids[block]));
-            }
-        }
-        if !eu.blocks.contains_key(&ff_entry) {
-            return Err(StateSsaError::MissingPhaseEntry(ff_entry));
-        }
-        Ok(Self {
-            ff_blocks: ff_indices
-                .iter()
-                .enumerate()
-                .filter_map(|(index, is_ff)| is_ff.then_some(cfg.block_ids[index]))
-                .collect(),
-            classified: true,
-        })
-    }
-
-    pub fn allows_ff_optimization(&self, block: BlockId) -> bool {
-        !self.classified || self.ff_blocks.contains(&block)
-    }
-
-    pub fn ff_blocks(&self) -> Option<&HashSet<BlockId>> {
-        self.classified.then_some(&self.ff_blocks)
-    }
-
-    fn phase(&self, block: BlockId, region: u32, role: AccessRole) -> StatePhase {
-        if !self.classified {
-            return StatePhase::Unclassified;
-        }
-        if !self.ff_blocks.contains(&block) {
-            return StatePhase::Comb;
-        }
-        if region == WORKING_REGION || region == SPARSE_WORKING_REGION {
-            return StatePhase::FfWorking;
-        }
-        match role {
-            AccessRole::Read => StatePhase::FfStableInput,
-            AccessRole::Write => StatePhase::FfStableApply,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct MemoryAccessId(pub usize);
 
@@ -214,7 +121,6 @@ pub(super) struct MemoryAccess {
     pub slot: usize,
     pub block: Option<BlockId>,
     pub instruction: Option<usize>,
-    pub phase: StatePhase,
     pub kind: MemoryAccessKind,
 }
 
@@ -234,7 +140,6 @@ struct RawSlot {
     ty: Option<RegisterType>,
     invalid: bool,
     has_load: bool,
-    has_commit_use: bool,
     has_store: bool,
     has_effectful_store: bool,
     has_kill: bool,
@@ -270,7 +175,6 @@ impl RawSlot {
 struct UseEffect {
     slot: usize,
     destination: Option<RegisterId>,
-    phase: StatePhase,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,7 +189,6 @@ enum DefEffectKind {
 #[derive(Debug, Clone, Copy)]
 struct DefEffect {
     slot: usize,
-    phase: StatePhase,
     kind: DefEffectKind,
 }
 
@@ -309,13 +212,10 @@ pub(super) struct StateSsa {
     read_versions: HashMap<(BlockId, usize, RegisterId), (usize, MemoryVersionId)>,
     entry_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
     exit_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
-    definitions_by_block_slot: HashMap<(BlockId, usize), Vec<(usize, MemoryVersionId)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StateSsaError {
-    MissingPhaseEntry(BlockId),
-    PhaseBypass(BlockId),
     MissingRegister(RegisterId),
     MissingReachingVersion { block: BlockId, slot: usize },
     MissingPhiIncoming { block: BlockId, slot: usize },
@@ -325,14 +225,6 @@ pub(super) enum StateSsaError {
 impl fmt::Display for StateSsaError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingPhaseEntry(block) => {
-                write!(formatter, "state phase entry b{} is absent", block.0)
-            }
-            Self::PhaseBypass(block) => write!(
-                formatter,
-                "state phase boundary is bypassed by an edge into b{}",
-                block.0
-            ),
             Self::MissingRegister(register) => {
                 write!(
                     formatter,
@@ -444,47 +336,13 @@ fn phi_blocks_for_slot(cfg: &SirCfg, facts: &RawSlot, live_in: &[bool]) -> Vec<u
 }
 
 impl StateSsa {
-    /// MemorySSA version visible immediately before one instruction.
-    ///
-    /// This is the phase-correct query used by sink-local materialization:
-    /// a Load may move to the sink only when its original reaching version is
-    /// exactly the version returned here.
-    pub(super) fn version_before(
-        &self,
-        block: BlockId,
-        instruction: usize,
-        slot: usize,
-    ) -> Option<MemoryVersionId> {
-        let entry = *self.entry_versions.get(&block)?.get(slot)?;
-        let Some(definitions) = self.definitions_by_block_slot.get(&(block, slot)) else {
-            return Some(entry);
-        };
-        let index = definitions.partition_point(|(site, _)| *site < instruction);
-        Some(
-            index
-                .checked_sub(1)
-                .map_or(entry, |index| definitions[index].1),
-        )
-    }
-
     pub fn analyze(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,
         region: u32,
         eligible_load_blocks: Option<&HashSet<BlockId>>,
-        phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(
-            eu,
-            cfg,
-            region,
-            eligible_load_blocks,
-            None,
-            phases,
-            false,
-            false,
-            false,
-        )
+        Self::analyze_selected(eu, cfg, region, eligible_load_blocks, None, false, false)
     }
 
     /// Build state versions for every exact load shape, including state which
@@ -496,9 +354,8 @@ impl StateSsa {
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,
         region: u32,
-        phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true, false, false)
+        Self::analyze_selected(eu, cfg, region, None, None, true, false)
     }
 
     /// Placement analysis for a two-state native compilation. `bit` and
@@ -509,23 +366,8 @@ impl StateSsa {
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,
         region: u32,
-        phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true, true, false)
-    }
-
-    /// Complete state-use graph for a reactive event projection.
-    ///
-    /// A Commit source is a MemorySSA use of the final staged StateVersion,
-    /// even when no ordinary SIR Load reads that fragment.
-    pub fn analyze_event_projection(
-        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        cfg: &SirCfg,
-        region: u32,
-        phases: &StatePhaseMap,
-        two_state: bool,
-    ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(eu, cfg, region, None, None, phases, true, two_state, true)
+        Self::analyze_selected(eu, cfg, region, None, None, true, true)
     }
 
     /// Build versions only for exact loads which have a prospective consumer.
@@ -537,19 +379,8 @@ impl StateSsa {
         cfg: &SirCfg,
         region: u32,
         eligible_loads: &HashSet<RegisterId>,
-        phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(
-            eu,
-            cfg,
-            region,
-            None,
-            Some(eligible_loads),
-            phases,
-            true,
-            false,
-            false,
-        )
+        Self::analyze_selected(eu, cfg, region, None, Some(eligible_loads), true, false)
     }
 
     /// Sparse selected-load analysis using the native two-state storage
@@ -561,19 +392,8 @@ impl StateSsa {
         cfg: &SirCfg,
         region: u32,
         eligible_loads: &HashSet<RegisterId>,
-        phases: &StatePhaseMap,
     ) -> Result<Self, StateSsaError> {
-        Self::analyze_selected(
-            eu,
-            cfg,
-            region,
-            None,
-            Some(eligible_loads),
-            phases,
-            true,
-            true,
-            false,
-        )
+        Self::analyze_selected(eu, cfg, region, None, Some(eligible_loads), true, true)
     }
 
     fn analyze_selected(
@@ -582,10 +402,8 @@ impl StateSsa {
         region: u32,
         eligible_load_blocks: Option<&HashSet<BlockId>>,
         eligible_loads: Option<&HashSet<RegisterId>>,
-        phases: &StatePhaseMap,
         include_read_only: bool,
         two_state: bool,
-        include_commit_uses: bool,
     ) -> Result<Self, StateSsaError> {
         let mut raw = HashMap::<StateLocation, RawSlot>::default();
 
@@ -659,38 +477,8 @@ impl StateSsa {
                         .or_default()
                         .record_type(ty, *width, two_state);
                     }
-                    SIRInstruction::Commit(source, _, SIROffset::Static(bit_offset), width, _)
-                        if include_commit_uses && source.region == region =>
-                    {
-                        raw.entry(StateLocation {
-                            addr: *source,
-                            bit_offset: *bit_offset,
-                            width: *width,
-                            dynamic: false,
-                        })
-                        .or_default()
-                        .has_commit_use = true;
-                    }
                     _ => {}
                 }
-            }
-        }
-
-        // Commit has no result register carrying its source type. Prefer an
-        // exact Load/Store type for the same fragment; a commit-only fragment
-        // uses the physical two/four-state compilation mode.
-        for (location, facts) in &mut raw {
-            if facts.has_commit_use && facts.ty.is_none() {
-                facts.ty = Some(if two_state {
-                    RegisterType::Bit {
-                        width: location.width,
-                        signed: false,
-                    }
-                } else {
-                    RegisterType::Logic {
-                        width: location.width,
-                    }
-                });
             }
         }
 
@@ -794,7 +582,6 @@ impl StateSsa {
                             instruction_effects.uses.push(UseEffect {
                                 slot,
                                 destination: Some(*destination),
-                                phase: phases.phase(block_id, region, AccessRole::Read),
                             });
                         }
                         for slot in overlapping_slots(&locations_by_address, *addr, offset, *width)
@@ -826,7 +613,6 @@ impl StateSsa {
                             defined.insert(slot);
                             instruction_effects.defs.push(DefEffect {
                                 slot,
-                                phase: phases.phase(block_id, region, AccessRole::Write),
                                 kind: DefEffectKind::Exact {
                                     source: *source,
                                     observable: !triggers.is_empty() || !capture_sites.is_empty(),
@@ -841,7 +627,6 @@ impl StateSsa {
                                 defined.insert(slot);
                                 instruction_effects.defs.push(DefEffect {
                                     slot,
-                                    phase: phases.phase(block_id, region, AccessRole::Write),
                                     kind: DefEffectKind::Kill,
                                 });
                             }
@@ -866,11 +651,9 @@ impl StateSsa {
                                 facts[slot].escapes = true;
                             }
                             if let Some(slot) = exact {
-                                facts[slot].has_load |= include_commit_uses;
                                 instruction_effects.uses.push(UseEffect {
                                     slot,
                                     destination: None,
-                                    phase: phases.phase(block_id, region, AccessRole::Read),
                                 });
                             }
                         }
@@ -886,7 +669,6 @@ impl StateSsa {
                                 defined.insert(slot);
                                 instruction_effects.defs.push(DefEffect {
                                     slot,
-                                    phase: phases.phase(block_id, region, AccessRole::Write),
                                     kind: DefEffectKind::Kill,
                                 });
                             }
@@ -977,7 +759,6 @@ impl StateSsa {
                     Some(UseEffect {
                         slot: remap[effect.slot]?,
                         destination: effect.destination,
-                        phase: effect.phase,
                     })
                 })
                 .collect();
@@ -987,7 +768,6 @@ impl StateSsa {
                 .filter_map(|effect| {
                     Some(DefEffect {
                         slot: remap[effect.slot]?,
-                        phase: effect.phase,
                         kind: effect.kind,
                     })
                 })
@@ -1002,23 +782,8 @@ impl StateSsa {
             read_versions: HashMap::default(),
             entry_versions: HashMap::default(),
             exit_versions: HashMap::default(),
-            definitions_by_block_slot: HashMap::default(),
         };
         state_ssa.build_access_graph(eu, cfg)?;
-        for access in &state_ssa.accesses {
-            if access.kind.defines_version()
-                && let (Some(block), Some(instruction)) = (access.block, access.instruction)
-            {
-                state_ssa
-                    .definitions_by_block_slot
-                    .entry((block, access.slot))
-                    .or_default()
-                    .push((instruction, access.id));
-            }
-        }
-        for definitions in state_ssa.definitions_by_block_slot.values_mut() {
-            definitions.sort_unstable_by_key(|(instruction, _)| *instruction);
-        }
         state_ssa.verify(cfg)?;
         Ok(state_ssa)
     }
@@ -1028,7 +793,6 @@ impl StateSsa {
         slot: usize,
         block: Option<BlockId>,
         instruction: Option<usize>,
-        phase: StatePhase,
         kind: MemoryAccessKind,
     ) -> MemoryAccessId {
         let id = MemoryAccessId(self.accesses.len());
@@ -1037,7 +801,6 @@ impl StateSsa {
             slot,
             block,
             instruction,
-            phase,
             kind,
         });
         id
@@ -1049,15 +812,7 @@ impl StateSsa {
         cfg: &SirCfg,
     ) -> Result<(), StateSsaError> {
         let live_versions = (0..self.slots.len())
-            .map(|slot| {
-                self.push_access(
-                    slot,
-                    None,
-                    None,
-                    StatePhase::Unclassified,
-                    MemoryAccessKind::LiveOnEntry,
-                )
-            })
+            .map(|slot| self.push_access(slot, None, None, MemoryAccessKind::LiveOnEntry))
             .collect::<Vec<_>>();
         let mut phi_accesses = vec![Vec::<(usize, MemoryAccessId)>::new(); cfg.block_ids.len()];
         for slot in 0..self.slots.len() {
@@ -1066,7 +821,6 @@ impl StateSsa {
                     slot,
                     Some(cfg.block_ids[block]),
                     None,
-                    StatePhase::Unclassified,
                     MemoryAccessKind::Phi {
                         incoming: Vec::new(),
                     },
@@ -1090,7 +844,6 @@ impl StateSsa {
                         effect.slot,
                         Some(block_id),
                         Some(instruction),
-                        effect.phase,
                         MemoryAccessKind::Use {
                             destination: effect.destination,
                             reaching: live_versions[effect.slot],
@@ -1107,13 +860,7 @@ impl StateSsa {
                             reaching: live_versions[effect.slot],
                         },
                     };
-                    let id = self.push_access(
-                        effect.slot,
-                        Some(block_id),
-                        Some(instruction),
-                        effect.phase,
-                        kind,
-                    );
+                    let id = self.push_access(effect.slot, Some(block_id), Some(instruction), kind);
                     ids.defs.push(id);
                 }
                 instruction_accesses.insert((block_id, instruction), ids);
@@ -1516,14 +1263,7 @@ mod tests {
             .into_iter()
             .collect::<HashSet<_>>();
 
-        let state = StateSsa::analyze_selected_loads(
-            &eu,
-            &cfg,
-            STABLE_REGION,
-            &eligible,
-            &StatePhaseMap::default(),
-        )
-        .unwrap();
+        let state = StateSsa::analyze_selected_loads(&eu, &cfg, STABLE_REGION, &eligible).unwrap();
 
         assert!(state.slots.is_empty());
         assert!(state.read_version(BlockId(0), 1, RegisterId(1)).is_none());
@@ -1553,18 +1293,10 @@ mod tests {
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
 
-        let four_state =
-            StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION, &StatePhaseMap::default())
-                .unwrap();
+        let four_state = StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION).unwrap();
         assert!(four_state.slots.is_empty());
 
-        let two_state = StateSsa::analyze_all_loads_two_state(
-            &eu,
-            &cfg,
-            STABLE_REGION,
-            &StatePhaseMap::default(),
-        )
-        .unwrap();
+        let two_state = StateSsa::analyze_all_loads_two_state(&eu, &cfg, STABLE_REGION).unwrap();
         assert_eq!(two_state.slots.len(), 1);
         assert!(matches!(
             two_state.slots[0].fragment.plane,
@@ -1575,56 +1307,6 @@ mod tests {
                 .read_version(BlockId(0), 1, RegisterId(1))
                 .is_some()
         );
-    }
-
-    #[test]
-    fn labels_fused_comb_and_ff_state_accesses() {
-        let stable = address(STABLE_REGION, 0);
-        let eu = unit(
-            vec![
-                block(
-                    0,
-                    vec![SIRInstruction::Store(
-                        stable,
-                        SIROffset::Static(0),
-                        8,
-                        RegisterId(0),
-                        Vec::new(),
-                        Vec::new(),
-                    )],
-                    SIRTerminator::Jump(BlockId(1), Vec::new()),
-                ),
-                block(
-                    1,
-                    vec![SIRInstruction::Load(
-                        RegisterId(1),
-                        stable,
-                        SIROffset::Static(0),
-                        8,
-                    )],
-                    SIRTerminator::Return,
-                ),
-            ],
-            [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))],
-        );
-        let cfg = SirCfg::analyze(&eu).unwrap();
-        let phases = StatePhaseMap::fused(&eu, &cfg, BlockId(1)).unwrap();
-        let eligible = HashSet::from_iter([BlockId(1)]);
-        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, Some(&eligible), &phases).unwrap();
-
-        assert_eq!(state.slots.len(), 1);
-        let definition = state
-            .accesses
-            .iter()
-            .find(|access| matches!(access.kind, MemoryAccessKind::Def { .. }))
-            .unwrap();
-        let use_access = use_access(&state, RegisterId(1));
-        assert_eq!(definition.phase, StatePhase::Comb);
-        assert_eq!(use_access.phase, StatePhase::FfStableInput);
-        assert!(matches!(
-            use_access.kind,
-            MemoryAccessKind::Use { reaching, .. } if reaching == definition.id
-        ));
     }
 
     #[test]
@@ -1669,9 +1351,7 @@ mod tests {
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
 
-        let state =
-            StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION, &StatePhaseMap::default())
-                .unwrap();
+        let state = StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION).unwrap();
 
         let (slot, original) = state
             .read_version(BlockId(0), 0, RegisterId(0))
@@ -1739,8 +1419,7 @@ mod tests {
             ],
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, None).unwrap();
 
         assert_eq!(state.slots.len(), 1);
         assert!(state.slots[0].has_kill);
@@ -1825,8 +1504,7 @@ mod tests {
             ],
         );
         let cfg = SirCfg::analyze_forward(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, None).unwrap();
 
         assert_eq!(state.slots[0].phi_blocks, [cfg.index[&BlockId(3)]]);
         let phi = state
@@ -1895,8 +1573,7 @@ mod tests {
             ],
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, None).unwrap();
         let first_slot = state
             .slots
             .iter()
@@ -1969,8 +1646,7 @@ mod tests {
             (0..4).map(|register| (RegisterId(register), bit(8))),
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, None).unwrap();
 
         assert_eq!(state.slots.len(), 2);
         assert!(state.slots.iter().all(|slot| !slot.has_kill));
@@ -2030,8 +1706,7 @@ mod tests {
             ],
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, STABLE_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, STABLE_REGION, None).unwrap();
 
         assert_eq!(state.slots[0].phi_blocks, [cfg.index[&BlockId(1)]]);
         let phi = state
@@ -2079,8 +1754,7 @@ mod tests {
             ],
         );
         let cfg = SirCfg::analyze(&eu).unwrap();
-        let state =
-            StateSsa::analyze(&eu, &cfg, WORKING_REGION, None, &StatePhaseMap::default()).unwrap();
+        let state = StateSsa::analyze(&eu, &cfg, WORKING_REGION, None).unwrap();
 
         assert_eq!(state.slots.len(), 1);
         assert_eq!(
@@ -2091,33 +1765,6 @@ mod tests {
         assert!(
             !state.slots[0].escapes,
             "a stable-region read is independent"
-        );
-    }
-
-    #[test]
-    fn rejects_a_fused_phase_bypass() {
-        let condition = RegisterId(0);
-        let eu = unit(
-            vec![
-                block(
-                    0,
-                    Vec::new(),
-                    SIRTerminator::Branch {
-                        cond: condition,
-                        true_block: (BlockId(1), Vec::new()),
-                        false_block: (BlockId(2), Vec::new()),
-                    },
-                ),
-                block(1, Vec::new(), SIRTerminator::Jump(BlockId(2), Vec::new())),
-                block(2, Vec::new(), SIRTerminator::Return),
-            ],
-            [(condition, bit(1))],
-        );
-        let cfg = SirCfg::analyze(&eu).unwrap();
-
-        assert_eq!(
-            StatePhaseMap::fused(&eu, &cfg, BlockId(1)).unwrap_err(),
-            StateSsaError::PhaseBypass(BlockId(2))
         );
     }
 }

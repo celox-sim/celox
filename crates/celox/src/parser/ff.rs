@@ -213,12 +213,6 @@ pub enum Domain {
     Ff, // TODO: add clock
 }
 
-#[derive(Default)]
-pub struct FfGroupParseResult {
-    pub targets: Vec<VarAtomBase<crate::ir::RegionedVarAddr>>,
-    pub dynamic_write_vars: HashSet<VarId>,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ModuleFfEirProcess {
     pub trigger_set: TriggerSet<VarId>,
@@ -231,7 +225,6 @@ pub struct FfParser<'a> {
     stack: VecDeque<RegisterId>,
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
-    dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
     local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<crate::ir::BlockId>,
@@ -265,7 +258,6 @@ impl<'a> FfParser<'a> {
             stack: VecDeque::new(),
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
-            dynamic_write_vars: HashSet::default(),
             local_working_vars,
             local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
@@ -2073,14 +2065,13 @@ impl<'a> FfParser<'a> {
         &mut self,
         decls: &[&FfDeclaration],
         ir_builder: &mut impl FfBuilder,
-    ) -> Result<FfGroupParseResult, ParserError> {
+    ) -> Result<(), ParserError> {
         if decls.is_empty() {
-            return Ok(FfGroupParseResult::default());
+            return Ok(());
         }
 
         self.defined_ranges.clear();
         self.dynamic_defined_vars.clear();
-        self.dynamic_write_vars.clear();
         self.local_let_values.clear();
         self.reset = decls[0].reset.clone();
 
@@ -2125,10 +2116,7 @@ impl<'a> FfParser<'a> {
             )?;
         }
 
-        Ok(FfGroupParseResult {
-            targets,
-            dynamic_write_vars: self.dynamic_write_vars.clone(),
-        })
+        Ok(())
     }
 
     fn bound_const_value(bound: &ForBound) -> Option<usize> {

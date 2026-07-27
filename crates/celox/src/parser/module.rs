@@ -2,10 +2,9 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crate::ir::{
-    BinaryOp, BitAccess, BlockId, CombObserver, ExecutionUnit, GlueAddr, GlueBlock,
-    InitialMemoryData, InitialMemoryWriteRun, ModuleId, ModuleInitialMemoryValue, RegionedVarAddr,
-    RuntimeEventSite, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SPARSE_WORKING_REGION,
-    STABLE_REGION, SimModule, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, CombObserver, GlueAddr, GlueBlock, InitialMemoryData,
+    InitialMemoryWriteRun, ModuleId, ModuleInitialMemoryValue, RuntimeEventSite, SimModule,
+    TriggerSet, UnaryOp, VarAtomBase,
 };
 
 use crate::logic_tree::{
@@ -1042,33 +1041,12 @@ impl<'a> ModuleParser<'a> {
             }
         }
 
-        // 2. Build FF blocks per trigger set.
-        //    parse_ff_group emits only WORKING-region stores (pure eval).
-        //    We build three variants:
-        //      eval_only  = seeds (STABLE->WORKING) + stores
-        //      apply      = commits (WORKING->STABLE) only
-        //      eval_apply = eval_only with commits appended to the Return block
-        let mut eval_only_ff_blocks = HashMap::default();
-        let mut apply_ff_blocks = HashMap::default();
-        let mut eval_apply_ff_blocks = HashMap::default();
+        // 2. Retain each FF AIR process independently until Event IR groups
+        //    processes by their canonical clock domain after relocation.
         let mut ff_eir_processes = Vec::new();
 
         for trigger_set in ff_group_order {
             let decls = &ff_groups[&trigger_set];
-            // --- eval_only and eval_apply ---
-            // Preserve the current grouped executable CFG until the atomic EIR
-            // projection cutover. EIR construction is mandatory and retains
-            // one process-local graph per source declaration.
-            let mut builder = SIRBuilder::new();
-            let grouped_declarations = decls
-                .iter()
-                .map(|(_, declaration)| *declaration)
-                .collect::<Vec<_>>();
-            let ff_group = self
-                .ff_parser
-                .parse_ff_group(&grouped_declarations, &mut builder)?;
-            let targets = ff_group.targets;
-            let dynamic_write_vars = ff_group.dynamic_write_vars;
             for &(source_order, declaration) in decls {
                 let mut event_builder = FfEirBuilder::new();
                 self.ff_parser
@@ -1079,74 +1057,6 @@ impl<'a> ModuleParser<'a> {
                     builder: event_builder,
                 });
             }
-            let mut commits = build_ff_region_copies_skipping(
-                &targets,
-                WORKING_REGION,
-                STABLE_REGION,
-                &dynamic_write_vars,
-            );
-            commits.extend(build_sparse_ff_commits(&targets, &dynamic_write_vars));
-
-            // Clone before sealing: eval_apply_builder gets the commit instructions appended.
-            let mut eval_apply_builder = builder.clone();
-            for commit in &commits {
-                eval_apply_builder.emit(commit.clone());
-            }
-
-            // Seal and drain eval_only.
-            builder.seal_block(SIRTerminator::Return);
-            let (bbs, regs, _) = builder.drain();
-            let mut eval_only_eu = ExecutionUnit {
-                blocks: bbs,
-                entry_block_id: BlockId(0),
-                register_map: regs,
-            };
-
-            // Seal and drain eval_apply.
-            eval_apply_builder.seal_block(SIRTerminator::Return);
-            let (ea_bbs, ea_regs, _) = eval_apply_builder.drain();
-            let mut eval_apply_eu = ExecutionUnit {
-                blocks: ea_bbs,
-                entry_block_id: BlockId(0),
-                register_map: ea_regs,
-            };
-            rewrite_dynamic_ff_stores_to_sparse(&mut eval_only_eu, &dynamic_write_vars);
-            rewrite_dynamic_ff_stores_to_sparse(&mut eval_apply_eu, &dynamic_write_vars);
-
-            // Build seeds (STABLE -> WORKING) and prepend to both eval_only and eval_apply.
-            let seeds = build_ff_region_copies_skipping(
-                &targets,
-                STABLE_REGION,
-                WORKING_REGION,
-                &dynamic_write_vars,
-            );
-            if let Some(entry) = eval_only_eu.blocks.get_mut(&BlockId(0)) {
-                let mut s = seeds.clone();
-                s.append(&mut entry.instructions);
-                entry.instructions = s;
-            }
-            if let Some(entry) = eval_apply_eu.blocks.get_mut(&BlockId(0)) {
-                let mut s = seeds;
-                s.append(&mut entry.instructions);
-                entry.instructions = s;
-            }
-
-            // --- apply: minimal EU containing only commit instructions ---
-            let mut apply_builder = SIRBuilder::new();
-            for commit in &commits {
-                apply_builder.emit(commit.clone());
-            }
-            apply_builder.seal_block(SIRTerminator::Return);
-            let (apply_bbs, apply_regs, _) = apply_builder.drain();
-            let apply_eu = ExecutionUnit {
-                blocks: apply_bbs,
-                entry_block_id: BlockId(0),
-                register_map: apply_regs,
-            };
-
-            eval_only_ff_blocks.insert(trigger_set.clone(), eval_only_eu);
-            apply_ff_blocks.insert(trigger_set.clone(), apply_eu);
-            eval_apply_ff_blocks.insert(trigger_set, eval_apply_eu);
         }
 
         // Keep both boundary sources:
@@ -1183,9 +1093,6 @@ impl<'a> ModuleParser<'a> {
             variables: self.module.variables.clone(),
             name: self.module.name,
             glue_blocks: self.glue_blocks,
-            eval_only_ff_blocks,
-            apply_ff_blocks,
-            eval_apply_ff_blocks,
             ff_eir_processes,
             comb_blocks: self.comb_blocks,
             comb_observers: self.comb_observers,
@@ -1198,136 +1105,6 @@ impl<'a> ModuleParser<'a> {
             reset_clock_map: self.reset_clock_map,
         })
     }
-}
-
-fn build_ff_region_copies_skipping(
-    targets: &[VarAtomBase<RegionedVarAddr>],
-    src_region: u32,
-    dst_region: u32,
-    skip_vars: &HashSet<VarId>,
-) -> Vec<SIRInstruction<RegionedVarAddr>> {
-    let mut ranges_by_var: HashMap<VarId, Vec<BitAccess>> = HashMap::default();
-    let mut var_order = Vec::new();
-    let mut seen_vars = HashSet::default();
-    for target in targets {
-        if skip_vars.contains(&target.id.var_id) {
-            continue;
-        }
-        if seen_vars.insert(target.id.var_id) {
-            var_order.push(target.id.var_id);
-        }
-        ranges_by_var
-            .entry(target.id.var_id)
-            .or_default()
-            .push(target.access);
-    }
-
-    let mut copies = Vec::new();
-    for var_id in var_order {
-        let Some(mut ranges) = ranges_by_var.remove(&var_id) else {
-            continue;
-        };
-        ranges.sort_by_key(|range| (range.lsb, range.msb));
-
-        let mut current: Option<BitAccess> = None;
-        for range in ranges {
-            match current {
-                Some(mut cur) if range.lsb <= cur.msb.saturating_add(1) => {
-                    cur.msb = cur.msb.max(range.msb);
-                    current = Some(cur);
-                }
-                Some(cur) => {
-                    push_ff_region_copy(&mut copies, var_id, cur, src_region, dst_region);
-                    current = Some(range);
-                }
-                None => current = Some(range),
-            }
-        }
-        if let Some(cur) = current {
-            push_ff_region_copy(&mut copies, var_id, cur, src_region, dst_region);
-        }
-    }
-
-    copies
-}
-
-fn build_sparse_ff_commits(
-    targets: &[VarAtomBase<RegionedVarAddr>],
-    sparse_vars: &HashSet<VarId>,
-) -> Vec<SIRInstruction<RegionedVarAddr>> {
-    let mut widths = HashMap::<VarId, usize>::default();
-    let mut order = Vec::new();
-    for target in targets {
-        if !sparse_vars.contains(&target.id.var_id) {
-            continue;
-        }
-        if !widths.contains_key(&target.id.var_id) {
-            order.push(target.id.var_id);
-        }
-        widths
-            .entry(target.id.var_id)
-            .and_modify(|width| *width = (*width).max(target.access.msb.saturating_add(1)))
-            .or_insert_with(|| target.access.msb.saturating_add(1));
-    }
-    order
-        .into_iter()
-        .map(|var_id| {
-            SIRInstruction::Commit(
-                RegionedVarAddr {
-                    region: SPARSE_WORKING_REGION,
-                    var_id,
-                },
-                RegionedVarAddr {
-                    region: STABLE_REGION,
-                    var_id,
-                },
-                SIROffset::Static(0),
-                widths[&var_id],
-                Vec::new(),
-            )
-        })
-        .collect()
-}
-
-fn rewrite_dynamic_ff_stores_to_sparse(
-    eu: &mut ExecutionUnit<RegionedVarAddr>,
-    dynamic_write_vars: &HashSet<VarId>,
-) {
-    if dynamic_write_vars.is_empty() {
-        return;
-    }
-    for block in eu.blocks.values_mut() {
-        for inst in &mut block.instructions {
-            if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
-                && addr.region == WORKING_REGION
-                && dynamic_write_vars.contains(&addr.var_id)
-            {
-                addr.region = SPARSE_WORKING_REGION;
-            }
-        }
-    }
-}
-
-fn push_ff_region_copy(
-    copies: &mut Vec<SIRInstruction<RegionedVarAddr>>,
-    var_id: VarId,
-    range: BitAccess,
-    src_region: u32,
-    dst_region: u32,
-) {
-    copies.push(SIRInstruction::Commit(
-        RegionedVarAddr {
-            region: src_region,
-            var_id,
-        },
-        RegionedVarAddr {
-            region: dst_region,
-            var_id,
-        },
-        SIROffset::Static(range.lsb),
-        range.msb - range.lsb + 1,
-        Vec::new(),
-    ));
 }
 
 fn remap_for_effect_site_ids<A: std::hash::Hash + Eq + Clone>(

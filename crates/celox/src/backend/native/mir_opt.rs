@@ -12,6 +12,129 @@ use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 mod pipeline;
 pub use pipeline::optimize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VRegCompaction {
+    pub before: u32,
+    pub after: u32,
+}
+
+/// Remove holes left in the VReg namespace by MIR optimization.
+///
+/// ISel can create many temporary machine values which disappear during DCE.
+/// Register allocation indexes several analysis tables by raw VReg ID, so
+/// retaining those dead IDs makes its memory cost proportional to historical
+/// ISel output rather than to the optimized MIR it actually allocates.
+///
+/// The remap is stable and monotonic: surviving old IDs are assigned dense new
+/// IDs in ascending order. This preserves deterministic MIR output and lets us
+/// rewrite use operands in place without a temporary VReg namespace.
+pub(crate) fn compact_vregs(func: &mut MFunction) -> VRegCompaction {
+    let before = func.vregs.count();
+    let old_count = before as usize;
+    assert_eq!(
+        func.spill_descs.len(),
+        old_count,
+        "MIR VReg compaction requires one spill descriptor per VReg"
+    );
+
+    let mut referenced = vec![false; old_count];
+    let mark = |referenced: &mut [bool], value: VReg| {
+        let slot = referenced
+            .get_mut(value.0 as usize)
+            .expect("MIR VReg reference must be inside the allocated namespace");
+        *slot = true;
+    };
+    for block in &func.blocks {
+        for phi in &block.phis {
+            mark(&mut referenced, phi.dst);
+            for &(_, source) in &phi.sources {
+                mark(&mut referenced, source);
+            }
+        }
+        for inst in &block.insts {
+            if let Some(destination) = inst.def() {
+                mark(&mut referenced, destination);
+            }
+            for source in inst.uses() {
+                mark(&mut referenced, source);
+            }
+        }
+    }
+
+    let mut old_to_new = vec![u32::MAX; old_count];
+    let mut after = 0u32;
+    for (old, is_referenced) in referenced.iter().copied().enumerate() {
+        if is_referenced {
+            old_to_new[old] = after;
+            after = after.checked_add(1).expect("dense VReg count overflow");
+        }
+    }
+    if after == before {
+        return VRegCompaction { before, after };
+    }
+
+    let remap = |value: VReg| {
+        let mapped = old_to_new[value.0 as usize];
+        assert_ne!(
+            mapped,
+            u32::MAX,
+            "executable MIR reference must survive VReg compaction"
+        );
+        VReg(mapped)
+    };
+
+    for block in &mut func.blocks {
+        for phi in &mut block.phis {
+            phi.dst = remap(phi.dst);
+            for (_, source) in &mut phi.sources {
+                *source = remap(*source);
+            }
+        }
+        for inst in &mut block.insts {
+            // The dense mapping never increases an ID. Rewriting original
+            // operands from low to high therefore cannot revisit a newly
+            // assigned ID as if it were an old operand.
+            let mut sources = inst.uses().into_iter().collect::<Vec<_>>();
+            sources.sort_unstable();
+            sources.dedup();
+            for source in sources {
+                inst.rewrite_use(source, remap(source));
+            }
+            if let Some(destination) = inst.def_mut() {
+                *destination = remap(*destination);
+            }
+        }
+    }
+
+    let mut spill_descs = Vec::with_capacity(after as usize);
+    for (old, is_referenced) in referenced.into_iter().enumerate() {
+        if !is_referenced {
+            continue;
+        }
+        let mut descriptor = func.spill_descs[old].clone();
+        if let Some(mut insert) = descriptor.state_insert {
+            let mapped = old_to_new[insert.value.0 as usize];
+            if mapped == u32::MAX {
+                // Provenance naming an instruction removed by MIR DCE cannot
+                // provide an executable reload recipe anymore.
+                descriptor.state_insert = None;
+            } else {
+                insert.value = VReg(mapped);
+                descriptor.state_insert = Some(insert);
+            }
+        }
+        spill_descs.push(descriptor);
+    }
+
+    let mut allocator = VRegAllocator::new();
+    for _ in 0..after {
+        allocator.alloc();
+    }
+    func.vregs = allocator;
+    func.spill_descs = spill_descs;
+    VRegCompaction { before, after }
+}
+
 /// Select x86 direct-memory updates for exact local load/ALU/store chains.
 ///
 /// The SSA temporaries must have no other users. Keeping the match local
@@ -7183,6 +7306,88 @@ mod tests {
         block.insts = insts;
         func.push_block(block);
         func
+    }
+
+    #[test]
+    fn vreg_compaction_removes_dead_ids_and_rewrites_phi_and_spill_metadata() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..8 {
+            vregs.alloc();
+        }
+        let mut spill_descs = vec![SpillDesc::transient(); 8];
+        spill_descs[6] = SpillDesc::transient().with_state_insert(VReg(4), 0, 8);
+        spill_descs[7] = SpillDesc::transient().with_state_insert(VReg(5), 0, 8);
+        let mut function = MFunction::new(vregs, spill_descs);
+        function.push_block(MBlock {
+            id: BlockId(0),
+            phis: Vec::new(),
+            insts: vec![
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(5),
+                    value: 1,
+                },
+                MInst::Jump { target: BlockId(1) },
+            ],
+        });
+        function.push_block(MBlock {
+            id: BlockId(1),
+            phis: vec![PhiNode {
+                dst: VReg(6),
+                sources: vec![(BlockId(0), VReg(2))],
+            }],
+            insts: vec![
+                MInst::Add {
+                    dst: VReg(7),
+                    lhs: VReg(6),
+                    rhs: VReg(5),
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(7),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+        });
+
+        assert_eq!(
+            compact_vregs(&mut function),
+            VRegCompaction {
+                before: 8,
+                after: 4,
+            }
+        );
+        assert_eq!(function.vregs.count(), 4);
+        assert_eq!(function.spill_descs.len(), 4);
+        assert_eq!(function.blocks[1].phis[0].dst, VReg(2));
+        assert_eq!(function.blocks[1].phis[0].sources[0].1, VReg(0));
+        assert!(matches!(
+            function.blocks[1].insts[0],
+            MInst::Add {
+                dst: VReg(3),
+                lhs: VReg(2),
+                rhs: VReg(1),
+            }
+        ));
+        assert_eq!(
+            function.spill_descs[3]
+                .state_insert
+                .expect("live provenance")
+                .value,
+            VReg(1)
+        );
+        assert!(
+            function.spill_descs[2].state_insert.is_none(),
+            "provenance for a DCE-removed definition must not survive"
+        );
+        function.verify();
     }
 
     #[test]

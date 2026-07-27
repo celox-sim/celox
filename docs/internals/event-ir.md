@@ -337,6 +337,42 @@ EIR lowering preserves structured control until deciding whether a Mux should
 remain dataflow or become CFG. It does not first create one giant branchless
 SIR graph and ask register allocation to repair its live ranges.
 
+### Sparse cross-definition control placement
+
+An SLT Mux may select values supplied by different `CombDefinition` recipes.
+Materializing every recipe dependency before lowering that Mux destroys the
+control dependence: both definition cones execute before the branch. Clock
+projection therefore builds a sparse `CombValueGraph` over the original SLT
+arena and definition edges. It never substitutes recipes into a cloned,
+context-expanded SLT arena.
+
+For each demanded projection the planner:
+
+1. constructs only the demanded definition closure;
+2. resolves arm-specific definition edges at candidate Muxes;
+3. stops arm-local cost traversal at a definition shared by another reachable
+   consumer or separately demanded by the projection;
+4. groups candidates whose transitive definition cones overlap; and
+5. selects at most one control cut per overlapping component while allowing
+   independent components to select independently.
+
+Only selected arm-exclusive edges are deferred into branch blocks. Every
+other definition receives one event-CFG placement represented by the
+dominator-tree LCA of its uses. Placement stores one block per definition;
+it must not copy complete use-block sets along dependency edges. The resulting
+analysis storage is linear in SLT nodes, reachable definitions, dependency
+edges, and event blocks.
+
+Four-state projection never applies this transformation. An X/Z Mux condition
+must retain the bitwise merge semantics which can require both arms.
+
+On the Heliodor Linux workload, the bounded non-LTO measurement used during
+this milestone completed sparse placement in tens of milliseconds, generated
+108,235 optimized fused SIR instructions, and reached kernel power-down in
+191.10 seconds of execution. The preceding mandatory-EIR baseline took
+288.87 seconds. Compilation and execution are measured separately. This is a
+validated improvement, not the final parity target.
+
 ## Correctness invariants
 
 An EIR implementation must verify:

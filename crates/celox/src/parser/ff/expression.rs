@@ -928,8 +928,6 @@ impl<'a> FfParser<'a> {
             for i in access.lsb..=access.msb {
                 bits.insert(i);
             }
-        } else {
-            self.dynamic_write_vars.insert(dst.id);
         }
         self.dynamic_defined_vars.insert(dst.id);
 

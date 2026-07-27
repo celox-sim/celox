@@ -688,9 +688,6 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 pub struct RelocationModule {
     #[cfg(test)]
     pub variables: HashMap<VarId, Variable>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
 }
@@ -700,15 +697,12 @@ impl fmt::Debug for RelocationModule {
         let mut ds = f.debug_struct("RelocationModule");
         #[cfg(test)]
         ds.field("variables", &"<omitted>");
-        ds.field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("comb_blocks", &self.comb_blocks)
+        ds.field("comb_blocks", &self.comb_blocks)
             .field("comb_observers", &self.comb_observers)
             .finish()
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
 pub struct ExecutionUnit<A> {
     pub entry_block_id: BlockId,
@@ -765,9 +759,6 @@ impl<A: Display> Display for ExecutionUnit<A> {
 pub struct SimModule {
     pub name: StrId,
     pub variables: HashMap<VarId, Variable>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub(crate) ff_eir_processes: Vec<crate::parser::ff::ModuleFfEirProcess>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
@@ -787,9 +778,6 @@ impl fmt::Debug for SimModule {
         f.debug_struct("SimModule")
             .field("name", &self.name)
             .field("variables", &"<omitted>")
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
             .field("ff_eir_processes", &self.ff_eir_processes.len())
             .field("glue_blocks", &self.glue_blocks)
             .field("comb_blocks", &self.comb_blocks)
@@ -822,49 +810,19 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
     merge_sir_eu_refs(&units)
 }
 
-/// Exact source-unit provenance for a merged SIR function.
-///
-/// Unlike a list of boundary block IDs, this remains valid when an input
-/// execution unit has a nonzero entry ID or sparse block IDs.
-#[derive(Debug, Clone)]
-pub(crate) struct SirMergeProvenance {
-    pub unit_entries: Vec<BlockId>,
-    pub block_units: crate::HashMap<BlockId, usize>,
-}
-
 /// Reference-based variant of [`merge_sir_eus`] used when one compilation
 /// unit is assembled from multiple Program-owned EU slices.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(crate) fn merge_sir_eu_refs<A: Clone>(
     units: &[&ExecutionUnit<A>],
 ) -> (ExecutionUnit<A>, Vec<BlockId>) {
-    let (merged, provenance) = merge_sir_eu_refs_with_provenance(units);
-    (merged, provenance.unit_entries[1..].to_vec())
-}
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
-    units: &[&ExecutionUnit<A>],
-) -> (ExecutionUnit<A>, SirMergeProvenance) {
     assert!(!units.is_empty(), "cannot merge an empty SIR EU list");
     if units.len() == 1 {
-        return (
-            (*units[0]).clone(),
-            SirMergeProvenance {
-                unit_entries: vec![units[0].entry_block_id],
-                block_units: units[0]
-                    .blocks
-                    .keys()
-                    .copied()
-                    .map(|block| (block, 0))
-                    .collect(),
-            },
-        );
+        return ((*units[0]).clone(), Vec::new());
     }
 
     let mut merged_blocks = crate::HashMap::default();
     let mut merged_regs = crate::HashMap::default();
-    let mut block_units = crate::HashMap::default();
 
     // Compute offsets for renumbering
     let mut reg_offset = 0usize;
@@ -906,7 +864,6 @@ pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
         // Copy blocks with renumbering
         for (&block_id, block) in &eu.blocks {
             let new_block_id = BlockId(block_id.0 + bo);
-            block_units.insert(new_block_id, eu_idx);
             let r = |reg: RegisterId| RegisterId(reg.0 + ro);
             let b = |bid: BlockId| BlockId(bid.0 + bo);
 
@@ -980,10 +937,7 @@ pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
             blocks: merged_blocks,
             register_map: merged_regs,
         },
-        SirMergeProvenance {
-            unit_entries: entry_blocks,
-            block_units,
-        },
+        entry_blocks[1..].to_vec(),
     )
 }
 
