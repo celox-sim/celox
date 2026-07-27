@@ -16,7 +16,7 @@
     "@playwright/test": "^1.55.1",
     "@celox-sim/celox": "workspace:*",
     "@celox-sim/vite-plugin": "workspace:*",
-    "monaco-editor": "^0.55.1",
+    "monaco-editor": "^0.56.0",
     "sucrase": "^3.35.1",
     "vite": "^8.0.0",
     "vite-plugin-monaco-editor": "^1.1.0",
