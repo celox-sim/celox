@@ -529,6 +529,37 @@ impl CombValueGraph {
         }
     }
 
+    fn append_input_dependencies(
+        &self,
+        recipe: CombRecipeId,
+        object: AbsoluteAddr,
+        static_access: Option<BitAccess>,
+        result: &mut HashSet<CombDefinitionId>,
+    ) {
+        if let Some(access) = static_access
+            && self.recipe_inputs[recipe.0]
+                .previous_snapshots_by_object
+                .get(&object)
+                .is_some_and(|snapshots| {
+                    snapshots.iter().any(|snapshot| snapshot.overlaps(&access))
+                })
+        {
+            return;
+        }
+        let Some(definitions) = self.recipe_inputs[recipe.0]
+            .definitions_by_object
+            .get(&object)
+        else {
+            return;
+        };
+        result.extend(
+            definitions
+                .iter()
+                .filter(|(_, target)| static_access.is_none_or(|access| target.overlaps(&access)))
+                .map(|(definition, _)| *definition),
+        );
+    }
+
     fn demand_summary(
         &self,
         recipe: CombRecipeId,
@@ -599,37 +630,6 @@ impl CombValueGraph {
             .borrow_mut()
             .insert((recipe, node), summary);
         summary
-    }
-
-    fn append_input_dependencies(
-        &self,
-        recipe: CombRecipeId,
-        object: AbsoluteAddr,
-        static_access: Option<BitAccess>,
-        result: &mut HashSet<CombDefinitionId>,
-    ) {
-        if let Some(access) = static_access
-            && self.recipe_inputs[recipe.0]
-                .previous_snapshots_by_object
-                .get(&object)
-                .is_some_and(|snapshots| {
-                    snapshots.iter().any(|snapshot| snapshot.overlaps(&access))
-                })
-        {
-            return;
-        }
-        let Some(definitions) = self.recipe_inputs[recipe.0]
-            .definitions_by_object
-            .get(&object)
-        else {
-            return;
-        };
-        result.extend(
-            definitions
-                .iter()
-                .filter(|(_, target)| static_access.is_none_or(|access| target.overlaps(&access)))
-                .map(|(definition, _)| *definition),
-        );
     }
 }
 

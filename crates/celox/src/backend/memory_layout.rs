@@ -87,6 +87,10 @@ pub struct MemoryLayout {
     pub working_offsets: HashMap<AbsoluteAddr, usize>,
     /// Base offset (bytes) of the working region inside the unified memory buffer.
     pub working_base_offset: usize,
+    /// Compiler-private, byte-addressable homes for values crossing allocation
+    /// regions. Unlike RTL state, values in this arena never share a byte.
+    pub materialization_home_base_offset: usize,
+    pub materialization_home_plane_size: usize,
     /// Copy-on-write next-state data for dynamically addressed FF targets.
     pub sparse_offsets: HashMap<AbsoluteAddr, usize>,
     pub sparse_base_offset: usize,
@@ -244,7 +248,15 @@ impl MemoryLayout {
 
         // Keep working region properly aligned when appended to the stable region.
         let working_base_offset = (current_offset + 7) & !7;
-        let sparse_base_offset = (working_base_offset + working_current_offset + 7) & !7;
+        let materialization_home_base_offset =
+            (working_base_offset + working_current_offset + 7) & !7;
+        let materialization_home_plane_size =
+            program.materialization_home_extent_bits().div_ceil(8);
+        let materialization_home_size = materialization_home_plane_size
+            .checked_mul(if four_state { 2 } else { 1 })
+            .expect("materialization home arena size overflow");
+        let sparse_base_offset =
+            (materialization_home_base_offset + materialization_home_size + 7) & !7;
         let mut sparse_metadata_offset = (sparse_base_offset + sparse_current_offset + 7) & !7;
         let mut sparse_layouts = HashMap::default();
         let mut sparse_order: Vec<_> = sparse_addrs.into_iter().collect();
@@ -329,6 +341,8 @@ impl MemoryLayout {
             total_size: current_offset,
             working_offsets,
             working_base_offset,
+            materialization_home_base_offset,
+            materialization_home_plane_size,
             sparse_offsets,
             sparse_base_offset,
             sparse_layouts,
@@ -353,6 +367,18 @@ impl MemoryLayout {
             .unwrap_or_else(|| get_byte_size(self.widths[addr]))
     }
 
+    pub(crate) fn region_base_offset(&self, addr: &RegionedAbsoluteAddr) -> usize {
+        let absolute = addr.absolute_addr();
+        match addr.region {
+            STABLE_REGION => self.offsets[&absolute],
+            crate::ir::MATERIALIZATION_HOME_REGION => self.materialization_home_base_offset,
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.sparse_base_offset + self.sparse_offsets[&absolute]
+            }
+            _ => self.working_base_offset + self.working_offsets[&absolute],
+        }
+    }
+
     pub fn map_static_bit_offset(&self, addr: &AbsoluteAddr, bit_offset: usize) -> (usize, usize) {
         let Some(array) = self.unpacked_arrays.get(addr) else {
             return (bit_offset / 8, bit_offset % 8);
@@ -373,6 +399,14 @@ impl MemoryLayout {
         let absolute = addr.absolute_addr();
         let base = match addr.region {
             STABLE_REGION => *self.offsets.get(&absolute).unwrap_or(&0),
+            crate::ir::MATERIALIZATION_HOME_REGION => {
+                let byte = bit_offset / 8;
+                let intra = bit_offset % 8;
+                return Some((
+                    i32::try_from(self.materialization_home_base_offset.checked_add(byte)?).ok()?,
+                    intra,
+                ));
+            }
             crate::ir::SPARSE_WORKING_REGION => {
                 self.sparse_base_offset + *self.sparse_offsets.get(&absolute).unwrap_or(&0)
             }

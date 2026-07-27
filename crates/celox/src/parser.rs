@@ -1291,7 +1291,15 @@ pub(crate) fn flatten(
         &global_arena,
         &slt_facts,
     )?);
-
+    let (clock_event_irs, clock_event_triggers) = timed_sub!(
+        "build_clock_event_irs",
+        build_clock_event_irs(
+            ff_eir_processes,
+            comb_graph.clone(),
+            module_ir,
+            &instance_modules,
+        )
+    )?;
     let sched_start = flatten_timing.then(crate::timing::now);
     let schedule = match scheduler::sort(
         comb_blocks,
@@ -1354,15 +1362,6 @@ pub(crate) fn flatten(
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
-    let (clock_event_irs, clock_event_triggers) = timed_sub!(
-        "build_clock_event_irs",
-        build_clock_event_irs(
-            ff_eir_processes,
-            comb_graph.clone(),
-            module_ir,
-            &instance_modules,
-        )
-    )?;
     let (topological_clocks, cascaded_clocks, event_signals) = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
@@ -1395,39 +1394,7 @@ pub(crate) fn flatten(
         }
     }
     let comb_semantic_regions = schedule.semantic_regions;
-    let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
-        .execution_units
-        .into_iter()
-        .map(|eu| crate::ir::ExecutionUnit {
-            entry_block_id: eu.entry_block_id,
-            blocks: eu
-                .blocks
-                .into_iter()
-                .map(|(id, bb)| {
-                    (
-                        id,
-                        crate::ir::BasicBlock {
-                            id: bb.id,
-                            params: bb.params,
-                            instructions: bb
-                                .instructions
-                                .into_iter()
-                                .map(|inst| {
-                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
-                                        region: STABLE_REGION,
-                                        instance_id: addr.instance_id,
-                                        var_id: addr.var_id,
-                                    })
-                                })
-                                .collect(),
-                            terminator: bb.terminator,
-                        },
-                    )
-                })
-                .collect(),
-            register_map: eu.register_map,
-        })
-        .collect();
+    let schduled = map_stable_execution_units(schedule.execution_units);
     let eval_comb = schduled.clone();
 
     if let Some(t) = trace
@@ -2231,14 +2198,16 @@ fn verify_region_contract(
     group: &'static str,
     eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
-    use crate::ir::{SIRInstruction, SIROffset, SPARSE_WORKING_REGION};
+    use crate::ir::{
+        MATERIALIZATION_HOME_REGION, SIRInstruction, SIROffset, SPARSE_WORKING_REGION,
+    };
 
     for block in eu.blocks.values() {
         for (index, inst) in block.instructions.iter().enumerate() {
             match inst {
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
-                    if addr.region > SPARSE_WORKING_REGION =>
+                    if addr.region > MATERIALIZATION_HOME_REGION =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.KNOWN_MEMORY_REGION",
@@ -2248,7 +2217,8 @@ fn verify_region_contract(
                     ));
                 }
                 SIRInstruction::Commit(src, dst, _, _, _)
-                    if src.region > SPARSE_WORKING_REGION || dst.region > SPARSE_WORKING_REGION =>
+                    if src.region > MATERIALIZATION_HOME_REGION
+                        || dst.region > MATERIALIZATION_HOME_REGION =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.KNOWN_MEMORY_REGION",
@@ -2298,6 +2268,29 @@ fn verify_region_contract(
                         block.id,
                         index,
                         "SPARSE is populated by Store, not by Commit",
+                    ));
+                }
+                SIRInstruction::Commit(src, dst, _, _, _)
+                    if src.region == MATERIALIZATION_HOME_REGION
+                        || dst.region == MATERIALIZATION_HOME_REGION =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.HOME_IS_NOT_COMMIT_STATE",
+                        block.id,
+                        index,
+                        "materialization homes are accessed only by Load and Store",
+                    ));
+                }
+                SIRInstruction::Load(_, addr, _, _)
+                | SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == MATERIALIZATION_HOME_REGION
+                        && !matches!(group, "eval_only_ffs" | "eval_apply_ffs") =>
+                {
+                    return Err(crate::ir::verify::SirVerifyError::instruction(
+                        "REGION.HOME_OUTSIDE_CLOCK_EVALUATION",
+                        block.id,
+                        index,
+                        format!("materialization home access is not valid in {group}"),
                     ));
                 }
                 _ => {}
@@ -2766,6 +2759,43 @@ fn build_clock_event_irs(
     Ok((clock_events, trigger_domains))
 }
 
+fn map_stable_execution_units(
+    units: Vec<crate::ir::ExecutionUnit<AbsoluteAddr>>,
+) -> Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> {
+    units
+        .into_iter()
+        .map(|eu| crate::ir::ExecutionUnit {
+            entry_block_id: eu.entry_block_id,
+            blocks: eu
+                .blocks
+                .into_iter()
+                .map(|(id, bb)| {
+                    (
+                        id,
+                        crate::ir::BasicBlock {
+                            id: bb.id,
+                            params: bb.params,
+                            instructions: bb
+                                .instructions
+                                .into_iter()
+                                .map(|inst| {
+                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                        region: STABLE_REGION,
+                                        instance_id: addr.instance_id,
+                                        var_id: addr.var_id,
+                                    })
+                                })
+                                .collect(),
+                            terminator: bb.terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map: eu.register_map,
+        })
+        .collect()
+}
+
 type ClockProjectionMaps = (
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
     HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -2798,7 +2828,7 @@ fn lower_clock_event_projections(
                 .then(crate::timing::now);
             fused_units.push(crate::event_ir::lower_event_projection(
                 event,
-                crate::event_ir::EventProjection::FusedClock,
+                crate::event_ir::EventProjection::FusedSettledClock,
                 arena,
                 four_state,
                 trigger,

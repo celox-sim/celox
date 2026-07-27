@@ -3124,13 +3124,13 @@ fn expand_factored_snapshot_inputs(
                         }
                         phi.inputs.to_vec()
                     }
-                    SnapshotAccess::Phi(_) => return None,
                     // MemorySSA folds a phi whose incoming clobbers are all
                     // equal. The validated write-free factoring still proves
                     // that the shared edge block represents every recorded
-                    // predecessor; expand the carried access over those
-                    // original edges instead of requiring a synthetic phi to
-                    // survive canonicalization.
+                    // predecessor. The carried access may itself be an
+                    // existing MemoryPhi from before the factoring; replicate
+                    // that version over the original edges instead of
+                    // mistaking it for the folded synthetic phi.
                     access => factoring
                         .predecessors
                         .iter()
@@ -5202,6 +5202,50 @@ mod tests {
         assert!(stable_memory_snapshot_matches(
             &folded_expected,
             &folded_actual,
+            &inserted_writes,
+            &factorings,
+        ));
+
+        let carried_phi = SnapshotAccess::Phi(BlockId(30));
+        let carried_phi_equation = SnapshotPhi {
+            block: BlockId(30),
+            inputs: vec![
+                (BlockId(4), SnapshotAccess::LiveOnEntry),
+                (BlockId(5), write(5)),
+            ]
+            .into_boxed_slice(),
+        };
+        let carried_expected = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![
+                SnapshotPhi {
+                    block: BlockId(10),
+                    inputs: vec![
+                        (BlockId(1), carried_phi),
+                        (BlockId(2), carried_phi),
+                        (BlockId(3), write(3)),
+                    ]
+                    .into_boxed_slice(),
+                },
+                carried_phi_equation.clone(),
+            ]
+            .into_boxed_slice(),
+        };
+        let carried_actual = MemorySnapshot {
+            root: SnapshotAccess::Phi(BlockId(10)),
+            phis: vec![
+                SnapshotPhi {
+                    block: BlockId(10),
+                    inputs: vec![(BlockId(3), write(3)), (BlockId(20), carried_phi)]
+                        .into_boxed_slice(),
+                },
+                carried_phi_equation,
+            ]
+            .into_boxed_slice(),
+        };
+        assert!(stable_memory_snapshot_matches(
+            &carried_expected,
+            &carried_actual,
             &inserted_writes,
             &factorings,
         ));

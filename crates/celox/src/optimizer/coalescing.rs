@@ -9,6 +9,8 @@ mod control_region_feasibility;
 pub mod cost_model;
 mod dead_working_stores;
 #[cfg(target_arch = "x86_64")]
+mod fused_comb_dse;
+#[cfg(target_arch = "x86_64")]
 mod lane_aggregate_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
@@ -77,6 +79,15 @@ pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsolut
 }
 
 #[cfg(target_arch = "x86_64")]
+pub(crate) fn eliminate_dead_fused_comb_publications(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    provenance: &crate::ir::SirMergeProvenance,
+    first_ff_unit: usize,
+) -> Result<usize, String> {
+    fused_comb_dse::eliminate(eu, provenance, first_ff_unit)
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn analyze_lane_aggregate_feasibility(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
@@ -105,7 +116,13 @@ pub(crate) fn optimize_native_merged_chain(
             .iter()
             .filter(|(_, array)| preserve_native_element_boundaries(array))
             .flat_map(|(&address, array)| {
-                [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
+                [
+                    STABLE_REGION,
+                    WORKING_REGION,
+                    SPARSE_WORKING_REGION,
+                    crate::ir::MATERIALIZATION_HOME_REGION,
+                ]
+                .map(move |region| {
                     (
                         RegionedAbsoluteAddr::from_absolute_addr(region, address),
                         array.element_width,
@@ -334,8 +351,12 @@ fn optimize_unified_commit_groups(
         }
         // Hazard analysis must see the complete event order, not an individual
         // always_ff/module EU.  The actual rewrites remain local to each EU.
-        let (merged, _) = crate::ir::merge_sir_eus(units);
-        let hazards = commit_ops::direct_stable_store_hazards(&merged);
+        let hazards = if units.len() == 1 {
+            commit_ops::direct_stable_store_hazards(&units[0])
+        } else {
+            let (merged, _) = crate::ir::merge_sir_eus(units);
+            commit_ops::direct_stable_store_hazards(&merged)
+        };
         if sink {
             pass_commit_sinking::run_complete_event(units, &hazards);
         }
@@ -554,6 +575,12 @@ fn optimize_late_comb(
     options: &PassOptions,
 ) {
     let on = |pass: SirPass| opt.is_enabled(pass);
+    let trace = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let branchify_watermarks = program
+        .eval_comb
+        .iter()
+        .map(|eu| eu.blocks.keys().map(|block| block.0).max().unwrap_or(0))
+        .collect::<Vec<_>>();
 
     // Identity Store bypass: share storage when B is unread; otherwise lower
     // a profitable exact copy directly from A's storage.
@@ -566,6 +593,9 @@ fn optimize_late_comb(
             program.address_aliases.extend(identity_aliases);
         }
     }
+    if trace {
+        eprintln!("[branchify-stats] late identity");
+    }
 
     // Identity-store bypass can make an entire expression DAG dead.
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
@@ -573,11 +603,17 @@ fn optimize_late_comb(
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, options);
         }
     }
+    if trace {
+        eprintln!("[branchify-stats] late loop");
+    }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, options);
         }
+    }
+    if trace {
+        eprintln!("[branchify-stats] late scatter");
     }
     if on(SirPass::IndexedStoreRecovery) {
         let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
@@ -585,23 +621,35 @@ fn optimize_late_comb(
             pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, options);
         }
     }
+    if trace {
+        eprintln!("[branchify-stats] late indexed");
+    }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, options);
         }
     }
+    if trace {
+        eprintln!("[branchify-stats] late guarded");
+    }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
+        if trace {
+            eprintln!("[branchify-stats] late sparse constructed");
+        }
         for eu in &mut program.eval_comb {
             pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, options);
         }
+    }
+    if trace {
+        eprintln!("[branchify-stats] late sparse");
     }
 
     // Recover control dependence created by the program-wide transforms, then
     // repair value placement and correlated merge state on that final CFG.
     if on(SirPass::BranchifyMux) {
-        for eu in &mut program.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&BranchifyMuxPass, eu, options);
+        for (eu, watermark) in program.eval_comb.iter_mut().zip(branchify_watermarks) {
+            pass_branchify_mux::run_late_branchify_mux(eu, options, watermark);
         }
         for eu in &mut program.eval_comb {
             pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
@@ -651,7 +699,13 @@ fn optimize_with_options(
                 .iter()
                 .filter(|(_, array)| preserve_native_element_boundaries(array))
                 .flat_map(|(&address, array)| {
-                    [STABLE_REGION, WORKING_REGION, SPARSE_WORKING_REGION].map(move |region| {
+                    [
+                        STABLE_REGION,
+                        WORKING_REGION,
+                        SPARSE_WORKING_REGION,
+                        crate::ir::MATERIALIZATION_HOME_REGION,
+                    ]
+                    .map(move |region| {
                         (
                             RegionedAbsoluteAddr::from_absolute_addr(region, address),
                             array.element_width,
@@ -674,6 +728,23 @@ fn optimize_with_options(
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
+    if timing {
+        for (trigger, units) in &program.eval_apply_ffs {
+            for (index, eu) in units.iter().enumerate() {
+                let instruction_count: usize = eu
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum();
+                eprintln!(
+                    "[phase] eval_apply_ffs trigger={trigger} eu[{index}]: blocks={} insts={} regs={}",
+                    eu.blocks.len(),
+                    instruction_count,
+                    eu.register_map.len()
+                );
+            }
+        }
+    }
     let mut ff_passes = ExecutionUnitPassManager::new();
     // Note: EliminateWorkingRoundTripPass runs post-merge in emit_chained_eus
     // with boundary info for cross-EU independence check.
@@ -701,6 +772,15 @@ fn optimize_with_options(
     }
     if on(SirPass::HoistCommonBranchLoads) {
         ff_passes.add_pass(HoistCommonBranchLoadsPass);
+    }
+    // Event-IR fused clock projections contain the combinational value graph
+    // as well as FF staging effects.  Unlike the old pipeline, there is no
+    // separately optimized eval_comb prefix to recover control dependence
+    // before the projection reaches this pass list.  Run the pure-expression
+    // control transforms here while Stage/Commit effects remain ordered in the
+    // surrounding CFG.
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        ff_passes.add_pass(GuardedRegionSinkingPass);
     }
     if on(SirPass::BitExtractPeephole) {
         ff_passes.add_pass(BitExtractPeepholePass);

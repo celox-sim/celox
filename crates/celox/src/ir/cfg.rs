@@ -132,6 +132,37 @@ impl SirCfg {
         })
     }
 
+    /// Analyze only forward structural properties without constructing a
+    /// dominance frontier.  Use this for repeated legality queries which need
+    /// dominance but do not build SSA.
+    pub(crate) fn analyze_forward_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+        let IndexedSirGraph {
+            block_ids,
+            index,
+            successors,
+        } = index_sir_graph(eu)?;
+        let analysis = ForwardControlFlowGraph::analyze_structure(successors, 0)
+            .map_err(map_analysis_error)?;
+        let dom_children = analysis.dominators.children.clone();
+        let blocks = block_ids.len();
+        Ok(Self {
+            block_ids,
+            index,
+            predecessors: analysis.predecessors,
+            successors: analysis.successors,
+            dominators: analysis.dominators,
+            dom_children,
+            dominance_frontier: analysis.dominance_frontier,
+            postdominators: None,
+            postdominance_frontier: vec![Vec::new(); blocks],
+            controllers: vec![Vec::new(); blocks],
+            control_dependents: vec![Vec::new(); blocks],
+            sccs: analysis.sccs,
+            scc_for_block: analysis.scc_for_block,
+            loops: analysis.loops,
+        })
+    }
+
     /// Analyze forward and reverse structural properties without materializing
     /// dominance frontiers or control-dependence tables.
     pub(crate) fn analyze_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {

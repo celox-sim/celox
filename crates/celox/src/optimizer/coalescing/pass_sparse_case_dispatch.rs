@@ -126,9 +126,18 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         // strictly decreasing number of SIR Mux instructions; there is no
         // iteration or function-size cap.
         let mut changed = false;
+        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+        let mut applied = 0usize;
         while let Some(plan) = find_best_sparse_case_plan(eu, &self.stable_alias_class) {
             apply_sparse_case_plan(eu, plan);
             changed = true;
+            applied += 1;
+            if stats && applied.is_multiple_of(100) {
+                eprintln!("[branchify-stats] sparse_case applied={applied}");
+            }
+        }
+        if stats {
+            eprintln!("[branchify-stats] sparse_case done applied={applied}");
         }
         if changed {
             // A condition can be defined in a dominating predecessor left by
@@ -1126,17 +1135,15 @@ fn dead_defs_after_rewrite(
         .iter()
         .map(|stage| stage.mux_index)
         .collect::<HashSet<_>>();
-    let mut remaining = use_counts.clone();
+    let mut remaining = SparseUseCounts::new(use_counts);
     for &index in &chain_indices {
         for operand in instruction_uses(&block.instructions[index]) {
-            decrement_count(&mut remaining, operand)?;
+            remaining.decrement(operand)?;
         }
     }
-    let selector_uses = remaining.entry(selector).or_default();
-    *selector_uses = selector_uses.checked_add(boundary_count)?;
+    remaining.increment(selector, boundary_count)?;
     for &arm_index in reachable_arms {
-        let arm_uses = remaining.entry(arms[arm_index].value).or_default();
-        *arm_uses = arm_uses.checked_add(1)?;
+        remaining.increment(arms[arm_index].value, 1)?;
     }
 
     let mut queue = VecDeque::new();
@@ -1144,7 +1151,7 @@ fn dead_defs_after_rewrite(
         if index <= root_index
             && !chain_indices.contains(&index)
             && !protected_defs.contains(&index)
-            && remaining.get(&reg).copied().unwrap_or(0) == 0
+            && remaining.get(reg) == 0
             && is_removable_pure(&block.instructions[index])
         {
             queue.push_back(index);
@@ -1157,8 +1164,8 @@ fn dead_defs_after_rewrite(
             continue;
         }
         for operand in instruction_uses(&block.instructions[index]) {
-            decrement_count(&mut remaining, operand)?;
-            if remaining.get(&operand).copied().unwrap_or(0) == 0
+            remaining.decrement(operand)?;
+            if remaining.get(operand) == 0
                 && local_defs.get(&operand).is_some_and(|&operand_index| {
                     operand_index <= root_index
                         && !chain_indices.contains(&operand_index)
@@ -1217,23 +1224,21 @@ fn cross_block_exact_dead_defs_after_rewrite(
         }
     }
 
-    let mut remaining = use_counts.clone();
+    let mut remaining = SparseUseCounts::new(use_counts);
     for stage in stages {
         for operand in instruction_uses(&block.instructions[stage.mux_index]) {
-            decrement_count(&mut remaining, operand)?;
+            remaining.decrement(operand)?;
         }
     }
-    let selector_uses = remaining.entry(selector).or_default();
-    *selector_uses = selector_uses.checked_add(boundary_count)?;
+    remaining.increment(selector, boundary_count)?;
     for &arm_index in reachable_arms {
-        let arm_uses = remaining.entry(arms[arm_index].value).or_default();
-        *arm_uses = arm_uses.checked_add(1)?;
+        remaining.increment(arms[arm_index].value, 1)?;
     }
 
     let mut queue = candidates
         .iter()
         .copied()
-        .filter(|reg| remaining.get(reg).copied().unwrap_or(0) == 0)
+        .filter(|&reg| remaining.get(reg) == 0)
         .collect::<VecDeque<_>>();
     let mut dead = HashSet::<RegisterId>::default();
     while let Some(reg) = queue.pop_front() {
@@ -1242,8 +1247,8 @@ fn cross_block_exact_dead_defs_after_rewrite(
         }
         let inst = instruction_defining(eu, def_sites, reg)?;
         for operand in instruction_uses(inst) {
-            decrement_count(&mut remaining, operand)?;
-            if candidates.contains(&operand) && remaining.get(&operand).copied().unwrap_or(0) == 0 {
+            remaining.decrement(operand)?;
+            if candidates.contains(&operand) && remaining.get(operand) == 0 {
                 queue.push_back(operand);
             }
         }
@@ -1360,13 +1365,38 @@ fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
     }
 }
 
-fn decrement_count(counts: &mut HashMap<RegisterId, usize>, reg: RegisterId) -> Option<()> {
-    let count = counts.get_mut(&reg)?;
-    *count = count.checked_sub(1)?;
-    if *count == 0 {
-        counts.remove(&reg);
+struct SparseUseCounts<'a> {
+    base: &'a HashMap<RegisterId, usize>,
+    overrides: HashMap<RegisterId, usize>,
+}
+
+impl<'a> SparseUseCounts<'a> {
+    fn new(base: &'a HashMap<RegisterId, usize>) -> Self {
+        Self {
+            base,
+            overrides: HashMap::default(),
+        }
     }
-    Some(())
+
+    fn get(&self, reg: RegisterId) -> usize {
+        self.overrides
+            .get(&reg)
+            .copied()
+            .or_else(|| self.base.get(&reg).copied())
+            .unwrap_or(0)
+    }
+
+    fn decrement(&mut self, reg: RegisterId) -> Option<()> {
+        let count = self.get(reg).checked_sub(1)?;
+        self.overrides.insert(reg, count);
+        Some(())
+    }
+
+    fn increment(&mut self, reg: RegisterId, amount: usize) -> Option<()> {
+        let count = self.get(reg).checked_add(amount)?;
+        self.overrides.insert(reg, count);
+        Some(())
+    }
 }
 
 const BRANCH_CONTROL_COST: u128 = 3;

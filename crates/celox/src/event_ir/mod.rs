@@ -77,6 +77,12 @@ pub enum EventProjection {
     Combinational,
     FusedClock,
     EvaluateClock,
+    /// Evaluate and commit FF AIR against combinational state which has
+    /// already been settled by the shared combinational schedule.
+    FusedSettledClock,
+    /// Evaluate FF AIR without commit against already-settled combinational
+    /// state.
+    EvaluateSettledClock,
     ApplyClock,
 }
 
@@ -86,7 +92,11 @@ impl EventProjection {
             (self, domain),
             (Self::Combinational, EventDomain::Combinational)
                 | (
-                    Self::FusedClock | Self::EvaluateClock | Self::ApplyClock,
+                    Self::FusedClock
+                        | Self::EvaluateClock
+                        | Self::FusedSettledClock
+                        | Self::EvaluateSettledClock
+                        | Self::ApplyClock,
                     EventDomain::Clock { .. }
                 )
         )

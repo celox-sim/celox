@@ -4878,11 +4878,61 @@ fn emit_chained_eu_list(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
+    trace: Option<&mut NativeFunctionTrace>,
+) -> Result<EmitResult, ChainedEmitError> {
+    let unit_refs = units.iter().collect::<Vec<_>>();
+    emit_chained_eu_refs(&unit_refs, layout, four_state, label, None, trace)
+}
+
+/// Compile the established combinational schedule and one settled-state FF
+/// projection as one optimization/allocation unit.
+pub fn emit_comb_eval_apply_eus(
+    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+) -> Result<EmitResult, ChainedEmitError> {
+    let units = comb_units.iter().chain(ff_units).collect::<Vec<_>>();
+    emit_chained_eu_refs(
+        &units,
+        layout,
+        four_state,
+        label,
+        Some(comb_units.len()),
+        None,
+    )
+}
+
+pub(crate) fn emit_comb_eval_apply_eus_with_trace(
+    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    trace: &mut NativeFunctionTrace,
+) -> Result<EmitResult, ChainedEmitError> {
+    let units = comb_units.iter().chain(ff_units).collect::<Vec<_>>();
+    emit_chained_eu_refs(
+        &units,
+        layout,
+        four_state,
+        label,
+        Some(comb_units.len()),
+        Some(trace),
+    )
+}
+
+fn emit_chained_eu_refs(
+    units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &crate::backend::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    first_ff_unit: Option<usize>,
     mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
     assert!(!units.is_empty(), "cannot emit an empty chained EU list");
-    let unit_refs = units.iter().collect::<Vec<_>>();
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
     let copy_stats = timing
@@ -4893,12 +4943,36 @@ fn emit_chained_eu_list(
 
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
-    let (mut sir_eu, sir_boundaries) = crate::ir::merge_sir_eu_refs(&unit_refs);
+    let (mut sir_eu, merge_provenance) = crate::ir::merge_sir_eu_refs_with_provenance(units);
+    let sir_boundaries = merge_provenance.unit_entries[1..].to_vec();
     let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
         eu.verify_result()
             .map_err(|error| ChainedEmitError::Sir { phase, error })
     };
     verify_sir(&sir_eu, "before native StateSSA")?;
+    if let Some(first_ff_unit) = first_ff_unit {
+        let dse_start = timing.then(crate::timing::now);
+        let removed = crate::optimizer::coalescing::eliminate_dead_fused_comb_publications(
+            &mut sir_eu,
+            &merge_provenance,
+            first_ff_unit,
+        )
+        .map_err(|message| ChainedEmitError::Analysis {
+            phase: "fused comb publication DSE",
+            message,
+        })?;
+        if removed != 0 {
+            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            verify_sir(&sir_eu, "after fused comb publication DSE")?;
+        }
+        if let Some(start) = dse_start {
+            eprintln!(
+                "[native-timing] fused comb publication DSE removed={} elapsed={:?}",
+                removed,
+                start.elapsed()
+            );
+        }
+    }
     if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
         verify_sir(&sir_eu, "after native working StateSSA")?;
         crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);

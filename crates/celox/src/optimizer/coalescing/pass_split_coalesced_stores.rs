@@ -5,6 +5,7 @@
 //! Complexity: O(n) per block where n = number of instructions.
 
 use super::pass_manager::ExecutionUnitPass;
+use super::sir_analysis::{UseSite, collect_uses};
 use crate::ir::*;
 use crate::optimizer::PassOptions;
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ impl ExecutionUnitPass for SplitCoalescedStoresPass {
 fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let block_ids: Vec<BlockId> = eu.blocks.keys().copied().collect();
     let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
+    let uses = collect_uses(eu);
 
     for bid in block_ids {
         let block = match eu.blocks.get(&bid) {
@@ -43,6 +45,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         struct SplitPlan {
             store_idx: usize,
             concat_idx: usize,
+            remove_concat: bool,
             /// (insert_after_idx, instructions_to_insert)
             insertions: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)>,
         }
@@ -132,6 +135,11 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             plans.push(SplitPlan {
                 store_idx: si,
                 concat_idx,
+                remove_concat: matches!(
+                    uses.get(&src_reg).map(Vec::as_slice),
+                    Some([UseSite::Instruction { block, index }])
+                        if *block == bid && *index == si
+                ),
                 insertions,
             });
         }
@@ -147,7 +155,9 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for plan in &plans {
             skip.insert(plan.store_idx);
-            skip.insert(plan.concat_idx);
+            if plan.remove_concat {
+                skip.insert(plan.concat_idx);
+            }
         }
 
         // Collect insertions by position: after index i, insert these instructions
@@ -190,5 +200,91 @@ fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
         | SIRInstruction::RuntimeEvent { .. }
         | SIRInstruction::CombCaptureEvent { .. }
         | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_var_id(n: u32) -> veryl_analyzer::ir::VarId {
+        let mut id = veryl_analyzer::ir::VarId::default();
+        for _ in 0..n {
+            id.inc();
+        }
+        id
+    }
+
+    fn make_addr() -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr {
+            region: 0,
+            instance_id: InstanceId(0),
+            var_id: make_var_id(0),
+        }
+    }
+
+    #[test]
+    fn preserves_a_split_concat_still_used_by_another_value() {
+        let addr = make_addr();
+        let mut register_map = crate::HashMap::default();
+        let mut instructions = Vec::new();
+        for index in 0..4 {
+            let register = RegisterId(index);
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 32,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(register, SIRValue::new(index as u64)));
+        }
+        let inner = RegisterId(4);
+        register_map.insert(inner, RegisterType::Logic { width: 128 });
+        instructions.push(SIRInstruction::Concat(
+            inner,
+            vec![RegisterId(3), RegisterId(2), RegisterId(1), RegisterId(0)],
+        ));
+        instructions.push(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(0),
+            128,
+            inner,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let outer = RegisterId(5);
+        register_map.insert(outer, RegisterType::Logic { width: 512 });
+        instructions.push(SIRInstruction::Concat(outer, vec![inner; 4]));
+        instructions.push(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(128),
+            512,
+            outer,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut blocks = crate::HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        split_coalesced_stores(&mut eu);
+
+        eu.verify_result().unwrap();
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(
+            |instruction| matches!(instruction, SIRInstruction::Concat(dst, _) if *dst == inner)
+        ));
     }
 }

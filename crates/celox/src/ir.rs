@@ -383,9 +383,8 @@ impl Program {
         self.num_events
     }
 
-    /// Collect the set of `AbsoluteAddr` values that are accessed in the working
-    /// region (region != STABLE). These are the only variables that need working
-    /// region space.
+    /// Collect the set of `AbsoluteAddr` values that need compact FF staging
+    /// storage. Compiler materialization homes use a separate unpacked arena.
     pub fn collect_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
         let mut addrs = std::collections::HashSet::new();
 
@@ -423,6 +422,88 @@ impl Program {
         scan_units(&self.apply_ffs, &mut addrs);
 
         addrs
+    }
+
+    pub fn collect_ff_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
+        let mut addrs = std::collections::HashSet::new();
+        for units in self
+            .eval_apply_ffs
+            .values()
+            .chain(self.eval_only_ffs.values())
+            .chain(self.apply_ffs.values())
+        {
+            for eu in units {
+                for block in eu.blocks.values() {
+                    for inst in &block.instructions {
+                        match inst {
+                            SIRInstruction::Store(addr, _, _, _, _, _)
+                                if addr.region == WORKING_REGION =>
+                            {
+                                addrs.insert(addr.absolute_addr());
+                            }
+                            SIRInstruction::Commit(src, dst, _, _, _) => {
+                                if src.region == WORKING_REGION {
+                                    addrs.insert(src.absolute_addr());
+                                }
+                                if dst.region == WORKING_REGION {
+                                    addrs.insert(dst.absolute_addr());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        addrs
+    }
+
+    pub fn collect_materialization_home_region_addrs(
+        &self,
+    ) -> std::collections::HashSet<AbsoluteAddr> {
+        let mut addrs = std::collections::HashSet::new();
+        for units in self
+            .eval_apply_ffs
+            .values()
+            .chain(self.eval_only_ffs.values())
+        {
+            for eu in units {
+                for block in eu.blocks.values() {
+                    for inst in &block.instructions {
+                        match inst {
+                            SIRInstruction::Load(_, addr, _, _)
+                            | SIRInstruction::Store(addr, _, _, _, _, _)
+                                if addr.region == MATERIALIZATION_HOME_REGION =>
+                            {
+                                addrs.insert(addr.absolute_addr());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        addrs
+    }
+
+    pub fn materialization_home_extent_bits(&self) -> usize {
+        self.eval_apply_ffs
+            .values()
+            .chain(self.eval_only_ffs.values())
+            .flat_map(|units| units.iter())
+            .flat_map(|eu| eu.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(_, address, SIROffset::Static(offset), width)
+                | SIRInstruction::Store(address, SIROffset::Static(offset), width, _, _, _)
+                    if address.region == MATERIALIZATION_HOME_REGION =>
+                {
+                    offset.checked_add(*width)
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
@@ -628,6 +709,9 @@ pub struct InstancePath(pub Vec<(StrId, usize)>);
 pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
 pub const SPARSE_WORKING_REGION: u32 = 2;
+/// Event-local homes used to cut values which cross FF process allocation
+/// boundaries. This is compiler scratch state, not published RTL state.
+pub const MATERIALIZATION_HOME_REGION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RegionedVarAddrBase<V> {
@@ -810,19 +894,50 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
     merge_sir_eu_refs(&units)
 }
 
+/// Exact source-unit provenance for a merged SIR function.
+///
+/// Block IDs are renumbered while merging, so a boundary block alone cannot
+/// identify every block on either side of a phase cut.  Keep the source-unit
+/// index for each merged block instead.
+#[derive(Debug, Clone)]
+pub(crate) struct SirMergeProvenance {
+    pub unit_entries: Vec<BlockId>,
+    pub block_units: crate::HashMap<BlockId, usize>,
+}
+
 /// Reference-based variant of [`merge_sir_eus`] used when one compilation
 /// unit is assembled from multiple Program-owned EU slices.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(crate) fn merge_sir_eu_refs<A: Clone>(
     units: &[&ExecutionUnit<A>],
 ) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    let (merged, provenance) = merge_sir_eu_refs_with_provenance(units);
+    (merged, provenance.unit_entries[1..].to_vec())
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
+    units: &[&ExecutionUnit<A>],
+) -> (ExecutionUnit<A>, SirMergeProvenance) {
     assert!(!units.is_empty(), "cannot merge an empty SIR EU list");
     if units.len() == 1 {
-        return ((*units[0]).clone(), Vec::new());
+        return (
+            (*units[0]).clone(),
+            SirMergeProvenance {
+                unit_entries: vec![units[0].entry_block_id],
+                block_units: units[0]
+                    .blocks
+                    .keys()
+                    .copied()
+                    .map(|block| (block, 0))
+                    .collect(),
+            },
+        );
     }
 
     let mut merged_blocks = crate::HashMap::default();
     let mut merged_regs = crate::HashMap::default();
+    let mut block_units = crate::HashMap::default();
 
     // Compute offsets for renumbering
     let mut reg_offset = 0usize;
@@ -864,6 +979,7 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
         // Copy blocks with renumbering
         for (&block_id, block) in &eu.blocks {
             let new_block_id = BlockId(block_id.0 + bo);
+            block_units.insert(new_block_id, eu_idx);
             let r = |reg: RegisterId| RegisterId(reg.0 + ro);
             let b = |bid: BlockId| BlockId(bid.0 + bo);
 
@@ -937,7 +1053,10 @@ pub(crate) fn merge_sir_eu_refs<A: Clone>(
             blocks: merged_blocks,
             register_map: merged_regs,
         },
-        entry_blocks[1..].to_vec(),
+        SirMergeProvenance {
+            unit_entries: entry_blocks,
+            block_units,
+        },
     )
 }
 

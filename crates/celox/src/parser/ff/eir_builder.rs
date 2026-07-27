@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use num_bigint::BigUint;
 use num_traits::One;
@@ -54,6 +54,71 @@ struct RecordedBlock {
     parameters: Vec<RegisterId>,
     operations: Vec<FfBuildOp>,
     terminator: Option<RecordedTerminator>,
+}
+
+#[derive(Default)]
+struct FfEffectOrder {
+    stage_frontier: HashMap<AbsoluteAddr, BTreeMap<usize, (usize, EffectId)>>,
+    last_observation: Option<EffectId>,
+}
+
+#[derive(Clone)]
+enum PendingPredicatedEffect {
+    Stage {
+        region: crate::event_ir::RegionId,
+        target: ObjectAccess,
+        value: ValueId,
+        guard: Option<ValueId>,
+        priority: usize,
+    },
+    RuntimeEvent {
+        region: crate::event_ir::RegionId,
+        site_id: u32,
+        arguments: Vec<ValueId>,
+        guard: Option<ValueId>,
+    },
+}
+
+impl FfEffectOrder {
+    fn stage_predecessors_and_update(
+        &mut self,
+        target: &ObjectAccess,
+        effect: EffectId,
+    ) -> Vec<EffectId> {
+        let frontier = self.stage_frontier.entry(target.object).or_default();
+        let mut overlapping = Vec::new();
+        if let Some((&start, &(end, previous))) = frontier.range(..=target.alias.lsb).next_back()
+            && end >= target.alias.lsb
+        {
+            overlapping.push((start, end, previous));
+        }
+        if target.alias.lsb < target.alias.msb {
+            overlapping.extend(
+                frontier
+                    .range(target.alias.lsb + 1..=target.alias.msb)
+                    .map(|(&start, &(end, previous))| (start, end, previous)),
+            );
+        }
+
+        let mut predecessors = overlapping
+            .iter()
+            .map(|(_, _, previous)| *previous)
+            .collect::<Vec<_>>();
+        predecessors.sort_unstable();
+        predecessors.dedup();
+
+        for (start, end, previous) in overlapping {
+            frontier.remove(&start);
+            if start < target.alias.lsb {
+                frontier.insert(start, (target.alias.lsb - 1, previous));
+            }
+            if end > target.alias.msb {
+                frontier.insert(target.alias.msb + 1, (end, previous));
+            }
+        }
+        frontier.insert(target.alias.lsb, (target.alias.msb, effect));
+        predecessors
+    }
 }
 
 impl RecordedBlock {
@@ -117,6 +182,16 @@ impl FfEirBuilder {
         resets: Vec<crate::ir::AbsoluteAddr>,
     ) -> Result<Vec<EffectId>, FfEirBuildError> {
         self.finish_recording()?;
+        if let Some(block_order) = self.acyclic_predication_order() {
+            return self.lower_predicated_into(
+                ir,
+                module,
+                instance_id,
+                source_order,
+                resets,
+                &block_order,
+            );
+        }
         let process = ir.add_process_with_resets(source_order, resets);
         let process_blocks = self.create_control_blocks(ir, process);
         let local_dataflow = self.analyze_local_liveness(module)?;
@@ -140,7 +215,9 @@ impl FfEirBuilder {
         );
         let mut outgoing_locals = vec![HashMap::default(); self.blocks.len()];
         let mut stages = Vec::new();
-        let mut block_last_effect = vec![None; self.blocks.len()];
+        let mut block_effect_order = (0..self.blocks.len())
+            .map(|_| FfEffectOrder::default())
+            .collect::<Vec<_>>();
 
         for block in block_order.iter().copied() {
             let eir_block = process_blocks[block.0];
@@ -162,7 +239,9 @@ impl FfEirBuilder {
                     block,
                     &mut register_values,
                     &mut locals,
-                    &mut block_last_effect[block.0],
+                    &mut block_effect_order[block.0],
+                    None,
+                    None,
                     &mut stages,
                 )?;
             }
@@ -186,6 +265,240 @@ impl FfEirBuilder {
         }
 
         Ok(stages)
+    }
+
+    /// Convert an acyclic AIR process to one predicated value/effect region.
+    ///
+    /// Pure AIR operations become one dataflow graph. Control only survives as
+    /// predicates on state stages and observations, so the event scheduler can
+    /// choose which FF sink to complete instead of inheriting AIR block order.
+    fn lower_predicated_into(
+        &self,
+        ir: &mut EventIr,
+        module: &Module,
+        instance_id: InstanceId,
+        source_order: usize,
+        resets: Vec<crate::ir::AbsoluteAddr>,
+        block_order: &[BlockId],
+    ) -> Result<Vec<EffectId>, FfEirBuildError> {
+        #[derive(Clone)]
+        struct IncomingEdge {
+            predicate: ValueId,
+            always: bool,
+            arguments: Vec<RegisterId>,
+            predecessor: BlockId,
+        }
+
+        let process = ir.add_process_with_resets(source_order, resets);
+        let entry = ir.processes()[process.0].entry;
+        let region = ir.blocks()[entry.0].region;
+        let local_dataflow = self.analyze_local_liveness(module)?;
+        let mut register_values = vec![None; self.registers.len()];
+        let mut outgoing_locals = vec![HashMap::default(); self.blocks.len()];
+        let mut incoming = vec![Vec::<IncomingEdge>::new(); self.blocks.len()];
+        let mut stages = Vec::new();
+        let mut effect_order = FfEffectOrder::default();
+        let mut pending_effects = Vec::new();
+
+        let true_value = ir.add_value(Value {
+            ty: ValueType::bit(1, false),
+            scope: ValueScope::Process(process),
+            region,
+            kind: ValueKind::Constant {
+                value: BigUint::one(),
+                unknown: BigUint::default(),
+            },
+        });
+
+        for &block in block_order {
+            let (predicate, always) = if block == BlockId(0) {
+                (true_value, true)
+            } else {
+                let edges = &incoming[block.0];
+                debug_assert!(!edges.is_empty(), "predicated AIR block is reachable");
+                (
+                    merge_predicates(ir, process, region, edges.iter().map(|edge| edge.predicate)),
+                    edges.iter().any(|edge| edge.always),
+                )
+            };
+
+            if block != BlockId(0) {
+                let edges = &incoming[block.0];
+                for (index, parameter) in self.block(block)?.parameters.iter().copied().enumerate()
+                {
+                    let ty = value_type(self.register_type(parameter)?);
+                    let merged = merge_predicated_values(
+                        ir,
+                        process,
+                        region,
+                        ty,
+                        edges.iter().map(|edge| {
+                            (
+                                edge.predicate,
+                                register_value(&register_values, edge.arguments[index]),
+                            )
+                        }),
+                    )?;
+                    register_values[parameter.0] = Some(merged);
+                }
+            }
+
+            let mut locals = if block == BlockId(0) {
+                self.create_entry_locals(ir, module, instance_id, &local_dataflow.live_in[block.0])?
+            } else {
+                let mut locals = HashMap::default();
+                for object in &local_dataflow.parameter_order[block.0] {
+                    let ty = object_type(module, *object)?;
+                    let merged = merge_predicated_values(
+                        ir,
+                        process,
+                        region,
+                        ty,
+                        incoming[block.0].iter().map(|edge| {
+                            (
+                                edge.predicate,
+                                outgoing_locals[edge.predecessor.0]
+                                    .get(object)
+                                    .copied()
+                                    .ok_or(FfEirBuildError::MissingLocalValue(*object, block)),
+                            )
+                        }),
+                    )?;
+                    locals.insert(*object, merged);
+                }
+                locals
+            };
+
+            let guard = (!always).then_some(predicate);
+            for operation in &self.block(block)?.operations {
+                self.lower_operation(
+                    operation,
+                    ir,
+                    module,
+                    instance_id,
+                    process,
+                    region,
+                    block,
+                    &mut register_values,
+                    &mut locals,
+                    &mut effect_order,
+                    guard,
+                    Some(&mut pending_effects),
+                    &mut stages,
+                )?;
+            }
+            outgoing_locals[block.0] = locals;
+
+            match self
+                .block(block)?
+                .terminator
+                .as_ref()
+                .ok_or(FfEirBuildError::UnterminatedBlock(block))?
+            {
+                RecordedTerminator::Return => {}
+                RecordedTerminator::Air(FfTerminator::Error(_)) => {
+                    unreachable!("error terminators retain structured control")
+                }
+                RecordedTerminator::Air(FfTerminator::Jump(target, arguments)) => {
+                    incoming[target.0].push(IncomingEdge {
+                        predicate,
+                        always,
+                        arguments: arguments.clone(),
+                        predecessor: block,
+                    });
+                }
+                RecordedTerminator::Air(FfTerminator::Branch {
+                    condition,
+                    true_block,
+                    false_block,
+                }) => {
+                    let condition = normalize_condition(
+                        ir,
+                        process,
+                        region,
+                        register_value(&register_values, *condition)?,
+                    );
+                    let false_condition = ir.add_value(Value {
+                        ty: ValueType::bit(1, false),
+                        scope: ValueScope::Process(process),
+                        region,
+                        kind: ValueKind::Unary {
+                            op: UnaryOp::LogicNot,
+                            input: condition,
+                        },
+                    });
+                    let true_predicate = if always {
+                        condition
+                    } else {
+                        predicate_and(ir, process, region, predicate, condition)
+                    };
+                    let false_predicate = if always {
+                        false_condition
+                    } else {
+                        predicate_and(ir, process, region, predicate, false_condition)
+                    };
+                    incoming[true_block.0.0].push(IncomingEdge {
+                        predicate: true_predicate,
+                        always: false,
+                        arguments: true_block.1.clone(),
+                        predecessor: block,
+                    });
+                    incoming[false_block.0.0].push(IncomingEdge {
+                        predicate: false_predicate,
+                        always: false,
+                        arguments: false_block.1.clone(),
+                        predecessor: block,
+                    });
+                }
+            }
+        }
+
+        debug_assert!(stages.is_empty());
+        let stages =
+            emit_predicated_effects(ir, process, region, pending_effects, &mut effect_order);
+        ir.set_terminator(entry, ControlTerminator::Return);
+        Ok(stages)
+    }
+
+    /// Return a deterministic topological order when this process can be
+    /// represented as one predicated dataflow region. Loop and terminating
+    /// error regions keep their explicit CFG.
+    fn acyclic_predication_order(&self) -> Option<Vec<BlockId>> {
+        if self.blocks.iter().any(|block| {
+            matches!(
+                block.terminator,
+                Some(RecordedTerminator::Air(FfTerminator::Error(_)))
+            )
+        }) {
+            return None;
+        }
+
+        let mut indegree = vec![0usize; self.blocks.len()];
+        for block in 0..self.blocks.len() {
+            for successor in self.successors(BlockId(block)) {
+                indegree[successor.0] = indegree[successor.0].checked_add(1)?;
+            }
+        }
+        let mut ready = std::collections::BTreeSet::new();
+        for (block, degree) in indegree.iter().enumerate() {
+            if *degree == 0 {
+                ready.insert(block);
+            }
+        }
+        let mut order = Vec::with_capacity(self.blocks.len());
+        while let Some(block) = ready.pop_first() {
+            order.push(BlockId(block));
+            for successor in self.successors(BlockId(block)) {
+                indegree[successor.0] = indegree[successor.0].checked_sub(1)?;
+                if indegree[successor.0] == 0 {
+                    ready.insert(successor.0);
+                }
+            }
+        }
+        if order.len() != self.blocks.len() || order.first() != Some(&BlockId(0)) {
+            return None;
+        }
+        Some(order)
     }
 
     pub fn remap_runtime_ids(
@@ -285,7 +598,9 @@ impl FfEirBuilder {
         block: BlockId,
         register_values: &mut [Option<ValueId>],
         locals: &mut HashMap<VarId, ValueId>,
-        last_effect: &mut Option<EffectId>,
+        effect_order: &mut FfEffectOrder,
+        guard: Option<ValueId>,
+        pending_effects: Option<&mut Vec<PendingPredicatedEffect>>,
         stages: &mut Vec<EffectId>,
     ) -> Result<(), FfEirBuildError> {
         match operation {
@@ -439,20 +754,33 @@ impl FfEirBuilder {
                             object_ty.width,
                             register_values,
                         )?;
-                        let predecessors = last_effect.iter().copied().collect();
-                        let stage = ir.add_effect(Effect {
-                            region,
-                            predecessors,
-                            kind: EffectKind::StageNextFf {
-                                process,
+                        if let Some(pending_effects) = pending_effects {
+                            let priority = pending_effects.len();
+                            pending_effects.push(PendingPredicatedEffect::Stage {
+                                region,
                                 target,
                                 value,
-                                guard: None,
-                                priority: stages.len(),
-                            },
-                        });
-                        *last_effect = Some(stage);
-                        stages.push(stage);
+                                guard,
+                                priority,
+                            });
+                        } else {
+                            let stage = EffectId(ir.effects().len());
+                            let predecessors =
+                                effect_order.stage_predecessors_and_update(&target, stage);
+                            let actual_stage = ir.add_effect(Effect {
+                                region,
+                                predecessors,
+                                kind: EffectKind::StageNextFf {
+                                    process,
+                                    target,
+                                    value,
+                                    guard,
+                                    priority: stages.len(),
+                                },
+                            });
+                            debug_assert_eq!(actual_stage, stage);
+                            stages.push(actual_stage);
+                        }
                     }
                 }
             }
@@ -515,17 +843,26 @@ impl FfEirBuilder {
                     .iter()
                     .map(|argument| register_value(register_values, *argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                let predecessors = last_effect.iter().copied().collect();
-                let effect = ir.add_effect(Effect {
-                    region,
-                    predecessors,
-                    kind: EffectKind::RuntimeEvent {
+                if let Some(pending_effects) = pending_effects {
+                    pending_effects.push(PendingPredicatedEffect::RuntimeEvent {
+                        region,
                         site_id: *site_id,
                         arguments,
-                        guard: None,
-                    },
-                });
-                *last_effect = Some(effect);
+                        guard,
+                    });
+                } else {
+                    let predecessors = effect_order.last_observation.iter().copied().collect();
+                    let effect = ir.add_effect(Effect {
+                        region,
+                        predecessors,
+                        kind: EffectKind::RuntimeEvent {
+                            site_id: *site_id,
+                            arguments,
+                            guard,
+                        },
+                    });
+                    effect_order.last_observation = Some(effect);
+                }
             }
         }
         Ok(())
@@ -1051,6 +1388,134 @@ fn bit_access(offset: usize, width: usize) -> Option<BitAccess> {
     Some(BitAccess::new(offset, msb))
 }
 
+fn predicate_and(
+    ir: &mut EventIr,
+    process: ProcessId,
+    region: crate::event_ir::RegionId,
+    lhs: ValueId,
+    rhs: ValueId,
+) -> ValueId {
+    ir.add_value(Value {
+        ty: ValueType::bit(1, false),
+        scope: ValueScope::Process(process),
+        region,
+        kind: ValueKind::Binary {
+            op: crate::ir::BinaryOp::And,
+            lhs,
+            rhs,
+        },
+    })
+}
+
+fn merge_predicates(
+    ir: &mut EventIr,
+    process: ProcessId,
+    region: crate::event_ir::RegionId,
+    predicates: impl IntoIterator<Item = ValueId>,
+) -> ValueId {
+    let mut predicates = predicates.into_iter();
+    let mut result = predicates
+        .next()
+        .expect("a reachable predicated block has an incoming edge");
+    for predicate in predicates {
+        result = ir.add_value(Value {
+            ty: ValueType::bit(1, false),
+            scope: ValueScope::Process(process),
+            region,
+            kind: ValueKind::Binary {
+                op: crate::ir::BinaryOp::Or,
+                lhs: result,
+                rhs: predicate,
+            },
+        });
+    }
+    result
+}
+
+fn merge_predicated_values(
+    ir: &mut EventIr,
+    process: ProcessId,
+    region: crate::event_ir::RegionId,
+    ty: ValueType,
+    incoming: impl IntoIterator<Item = (ValueId, Result<ValueId, FfEirBuildError>)>,
+) -> Result<ValueId, FfEirBuildError> {
+    let mut incoming = incoming.into_iter();
+    let (_, first) = incoming
+        .next()
+        .expect("a reachable predicated block has an incoming value");
+    let mut result = resize_if_needed(ir, ValueScope::Process(process), region, first?, ty);
+    for (predicate, value) in incoming {
+        let value = resize_if_needed(ir, ValueScope::Process(process), region, value?, ty);
+        result = ir.add_value(Value {
+            ty,
+            scope: ValueScope::Process(process),
+            region,
+            kind: ValueKind::Mux {
+                condition: predicate,
+                then_value: value,
+                else_value: result,
+            },
+        });
+    }
+    Ok(result)
+}
+
+fn emit_predicated_effects(
+    ir: &mut EventIr,
+    process: ProcessId,
+    _region: crate::event_ir::RegionId,
+    pending: Vec<PendingPredicatedEffect>,
+    effect_order: &mut FfEffectOrder,
+) -> Vec<EffectId> {
+    let mut stages = Vec::new();
+    for effect in pending {
+        match effect {
+            PendingPredicatedEffect::Stage {
+                region,
+                target,
+                value,
+                guard,
+                priority,
+            } => {
+                let id = EffectId(ir.effects().len());
+                let predecessors = effect_order.stage_predecessors_and_update(&target, id);
+                let actual = ir.add_effect(Effect {
+                    region,
+                    predecessors,
+                    kind: EffectKind::StageNextFf {
+                        process,
+                        target,
+                        value,
+                        guard,
+                        priority,
+                    },
+                });
+                debug_assert_eq!(actual, id);
+                stages.push(actual);
+            }
+            PendingPredicatedEffect::RuntimeEvent {
+                region,
+                site_id,
+                arguments,
+                guard,
+            } => {
+                let predecessors = effect_order.last_observation.iter().copied().collect();
+                let id = ir.add_effect(Effect {
+                    region,
+                    predecessors,
+                    kind: EffectKind::RuntimeEvent {
+                        site_id,
+                        arguments,
+                        guard,
+                    },
+                });
+                effect_order.last_observation = Some(id);
+            }
+        }
+    }
+    stages
+}
+
 fn object_range(
     instance_id: InstanceId,
     object: VarId,
@@ -1349,6 +1814,13 @@ module Top (
                 .filter(|effect| matches!(effect.kind, EffectKind::StageNextFf { .. }))
                 .count(),
             2
+        );
+        assert!(
+            event
+                .values()
+                .iter()
+                .any(|value| matches!(value.kind, ValueKind::Mux { .. })),
+            "predicated AIR control must retain its value merge"
         );
         assert!(
             event

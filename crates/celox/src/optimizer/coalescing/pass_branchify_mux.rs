@@ -288,184 +288,288 @@ impl ExecutionUnitPass for BranchifyMuxPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        // A four-state Mux bitwise-merges its arms for an X/Z condition.
-        // Control flow selects only one arm, so branchification cannot preserve
-        // that behavior.
-        if options.four_state {
-            return;
+        run_branchify_mux(eu, options, None, true, true);
+    }
+}
+
+pub(super) fn run_late_branchify_mux(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    options: &PassOptions,
+    previous_max_block: usize,
+) {
+    run_branchify_mux(eu, options, Some(previous_max_block), true, true);
+}
+
+fn run_branchify_mux(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    options: &PassOptions,
+    controlled_join_after: Option<usize>,
+    recover_controlled_joins: bool,
+    enable_whole_function_rewrites: bool,
+) {
+    let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
+        if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some()
+            && let Err(error) = eu.verify_result()
+        {
+            panic!("during branchify_mux {stage}: {error}");
         }
-        // First consume Muxes whose arms are already guarded by an existing
-        // branch.  This is the CFG case the old block-local pass missed: no
-        // new control flow is needed, so the selected value can be carried as
-        // a block parameter and the branchless Mux can be deleted outright.
-        // Plan all such rewrites from one CFG snapshot; do not repeatedly
-        // rescan the whole function for each Mux.
-        eliminate_controlled_join_muxes(eu);
+    };
+    // A four-state Mux bitwise-merges its arms for an X/Z condition.
+    // Control flow selects only one arm, so branchification cannot preserve
+    // that behavior.
+    if options.four_state {
+        return;
+    }
+    // First consume Muxes whose arms are already guarded by an existing
+    // branch.  This is the CFG case the old block-local pass missed: no
+    // new control flow is needed, so the selected value can be carried as
+    // a block parameter and the branchless Mux can be deleted outright.
+    // Plan all such rewrites from one CFG snapshot; do not repeatedly
+    // rescan the whole function for each Mux.
+    if recover_controlled_joins {
+        eliminate_controlled_join_muxes(eu, controlled_join_after);
+    }
+    verify_stage(eu, "controlled-join elimination");
 
-        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
-        let stats_start = stats.then(crate::timing::now);
-        let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .map(RegisterId);
-        let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-        let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
-        let mut applied = 0usize;
+    let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let stats_start = stats.then(crate::timing::now);
+    let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(RegisterId);
+    let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
+    let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let mut applied = 0usize;
 
-        // Recover a source-level conditional state update before treating its
-        // Muxes independently. RTL lowering commonly separates correlated
-        // updates into distant recurrence chains:
-        //
-        //   next_pri = Mux(c, candidate_pri, pri)
-        //   ...
-        //   next_id  = Mux(c, candidate_id, id)
-        //
-        // Keeping those as two selects extends `c` across the intervening
-        // dataflow and prevents the backend from representing the update as
-        // one branch carrying a state tuple. Process each resulting merge as
-        // a worklist item so a sequence is recovered in source order without
-        // repeatedly rescanning the whole execution unit.
+    // Recover a source-level conditional state update before treating its
+    // Muxes independently. RTL lowering commonly separates correlated
+    // updates into distant recurrence chains:
+    //
+    //   next_pri = Mux(c, candidate_pri, pri)
+    //   ...
+    //   next_id  = Mux(c, candidate_id, id)
+    //
+    // Keeping those as two selects extends `c` across the intervening
+    // dataflow and prevents the backend from representing the update as
+    // one branch carrying a state tuple. Process each resulting merge as
+    // a worklist item so a sequence is recovered in source order without
+    // repeatedly rescanning the whole execution unit.
+    if enable_whole_function_rewrites {
         applied += branchify_coupled_priority_chains(eu, &mut next_block_id, &mut reg_counter);
         applied += branchify_coupled_state_updates(eu, &mut next_block_id, &mut reg_counter);
-        let mut use_counts = count_uses(eu);
-        let mut def_blocks = instruction_def_blocks(eu);
+        verify_stage(eu, "coupled updates");
+    }
+    let mut use_counts = count_uses(eu);
+    let mut def_blocks = instruction_def_blocks(eu);
 
-        // A priority spine is one short-circuit expression, not a collection
-        // of independent selects.  Handle the whole spine before the
-        // single-Mux motion below so later conditions and their pure compare
-        // DAGs are evaluated only on the fall-through path.
-        while let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts) {
-            apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
-        }
-
-        // The local transform below can only move definitions from one basic
-        // block.  Before using it, repeatedly consume the existing
-        // conservative cross-block plans: every moved instruction must be
-        // pure, its defining block must dominate the Mux block, and every
-        // moved definition must have exactly one use in the selected arm.
-        // Preserve these already-proved short-circuit regions before the
-        // whole-unit placement pass considers the residual Mux graph.
-        while let Some(plan) = find_cross_block_group_branchify_plan(eu) {
-            apply_cross_block_group_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
-        }
-        while let Some(plan) = find_cross_block_branchify_plan(eu, &use_counts) {
-            apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
-        }
-        let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-        block_ids.sort_by_key(|id| id.0);
-        let mut worklist = VecDeque::from(block_ids);
-        let mut queued = HashSet::default();
-        queued.extend(worklist.iter().copied());
-        while let Some(block_id) = worklist.pop_front() {
-            queued.remove(&block_id);
-            if !eu.blocks.contains_key(&block_id) {
-                continue;
-            }
-            while let Some(plan) =
-                find_branchify_mux_in_block(eu, block_id, &use_counts, &def_blocks)
+    // A priority spine is one short-circuit expression, not a collection
+    // of independent selects.  Handle the whole spine before the
+    // single-Mux motion below so later conditions and their pure compare
+    // DAGs are evaluated only on the fall-through path.
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts)
+    {
+        if let Some(register) = trace_reg {
+            eprintln!(
+                "[branchify-trace] selected cross-block priority plan source=b{} first_mux={} muxes={} r{} uses={}",
+                plan.block_id.0,
+                plan.first_mux_idx,
+                plan.muxes.len(),
+                register.0,
+                use_counts.get(&register).copied().unwrap_or(0)
+            );
+            for (kind, group, definitions) in plan
+                .condition_defs
+                .iter()
+                .enumerate()
+                .map(|(index, definitions)| ("condition", index, definitions))
+                .chain(
+                    plan.arm_defs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, definitions)| ("arm", index, definitions)),
+                )
             {
-                let new_blocks = apply_branchify_mux(
-                    eu,
-                    plan,
-                    &mut use_counts,
-                    &mut def_blocks,
-                    &mut next_block_id,
-                    &mut reg_counter,
-                    trace_reg,
-                );
-                applied += 1;
-                if stats && applied.is_multiple_of(1000) {
-                    let insts = eu
-                        .blocks
-                        .values()
-                        .map(|block| block.instructions.len())
-                        .sum::<usize>();
-                    eprintln!(
-                        "[branchify-stats] applied={applied} blocks={} insts={} worklist={} elapsed={:?}",
-                        eu.blocks.len(),
-                        insts,
-                        worklist.len(),
-                        stats_start.unwrap().elapsed()
-                    );
-                }
-                for new_block in new_blocks {
-                    if queued.insert(new_block) {
-                        worklist.push_back(new_block);
+                for definition in definitions {
+                    if def_reg(&definition.instruction) == Some(register)
+                        || inst_uses(&definition.instruction).contains(&register)
+                    {
+                        eprintln!(
+                            "[branchify-trace] plan {kind}[{group}] b{} i{}: {}",
+                            definition.block.0, definition.index, definition.instruction
+                        );
                     }
                 }
             }
+            for candidate in eu.blocks.values() {
+                trace_reg_in_new_block(candidate, register);
+            }
         }
-
-        // The leaf fixed point has now exposed the residual nested Mux spines.
-        // Select complete priority regions from one occurrence-aware snapshot
-        // and apply the non-overlapping whole-unit plan atomically.  Running
-        // here preserves every existing CFG/block-number decision and appends
-        // only complete regions which the leaf transforms could not consume.
-        if let Ok(placement) = PlacementAnalysis::analyze(eu)
-            && let Some(plan) = find_atomic_priority_placement(eu, &placement)
+        let trace_plan = trace_reg.map(|register| {
+            (
+                register,
+                plan.block_id,
+                plan.first_mux_idx,
+                plan.muxes.len(),
+            )
+        });
+        apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
+        if let Some((register, block, first_mux, muxes)) = trace_plan
+            && let Err(error) = eu.verify_result()
         {
-            let regions =
-                apply_atomic_priority_placement(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += regions;
+            eprintln!(
+                "[branchify-trace] invalid cross-block priority plan source=b{} first_mux={} muxes={}: {error}",
+                block.0, first_mux, muxes
+            );
+            for candidate in eu.blocks.values() {
+                trace_reg_in_new_block(candidate, register);
+            }
+            panic!("cross-block priority rewrite produced invalid SIR");
         }
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block priority chains");
 
-        // Rebuild placement facts after the atomic CFG rewrite, then perform
-        // ordinary whole-unit ScheduleLate on the existing branch forest.
-        // This catches pure/state-versioned DAGs which feed only one existing
-        // control arm even when no Mux remains at the use site.  The complete
-        // connected move is selected and preflighted before any block changes.
-        if let Ok(placement) = PlacementAnalysis::analyze(eu)
-            && let Some(plan) = find_existing_cfg_placement(eu, &placement)
-        {
-            applied += apply_existing_cfg_placement(eu, plan);
+    // The local transform below can only move definitions from one basic
+    // block.  Before using it, repeatedly consume the existing
+    // conservative cross-block plans: every moved instruction must be
+    // pure, its defining block must dominate the Mux block, and every
+    // moved definition must have exactly one use in the selected arm.
+    // Preserve these already-proved short-circuit regions before the
+    // whole-unit placement pass considers the residual Mux graph.
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_group_branchify_plan(eu)
+    {
+        apply_cross_block_group_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block groups");
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_branchify_plan(eu, &use_counts)
+    {
+        apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block muxes");
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_by_key(|id| id.0);
+    let mut worklist = VecDeque::from(block_ids);
+    let mut queued = HashSet::default();
+    queued.extend(worklist.iter().copied());
+    while let Some(block_id) = worklist.pop_front() {
+        queued.remove(&block_id);
+        if !eu.blocks.contains_key(&block_id) {
+            continue;
         }
+        while let Some(plan) = find_branchify_mux_in_block(eu, block_id, &use_counts, &def_blocks) {
+            let new_blocks = apply_branchify_mux(
+                eu,
+                plan,
+                &mut use_counts,
+                &mut def_blocks,
+                &mut next_block_id,
+                &mut reg_counter,
+                trace_reg,
+            );
+            applied += 1;
+            if stats && applied.is_multiple_of(1000) {
+                let insts = eu
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>();
+                eprintln!(
+                    "[branchify-stats] applied={applied} blocks={} insts={} worklist={} elapsed={:?}",
+                    eu.blocks.len(),
+                    insts,
+                    worklist.len(),
+                    stats_start.unwrap().elapsed()
+                );
+            }
+            for new_block in new_blocks {
+                if queued.insert(new_block) {
+                    worklist.push_back(new_block);
+                }
+            }
+        }
+    }
+    verify_stage(eu, "local muxes");
 
-        // A selector-disjoint Boolean sum is control flow, not a reason to
-        // evaluate every payload shape eagerly:
-        //
-        //   common && ((kind == A && payload_a) ||
-        //              (kind == B && payload_b) || ...)
-        //
-        // Lower the complete predicate after the ordinary placement pass so
-        // only the selected payload DAG executes.  Planning is whole-EU and
-        // each source block is rewritten once; newly added decision blocks do
-        // not trigger a repeated global scan.
+    // The leaf fixed point has now exposed the residual nested Mux spines.
+    // Select complete priority regions from one occurrence-aware snapshot
+    // and apply the non-overlapping whole-unit plan atomically.  Running
+    // here preserves every existing CFG/block-number decision and appends
+    // only complete regions which the leaf transforms could not consume.
+    if enable_whole_function_rewrites
+        && let Ok(placement) = PlacementAnalysis::analyze(eu)
+        && let Some(plan) = find_atomic_priority_placement(eu, &placement)
+    {
+        let regions =
+            apply_atomic_priority_placement(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += regions;
+    }
+    verify_stage(eu, "atomic priority placement");
+
+    // Rebuild placement facts after the atomic CFG rewrite, then perform
+    // ordinary whole-unit ScheduleLate on the existing branch forest.
+    // This catches pure/state-versioned DAGs which feed only one existing
+    // control arm even when no Mux remains at the use site.  The complete
+    // connected move is selected and preflighted before any block changes.
+    if enable_whole_function_rewrites
+        && let Ok(placement) = PlacementAnalysis::analyze(eu)
+        && let Some(plan) = find_existing_cfg_placement(eu, &placement)
+    {
+        applied += apply_existing_cfg_placement(eu, plan);
+    }
+    verify_stage(eu, "existing CFG placement");
+
+    // A selector-disjoint Boolean sum is control flow, not a reason to
+    // evaluate every payload shape eagerly:
+    //
+    //   common && ((kind == A && payload_a) ||
+    //              (kind == B && payload_b) || ...)
+    //
+    // Lower the complete predicate after the ordinary placement pass so
+    // only the selected payload DAG executes.  Planning is whole-EU and
+    // each source block is rewritten once; newly added decision blocks do
+    // not trigger a repeated global scan.
+    if enable_whole_function_rewrites {
         applied += branchify_selector_guarded_predicates(eu, &mut next_block_id, &mut reg_counter);
+    }
+    verify_stage(eu, "selector predicates");
 
-        if stats {
-            eprintln!(
-                "[branchify-stats] before_pre_repair_inline applied={applied} blocks={} elapsed={:?}",
-                eu.blocks.len(),
-                stats_start.unwrap().elapsed()
-            );
-        }
-        inline_param_only_jump_blocks(eu);
-        inline_param_only_jump_blocks(eu);
-        if stats {
-            let insts = eu
-                .blocks
-                .values()
-                .map(|block| block.instructions.len())
-                .sum::<usize>();
-            eprintln!(
-                "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
-                eu.blocks.len(),
-                insts,
-                stats_start.unwrap().elapsed()
-            );
-        }
-        if std::env::var_os("CELOX_BRANCHIFY_VERIFY").is_some() {
-            verify_all_uses_have_defs(eu);
-        }
+    if stats {
+        eprintln!(
+            "[branchify-stats] before_pre_repair_inline applied={applied} blocks={} elapsed={:?}",
+            eu.blocks.len(),
+            stats_start.unwrap().elapsed()
+        );
+    }
+    inline_param_only_jump_blocks(eu);
+    verify_stage(eu, "first parameter-block inline");
+    inline_param_only_jump_blocks(eu);
+    verify_stage(eu, "second parameter-block inline");
+    if stats {
+        let insts = eu
+            .blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>();
+        eprintln!(
+            "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
+            eu.blocks.len(),
+            insts,
+            stats_start.unwrap().elapsed()
+        );
+    }
+    if std::env::var_os("CELOX_BRANCHIFY_VERIFY").is_some() {
+        verify_all_uses_have_defs(eu);
     }
 }
 
@@ -1752,7 +1856,7 @@ fn find_cross_block_priority_chain_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockPriorityChainPlan> {
-    let cfg = CfgAnalysis::compute(eu)?;
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -1817,10 +1921,11 @@ fn find_cross_block_priority_chain_plan(
                     valid = false;
                     break;
                 };
-                let defs = defs
-                    .into_iter()
-                    .filter(|def| def.block != block_id)
-                    .collect::<Vec<_>>();
+                // Moving only the cross-block prefix of a condition DAG is
+                // not a closed rewrite.  If the root (or an intermediate)
+                // remains in the Mux block, it still uses that prefix before
+                // the newly created decision blocks execute.
+                let defs = closed_cross_block_condition_slice(defs, block_id);
                 for def in &defs {
                     if !moved_locations.insert((def.block, def.index)) {
                         valid = false;
@@ -2116,7 +2221,7 @@ fn find_cross_block_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu)?;
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -2141,13 +2246,10 @@ fn find_cross_block_branchify_plan(
             ) else {
                 continue;
             };
-            // Definitions already in the Mux block are kept in their original
-            // order.  Only a dominating cross-block slice is actually moved
-            // into the new branch head.
-            let condition_defs = condition_defs
-                .into_iter()
-                .filter(|def| def.block != block_id)
-                .collect::<Vec<_>>();
+            // Do not sever a cross-block producer from a condition node that
+            // remains in the Mux block.  Such a prefix is not independently
+            // movable: the local node still executes before the new branch.
+            let condition_defs = closed_cross_block_condition_slice(condition_defs, block_id);
             let head = block
                 .instructions
                 .iter()
@@ -2292,6 +2394,20 @@ fn moved_defs_insertion_index(
     (insertion <= first_use).then_some(insertion)
 }
 
+fn closed_cross_block_condition_slice(
+    definitions: Vec<LocatedInstruction>,
+    mux_block: BlockId,
+) -> Vec<LocatedInstruction> {
+    if definitions
+        .iter()
+        .any(|definition| definition.block == mux_block)
+    {
+        Vec::new()
+    } else {
+        definitions
+    }
+}
+
 /// Find a group of selects driven by the same predicate.  Treating each Mux
 /// independently misses the important case where several selected values
 /// share one arm DAG:
@@ -2310,7 +2426,7 @@ fn moved_defs_insertion_index(
 fn find_cross_block_group_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<CrossBlockGroupBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu)?;
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
     let def_blocks = all_def_blocks(eu);
     let use_locations = register_use_locations(eu);
@@ -3292,7 +3408,7 @@ fn located_instruction_key(instruction: &LocatedInstruction) -> (BlockId, usize)
 
 fn collect_cross_group_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
     first_mux_idx: usize,
@@ -3300,7 +3416,7 @@ fn collect_cross_group_defs(
 ) -> Vec<LocatedInstruction> {
     fn visit(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        cfg: &CfgAnalysis,
+        cfg: &SirCfg,
         locations: &HashMap<RegisterId, (BlockId, usize)>,
         mux_block: BlockId,
         first_mux_idx: usize,
@@ -3314,7 +3430,7 @@ fn collect_cross_group_defs(
         if block == mux_block && index >= first_mux_idx {
             return;
         }
-        if !cfg.graph.dominates(block, mux_block) {
+        if !cfg.dominates(block, mux_block) {
             return;
         }
         let instruction = eu.blocks[&block].instructions[index].clone();
@@ -3428,7 +3544,7 @@ fn filter_cross_group_defs(
 }
 
 fn cross_group_value_available(
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     def_blocks: &HashMap<RegisterId, BlockId>,
     def_locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -3440,12 +3556,11 @@ fn cross_group_value_available(
         if moved.contains(&(block, index)) {
             return true;
         }
-        return cfg.graph.dominates(block, mux_block)
-            && (block != mux_block || index < first_mux_idx);
+        return cfg.dominates(block, mux_block) && (block != mux_block || index < first_mux_idx);
     }
     def_blocks
         .get(&register)
-        .is_some_and(|block| cfg.graph.dominates(*block, mux_block))
+        .is_some_and(|block| cfg.dominates(*block, mux_block))
 }
 
 fn cross_group_branch_is_profitable(
@@ -3527,7 +3642,7 @@ fn cross_group_branch_is_profitable(
 /// as a live-in; SSA dominance guarantees that it is available at the Mux.
 fn collect_cross_arm_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     use_counts: &HashMap<RegisterId, usize>,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -3542,7 +3657,7 @@ fn collect_cross_arm_defs(
     if block_id == mux_block && index >= mux_idx {
         return None;
     }
-    if !cfg.graph.dominates(block_id, mux_block) {
+    if !cfg.dominates(block_id, mux_block) {
         return None;
     }
     if use_counts.get(&root).copied().unwrap_or(0) != 1 {
@@ -3563,7 +3678,7 @@ fn collect_cross_arm_defs(
                 .get(&operand)
                 .is_some_and(|&(operand_block, operand_idx)| {
                     (operand_block != mux_block || operand_idx < mux_idx)
-                        && cfg.graph.dominates(operand_block, mux_block)
+                        && cfg.dominates(operand_block, mux_block)
                 });
         if can_attempt_move
             && use_counts.get(&operand).copied().unwrap_or(0) == 1
@@ -4084,7 +4199,10 @@ fn apply_cross_block_branchify(
     eu.blocks.insert(merge_id, merge_block);
 }
 
-fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+fn eliminate_controlled_join_muxes(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    controlled_join_after: Option<usize>,
+) {
     let Some(cfg) = CfgAnalysis::compute(eu) else {
         return;
     };
@@ -4132,6 +4250,9 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
 
     let mut plans = Vec::new();
     for block_id in block_ids {
+        if controlled_join_after.is_some_and(|watermark| block_id.0 <= watermark) {
+            continue;
+        }
         let block = &eu.blocks[&block_id];
         for (mux_idx, inst) in block.instructions.iter().enumerate() {
             let SIRInstruction::Mux(dst, condition, true_val, false_val) = inst else {
@@ -4663,10 +4784,26 @@ fn resolve_boolean_alias(
 
 impl CfgAnalysis {
     fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<Self> {
-        let graph = SirCfg::analyze(eu).ok()?;
+        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+        // Controlled-join recovery needs predecessor, dominance, and
+        // post-dominance queries, but not the potentially dense dominance
+        // frontiers or control-dependence tables of the full analysis.
+        let graph = SirCfg::analyze_structure(eu).ok()?;
+        if stats {
+            eprintln!("[branchify-stats] controlled_join cfg");
+        }
         let def_locations = instruction_def_locations(eu);
+        if stats {
+            eprintln!("[branchify-stats] controlled_join defs");
+        }
         let incoming_edges = indexed_incoming_edges(eu, &graph);
+        if stats {
+            eprintln!("[branchify-stats] controlled_join incoming");
+        }
         let path_facts = PathFacts::compute(eu, &def_locations, &graph, &incoming_edges);
+        if stats {
+            eprintln!("[branchify-stats] controlled_join path_facts");
+        }
 
         Some(Self {
             graph,
@@ -6375,6 +6512,31 @@ mod tests {
         SIRInstruction::Imm(RegisterId(dst), SIRValue::new(BigUint::from(value)))
     }
 
+    #[test]
+    fn does_not_sever_cross_block_condition_prefix_from_local_user() {
+        let definitions = vec![
+            LocatedInstruction {
+                block: BlockId(0),
+                index: 0,
+                instruction: imm(0, 1),
+            },
+            LocatedInstruction {
+                block: BlockId(1),
+                index: 0,
+                instruction: SIRInstruction::Unary(
+                    RegisterId(1),
+                    crate::ir::UnaryOp::Ident,
+                    RegisterId(0),
+                ),
+            },
+        ];
+
+        assert!(
+            closed_cross_block_condition_slice(definitions, BlockId(1)).is_empty(),
+            "a producer cannot move below the local condition node which still uses it"
+        );
+    }
+
     fn append_mul_chain(
         instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
         initial: usize,
@@ -7282,7 +7444,7 @@ mod tests {
             },
         );
 
-        eliminate_controlled_join_muxes(&mut eu);
+        eliminate_controlled_join_muxes(&mut eu, None);
 
         assert_eq!(eu.verify_result(), Ok(()));
         assert_eq!(
@@ -7357,7 +7519,7 @@ mod tests {
         ];
         let mut eu = cfg_unit(5, &[0], blocks);
 
-        eliminate_controlled_join_muxes(&mut eu);
+        eliminate_controlled_join_muxes(&mut eu, None);
 
         assert_eq!(eu.verify_result(), Ok(()));
         assert!(eu.blocks[&BlockId(1)].instructions.is_empty());
@@ -7572,7 +7734,7 @@ mod tests {
             register_map,
         };
 
-        eliminate_controlled_join_muxes(&mut eu);
+        eliminate_controlled_join_muxes(&mut eu, None);
 
         assert_eq!(eu.verify_result(), Ok(()));
         assert_eq!(eu.blocks[&BlockId(5)].params, vec![RegisterId(7)]);

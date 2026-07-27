@@ -1,6 +1,7 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{
-    collect_all_used_registers, def_reg, resolve_transitive_aliases, sir_value_to_u64,
+    collect_all_used_registers, def_reg, replace_reg_in_terminator, resolve_transitive_aliases,
+    sir_value_to_u64,
 };
 use crate::HashMap;
 use crate::ir::*;
@@ -16,15 +17,102 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let register_map = &eu.register_map;
+        let mut aliases = HashMap::default();
         for block in eu.blocks.values_mut() {
-            forward_and_simplify(&mut block.instructions, register_map, options.four_state);
+            aliases.extend(forward_and_simplify(
+                &mut block.instructions,
+                register_map,
+                options.four_state,
+            ));
         }
 
-        // Apply aliases across the whole EU
-        // (block params, terminators, all instructions)
-        // then DCE
+        // A value simplified in its defining block can be consumed in any
+        // dominated block. Apply the complete alias relation to the whole EU
+        // before DCE; applying it only to the defining block leaves dangling
+        // cross-block uses.
+        let aliases = resolve_transitive_aliases(&aliases);
+        for block in eu.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                apply_aliases_to_inst(instruction, &aliases);
+            }
+            for (&from, &to) in &aliases {
+                replace_reg_in_terminator(&mut block.terminator, from, to);
+            }
+        }
         dead_code_eliminate(eu);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BooleanExpression {
+    Same(RegisterId),
+    Not(RegisterId),
+    And(RegisterId, RegisterId),
+}
+
+fn boolean_root(
+    definitions: &HashMap<RegisterId, BooleanExpression>,
+    mut register: RegisterId,
+) -> RegisterId {
+    let mut seen = crate::HashSet::default();
+    while seen.insert(register) {
+        match definitions.get(&register) {
+            Some(BooleanExpression::Same(source)) => register = *source,
+            _ => break,
+        }
+    }
+    register
+}
+
+fn one_bit(register_map: &HashMap<RegisterId, RegisterType>, register: RegisterId) -> bool {
+    register_map
+        .get(&register)
+        .is_some_and(|ty| ty.width() == 1)
+}
+
+fn boolean_complements(
+    definitions: &HashMap<RegisterId, BooleanExpression>,
+    left: RegisterId,
+    right: RegisterId,
+) -> bool {
+    let left = boolean_root(definitions, left);
+    let right = boolean_root(definitions, right);
+    matches!(
+        definitions.get(&left),
+        Some(BooleanExpression::Not(source))
+            if boolean_root(definitions, *source) == right
+    ) || matches!(
+        definitions.get(&right),
+        Some(BooleanExpression::Not(source))
+            if boolean_root(definitions, *source) == left
+    )
+}
+
+fn complemented_and_common_factor(
+    definitions: &HashMap<RegisterId, BooleanExpression>,
+    left: RegisterId,
+    right: RegisterId,
+) -> Option<RegisterId> {
+    let left = boolean_root(definitions, left);
+    let right = boolean_root(definitions, right);
+    let (
+        Some(BooleanExpression::And(left_a, left_b)),
+        Some(BooleanExpression::And(right_a, right_b)),
+    ) = (definitions.get(&left), definitions.get(&right))
+    else {
+        return None;
+    };
+    [
+        (*left_a, *left_b, *right_a, *right_b),
+        (*left_a, *left_b, *right_b, *right_a),
+        (*left_b, *left_a, *right_a, *right_b),
+        (*left_b, *left_a, *right_b, *right_a),
+    ]
+    .into_iter()
+    .find_map(|(common_left, other_left, common_right, other_right)| {
+        (common_left == common_right && boolean_complements(definitions, other_left, other_right))
+            .then_some(common_left)
+    })
 }
 
 /// Per-block store-load forwarding + algebraic simplification.
@@ -33,7 +121,7 @@ fn forward_and_simplify(
     instructions: &mut [SIRInstruction<RegionedAbsoluteAddr>],
     register_map: &HashMap<RegisterId, RegisterType>,
     four_state: bool,
-) {
+) -> HashMap<RegisterId, RegisterId> {
     struct StoreEntry {
         src: RegisterId,
         width: usize,
@@ -46,8 +134,12 @@ fn forward_and_simplify(
         HashMap::default();
     let mut known_constants: HashMap<RegisterId, u64> = HashMap::default();
     let mut aliases: HashMap<RegisterId, RegisterId> = HashMap::default();
+    let mut boolean_definitions = HashMap::<RegisterId, BooleanExpression>::default();
 
     for inst in instructions.iter_mut() {
+        // Keep every newly recorded expression in canonical operands. Aliases
+        // are always inserted after this rewrite, so one lookup is sufficient.
+        apply_aliases_to_inst(inst, &aliases);
         match inst {
             SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _triggers, _) => {
                 let store_end = off.saturating_add(*width);
@@ -121,6 +213,45 @@ fn forward_and_simplify(
                 let lhs_const = known_constants.get(lhs).copied();
                 let rhs_const = known_constants.get(rhs).copied();
 
+                if !four_state
+                    && one_bit(register_map, *dst)
+                    && one_bit(register_map, *lhs)
+                    && one_bit(register_map, *rhs)
+                {
+                    match op {
+                        BinaryOp::And | BinaryOp::LogicAnd => {
+                            let canonical_lhs = boolean_root(&boolean_definitions, *lhs);
+                            let canonical_rhs = boolean_root(&boolean_definitions, *rhs);
+                            if canonical_lhs == canonical_rhs
+                                && register_map.get(dst) == register_map.get(lhs)
+                            {
+                                aliases.insert(*dst, *lhs);
+                            } else {
+                                boolean_definitions.insert(
+                                    *dst,
+                                    BooleanExpression::And(canonical_lhs, canonical_rhs),
+                                );
+                            }
+                        }
+                        BinaryOp::Or | BinaryOp::LogicOr => {
+                            if lhs == rhs {
+                                aliases.insert(*dst, *lhs);
+                            } else if let Some(common) =
+                                complemented_and_common_factor(&boolean_definitions, *lhs, *rhs)
+                            {
+                                // (x & y) | (x & !y) == x
+                                if register_map.get(dst) == register_map.get(&common) {
+                                    aliases.insert(*dst, common);
+                                } else {
+                                    boolean_definitions
+                                        .insert(*dst, BooleanExpression::Same(common));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
                 match (op, lhs_const, rhs_const) {
                     // shift by 0 → identity
                     (BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar, _, Some(0)) => {
@@ -171,6 +302,43 @@ fn forward_and_simplify(
                     aliases.insert(*dst, *src);
                 }
             }
+            SIRInstruction::Unary(dst, UnaryOp::Ident, src)
+                if register_map.get(dst) == register_map.get(src) =>
+            {
+                aliases.insert(*dst, *src);
+            }
+            SIRInstruction::Unary(dst, UnaryOp::ToTwoState, src)
+                if !four_state && one_bit(register_map, *dst) && one_bit(register_map, *src) =>
+            {
+                if register_map.get(dst) == register_map.get(src) {
+                    aliases.insert(*dst, *src);
+                } else {
+                    boolean_definitions.insert(*dst, BooleanExpression::Same(*src));
+                }
+            }
+            SIRInstruction::Unary(dst, UnaryOp::LogicNot, src)
+                if !four_state && one_bit(register_map, *dst) && one_bit(register_map, *src) =>
+            {
+                if let Some(BooleanExpression::Not(inner)) = boolean_definitions.get(src) {
+                    let inner = boolean_root(&boolean_definitions, *inner);
+                    if register_map.get(dst) == register_map.get(&inner) {
+                        aliases.insert(*dst, inner);
+                    } else {
+                        boolean_definitions.insert(*dst, BooleanExpression::Same(inner));
+                    }
+                } else {
+                    boolean_definitions.insert(
+                        *dst,
+                        BooleanExpression::Not(boolean_root(&boolean_definitions, *src)),
+                    );
+                }
+            }
+            SIRInstruction::Mux(dst, _, then_value, else_value)
+                if then_value == else_value
+                    && register_map.get(dst) == register_map.get(then_value) =>
+            {
+                aliases.insert(*dst, *then_value);
+            }
             SIRInstruction::Commit(_, dst_addr, SIROffset::Static(_), _, _) => {
                 // Invalidate known stores for the destination address
                 known_stores.remove(dst_addr);
@@ -189,7 +357,7 @@ fn forward_and_simplify(
     }
 
     if aliases.is_empty() {
-        return;
+        return aliases;
     }
 
     // Resolve transitive aliases
@@ -199,6 +367,7 @@ fn forward_and_simplify(
     for inst in instructions.iter_mut() {
         apply_aliases_to_inst(inst, &resolved);
     }
+    resolved
 }
 
 /// Whether replacing a memory round trip with the stored SSA value preserves
@@ -534,6 +703,122 @@ mod tests {
                 SIRInstruction::Unary(RegisterId(2), UnaryOp::ToTwoState, RegisterId(0),)
             );
         }
+    }
+
+    #[test]
+    fn folds_two_state_double_boolean_negation() {
+        let mut instructions = vec![
+            SIRInstruction::Unary(RegisterId(1), UnaryOp::LogicNot, RegisterId(0)),
+            SIRInstruction::Unary(RegisterId(2), UnaryOp::LogicNot, RegisterId(1)),
+            SIRInstruction::Unary(RegisterId(3), UnaryOp::ToTwoState, RegisterId(2)),
+            SIRInstruction::Store(
+                address(),
+                SIROffset::Static(0),
+                1,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+        let register_map = [
+            (RegisterId(0), RegisterType::Logic { width: 1 }),
+            (RegisterId(1), RegisterType::Logic { width: 1 }),
+            (RegisterId(2), RegisterType::Logic { width: 1 }),
+            (RegisterId(3), bit(1)),
+        ]
+        .into_iter()
+        .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert_eq!(
+            instructions[2],
+            SIRInstruction::Unary(RegisterId(3), UnaryOp::ToTwoState, RegisterId(0))
+        );
+    }
+
+    #[test]
+    fn folds_complemented_boolean_partition() {
+        let mut instructions = vec![
+            SIRInstruction::Unary(RegisterId(2), UnaryOp::LogicNot, RegisterId(1)),
+            SIRInstruction::Binary(RegisterId(3), RegisterId(0), BinaryOp::And, RegisterId(1)),
+            SIRInstruction::Binary(RegisterId(4), RegisterId(0), BinaryOp::And, RegisterId(2)),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(3), BinaryOp::Or, RegisterId(4)),
+            SIRInstruction::Store(
+                address(),
+                SIROffset::Static(0),
+                1,
+                RegisterId(5),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+        let register_map = (0..=5)
+            .map(|register| (RegisterId(register), bit(1)))
+            .collect();
+
+        forward_and_simplify(&mut instructions, &register_map, false);
+
+        assert!(matches!(
+            instructions[4],
+            SIRInstruction::Store(_, _, 1, RegisterId(0), _, _)
+        ));
+    }
+
+    #[test]
+    fn applies_boolean_aliases_to_dominated_blocks_before_dce() {
+        let register_map = (0..=2)
+            .map(|register| (RegisterId(register), bit(1)))
+            .collect();
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                            SIRInstruction::Unary(RegisterId(1), UnaryOp::LogicNot, RegisterId(0)),
+                            SIRInstruction::Unary(RegisterId(2), UnaryOp::LogicNot, RegisterId(1)),
+                        ],
+                        terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: Vec::new(),
+                        instructions: vec![SIRInstruction::Store(
+                            address(),
+                            SIROffset::Static(0),
+                            1,
+                            RegisterId(2),
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        StoreLoadForwardingPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))]
+        );
+        assert!(matches!(
+            eu.blocks[&BlockId(1)].instructions.as_slice(),
+            [SIRInstruction::Store(_, _, 1, RegisterId(0), _, _)]
+        ));
     }
 
     #[test]

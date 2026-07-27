@@ -406,7 +406,7 @@ module Top (
 }
 
 #[test]
-fn clock_eir_comb_memory_demand_lowers_to_a_narrow_element_load() {
+fn settled_clock_projection_reads_the_published_comb_value() {
     let program = setup_and_parse(
         r#"
 module Top (
@@ -445,7 +445,28 @@ module Top (
         "a conservative memory dependency must not materialize the complete 32-Mibit array"
     );
     assert!(
-        unit.blocks
+        program
+            .eval_comb
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                instruction,
+                crate::ir::SIRInstruction::Load(
+                    _,
+                    _,
+                    crate::ir::SIROffset::Element {
+                        element_width: 32,
+                        ..
+                    },
+                    32,
+                )
+            )),
+        "the shared comb schedule must perform the narrow indexed memory read"
+    );
+    assert!(
+        !unit
+            .blocks
             .values()
             .flat_map(|block| &block.instructions)
             .any(|instruction| matches!(
@@ -459,7 +480,23 @@ module Top (
                     },
                     32,
                 )
-            ))
+            )),
+        "the FF projection must not repeat the indexed comb read"
+    );
+    assert!(
+        unit.blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                instruction,
+                crate::ir::SIRInstruction::Load(
+                    _,
+                    address,
+                    crate::ir::SIROffset::Static(0),
+                    32,
+                ) if address.region == crate::ir::STABLE_REGION
+            )),
+        "the FF projection must read the settled comb publication"
     );
 }
 

@@ -161,44 +161,6 @@ impl DirectStableStoreHazards {
         *ranges = merged;
     }
 
-    fn merge_from(&mut self, other: &Self) {
-        for (&addr, ranges) in &other.ranges {
-            for &(start, end) in ranges {
-                self.insert(addr, start, end);
-            }
-        }
-    }
-
-    fn remove(&mut self, addr: AbsoluteAddr, start: usize, end: usize) {
-        if start >= end {
-            return;
-        }
-        let Some(ranges) = self.ranges.get_mut(&addr) else {
-            return;
-        };
-        let mut remaining = Vec::with_capacity(ranges.len().saturating_add(1));
-        for &(range_start, range_end) in ranges.iter() {
-            if range_end <= start || end <= range_start {
-                remaining.push((range_start, range_end));
-                continue;
-            }
-            if range_start < start {
-                remaining.push((range_start, start));
-            }
-            if end < range_end {
-                remaining.push((end, range_end));
-            }
-        }
-        *ranges = remaining;
-        if ranges.is_empty() {
-            self.ranges.remove(&addr);
-        }
-    }
-
-    fn remove_addr(&mut self, addr: AbsoluteAddr) {
-        self.ranges.remove(&addr);
-    }
-
     pub(crate) fn overlaps(&self, addr: AbsoluteAddr, start: usize, bits: usize) -> bool {
         let end = start.saturating_add(bits);
         self.ranges.get(&addr).is_some_and(|ranges| {
@@ -262,33 +224,125 @@ fn instruction_range(
     }
 }
 
-fn intersect_read_with_written(
-    hazards: &mut DirectStableStoreHazards,
-    written: &DirectStableStoreHazards,
-    register_map: &HashMap<RegisterId, RegisterType>,
-    addr: AbsoluteAddr,
-    offset: &SIROffset,
-    bits: usize,
-) {
-    let (read_start, read_end) = instruction_range(register_map, offset, bits);
-    if let Some(ranges) = written.ranges.get(&addr) {
-        for &(write_start, write_end) in ranges {
-            let start = read_start.max(write_start);
-            let end = read_end.min(write_end);
-            hazards.insert(addr, start, end);
+struct PendingSegments {
+    by_addr: HashMap<AbsoluteAddr, (usize, Vec<usize>)>,
+    count: usize,
+}
+
+impl PendingSegments {
+    fn build(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
+        let mut endpoints: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+        for block in eu.blocks.values() {
+            for instruction in &block.instructions {
+                match instruction {
+                    SIRInstruction::Store(addr, offset, bits, _, _, _)
+                        if addr.region == WORKING_REGION
+                            || addr.region == SPARSE_WORKING_REGION =>
+                    {
+                        let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                        if start < end {
+                            endpoints
+                                .entry(addr.absolute_addr())
+                                .or_default()
+                                .extend([start, end]);
+                        }
+                    }
+                    SIRInstruction::Commit(src, dst, offset, bits, _)
+                        if dst.region == STABLE_REGION
+                            && (src.region == WORKING_REGION
+                                || src.region == SPARSE_WORKING_REGION)
+                            && src.absolute_addr() == dst.absolute_addr() =>
+                    {
+                        let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                        if start < end {
+                            endpoints
+                                .entry(src.absolute_addr())
+                                .or_default()
+                                .extend([start, end]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut addresses = endpoints.into_iter().collect::<Vec<_>>();
+        addresses.sort_unstable_by_key(|(address, _)| *address);
+        let mut by_addr = HashMap::default();
+        let mut count = 0usize;
+        for (address, mut points) in addresses {
+            points.sort_unstable();
+            points.dedup();
+            if points.len() < 2 {
+                continue;
+            }
+            let base = count;
+            count += points.len() - 1;
+            by_addr.insert(address, (base, points));
+        }
+        Self { by_addr, count }
+    }
+
+    fn segment_range(
+        &self,
+        address: AbsoluteAddr,
+        start: usize,
+        end: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        if start >= end {
+            return None;
+        }
+        let (base, endpoints) = self.by_addr.get(&address)?;
+        let first = endpoints.binary_search(&start).ok()?;
+        let limit = endpoints.binary_search(&end).ok()?;
+        Some((base + first)..(base + limit))
+    }
+
+    fn record_observation(
+        &self,
+        hazards: &mut DirectStableStoreHazards,
+        written: &[u64],
+        address: AbsoluteAddr,
+        start: usize,
+        end: usize,
+    ) {
+        let Some((base, endpoints)) = self.by_addr.get(&address) else {
+            return;
+        };
+        for index in 0..endpoints.len() - 1 {
+            let segment_start = endpoints[index];
+            let segment_end = endpoints[index + 1];
+            if start >= segment_end || end <= segment_start {
+                continue;
+            }
+            let bit = base + index;
+            if written[bit / 64] & (1u64 << (bit % 64)) != 0 {
+                hazards.insert(address, start.max(segment_start), end.min(segment_end));
+            }
+        }
+    }
+
+    fn record_pending(&self, hazards: &mut DirectStableStoreHazards, written: &[u64]) {
+        for (&address, &(base, ref endpoints)) in &self.by_addr {
+            for index in 0..endpoints.len() - 1 {
+                let bit = base + index;
+                if written[bit / 64] & (1u64 << (bit % 64)) != 0 {
+                    hazards.insert(address, endpoints[index], endpoints[index + 1]);
+                }
+            }
         }
     }
 }
 
-fn intersect_write_with_written(
-    hazards: &mut DirectStableStoreHazards,
-    written: &DirectStableStoreHazards,
-    register_map: &HashMap<RegisterId, RegisterType>,
-    addr: AbsoluteAddr,
-    offset: &SIROffset,
-    bits: usize,
-) {
-    intersect_read_with_written(hazards, written, register_map, addr, offset, bits);
+fn update_segments(bits: &mut [u64], range: std::ops::Range<usize>, set: bool) {
+    for bit in range {
+        let mask = 1u64 << (bit % 64);
+        if set {
+            bits[bit / 64] |= mask;
+        } else {
+            bits[bit / 64] &= !mask;
+        }
+    }
 }
 
 /// Bit ranges for which replacing a WORKING/SPARSE write with an immediate
@@ -305,38 +359,46 @@ pub(crate) fn direct_stable_store_hazards(
     use std::collections::VecDeque;
 
     let mut hazards = DirectStableStoreHazards::default();
-    let mut in_written: HashMap<BlockId, DirectStableStoreHazards> = HashMap::default();
+    let segments = PendingSegments::build(eu);
+    if segments.count == 0 {
+        return hazards;
+    }
+    let word_count = segments.count.div_ceil(64);
+    let mut in_written: HashMap<BlockId, Vec<u64>> = HashMap::default();
     let mut worklist = VecDeque::new();
-    in_written.insert(eu.entry_block_id, DirectStableStoreHazards::default());
+    in_written.insert(eu.entry_block_id, vec![0; word_count]);
     worklist.push_back(eu.entry_block_id);
 
     while let Some(bid) = worklist.pop_front() {
         let Some(block) = eu.blocks.get(&bid) else {
             continue;
         };
-        let mut written = in_written.get(&bid).cloned().unwrap_or_default();
+        let mut written = in_written
+            .get(&bid)
+            .cloned()
+            .unwrap_or_else(|| vec![0; word_count]);
         for inst in &block.instructions {
             // Record old-state reads before updating the pending-write state
             // for this instruction.
             match inst {
                 SIRInstruction::Load(_, addr, offset, bits) if addr.region == STABLE_REGION => {
-                    intersect_read_with_written(
+                    let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                    segments.record_observation(
                         &mut hazards,
                         &written,
-                        &eu.register_map,
                         addr.absolute_addr(),
-                        offset,
-                        *bits,
+                        start,
+                        end,
                     );
                 }
                 SIRInstruction::Commit(src, _, offset, bits, _) if src.region == STABLE_REGION => {
-                    intersect_read_with_written(
+                    let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                    segments.record_observation(
                         &mut hazards,
                         &written,
-                        &eu.register_map,
                         src.absolute_addr(),
-                        offset,
-                        *bits,
+                        start,
+                        end,
                     );
                 }
                 _ => {}
@@ -347,18 +409,20 @@ pub(crate) fn direct_stable_store_hazards(
                     if addr.region == WORKING_REGION || addr.region == SPARSE_WORKING_REGION =>
                 {
                     let (start, end) = instruction_range(&eu.register_map, offset, *bits);
-                    written.insert(addr.absolute_addr(), start, end);
+                    if let Some(range) = segments.segment_range(addr.absolute_addr(), start, end) {
+                        update_segments(&mut written, range, true);
+                    }
                 }
                 SIRInstruction::Store(addr, offset, bits, _, _, _)
                     if addr.region == STABLE_REGION =>
                 {
-                    intersect_write_with_written(
+                    let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                    segments.record_observation(
                         &mut hazards,
                         &written,
-                        &eu.register_map,
                         addr.absolute_addr(),
-                        offset,
-                        *bits,
+                        start,
+                        end,
                     );
                 }
                 SIRInstruction::Commit(src, dst, offset, bits, _)
@@ -373,20 +437,28 @@ pub(crate) fn direct_stable_store_hazards(
                         // The SIR region contract defines this as a full-range
                         // sparse publication, even when the preceding indexed
                         // Store had no statically bounded bit range.
-                        written.remove_addr(addr);
+                        if let Some((base, endpoints)) = segments.by_addr.get(&addr) {
+                            update_segments(
+                                &mut written,
+                                *base..(*base + endpoints.len() - 1),
+                                false,
+                            );
+                        }
                     } else {
                         let (start, end) = instruction_range(&eu.register_map, offset, *bits);
-                        written.remove(addr, start, end);
+                        if let Some(range) = segments.segment_range(addr, start, end) {
+                            update_segments(&mut written, range, false);
+                        }
                     }
                 }
                 SIRInstruction::Commit(_, dst, offset, bits, _) if dst.region == STABLE_REGION => {
-                    intersect_write_with_written(
+                    let (start, end) = instruction_range(&eu.register_map, offset, *bits);
+                    segments.record_observation(
                         &mut hazards,
                         &written,
-                        &eu.register_map,
                         dst.absolute_addr(),
-                        offset,
-                        *bits,
+                        start,
+                        end,
                     );
                 }
                 _ => {}
@@ -395,10 +467,16 @@ pub(crate) fn direct_stable_store_hazards(
 
         let mut propagate = |succ: BlockId| {
             let is_new = !in_written.contains_key(&succ);
-            let entry = in_written.entry(succ).or_default();
-            let old = entry.clone();
-            entry.merge_from(&written);
-            if is_new || *entry != old {
+            let entry = in_written
+                .entry(succ)
+                .or_insert_with(|| vec![0; word_count]);
+            let mut changed = is_new;
+            for (destination, source) in entry.iter_mut().zip(&written) {
+                let merged = *destination | *source;
+                changed |= merged != *destination;
+                *destination = merged;
+            }
+            if changed {
                 worklist.push_back(succ);
             }
         };
@@ -422,7 +500,7 @@ pub(crate) fn direct_stable_store_hazards(
                 // Publishing a redirected state Store on a path where the
                 // source program never reaches its Commit changes the final
                 // state (and can expose state before an Error is reported).
-                hazards.merge_from(&written);
+                segments.record_pending(&mut hazards, &written);
             }
         }
     }

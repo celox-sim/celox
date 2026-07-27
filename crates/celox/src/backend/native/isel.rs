@@ -1940,6 +1940,10 @@ impl<'a> ISelContext<'a> {
     /// Resolve the mask byte offset for a variable.
     /// The mask is stored immediately after the value in memory.
     fn mask_byte_offset(&self, addr: &RegionedAbsoluteAddr, bit_offset: usize) -> i32 {
+        if addr.region == crate::ir::MATERIALIZATION_HOME_REGION {
+            return self.byte_offset(addr, bit_offset)
+                + self.layout.materialization_home_plane_size as i32;
+        }
         let abs_addr = addr.absolute_addr();
         self.byte_offset(addr, bit_offset) + self.layout.plane_size(&abs_addr) as i32
     }
@@ -1998,11 +2002,17 @@ impl<'a> ISelContext<'a> {
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
-        if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr())
-            && width_bits == array.element_width
-            && bit_offset.is_multiple_of(array.element_width)
-        {
+        if addr.region == crate::ir::MATERIALIZATION_HOME_REGION && bit_offset.is_multiple_of(8) {
             return Self::exact_storage_access_size(width_bits);
+        }
+        if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr()) {
+            if width_bits == array.element_width && bit_offset.is_multiple_of(array.element_width) {
+                return Self::exact_storage_access_size(width_bits);
+            }
+            // A complete unpacked array is not one contiguous scalar object
+            // in element-strided mode. It must be gathered/scattered element
+            // by element even when its logical width is 8/16/32/64 bits.
+            return None;
         }
         if bit_offset != 0 {
             return None;
@@ -4928,14 +4938,58 @@ fn emit_static_commit_plane(
     width: usize,
     mask_plane: bool,
 ) {
+    if let (Some(src_size), Some(dst_size)) = (
+        ctx.full_static_load_size(src_addr, bit_offset, width),
+        ctx.full_static_store_size(dst_addr, bit_offset, width),
+    ) && src_size == dst_size
+    {
+        // A complete logical object owns every byte in its physical slot.
+        // Padding bits are not RTL state and no other object aliases them, so
+        // copying the native storage unit directly is both exact and avoids
+        // the load/mask/load/insert/store sequence used for partial ranges.
+        let src_offset = if mask_plane {
+            ctx.mask_byte_offset(src_addr, bit_offset)
+        } else {
+            ctx.byte_offset(src_addr, bit_offset)
+        };
+        let dst_offset = if mask_plane {
+            ctx.mask_byte_offset(dst_addr, bit_offset)
+        } else {
+            ctx.byte_offset(dst_addr, bit_offset)
+        };
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: value,
+            base: BaseReg::SimState,
+            offset: src_offset,
+            size: src_size,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: dst_offset,
+            src: value,
+            size: dst_size,
+        });
+        return;
+    }
+
     let mut copied = 0usize;
     while copied < width {
         let part_bit_offset = bit_offset + copied;
         let (_, src_intra) = ctx.static_byte_and_intra(src_addr, part_bit_offset);
         let (_, dst_intra) = ctx.static_byte_and_intra(dst_addr, part_bit_offset);
-        let part_width = (width - copied)
+        let mut part_width = (width - copied)
             .min(static_commit_chunk_capacity(ctx, src_addr, part_bit_offset))
             .min(static_commit_chunk_capacity(ctx, dst_addr, part_bit_offset));
+        if src_intra == 0 && dst_intra == 0 {
+            part_width = match part_width {
+                64.. => 64,
+                32.. => 32,
+                16.. => 16,
+                8.. => 8,
+                _ => part_width,
+            };
+        }
         debug_assert!(part_width != 0);
 
         let src_size = ISelContext::op_size_for_width(src_intra + part_width);
@@ -4950,6 +5004,27 @@ fn emit_static_commit_plane(
         } else {
             ctx.byte_offset(dst_addr, part_bit_offset)
         };
+
+        if src_intra == 0
+            && dst_intra == 0
+            && let Some(size) = OpSize::from_bits(part_width)
+        {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Load {
+                dst: value,
+                base: BaseReg::SimState,
+                offset: containing_src,
+                size,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: containing_dst,
+                src: value,
+                size,
+            });
+            copied += part_width;
+            continue;
+        }
 
         let raw = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Load {
@@ -14039,6 +14114,8 @@ mod tests {
             total_size: 0,
             working_offsets: HashMap::default(),
             working_base_offset: 0,
+            materialization_home_base_offset: 0,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 0,
             sparse_layouts: HashMap::default(),
@@ -16161,6 +16238,85 @@ mod tests {
     }
 
     #[test]
+    fn full_narrow_commit_copies_private_padding_without_rmw() {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let working = RegionedAbsoluteAddr::from_absolute_addr(crate::ir::WORKING_REGION, absolute);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Commit(
+                        stable,
+                        working,
+                        SIROffset::Static(0),
+                        1,
+                        vec![],
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+        let mut layout = empty_layout();
+        layout.offsets.insert(absolute, 0);
+        layout.widths.insert(absolute, 1);
+        layout.is_4states.insert(absolute, false);
+        layout.working_offsets.insert(absolute, 0);
+        layout.working_base_offset = 8;
+        layout.total_size = 8;
+        layout.merged_total_size = 16;
+
+        let function = lower_execution_unit(&eu, &layout, false);
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        offset: 0,
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Store {
+                        offset: 8,
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, MInst::And { .. } | MInst::Or { .. }))
+        );
+    }
+
+    #[test]
     fn preallocates_vregs_in_sir_register_order() {
         let low = RegisterId(2);
         let middle = RegisterId(7);
@@ -16359,6 +16515,8 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
+            materialization_home_base_offset: 24,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -16577,6 +16735,8 @@ mod tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset: total_size,
+            materialization_home_base_offset: total_size,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
@@ -16812,6 +16972,8 @@ mod tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset: total_size,
+            materialization_home_base_offset: total_size,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
@@ -16962,6 +17124,8 @@ mod tests {
             total_size: 112,
             working_offsets: HashMap::default(),
             working_base_offset: 112,
+            materialization_home_base_offset: 112,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 112,
             sparse_layouts: HashMap::default(),
@@ -17675,6 +17839,8 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
+            materialization_home_base_offset: 24,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -17878,6 +18044,8 @@ mod tests {
             total_size: state_size,
             working_offsets: HashMap::default(),
             working_base_offset: state_size,
+            materialization_home_base_offset: state_size,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: state_size,
             sparse_layouts: HashMap::default(),
@@ -18108,6 +18276,8 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
+            materialization_home_base_offset: 24,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -18275,6 +18445,8 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
+            materialization_home_base_offset: 24,
+            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),

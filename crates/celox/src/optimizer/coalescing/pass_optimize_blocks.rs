@@ -1,4 +1,4 @@
-use super::block_opt::optimize_block;
+use super::block_opt::{optimize_block, schedule_instructions};
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
 use crate::HashMap;
 use crate::ir::*;
@@ -38,41 +38,48 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
                 &mut eu.register_map,
                 &mut replacement_map,
                 &mut reg_counter,
-                skip_final_schedule,
+                true,
                 &self.element_widths,
             );
         }
 
-        if replacement_map.is_empty() {
-            return;
+        if !replacement_map.is_empty() {
+            // Resolve transitive replacements to avoid chain issues
+            let mut final_map = HashMap::default();
+            for &from in replacement_map.keys() {
+                let mut to = replacement_map[&from];
+                let mut depth = 0;
+                while let Some(&next_to) = replacement_map.get(&to) {
+                    if next_to == to || depth > replacement_map.len() {
+                        break;
+                    }
+                    to = next_to;
+                    depth += 1;
+                }
+                final_map.insert(from, to);
+            }
+
+            // Batch apply all replacements in a single pass over all blocks
+            for block in eu.blocks.values_mut() {
+                for p in &mut block.params {
+                    if let Some(&to) = final_map.get(p) {
+                        *p = to;
+                    }
+                }
+                for inst in &mut block.instructions {
+                    batch_replace_in_inst(inst, &final_map);
+                }
+                batch_replace_in_terminator(&mut block.terminator, &final_map);
+            }
         }
 
-        // Resolve transitive replacements to avoid chain issues
-        let mut final_map = HashMap::default();
-        for &from in replacement_map.keys() {
-            let mut to = replacement_map[&from];
-            let mut depth = 0;
-            while let Some(&next_to) = replacement_map.get(&to) {
-                if next_to == to || depth > replacement_map.len() {
-                    break;
-                }
-                to = next_to;
-                depth += 1;
+        // Scheduling must see the final operand graph. Scheduling first and
+        // applying unit-wide replacements afterward can replace an operand
+        // with a value whose definition was moved below that use.
+        if !skip_final_schedule {
+            for block in eu.blocks.values_mut() {
+                schedule_instructions(&mut block.instructions, 8);
             }
-            final_map.insert(from, to);
-        }
-
-        // Batch apply all replacements in a single pass over all blocks
-        for block in eu.blocks.values_mut() {
-            for p in &mut block.params {
-                if let Some(&to) = final_map.get(p) {
-                    *p = to;
-                }
-            }
-            for inst in &mut block.instructions {
-                batch_replace_in_inst(inst, &final_map);
-            }
-            batch_replace_in_terminator(&mut block.terminator, &final_map);
         }
     }
 }

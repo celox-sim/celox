@@ -8,7 +8,7 @@ use crate::{
     HashMap, SimulatorOptions,
     ir::{
         AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
-        SIRInstruction, STABLE_REGION,
+        SIRInstruction,
     },
     optimizer::coalescing::TailCallChunk,
     optimizer::coalescing::pass_tail_call_split::{
@@ -58,11 +58,11 @@ fn preload_trigger_old_values<'a>(
             "Trigger signal wider than 64 bits is not supported"
         );
         let cl_type = get_cl_type(width);
-        let base_offset = if region == STABLE_REGION {
-            layout.offsets[&abs]
-        } else {
-            layout.working_base_offset + layout.working_offsets[&abs]
-        };
+        let base_offset = layout.region_base_offset(&RegionedAbsoluteAddr {
+            region,
+            instance_id: abs.instance_id,
+            var_id: abs.var_id,
+        });
         let addr_val = builder.ins().iadd_imm(mem_ptr, base_offset as i64);
         let raw_val = builder.ins().load(cl_type, MemFlags::new(), addr_val, 0);
         let val = if cl_type == types::I64 {

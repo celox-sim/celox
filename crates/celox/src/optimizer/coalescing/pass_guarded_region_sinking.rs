@@ -1294,7 +1294,7 @@ fn apply_deferred_value_region(
         plan.use_block,
         BasicBlock {
             id: plan.use_block,
-            params: Vec::new(),
+            params: original_use.params,
             instructions: moved,
             terminator: original_branch,
         },
@@ -5428,7 +5428,7 @@ mod tests {
         let mut register_map = HashMap::default();
         register_map.insert(RegisterId(0), bit(1));
         register_map.insert(RegisterId(1), bit(1));
-        for register in 2..=20 {
+        for register in 2..=21 {
             register_map.insert(RegisterId(register), bit(8));
         }
         let mut blocks = HashMap::default();
@@ -5504,7 +5504,7 @@ mod tests {
             SIRTerminator::Branch {
                 cond: RegisterId(0),
                 true_block: (BlockId(8), Vec::new()),
-                false_block: (BlockId(9), Vec::new()),
+                false_block: (BlockId(9), vec![RegisterId(2)]),
             },
         );
         insert_block(
@@ -5524,7 +5524,7 @@ mod tests {
         insert_block(
             &mut blocks,
             9,
-            Vec::new(),
+            vec![RegisterId(21)],
             vec![SIRInstruction::Store(
                 address(82),
                 SIROffset::Static(0),
@@ -5559,6 +5559,7 @@ mod tests {
             SIRTerminator::Jump(BlockId(7), ref arguments) if arguments.is_empty()
         ));
         assert!(eu.blocks[&BlockId(7)].params.is_empty());
+        assert_eq!(eu.blocks[&BlockId(9)].params, vec![RegisterId(21)]);
         assert!(
             !eu.blocks[&BlockId(0)]
                 .instructions

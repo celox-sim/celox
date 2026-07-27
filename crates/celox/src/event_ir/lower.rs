@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
 use celox_analysis::cfg::{CfgError, ForwardControlFlowGraph};
+use celox_analysis::dag_schedule::{
+    DagScheduleError, schedule_min_live_values_in_domains_with_weights,
+};
 use num_bigint::BigUint;
 use num_traits::One;
 use thiserror::Error;
@@ -8,9 +11,9 @@ use thiserror::Error;
 use crate::{
     HashMap, HashSet,
     ir::{
-        AbsoluteAddr, BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr,
-        RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
-        SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
+        AbsoluteAddr, BasicBlock, BinaryOp, BlockId, ExecutionUnit, MATERIALIZATION_HOME_REGION,
+        RegionedAbsoluteAddr, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
+        SIRTerminator, SIRValue, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
     },
     logic_tree::{NodeId, SLTNodeArena, SLTToSIRLowerer},
 };
@@ -21,6 +24,12 @@ use super::{
     ValueScope, ValueType,
     comb_value_graph::{CombValueGraph, CombValueGraphError},
 };
+
+/// A settled-state materialization may replace one comb publication Store and
+/// one FF-side reload. Keep the initial production subset to a frontier leaf
+/// plus at most one pure operation; larger cones require a whole-plan cost
+/// comparison rather than a local expression estimate.
+const SETTLED_FRONTIER_MATERIALIZATION_BUDGET: usize = 2;
 
 #[derive(Debug, Error)]
 pub enum EventProjectionError {
@@ -57,8 +66,8 @@ pub enum EventProjectionError {
     },
     #[error("EIR combinational definition cycle reaches {definition}")]
     CombDefinitionCycle { definition: CombDefinitionId },
-    #[error("EIR comb value graph construction failed: {0}")]
-    CombValueGraph(String),
+    #[error("EIR materialization-home layout exceeds the host address space")]
+    MaterializationHomeLayoutOverflow,
     #[error("EIR comb recipe {recipe} contains an effectful SLT value recipe")]
     EffectfulCombValue { recipe: CombRecipeId },
     #[error("EIR process {process} has an entry block parameter")]
@@ -75,6 +84,11 @@ pub enum EventProjectionError {
     EventControlFlowAnalysis {
         #[source]
         source: CfgError,
+    },
+    #[error("EIR unified block scheduling failed for {block}: {error:?}")]
+    BlockScheduling {
+        block: ControlBlockId,
+        error: DagScheduleError,
     },
     #[error("EIR projection produced an unexpected SIR Commit before state publication")]
     UnexpectedBodyCommit,
@@ -122,7 +136,19 @@ pub fn lower_event_projection(
         return Ok(lower_apply_projection(&state));
     }
 
-    ClockBodyLowering::new(ir, arena, four_state, state, selected_processes)?.lower(projection)
+    let settled_comb_reads = matches!(
+        projection,
+        EventProjection::FusedSettledClock | EventProjection::EvaluateSettledClock
+    );
+    ClockBodyLowering::new(
+        ir,
+        arena,
+        four_state,
+        state,
+        selected_processes,
+        settled_comb_reads,
+    )?
+    .lower(projection)
 }
 
 fn active_processes(
@@ -253,9 +279,28 @@ impl StatePublicationPlan {
         }));
         result
     }
+
+    fn stage_region(&self, object: AbsoluteAddr) -> u32 {
+        if self.sparse_objects.contains(&object) {
+            SPARSE_WORKING_REGION
+        } else if self.static_ranges.contains_key(&object) {
+            WORKING_REGION
+        } else {
+            STABLE_REGION
+        }
+    }
 }
 
 fn merge_ranges(mut ranges: Vec<super::BitAccess>) -> Vec<super::BitAccess> {
+    // Static staging storage is private for the duration of one event. Seed
+    // and commit the complete touched bytes: bits outside an FF write are
+    // copied from stable state before evaluation and copied back unchanged.
+    // This converts narrow publication RMWs into ordinary byte copies without
+    // changing the StageNextFf ranges or their priority.
+    for range in &mut ranges {
+        range.lsb &= !7;
+        range.msb |= 7;
+    }
     ranges.sort_unstable_by_key(|range| (range.lsb, range.msb));
     let mut merged: Vec<super::BitAccess> = Vec::with_capacity(ranges.len());
     for range in ranges {
@@ -562,6 +607,77 @@ struct PlacedValue {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct CombMaterializationId(usize);
 
+#[derive(Debug, Clone)]
+enum BlockScheduleNode {
+    CombDefinition(CombMaterializationId, CombDefinitionId),
+    CombValue(ValueId),
+    Effects(Vec<EffectId>),
+    Exit,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledBlockNode {
+    process: ProcessId,
+    block: ControlBlockId,
+    node: BlockScheduleNode,
+}
+
+fn effect_guard(kind: &EffectKind) -> Option<ValueId> {
+    match kind {
+        EffectKind::StageNextFf { guard, .. }
+        | EffectKind::WritePersistentMemory { guard, .. }
+        | EffectKind::RuntimeEvent { guard, .. }
+        | EffectKind::Capture { guard, .. } => *guard,
+        EffectKind::TriggerPublication { .. }
+        | EffectKind::CommitFfState { .. }
+        | EffectKind::RuntimeObservationBarrier => None,
+    }
+}
+
+type SltCachesByRecipe = HashMap<CombRecipeId, HashMap<NodeId, RegisterId>>;
+#[derive(Default)]
+struct BlockMaterializationCache {
+    comb: HashMap<CombDefinitionId, RegisterId>,
+    unbound_slt: HashMap<NodeId, RegisterId>,
+    slt_by_recipe: SltCachesByRecipe,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DefinitionConsumers {
+    first: Option<ProcessId>,
+    second: Option<ProcessId>,
+    many_processes: bool,
+}
+
+impl DefinitionConsumers {
+    fn add(&mut self, process: ProcessId) {
+        if self.first == Some(process) || self.second == Some(process) {
+            return;
+        }
+        if self.first.is_none() {
+            self.first = Some(process);
+        } else if self.second.is_none() {
+            self.second = Some(process);
+        } else {
+            self.many_processes = true;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if let Some(process) = other.first {
+            self.add(process);
+        }
+        if let Some(process) = other.second {
+            self.add(process);
+        }
+        self.many_processes |= other.many_processes;
+    }
+
+    fn crosses_processes(self) -> bool {
+        self.second.is_some()
+    }
+}
+
 fn control_successors(ir: &EventIr, block: ControlBlockId) -> Vec<ControlBlockId> {
     match ir.blocks()[block.0]
         .terminator
@@ -586,6 +702,7 @@ struct ClockBodyLowering<'a> {
     comb_value_graph: Option<CombValueGraph>,
     slt: SLTToSIRLowerer,
     four_state: bool,
+    settled_comb_reads: bool,
     builder: SIRBuilder<AbsoluteAddr>,
     state: StatePublicationPlan,
     sir_blocks: Vec<BlockId>,
@@ -595,6 +712,9 @@ struct ClockBodyLowering<'a> {
     placed_comb_values: HashMap<(ProcessId, ValueId), PlacedValue>,
     placed_comb_definitions: Vec<Option<PlacedValue>>,
     comb_materialization_by_definition: Vec<Option<CombMaterializationId>>,
+    homed_comb_definitions: Vec<bool>,
+    comb_home_offsets: Vec<Option<usize>>,
+    comb_home_loads: HashSet<RegisterId>,
     comb_values_by_block: Vec<Vec<ValueId>>,
     comb_definitions_by_block: Vec<Vec<(CombMaterializationId, CombDefinitionId)>>,
     selected_processes: Vec<ProcessId>,
@@ -609,6 +729,7 @@ impl<'a> ClockBodyLowering<'a> {
         four_state: bool,
         state: StatePublicationPlan,
         selected_processes: Vec<ProcessId>,
+        settled_comb_reads: bool,
     ) -> Result<Self, EventProjectionError> {
         let selected_process_set = selected_processes.iter().copied().collect();
         let event_control = EventExecutionControlFlow::build(ir, &selected_processes)?;
@@ -620,6 +741,7 @@ impl<'a> ClockBodyLowering<'a> {
             comb_value_graph: None,
             slt: SLTToSIRLowerer::new(four_state),
             four_state,
+            settled_comb_reads,
             builder: SIRBuilder::new(),
             state,
             sir_blocks: vec![BlockId(usize::MAX); ir.blocks().len()],
@@ -629,6 +751,9 @@ impl<'a> ClockBodyLowering<'a> {
             placed_comb_values: HashMap::default(),
             placed_comb_definitions: Vec::new(),
             comb_materialization_by_definition: vec![None; ir.comb_definitions().len()],
+            homed_comb_definitions: vec![false; ir.comb_definitions().len()],
+            comb_home_offsets: vec![None; ir.comb_definitions().len()],
+            comb_home_loads: HashSet::default(),
             comb_values_by_block: vec![Vec::new(); ir.blocks().len()],
             comb_definitions_by_block: vec![Vec::new(); ir.blocks().len()],
             selected_processes,
@@ -674,14 +799,17 @@ impl<'a> ClockBodyLowering<'a> {
         self.builder.switch_to_block(self.final_block);
         self.builder.seal_block(SIRTerminator::Return);
         let (blocks, register_map, _) = self.builder.drain();
-        let mut result = map_clock_body(blocks, register_map, &self.state)?;
+        let mut result = map_clock_body(blocks, register_map, &self.state, &self.comb_home_loads)?;
         result
             .blocks
             .get_mut(&result.entry_block_id)
             .expect("projection entry block exists")
             .instructions
             .splice(0..0, self.state.seeds());
-        if projection == EventProjection::FusedClock {
+        if matches!(
+            projection,
+            EventProjection::FusedClock | EventProjection::FusedSettledClock
+        ) {
             result
                 .blocks
                 .get_mut(&self.final_block)
@@ -759,17 +887,373 @@ impl<'a> ClockBodyLowering<'a> {
         Ok(())
     }
 
+    fn block_schedule(
+        &self,
+        block: ControlBlockId,
+    ) -> Result<Vec<ScheduledBlockNode>, EventProjectionError> {
+        self.region_schedule(&[(self.ir.blocks()[block.0].process, block)])
+    }
+
+    fn region_schedule(
+        &self,
+        blocks: &[(ProcessId, ControlBlockId)],
+    ) -> Result<Vec<ScheduledBlockNode>, EventProjectionError> {
+        let node_capacity = blocks
+            .iter()
+            .map(|(_, block)| {
+                self.comb_definitions_by_block[block.0].len()
+                    + self.comb_values_by_block[block.0].len()
+                    + self.effects_by_block[block.0].len()
+            })
+            .sum::<usize>()
+            + 1;
+        let mut nodes = Vec::with_capacity(node_capacity);
+        let mut definition_nodes = HashMap::default();
+        let mut value_nodes = HashMap::default();
+        let mut effect_nodes = HashMap::default();
+        let mut guarded_groups = HashMap::<(ProcessId, ControlBlockId, ValueId), usize>::default();
+        for &(process, block) in blocks {
+            for &(materialization, definition) in &self.comb_definitions_by_block[block.0] {
+                let node = nodes.len();
+                nodes.push(ScheduledBlockNode {
+                    process,
+                    block,
+                    node: BlockScheduleNode::CombDefinition(materialization, definition),
+                });
+                definition_nodes.insert(definition, node);
+            }
+            for &value in &self.comb_values_by_block[block.0] {
+                let node = nodes.len();
+                nodes.push(ScheduledBlockNode {
+                    process,
+                    block,
+                    node: BlockScheduleNode::CombValue(value),
+                });
+                value_nodes.insert(value, node);
+            }
+            for &effect in &self.effects_by_block[block.0] {
+                let guard = effect_guard(&self.ir.effects()[effect.0].kind);
+                if let Some(guard) = guard
+                    && let Some(&node) = guarded_groups.get(&(process, block, guard))
+                {
+                    let BlockScheduleNode::Effects(group) = &mut nodes[node].node else {
+                        unreachable!("guard domains contain only effects");
+                    };
+                    group.push(effect);
+                    effect_nodes.insert(effect, node);
+                    continue;
+                }
+                let node = nodes.len();
+                nodes.push(ScheduledBlockNode {
+                    process,
+                    block,
+                    node: BlockScheduleNode::Effects(vec![effect]),
+                });
+                effect_nodes.insert(effect, node);
+                if let Some(guard) = guard {
+                    guarded_groups.insert((process, block, guard), node);
+                }
+            }
+        }
+        let exit = nodes.len();
+        let (exit_process, exit_block) = blocks
+            .first()
+            .copied()
+            .unwrap_or((ProcessId(0), ControlBlockId(0)));
+        nodes.push(ScheduledBlockNode {
+            process: exit_process,
+            block: exit_block,
+            node: BlockScheduleNode::Exit,
+        });
+
+        let mut dependencies = vec![Vec::new(); nodes.len()];
+        let mut value_dependencies = vec![Vec::new(); nodes.len()];
+        let comb_graph = self
+            .comb_value_graph
+            .as_ref()
+            .expect("reachable comb values have a sparse graph");
+        let carries_register = |producer: usize, user: usize| {
+            !matches!(
+                nodes[producer].node,
+                BlockScheduleNode::CombDefinition(_, definition)
+                    if self.homed_comb_definitions[definition.0]
+                        && nodes[producer].process != nodes[user].process
+            )
+        };
+        for (&definition, &node) in &definition_nodes {
+            let recipe = self.ir.comb_definitions()[definition.0].recipe;
+            for dependency in comb_graph.eager_dependencies(recipe) {
+                if let Some(&producer) = definition_nodes.get(&dependency) {
+                    dependencies[node].push(producer);
+                    if carries_register(producer, node) {
+                        value_dependencies[node].push(producer);
+                    }
+                }
+            }
+        }
+        for (&value, &node) in &value_nodes {
+            let mut visited = HashSet::default();
+            self.collect_local_value_producers(
+                value,
+                &value_nodes,
+                &definition_nodes,
+                &mut dependencies[node],
+                &mut visited,
+                Some(value),
+            );
+            value_dependencies[node].extend(
+                dependencies[node]
+                    .iter()
+                    .copied()
+                    .filter(|producer| carries_register(*producer, node)),
+            );
+        }
+        for node in 0..nodes.len() {
+            let BlockScheduleNode::Effects(group) = &nodes[node].node else {
+                continue;
+            };
+            for &effect in group {
+                for predecessor in &self.ir.effects()[effect.0].predecessors {
+                    if let Some(&predecessor) = effect_nodes.get(predecessor)
+                        && predecessor != node
+                    {
+                        dependencies[node].push(predecessor);
+                    }
+                }
+                let mut visited = HashSet::default();
+                self.ir.effects()[effect.0]
+                    .kind
+                    .visit_value_operands(|value| {
+                        self.collect_local_value_producers(
+                            value,
+                            &value_nodes,
+                            &definition_nodes,
+                            &mut dependencies[node],
+                            &mut visited,
+                            None,
+                        );
+                    });
+            }
+            value_dependencies[node].extend(dependencies[node].iter().copied().filter(
+                |producer| {
+                    matches!(
+                        &nodes[*producer].node,
+                        BlockScheduleNode::CombDefinition(..) | BlockScheduleNode::CombValue(..)
+                    ) && carries_register(*producer, node)
+                },
+            ));
+        }
+
+        // Exit is the block scheduling barrier. Every local computation and
+        // effect must precede it, while only values consumed by the actual
+        // terminator are live through the barrier.
+        dependencies[exit].extend(0..exit);
+        for &(_, block) in blocks {
+            let mut visited = HashSet::default();
+            self.ir.blocks()[block.0]
+                .terminator
+                .as_ref()
+                .expect("verified EIR block is terminated")
+                .visit_value_operands(|value| {
+                    self.collect_local_value_producers(
+                        value,
+                        &value_nodes,
+                        &definition_nodes,
+                        &mut value_dependencies[exit],
+                        &mut visited,
+                        None,
+                    );
+                });
+        }
+
+        for row in &mut dependencies {
+            row.sort_unstable();
+            row.dedup();
+        }
+        for row in &mut value_dependencies {
+            row.sort_unstable();
+            row.dedup();
+        }
+        let domains = nodes.iter().map(|node| node.process.0).collect::<Vec<_>>();
+        let value_weights = nodes
+            .iter()
+            .map(|node| match node.node {
+                BlockScheduleNode::CombDefinition(_, definition) => self.register_chunks(
+                    self.ir.comb_definitions()[definition.0]
+                        .target
+                        .width()
+                        .expect("verified combinational definition range"),
+                    self.four_state,
+                ),
+                BlockScheduleNode::CombValue(value) => {
+                    let ty = self.ir.values()[value.0].ty;
+                    self.register_chunks(ty.width, ty.four_state)
+                }
+                BlockScheduleNode::Effects(_) | BlockScheduleNode::Exit => 0,
+            })
+            .collect::<Vec<_>>();
+        let order = schedule_min_live_values_in_domains_with_weights(
+            &dependencies,
+            &value_dependencies,
+            &domains,
+            &value_weights,
+        )
+        .map_err(|error| EventProjectionError::BlockScheduling {
+            block: exit_block,
+            error,
+        })?;
+        Ok(order.into_iter().map(|node| nodes[node].clone()).collect())
+    }
+
+    fn register_chunks(&self, width: usize, four_state: bool) -> usize {
+        let chunks = width.saturating_add(63) / 64;
+        chunks.saturating_mul(if four_state { 2 } else { 1 })
+    }
+
+    fn collect_local_value_producers(
+        &self,
+        value: ValueId,
+        value_nodes: &HashMap<ValueId, usize>,
+        definition_nodes: &HashMap<CombDefinitionId, usize>,
+        result: &mut Vec<usize>,
+        visited: &mut HashSet<ValueId>,
+        exclude_value: Option<ValueId>,
+    ) {
+        if !visited.insert(value) {
+            return;
+        }
+        if Some(value) != exclude_value
+            && let Some(&producer) = value_nodes.get(&value)
+        {
+            result.push(producer);
+            return;
+        }
+        if let ValueKind::ReadCombDefinition { definition, .. } = self.ir.values()[value.0].kind {
+            if let Some(&producer) = definition_nodes.get(&definition) {
+                result.push(producer);
+            }
+            return;
+        }
+        self.ir.values()[value.0].kind.visit_operands(|operand| {
+            self.collect_local_value_producers(
+                operand,
+                value_nodes,
+                definition_nodes,
+                result,
+                visited,
+                exclude_value,
+            );
+        });
+    }
+
     fn lower_block(
         &mut self,
         process: ProcessId,
         block: ControlBlockId,
     ) -> Result<(), EventProjectionError> {
         self.builder.switch_to_block(self.sir_blocks[block.0]);
-        self.prepare_block_comb_values(process, block)?;
         let mut cache = self.block_anchors(block);
-        let effects = self.effects_by_block[block.0].clone();
-        for effect in effects {
-            self.lower_effect(process, block, effect, &mut cache)?;
+        let mut materialization_cache = BlockMaterializationCache::default();
+        for scheduled in self.block_schedule(block)? {
+            debug_assert_eq!(scheduled.process, process);
+            debug_assert_eq!(scheduled.block, block);
+            match scheduled.node {
+                BlockScheduleNode::CombDefinition(materialization, definition) => {
+                    let mut values = ValueMaterializer::new_with_caches(
+                        self.ir,
+                        self.comb_value_graph
+                            .as_ref()
+                            .expect("reachable comb values have a sparse graph"),
+                        self.arena,
+                        &self.slt,
+                        self.settled_comb_reads,
+                        &self.control,
+                        self.event_control
+                            .as_ref()
+                            .expect("a non-empty clock projection has an event CFG"),
+                        &self.placed_comb_values,
+                        &self.comb_materialization_by_definition,
+                        &self.placed_comb_definitions,
+                        &self.homed_comb_definitions,
+                        &self.comb_home_offsets,
+                        &mut self.comb_home_loads,
+                        &mut self.builder,
+                        process,
+                        block,
+                        &mut cache,
+                        std::mem::take(&mut materialization_cache),
+                    );
+                    values.scheduled_comb_definitions.insert(definition);
+                    let register = values.materialize_comb_definition(definition)?;
+                    if values.homed_comb_definitions[definition.0] {
+                        let target = self.ir.comb_definitions()[definition.0].target;
+                        let home_offset = values.comb_home_offsets[definition.0]
+                            .expect("a homed definition has a private slot");
+                        values.builder.emit(SIRInstruction::Store(
+                            target.object,
+                            SIROffset::Static(home_offset),
+                            target
+                                .width()
+                                .expect("verified combinational definition range"),
+                            register,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
+                    materialization_cache = values.into_caches();
+                    let previous = self.placed_comb_definitions[materialization.0]
+                        .replace(PlacedValue { block, register });
+                    assert!(
+                        previous.is_none(),
+                        "one comb materialization is emitted exactly once"
+                    );
+                }
+                BlockScheduleNode::CombValue(value) => {
+                    let mut values = ValueMaterializer::new_with_caches(
+                        self.ir,
+                        self.comb_value_graph
+                            .as_ref()
+                            .expect("reachable comb values have a sparse graph"),
+                        self.arena,
+                        &self.slt,
+                        self.settled_comb_reads,
+                        &self.control,
+                        self.event_control
+                            .as_ref()
+                            .expect("a non-empty clock projection has an event CFG"),
+                        &self.placed_comb_values,
+                        &self.comb_materialization_by_definition,
+                        &self.placed_comb_definitions,
+                        &self.homed_comb_definitions,
+                        &self.comb_home_offsets,
+                        &mut self.comb_home_loads,
+                        &mut self.builder,
+                        process,
+                        block,
+                        &mut cache,
+                        std::mem::take(&mut materialization_cache),
+                    );
+                    let register = values.materialize(value)?;
+                    materialization_cache = values.into_caches();
+                    let previous = self
+                        .placed_comb_values
+                        .insert((process, value), PlacedValue { block, register });
+                    assert!(
+                        previous.is_none(),
+                        "one placed comb value is emitted exactly once"
+                    );
+                }
+                BlockScheduleNode::Effects(effects) => {
+                    self.lower_effect_group(
+                        process,
+                        block,
+                        &effects,
+                        &mut cache,
+                        &mut materialization_cache,
+                    )?;
+                }
+                BlockScheduleNode::Exit => break,
+            }
         }
 
         let terminator = self.ir.blocks()[block.0]
@@ -786,6 +1270,7 @@ impl<'a> ClockBodyLowering<'a> {
                         .expect("reachable comb values have a sparse graph"),
                     self.arena,
                     &self.slt,
+                    self.settled_comb_reads,
                     &self.control,
                     self.event_control
                         .as_ref()
@@ -793,6 +1278,9 @@ impl<'a> ClockBodyLowering<'a> {
                     &self.placed_comb_values,
                     &self.comb_materialization_by_definition,
                     &self.placed_comb_definitions,
+                    &self.homed_comb_definitions,
+                    &self.comb_home_offsets,
+                    &mut self.comb_home_loads,
                     &mut self.builder,
                     process,
                     block,
@@ -818,6 +1306,7 @@ impl<'a> ClockBodyLowering<'a> {
                             .expect("reachable comb values have a sparse graph"),
                         self.arena,
                         &self.slt,
+                        self.settled_comb_reads,
                         &self.control,
                         self.event_control
                             .as_ref()
@@ -825,6 +1314,9 @@ impl<'a> ClockBodyLowering<'a> {
                         &self.placed_comb_values,
                         &self.comb_materialization_by_definition,
                         &self.placed_comb_definitions,
+                        &self.homed_comb_definitions,
+                        &self.comb_home_offsets,
+                        &mut self.comb_home_loads,
                         &mut self.builder,
                         process,
                         block,
@@ -894,6 +1386,7 @@ impl<'a> ClockBodyLowering<'a> {
                 .expect("reachable comb values have a sparse graph"),
             self.arena,
             &self.slt,
+            self.settled_comb_reads,
             &self.control,
             self.event_control
                 .as_ref()
@@ -901,6 +1394,9 @@ impl<'a> ClockBodyLowering<'a> {
             &self.placed_comb_values,
             &self.comb_materialization_by_definition,
             &self.placed_comb_definitions,
+            &self.homed_comb_definitions,
+            &self.comb_home_offsets,
+            &mut self.comb_home_loads,
             &mut self.builder,
             process,
             source,
@@ -912,12 +1408,90 @@ impl<'a> ClockBodyLowering<'a> {
         Ok(())
     }
 
+    fn lower_effect_group(
+        &mut self,
+        process: ProcessId,
+        block: ControlBlockId,
+        effects: &[EffectId],
+        cache: &mut HashMap<ValueId, RegisterId>,
+        materialization_cache: &mut BlockMaterializationCache,
+    ) -> Result<(), EventProjectionError> {
+        let Some(&first) = effects.first() else {
+            return Ok(());
+        };
+        let guard = effect_guard(&self.ir.effects()[first.0].kind);
+        debug_assert!(
+            effects
+                .iter()
+                .all(|effect| effect_guard(&self.ir.effects()[effect.0].kind) == guard)
+        );
+        let Some(guard) = guard else {
+            for &effect in effects {
+                self.lower_effect(process, block, effect, cache, materialization_cache, true)?;
+            }
+            return Ok(());
+        };
+
+        let condition = {
+            let mut values = ValueMaterializer::new(
+                self.ir,
+                self.comb_value_graph
+                    .as_ref()
+                    .expect("reachable comb values have a sparse graph"),
+                self.arena,
+                &self.slt,
+                self.settled_comb_reads,
+                &self.control,
+                self.event_control
+                    .as_ref()
+                    .expect("a non-empty clock projection has an event CFG"),
+                &self.placed_comb_values,
+                &self.comb_materialization_by_definition,
+                &self.placed_comb_definitions,
+                &self.homed_comb_definitions,
+                &self.comb_home_offsets,
+                &mut self.comb_home_loads,
+                &mut self.builder,
+                process,
+                block,
+                cache,
+            );
+            values.materialize(guard)?
+        };
+        let effect_block = self.builder.new_block();
+        let continuation = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (effect_block, Vec::new()),
+            false_block: (continuation, Vec::new()),
+        });
+        self.builder.switch_to_block(effect_block);
+        let mut effect_cache = cache.clone();
+        let mut effect_materializations = BlockMaterializationCache::default();
+        for &effect in effects {
+            self.lower_effect(
+                process,
+                block,
+                effect,
+                &mut effect_cache,
+                &mut effect_materializations,
+                false,
+            )?;
+        }
+        self.builder
+            .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
+        self.builder.switch_to_block(continuation);
+        Ok(())
+    }
+
     fn lower_effect(
         &mut self,
         process: ProcessId,
         block: ControlBlockId,
         effect_id: EffectId,
         cache: &mut HashMap<ValueId, RegisterId>,
+        materialization_cache: &mut BlockMaterializationCache,
+        honor_guard: bool,
     ) -> Result<(), EventProjectionError> {
         let effect = &self.ir.effects()[effect_id.0];
         match &effect.kind {
@@ -927,7 +1501,7 @@ impl<'a> ClockBodyLowering<'a> {
                 guard,
                 ..
             } => {
-                if let Some(guard) = guard {
+                if honor_guard && let Some(guard) = guard {
                     let mut condition_values = ValueMaterializer::new(
                         self.ir,
                         self.comb_value_graph
@@ -935,6 +1509,7 @@ impl<'a> ClockBodyLowering<'a> {
                             .expect("reachable comb values have a sparse graph"),
                         self.arena,
                         &self.slt,
+                        self.settled_comb_reads,
                         &self.control,
                         self.event_control
                             .as_ref()
@@ -942,6 +1517,9 @@ impl<'a> ClockBodyLowering<'a> {
                         &self.placed_comb_values,
                         &self.comb_materialization_by_definition,
                         &self.placed_comb_definitions,
+                        &self.homed_comb_definitions,
+                        &self.comb_home_offsets,
+                        &mut self.comb_home_loads,
                         &mut self.builder,
                         process,
                         block,
@@ -957,12 +1535,20 @@ impl<'a> ClockBodyLowering<'a> {
                     });
                     self.builder.switch_to_block(store_block);
                     let mut store_cache = cache.clone();
-                    self.emit_stage(process, block, target, *value, &mut store_cache)?;
+                    let mut store_materializations = BlockMaterializationCache::default();
+                    self.emit_stage(
+                        process,
+                        block,
+                        target,
+                        *value,
+                        &mut store_cache,
+                        &mut store_materializations,
+                    )?;
                     self.builder
                         .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
                     self.builder.switch_to_block(continuation);
                 } else {
-                    self.emit_stage(process, block, target, *value, cache)?;
+                    self.emit_stage(process, block, target, *value, cache, materialization_cache)?;
                 }
             }
             EffectKind::RuntimeEvent {
@@ -975,48 +1561,116 @@ impl<'a> ClockBodyLowering<'a> {
                 arguments,
                 guard,
             } => {
-                if guard.is_some() {
-                    return Err(EventProjectionError::UnsupportedEffect {
-                        effect: effect_id,
-                        kind: "guarded runtime observation",
-                    });
-                }
-                let mut values = ValueMaterializer::new(
-                    self.ir,
-                    self.comb_value_graph
-                        .as_ref()
-                        .expect("reachable comb values have a sparse graph"),
-                    self.arena,
-                    &self.slt,
-                    &self.control,
-                    self.event_control
-                        .as_ref()
-                        .expect("a non-empty clock projection has an event CFG"),
-                    &self.placed_comb_values,
-                    &self.comb_materialization_by_definition,
-                    &self.placed_comb_definitions,
-                    &mut self.builder,
-                    process,
-                    block,
-                    cache,
-                );
-                let arguments = values.materialize_many(arguments)?;
-                match &effect.kind {
-                    EffectKind::RuntimeEvent { .. } => {
-                        self.builder.emit(SIRInstruction::RuntimeEvent {
+                let observation_kind = matches!(effect.kind, EffectKind::RuntimeEvent { .. });
+                let emit = |builder: &mut SIRBuilder<AbsoluteAddr>, arguments| {
+                    if observation_kind {
+                        builder.emit(SIRInstruction::RuntimeEvent {
                             site_id: *site_id,
                             args: arguments,
                         });
-                    }
-                    EffectKind::Capture { .. } => {
-                        self.builder.emit(SIRInstruction::CombCaptureEvent {
+                    } else {
+                        builder.emit(SIRInstruction::CombCaptureEvent {
                             site_id: *site_id,
                             args: arguments,
                             fatal_error_code: None,
                             consume_enabled: false,
                         });
                     }
-                    _ => unreachable!(),
+                };
+                if honor_guard && let Some(guard) = guard {
+                    let condition = {
+                        let mut values = ValueMaterializer::new(
+                            self.ir,
+                            self.comb_value_graph
+                                .as_ref()
+                                .expect("reachable comb values have a sparse graph"),
+                            self.arena,
+                            &self.slt,
+                            self.settled_comb_reads,
+                            &self.control,
+                            self.event_control
+                                .as_ref()
+                                .expect("a non-empty clock projection has an event CFG"),
+                            &self.placed_comb_values,
+                            &self.comb_materialization_by_definition,
+                            &self.placed_comb_definitions,
+                            &self.homed_comb_definitions,
+                            &self.comb_home_offsets,
+                            &mut self.comb_home_loads,
+                            &mut self.builder,
+                            process,
+                            block,
+                            cache,
+                        );
+                        values.materialize(*guard)?
+                    };
+                    let event_block = self.builder.new_block();
+                    let continuation = self.builder.new_block();
+                    self.builder.seal_block(SIRTerminator::Branch {
+                        cond: condition,
+                        true_block: (event_block, Vec::new()),
+                        false_block: (continuation, Vec::new()),
+                    });
+                    self.builder.switch_to_block(event_block);
+                    let mut event_cache = cache.clone();
+                    let arguments = {
+                        let mut values = ValueMaterializer::new(
+                            self.ir,
+                            self.comb_value_graph
+                                .as_ref()
+                                .expect("reachable comb values have a sparse graph"),
+                            self.arena,
+                            &self.slt,
+                            self.settled_comb_reads,
+                            &self.control,
+                            self.event_control
+                                .as_ref()
+                                .expect("a non-empty clock projection has an event CFG"),
+                            &self.placed_comb_values,
+                            &self.comb_materialization_by_definition,
+                            &self.placed_comb_definitions,
+                            &self.homed_comb_definitions,
+                            &self.comb_home_offsets,
+                            &mut self.comb_home_loads,
+                            &mut self.builder,
+                            process,
+                            block,
+                            &mut event_cache,
+                        );
+                        values.materialize_many(arguments)?
+                    };
+                    emit(&mut self.builder, arguments);
+                    self.builder
+                        .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
+                    self.builder.switch_to_block(continuation);
+                } else {
+                    let arguments = {
+                        let mut values = ValueMaterializer::new(
+                            self.ir,
+                            self.comb_value_graph
+                                .as_ref()
+                                .expect("reachable comb values have a sparse graph"),
+                            self.arena,
+                            &self.slt,
+                            self.settled_comb_reads,
+                            &self.control,
+                            self.event_control
+                                .as_ref()
+                                .expect("a non-empty clock projection has an event CFG"),
+                            &self.placed_comb_values,
+                            &self.comb_materialization_by_definition,
+                            &self.placed_comb_definitions,
+                            &self.homed_comb_definitions,
+                            &self.comb_home_offsets,
+                            &mut self.comb_home_loads,
+                            &mut self.builder,
+                            process,
+                            block,
+                            cache,
+                        );
+                        values.materialize_many(arguments)?
+                    };
+                    emit(&mut self.builder, arguments);
                 }
             }
             EffectKind::RuntimeObservationBarrier => {}
@@ -1044,14 +1698,16 @@ impl<'a> ClockBodyLowering<'a> {
         target: &super::ObjectAccess,
         value: ValueId,
         cache: &mut HashMap<ValueId, RegisterId>,
+        materialization_cache: &mut BlockMaterializationCache,
     ) -> Result<(), EventProjectionError> {
-        let mut values = ValueMaterializer::new(
+        let mut values = ValueMaterializer::new_with_caches(
             self.ir,
             self.comb_value_graph
                 .as_ref()
                 .expect("reachable comb values have a sparse graph"),
             self.arena,
             &self.slt,
+            self.settled_comb_reads,
             &self.control,
             self.event_control
                 .as_ref()
@@ -1059,14 +1715,18 @@ impl<'a> ClockBodyLowering<'a> {
             &self.placed_comb_values,
             &self.comb_materialization_by_definition,
             &self.placed_comb_definitions,
+            &self.homed_comb_definitions,
+            &self.comb_home_offsets,
+            &mut self.comb_home_loads,
             &mut self.builder,
             process,
             block,
             cache,
+            std::mem::take(materialization_cache),
         );
         let value = values.materialize(value)?;
         let offset = values.materialize_offset(&target.offset)?;
-        self.builder.emit(SIRInstruction::Store(
+        values.builder.emit(SIRInstruction::Store(
             target.object,
             offset,
             target.width,
@@ -1074,6 +1734,7 @@ impl<'a> ClockBodyLowering<'a> {
             Vec::new(),
             Vec::new(),
         ));
+        *materialization_cache = values.into_caches();
         Ok(())
     }
 
@@ -1098,6 +1759,8 @@ impl<'a> ClockBodyLowering<'a> {
         // definition can become O(definitions * blocks) on a large flattened
         // design even though placement only consumes its LCA.
         let mut definition_placements = vec![None; self.ir.comb_definitions().len()];
+        let mut definition_consumers =
+            vec![DefinitionConsumers::default(); self.ir.comb_definitions().len()];
         let mut projection_values = Vec::new();
 
         // EIR values other than comb definitions are cheap process-local
@@ -1142,15 +1805,17 @@ impl<'a> ClockBodyLowering<'a> {
                                 .visit_value_operands(|value| projection_values.push(value));
                             if let Some(guard) = guard {
                                 projection_values.push(*guard);
-                            }
-                            if let Some(guard) = guard {
                                 seeds.push((*guard, block));
-                            } else {
-                                seeds.push((*value, block));
-                                target
-                                    .offset
-                                    .visit_value_operands(|value| seeds.push((value, block)));
                             }
+                            // Combinational definitions are pure settled-event
+                            // values. A guarded Stage controls publication, not
+                            // whether its shared comb graph may be evaluated.
+                            // Seed the value for event-level placement so many
+                            // FF predicates do not each rebuild the same cone.
+                            seeds.push((*value, block));
+                            target
+                                .offset
+                                .visit_value_operands(|value| seeds.push((value, block)));
                         }
                         EffectKind::RuntimeEvent {
                             arguments,
@@ -1231,6 +1896,7 @@ impl<'a> ClockBodyLowering<'a> {
                     continue;
                 };
                 let definition = *definition;
+                definition_consumers[definition.0].add(process);
                 let block = self.control.hoist_out_of_cycles(process, placement);
                 self.comb_values_by_block[block.0].push(ValueId(value));
                 let event_control = self
@@ -1240,6 +1906,24 @@ impl<'a> ClockBodyLowering<'a> {
                 definition_placements[definition.0] =
                     Some(event_control.merge_use_block(definition_placements[definition.0], block));
             }
+        }
+
+        if self.settled_comb_reads {
+            let demanded_definitions = vec![false; self.ir.comb_definitions().len()];
+            self.comb_value_graph = Some(
+                CombValueGraph::build(
+                    self.ir.comb_graph(),
+                    self.arena,
+                    &demanded_definitions,
+                    false,
+                )
+                .map_err(|error| match error {
+                    CombValueGraphError::DefinitionCycle(definition) => {
+                        EventProjectionError::CombDefinitionCycle { definition }
+                    }
+                })?,
+            );
+            return Ok(());
         }
 
         let mut demanded_definitions = vec![false; self.ir.comb_definitions().len()];
@@ -1296,8 +1980,10 @@ impl<'a> ClockBodyLowering<'a> {
                 &demanded_definitions,
                 !self.four_state,
             )
-            .map_err(|error: CombValueGraphError| {
-                EventProjectionError::CombValueGraph(error.to_string())
+            .map_err(|error| match error {
+                CombValueGraphError::DefinitionCycle(definition) => {
+                    EventProjectionError::CombDefinitionCycle { definition }
+                }
             })?,
         );
         if !reachable.iter().any(|reachable| *reachable) {
@@ -1347,6 +2033,20 @@ impl<'a> ClockBodyLowering<'a> {
         while let Some(definition) = ready.pop() {
             processed += 1;
             let placement = definition_placements[definition.0];
+            let consumers = definition_consumers[definition.0];
+            let dependency_consumers = if consumers.crosses_processes() && !self.four_state {
+                let producer = placement
+                    .map(|block| self.ir.blocks()[block].process)
+                    .expect("a consumed combinational definition has a placement");
+                self.homed_comb_definitions[definition.0] = true;
+                DefinitionConsumers {
+                    first: Some(producer),
+                    second: None,
+                    many_processes: false,
+                }
+            } else {
+                consumers
+            };
             let recipe = self.ir.comb_definitions()[definition.0].recipe;
             for dependency in self
                 .comb_value_graph
@@ -1359,6 +2059,9 @@ impl<'a> ClockBodyLowering<'a> {
                         event_control.merge_local(definition_placements[dependency.0], placement),
                     );
                 }
+                // A home is the process-allocation cut. Dependencies below
+                // that cut feed only the process which computes the home.
+                definition_consumers[dependency.0].merge(dependency_consumers);
                 eager_indegree[dependency.0] -= 1;
                 if eager_indegree[dependency.0] == 0 {
                     ready.push(dependency);
@@ -1410,73 +2113,34 @@ impl<'a> ClockBodyLowering<'a> {
             definitions.sort_unstable();
             definitions.dedup();
         }
-        Ok(())
-    }
 
-    fn prepare_block_comb_values(
-        &mut self,
-        process: ProcessId,
-        block: ControlBlockId,
-    ) -> Result<(), EventProjectionError> {
-        let roots = self.comb_values_by_block[block.0].clone();
-        let definitions = self.comb_definitions_by_block[block.0].clone();
-        if roots.is_empty() && definitions.is_empty() {
-            return Ok(());
-        }
-        let mut cache = self.block_anchors(block);
-        let (materialized, scheduled_registers) = {
-            let event_control = self
-                .event_control
-                .as_ref()
-                .expect("a non-empty clock projection has an event CFG");
-            let mut values = ValueMaterializer::new(
-                self.ir,
-                self.comb_value_graph
-                    .as_ref()
-                    .expect("reachable comb values have a sparse graph"),
-                self.arena,
-                &self.slt,
-                &self.control,
-                event_control,
-                &self.placed_comb_values,
-                &self.comb_materialization_by_definition,
-                &self.placed_comb_definitions,
-                &mut self.builder,
-                process,
-                block,
-                &mut cache,
-            );
-            for &(_, definition) in &definitions {
-                values.materialize_comb_definition(definition)?;
+        // Homes are compiler-private SSA-version slots, not aliases of the
+        // packed RTL target. Give every retained home a disjoint,
+        // machine-aligned logical range so narrow stores never need to
+        // preserve neighboring RTL bits and distinct versions cannot
+        // overwrite each other.
+        let mut next_home_bit = 0usize;
+        for (definition, homed) in self.homed_comb_definitions.iter().copied().enumerate() {
+            if !homed {
+                continue;
             }
-            let mut materialized = Vec::with_capacity(roots.len());
-            for root in roots {
-                materialized.push((
-                    (process, root),
-                    PlacedValue {
-                        block,
-                        register: values.materialize(root)?,
-                    },
-                ));
-            }
-            let comb_cache = values.into_comb_cache();
-            let scheduled_registers = definitions
-                .iter()
-                .map(|&(materialization, definition)| {
-                    (materialization, definition, comb_cache[&definition])
-                })
-                .collect::<Vec<_>>();
-            (materialized, scheduled_registers)
-        };
-        for (materialization, _definition, register) in scheduled_registers {
-            let previous = self.placed_comb_definitions[materialization.0]
-                .replace(PlacedValue { block, register });
-            assert!(
-                previous.is_none(),
-                "one comb materialization is emitted exactly once"
-            );
+            next_home_bit = next_home_bit
+                .checked_add(63)
+                .map(|bit| bit & !63)
+                .ok_or(EventProjectionError::MaterializationHomeLayoutOverflow)?;
+            self.comb_home_offsets[definition] = Some(next_home_bit);
+            let width = self.ir.comb_definitions()[definition]
+                .target
+                .width()
+                .expect("verified combinational definition range");
+            let storage_width = width
+                .checked_add(63)
+                .map(|bits| bits & !63)
+                .ok_or(EventProjectionError::MaterializationHomeLayoutOverflow)?;
+            next_home_bit = next_home_bit
+                .checked_add(storage_width)
+                .ok_or(EventProjectionError::MaterializationHomeLayoutOverflow)?;
         }
-        self.placed_comb_values.extend(materialized);
         Ok(())
     }
 
@@ -1494,23 +2158,26 @@ struct ValueMaterializer<'a, 'cache, 'builder> {
     comb_value_graph: &'a CombValueGraph,
     arena: &'a SLTNodeArena<AbsoluteAddr>,
     slt: &'a SLTToSIRLowerer,
+    settled_comb_reads: bool,
     control: &'a EventControlFlow,
     event_control: &'a EventExecutionControlFlow,
     placed_cache: &'a HashMap<(ProcessId, ValueId), PlacedValue>,
     comb_materialization_by_definition: &'a [Option<CombMaterializationId>],
     placed_comb_cache: &'a [Option<PlacedValue>],
+    homed_comb_definitions: &'a [bool],
+    comb_home_offsets: &'a [Option<usize>],
+    comb_home_loads: &'builder mut HashSet<RegisterId>,
     builder: &'builder mut SIRBuilder<AbsoluteAddr>,
     process: ProcessId,
     block: ControlBlockId,
     cache: &'cache mut HashMap<ValueId, RegisterId>,
     comb_cache: HashMap<CombDefinitionId, RegisterId>,
     comb_visiting: HashSet<CombDefinitionId>,
+    scheduled_comb_definitions: HashSet<CombDefinitionId>,
     sparse_control_depth: usize,
     sparse_controlled_recipes: HashSet<CombRecipeId>,
-    slt_caches_by_inputs: HashMap<
-        Vec<(crate::ir::VarAtomBase<AbsoluteAddr>, RegisterId)>,
-        HashMap<NodeId, RegisterId>,
-    >,
+    unbound_slt_cache: HashMap<NodeId, RegisterId>,
+    slt_caches_by_recipe: SltCachesByRecipe,
 }
 
 impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
@@ -1519,70 +2186,88 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
         comb_value_graph: &'a CombValueGraph,
         arena: &'a SLTNodeArena<AbsoluteAddr>,
         slt: &'a SLTToSIRLowerer,
+        settled_comb_reads: bool,
         control: &'a EventControlFlow,
         event_control: &'a EventExecutionControlFlow,
         placed_cache: &'a HashMap<(ProcessId, ValueId), PlacedValue>,
         comb_materialization_by_definition: &'a [Option<CombMaterializationId>],
         placed_comb_cache: &'a [Option<PlacedValue>],
+        homed_comb_definitions: &'a [bool],
+        comb_home_offsets: &'a [Option<usize>],
+        comb_home_loads: &'builder mut HashSet<RegisterId>,
         builder: &'builder mut SIRBuilder<AbsoluteAddr>,
         process: ProcessId,
         block: ControlBlockId,
         cache: &'cache mut HashMap<ValueId, RegisterId>,
     ) -> Self {
-        Self::new_with_comb_cache(
+        Self::new_with_caches(
             ir,
             comb_value_graph,
             arena,
             slt,
+            settled_comb_reads,
             control,
             event_control,
             placed_cache,
             comb_materialization_by_definition,
             placed_comb_cache,
+            homed_comb_definitions,
+            comb_home_offsets,
+            comb_home_loads,
             builder,
             process,
             block,
             cache,
-            HashMap::default(),
+            BlockMaterializationCache::default(),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_comb_cache(
+    fn new_with_caches(
         ir: &'a EventIr,
         comb_value_graph: &'a CombValueGraph,
         arena: &'a SLTNodeArena<AbsoluteAddr>,
         slt: &'a SLTToSIRLowerer,
+        settled_comb_reads: bool,
         control: &'a EventControlFlow,
         event_control: &'a EventExecutionControlFlow,
         placed_cache: &'a HashMap<(ProcessId, ValueId), PlacedValue>,
         comb_materialization_by_definition: &'a [Option<CombMaterializationId>],
         placed_comb_cache: &'a [Option<PlacedValue>],
+        homed_comb_definitions: &'a [bool],
+        comb_home_offsets: &'a [Option<usize>],
+        comb_home_loads: &'builder mut HashSet<RegisterId>,
         builder: &'builder mut SIRBuilder<AbsoluteAddr>,
         process: ProcessId,
         block: ControlBlockId,
         cache: &'cache mut HashMap<ValueId, RegisterId>,
-        comb_cache: HashMap<CombDefinitionId, RegisterId>,
+        caches: BlockMaterializationCache,
     ) -> Self {
         Self {
             ir,
             comb_value_graph,
             arena,
             slt,
+            settled_comb_reads,
             control,
             event_control,
             placed_cache,
             comb_materialization_by_definition,
             placed_comb_cache,
+            homed_comb_definitions,
+            comb_home_offsets,
+            comb_home_loads,
             builder,
             process,
             block,
             cache,
-            comb_cache,
+            comb_cache: caches.comb,
             comb_visiting: HashSet::default(),
+            scheduled_comb_definitions: HashSet::default(),
             sparse_control_depth: 0,
             sparse_controlled_recipes: HashSet::default(),
-            slt_caches_by_inputs: HashMap::default(),
+            unbound_slt_cache: caches.unbound_slt,
+            slt_caches_by_recipe: caches.slt_by_recipe,
         }
     }
 
@@ -1596,8 +2281,12 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
             .collect()
     }
 
-    fn into_comb_cache(self) -> HashMap<CombDefinitionId, RegisterId> {
-        self.comb_cache
+    fn into_caches(self) -> BlockMaterializationCache {
+        BlockMaterializationCache {
+            comb: self.comb_cache,
+            unbound_slt: self.unbound_slt_cache,
+            slt_by_recipe: self.slt_caches_by_recipe,
+        }
     }
 
     fn materialize(&mut self, root: ValueId) -> Result<RegisterId, EventProjectionError> {
@@ -1663,6 +2352,11 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
             .get(definition.0)?
             .as_ref()?;
         let placed = self.placed_comb_cache.get(materialization.0)?.as_ref()?;
+        if self.homed_comb_definitions[definition.0]
+            && self.ir.blocks()[placed.block.0].process != self.process
+        {
+            return None;
+        }
         self.event_control
             .dominates(placed.block, self.block)
             .then_some(placed.register)
@@ -1743,6 +2437,49 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
                 destination
             }
             ValueKind::ReadCombDefinition { definition, access } => {
+                if self.settled_comb_reads {
+                    let recipe_id = self.ir.comb_definitions()[definition.0].recipe;
+                    let recipe = &self.ir.comb_graph().recipes()[recipe_id.0];
+                    if settled_slice_rematerialization_cost(
+                        NodeId(recipe.root.0),
+                        *access,
+                        self.arena,
+                        SETTLED_FRONTIER_MATERIALIZATION_BUDGET,
+                    )
+                    .is_some()
+                        && recipe.pre_evaluate.is_empty()
+                        && recipe.local_inputs.is_empty()
+                        && recipe
+                            .snapshot_inputs
+                            .iter()
+                            .all(|input| input.kind == super::CombSnapshotKind::EventEntry)
+                        && !slt_tree_has_effects(NodeId(recipe.root.0), self.arena)
+                    {
+                        // The shared comb schedule has reached a fixed point
+                        // before this projection starts.  Treat its stable
+                        // state as a materialization frontier and rebuild only
+                        // the exact FF-demanded range.  A fresh cache keeps
+                        // this materialization local to the use cluster.
+                        let mut cache = HashMap::default();
+                        let value = self.slt.lower_region_slice(
+                            self.builder,
+                            NodeId(recipe.root.0),
+                            *access,
+                            self.arena,
+                            &mut cache,
+                        );
+                        return Ok(self.coerce(value, item.ty));
+                    }
+                    let target = self.ir.comb_definitions()[definition.0].target;
+                    let destination = self.alloc_type(item.ty);
+                    self.builder.emit(SIRInstruction::Load(
+                        destination,
+                        target.object,
+                        SIROffset::Static(target.access.lsb + access.lsb),
+                        item.ty.width,
+                    ));
+                    return Ok(self.coerce(destination, item.ty));
+                }
                 let source = self.materialize_comb_definition(*definition)?;
                 let full_width = self.ir.comb_definitions()[definition.0]
                     .target
@@ -2089,6 +2826,26 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
         if self.has_comb_definition(definition) {
             return Ok(self.comb_register(definition));
         }
+        if self.homed_comb_definitions[definition.0]
+            && !self.scheduled_comb_definitions.contains(&definition)
+        {
+            let target = self.ir.comb_definitions()[definition.0].target;
+            let home_offset = self.comb_home_offsets[definition.0]
+                .expect("a homed definition has a private slot");
+            let width = target
+                .width()
+                .expect("verified combinational definition range");
+            let register = self.builder.alloc_logic(width);
+            self.builder.emit(SIRInstruction::Load(
+                register,
+                target.object,
+                SIROffset::Static(home_offset),
+                width,
+            ));
+            self.comb_home_loads.insert(register);
+            self.comb_cache.insert(definition, register);
+            return Ok(register);
+        }
         if !self.comb_visiting.insert(definition) {
             return Err(EventProjectionError::CombDefinitionCycle { definition });
         }
@@ -2103,6 +2860,12 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
         &mut self,
         definition: CombDefinitionId,
     ) -> Result<RegisterId, EventProjectionError> {
+        if std::env::var_os("CELOX_EIR_TRACE_EMISSION").is_some() {
+            eprintln!(
+                "[eir-emission] definition={} process={} block={}",
+                definition.0, self.process.0, self.block.0
+            );
+        }
         let recipe_id = self.ir.comb_definitions()[definition.0].recipe;
         let recipe = &self.ir.comb_graph().recipes()[recipe_id.0];
         if recipe
@@ -2163,12 +2926,16 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
             );
         }
         if cache.is_empty() && self.sparse_control_depth == 0 {
-            let mut input_key = inputs
-                .iter()
-                .map(|(range, register)| (*range, *register))
-                .collect::<Vec<_>>();
-            input_key.sort_unstable();
-            let shared_cache = self.slt_caches_by_inputs.entry(input_key).or_default();
+            // With no scoped overrides NodeId alone is an immutable event
+            // value and can be shared across recipes. Otherwise one
+            // CombRecipe names one fixed binding of every overridden range.
+            // Keying by the complete register environment would retain one
+            // large key per materialized prefix.
+            let shared_cache = if inputs.is_empty() {
+                &mut self.unbound_slt_cache
+            } else {
+                self.slt_caches_by_recipe.entry(recipe).or_default()
+            };
             Ok(self.slt.lower_with_scoped_inputs(
                 self.builder,
                 root,
@@ -2360,6 +3127,155 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
     }
 }
 
+fn settled_slice_rematerialization_cost(
+    node: NodeId,
+    access: crate::ir::BitAccess,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    budget: usize,
+) -> Option<usize> {
+    use crate::logic_tree::SLTNode;
+
+    if access.msb < access.lsb
+        || access.msb >= crate::logic_tree::get_width(node, arena)
+        || budget == 0
+    {
+        return None;
+    }
+    let add = |parts: &[usize]| {
+        parts
+            .iter()
+            .try_fold(0usize, |total, part| total.checked_add(*part))
+            .filter(|total| *total <= budget)
+    };
+    match arena.get(node) {
+        SLTNode::Input { index, .. } if index.is_empty() => Some(1),
+        SLTNode::Input { .. } => None,
+        SLTNode::Constant(..) => Some(1),
+        SLTNode::Slice {
+            expr,
+            access: inner,
+        } if access.msb <= inner.msb - inner.lsb => settled_slice_rematerialization_cost(
+            *expr,
+            crate::ir::BitAccess::new(inner.lsb + access.lsb, inner.lsb + access.msb),
+            arena,
+            budget,
+        ),
+        SLTNode::Unary(
+            crate::ir::UnaryOp::Ident | crate::ir::UnaryOp::ToTwoState | crate::ir::UnaryOp::BitNot,
+            input,
+        ) if access.msb < crate::logic_tree::get_width(*input, arena) => {
+            let input = settled_slice_rematerialization_cost(*input, access, arena, budget - 1)?;
+            add(&[1, input])
+        }
+        SLTNode::Binary(
+            lhs,
+            crate::ir::BinaryOp::And | crate::ir::BinaryOp::Or | crate::ir::BinaryOp::Xor,
+            rhs,
+        ) if access.msb < crate::logic_tree::get_width(*lhs, arena)
+            && access.msb < crate::logic_tree::get_width(*rhs, arena) =>
+        {
+            let lhs = settled_slice_rematerialization_cost(*lhs, access, arena, budget - 1)?;
+            let rhs = settled_slice_rematerialization_cost(*rhs, access, arena, budget - 1)?;
+            add(&[1, lhs, rhs])
+        }
+        SLTNode::Binary(
+            lhs,
+            crate::ir::BinaryOp::Add | crate::ir::BinaryOp::Sub | crate::ir::BinaryOp::Mul,
+            rhs,
+        ) if access.lsb == 0
+            && access.msb < crate::logic_tree::get_width(*lhs, arena)
+            && access.msb < crate::logic_tree::get_width(*rhs, arena) =>
+        {
+            let lhs = settled_slice_rematerialization_cost(*lhs, access, arena, budget - 1)?;
+            let rhs = settled_slice_rematerialization_cost(*rhs, access, arena, budget - 1)?;
+            add(&[1, lhs, rhs])
+        }
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } if access.msb < crate::logic_tree::get_width(*then_expr, arena)
+            && access.msb < crate::logic_tree::get_width(*else_expr, arena) =>
+        {
+            let cond = settled_full_rematerialization_cost(*cond, arena, budget - 1)?;
+            let then_cost =
+                settled_slice_rematerialization_cost(*then_expr, access, arena, budget - 1)?;
+            let else_cost =
+                settled_slice_rematerialization_cost(*else_expr, access, arena, budget - 1)?;
+            add(&[1, cond, then_cost, else_cost])
+        }
+        SLTNode::Concat(parts) => {
+            let mut part_lsb = 0usize;
+            let mut costs = Vec::new();
+            for (part, width) in parts.iter().rev() {
+                let part_msb = part_lsb + *width - 1;
+                let overlap_lsb = access.lsb.max(part_lsb);
+                let overlap_msb = access.msb.min(part_msb);
+                if overlap_lsb <= overlap_msb {
+                    costs.push(settled_slice_rematerialization_cost(
+                        *part,
+                        crate::ir::BitAccess::new(overlap_lsb - part_lsb, overlap_msb - part_lsb),
+                        arena,
+                        budget,
+                    )?);
+                }
+                part_lsb += *width;
+                if part_lsb > access.msb {
+                    break;
+                }
+            }
+            if costs.len() > 1 {
+                costs.push(1);
+            }
+            add(&costs)
+        }
+        _ if access.lsb == 0 && access.msb + 1 == crate::logic_tree::get_width(node, arena) => {
+            settled_full_rematerialization_cost(node, arena, budget)
+        }
+        _ => None,
+    }
+}
+
+fn settled_full_rematerialization_cost(
+    node: NodeId,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    budget: usize,
+) -> Option<usize> {
+    use crate::logic_tree::SLTNode;
+
+    if budget == 0 || crate::logic_tree::get_width(node, arena) > 64 {
+        return None;
+    }
+    let children = match arena.get(node) {
+        SLTNode::Input { index, .. } => index.iter().map(|item| item.node).collect::<Vec<_>>(),
+        SLTNode::Constant(..) => Vec::new(),
+        SLTNode::Binary(lhs, _, rhs) => vec![*lhs, *rhs],
+        SLTNode::Unary(_, input) => vec![*input],
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => vec![*cond, *then_expr, *else_expr],
+        SLTNode::Concat(parts) => parts.iter().map(|(part, _)| *part).collect(),
+        SLTNode::Slice { expr, access } => {
+            return settled_slice_rematerialization_cost(*expr, *access, arena, budget);
+        }
+        SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return None,
+    };
+    let mut total = 1usize;
+    for child in children {
+        total = total.checked_add(settled_full_rematerialization_cost(
+            child,
+            arena,
+            budget.saturating_sub(total),
+        )?)?;
+        if total > budget {
+            return None;
+        }
+    }
+    Some(total)
+}
+
 fn slt_value_children(node: &crate::logic_tree::SLTNode<AbsoluteAddr>) -> Vec<NodeId> {
     match node {
         crate::logic_tree::SLTNode::Input { index, .. } => {
@@ -2490,23 +3406,26 @@ fn map_clock_body(
     blocks: HashMap<BlockId, BasicBlock<AbsoluteAddr>>,
     register_map: HashMap<RegisterId, RegisterType>,
     state: &StatePublicationPlan,
+    comb_home_loads: &HashSet<RegisterId>,
 ) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, EventProjectionError> {
     let mut mapped = HashMap::default();
     for (block_id, block) in blocks {
         let mut instructions = Vec::with_capacity(block.instructions.len());
         for instruction in block.instructions {
             let instruction = match instruction {
-                SIRInstruction::Load(destination, address, offset, width) => SIRInstruction::Load(
-                    destination,
-                    regioned(STABLE_REGION, address),
-                    offset,
-                    width,
-                ),
-                SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
-                    let region = if state.sparse_objects.contains(&address) {
-                        SPARSE_WORKING_REGION
+                SIRInstruction::Load(destination, address, offset, width) => {
+                    let region = if comb_home_loads.contains(&destination) {
+                        MATERIALIZATION_HOME_REGION
                     } else {
-                        WORKING_REGION
+                        STABLE_REGION
+                    };
+                    SIRInstruction::Load(destination, regioned(region, address), offset, width)
+                }
+                SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
+                    let region = if state.stage_region(address) == STABLE_REGION {
+                        MATERIALIZATION_HOME_REGION
+                    } else {
+                        state.stage_region(address)
                     };
                     SIRInstruction::Store(
                         regioned(region, address),
@@ -2564,7 +3483,7 @@ mod tests {
             CombGraph, ControlTerminator, Effect, EventDomain, ObjectAccess, ObjectRange, Value,
             ValueKind,
         },
-        ir::{BitAccess, InstanceId, LogicPathId, VarAtomBase},
+        ir::{BitAccess, InstanceId, LogicPathId, UnaryOp, VarAtomBase},
         logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeFacts},
     };
 
@@ -2929,7 +3848,6 @@ mod tests {
 
     #[test]
     fn comb_to_ff_chain_is_lowered_as_values_without_publication_traffic() {
-        let source = object(1);
         let intermediate = object(2);
         let output = object(3);
         let ff = object(4);
@@ -2950,27 +3868,10 @@ mod tests {
                 access: BitAccess::new(0, 7),
             })
             .unwrap();
-        let source_input = arena
-            .alloc(SLTNode::Input {
-                variable: source,
-                signed: false,
-                index: Vec::new(),
-                access: BitAccess::new(0, 7),
-            })
-            .unwrap();
-        let sum = arena
-            .alloc(SLTNode::Binary(input, BinaryOp::Add, source_input))
-            .unwrap();
+        let inverted = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, input)).unwrap();
         let paths = vec![
             comb_path(intermediate, constant, []),
-            comb_path(
-                output,
-                sum,
-                [
-                    VarAtomBase::new(intermediate, 0, 7),
-                    VarAtomBase::new(source, 0, 7),
-                ],
-            ),
+            comb_path(output, inverted, [VarAtomBase::new(intermediate, 0, 7)]),
         ];
         let facts = SLTNodeFacts::verify(&arena).unwrap();
         let graph = Arc::new(CombGraph::import(&paths, &arena, &facts).unwrap());
@@ -3025,10 +3926,39 @@ mod tests {
         }));
         assert!(instructions(&fused).any(|instruction| matches!(
             instruction,
-            SIRInstruction::Load(_, address, SIROffset::Static(0), 8)
-                if address.absolute_addr() == source && address.region == STABLE_REGION
+            SIRInstruction::Unary(_, UnaryOp::BitNot, _)
         )));
         assert!(instructions(&fused).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
+                if address.absolute_addr() == ff && address.region == WORKING_REGION
+        )));
+
+        let settled = lower_event_projection(
+            &event,
+            EventProjection::FusedSettledClock,
+            &arena,
+            false,
+            object(0),
+        )
+        .unwrap();
+        settled.verify_result().unwrap();
+
+        assert!(!instructions(&settled).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, address, SIROffset::Static(0), 8)
+                if address.absolute_addr() == output && address.region == STABLE_REGION
+        )));
+        assert!(instructions(&settled).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, address, ..)
+                if address.absolute_addr() == intermediate
+        )));
+        assert!(instructions(&settled).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Unary(_, UnaryOp::BitNot, _)
+        )));
+        assert!(instructions(&settled).any(|instruction| matches!(
             instruction,
             SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
                 if address.absolute_addr() == ff && address.region == WORKING_REGION
@@ -3204,6 +4134,121 @@ mod tests {
                 ))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn same_predicate_muxes_lower_to_sparse_control() {
+        let condition = object(1);
+        let inputs = (2..10).map(object).collect::<Vec<_>>();
+        let output = object(10);
+        let ff = object(11);
+        let mut arena = SLTNodeArena::new();
+        let input =
+            |arena: &mut SLTNodeArena<AbsoluteAddr>, variable: AbsoluteAddr, access: BitAccess| {
+                arena
+                    .alloc(SLTNode::Input {
+                        variable,
+                        signed: false,
+                        index: Vec::new(),
+                        access,
+                    })
+                    .unwrap()
+            };
+        let condition_node = input(&mut arena, condition, BitAccess::new(0, 0));
+        let values = inputs
+            .iter()
+            .map(|&object| input(&mut arena, object, BitAccess::new(0, 7)))
+            .collect::<Vec<_>>();
+        let divide = |arena: &mut SLTNodeArena<AbsoluteAddr>, lhs, rhs| {
+            arena
+                .alloc(SLTNode::Binary(lhs, BinaryOp::DivU, rhs))
+                .unwrap()
+        };
+        let mux_a_then = divide(&mut arena, values[0], values[1]);
+        let mux_a_else = divide(&mut arena, values[2], values[3]);
+        let mux_b_then = divide(&mut arena, values[4], values[5]);
+        let mux_b_else = divide(&mut arena, values[6], values[7]);
+        let mux_a = arena
+            .alloc(SLTNode::Mux {
+                cond: condition_node,
+                then_expr: mux_a_then,
+                else_expr: mux_a_else,
+            })
+            .unwrap();
+        let mux_b = arena
+            .alloc(SLTNode::Mux {
+                cond: condition_node,
+                then_expr: mux_b_then,
+                else_expr: mux_b_else,
+            })
+            .unwrap();
+        let sum = arena
+            .alloc(SLTNode::Binary(mux_a, BinaryOp::Add, mux_b))
+            .unwrap();
+        let sources = std::iter::once(VarAtomBase::new(condition, 0, 0))
+            .chain(inputs.iter().map(|&object| VarAtomBase::new(object, 0, 7)))
+            .collect::<Vec<_>>();
+        let paths = vec![comb_path(output, sum, sources)];
+        let facts = SLTNodeFacts::verify(&arena).unwrap();
+        let graph = Arc::new(CombGraph::import(&paths, &arena, &facts).unwrap());
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(0),
+                resets: Vec::new(),
+            },
+            graph,
+        );
+        let process = event.add_process(0);
+        let block = event.processes()[process.0].entry;
+        let value = event.add_value(Value {
+            ty: ValueType::bit(8, false),
+            scope: ValueScope::Event,
+            region: event.root_region(),
+            kind: ValueKind::ReadCombDefinition {
+                definition: CombDefinitionId(0),
+                access: BitAccess::new(0, 7),
+            },
+        });
+        let stage = add_stage(
+            &mut event,
+            process,
+            block,
+            ObjectRange::new(ff, BitAccess::new(0, 7)).into(),
+            value,
+        );
+        finish_clock_event(&mut event, block, vec![stage]);
+
+        let fused = lower_event_projection(
+            &event,
+            EventProjection::FusedClock,
+            &arena,
+            false,
+            object(0),
+        )
+        .unwrap();
+        fused.verify_result().unwrap();
+
+        let branches = fused
+            .blocks
+            .values()
+            .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+            .count();
+        assert_eq!(branches, 2);
+        assert_eq!(
+            instructions(&fused)
+                .filter(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+                .count(),
+            0
+        );
+        assert_eq!(
+            instructions(&fused)
+                .filter(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(_, _, BinaryOp::DivU, _)
+                ))
+                .count(),
+            4
         );
     }
 
@@ -3419,6 +4464,34 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            instructions(&fused)
+                .filter(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
+                        if address.region == MATERIALIZATION_HOME_REGION
+                            && address.absolute_addr() == comb_output
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            instructions(&fused)
+                .filter(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Load(_, address, SIROffset::Static(0), 8)
+                        if address.region == MATERIALIZATION_HOME_REGION
+                            && address.absolute_addr() == comb_output
+                ))
+                .count(),
+            1
+        );
+        assert!(!instructions(&fused).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, ..)
+                if address.region == MATERIALIZATION_HOME_REGION
+                    && (address.absolute_addr() == ff_a || address.absolute_addr() == ff_b)
+        )));
     }
 
     #[test]
@@ -3536,7 +4609,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_stage_materializes_its_comb_cone_only_in_the_store_block() {
+    fn guarded_stage_hoists_its_pure_comb_cone_before_the_store_guard() {
         let condition_object = object(1);
         let comb_output = object(2);
         let ff = object(3);
@@ -3628,8 +4701,8 @@ mod tests {
                 )
             })
         };
-        assert!(!has_payload(branch_block));
-        assert!(has_payload(store_block));
+        assert!(has_payload(branch_block));
+        assert!(!has_payload(store_block));
         assert!(!has_payload(continuation));
     }
 

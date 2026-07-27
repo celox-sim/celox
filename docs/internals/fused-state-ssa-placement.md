@@ -3463,6 +3463,74 @@ above: selector reconstruction must be sink-rooted and verified as one closed
 control/effect recipe at its final placement point. It must not be obtained by
 moving a syntactic source-level dispatch earlier in the generic pipeline.
 
+## Settled-frontier production checkpoint
+
+The production fused path now preserves the established combinational
+schedule, lowers the settled FF projection separately, and merges both before
+native optimization and allocation. Phase-aware StateSSA DSE removes a comb
+publication only when its exact definition cannot reach any FF-side or other
+read. This avoids turning every eliminated memory home into a whole-function
+VReg.
+
+An attempted direct `FusedClock` projection showed why a definition is the
+wrong materialization unit. A narrow FF demand caused the complete defining
+range to become a VReg, including definitions up to 208,896 bits. On the
+Heliodor workload this produced:
+
+```text
+eval_apply_ff SIR instructions             147,902
+eval_apply_ff MIR immediately after ISel 1,246,626
+eval_apply_ff native code bytes           1,885,038
+```
+
+The direct form is rejected. FF demands must be range-local and may stop at a
+concrete settled-state frontier.
+
+The retained initial subset rematerializes only:
+
+- a static settled input or immutable constant; and
+- at most one pure unary operation above that leaf.
+
+Dynamic indexed inputs, previous-value snapshots, effectful recipes, local
+recipe environments, folds, and larger cones remain explicit reloads. A fresh
+SLT cache gives each accepted FF use cluster its own materialization identity,
+so CSE cannot recreate a long cross-cluster live range. The ordinary
+whole-program DSE then removes comb publications whose final consumer was the
+replaced FF reload.
+
+A broader six-operation budget was measured and rejected. It moved enough
+binary work to the FF suffix that fused code grew to 911,270 bytes and the
+runtime gain fell into noise. The retained two-operation boundary produces
+the following final native checkpoint:
+
+```text
+                                        prior checkpoint   retained
+fused pre-RA MIR instructions                   96,648       95,674
+fused post-RA MIR instructions                 130,147      129,852
+fused spill frame bytes                          5,104        5,056
+fused native code bytes                        900,545      896,639
+```
+
+The exact Heliodor Linux workload reaches normal power-down:
+
+```text
+v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1
+compile_ns=68450620833
+execute_ns=79082313918
+```
+
+The adjacent rematerialization-disabled run executed in 80.979 seconds; the
+retained form executed in 79.082 seconds. Earlier independent structural
+changes in the same checkpoint moved execution from 93.861 seconds after
+phase-aware publication DSE to 82.022 seconds after SIR boolean
+canonicalization.
+
+The test gate includes all 1,150 library tests, strict Clippy, complete SIR
+verification, complete MIR verification, and the Linux power-down marker.
+During this gate an independent layout bug was found and fixed: an unpacked
+element-strided array must not fall through to the scalar whole-object access
+fast path merely because its logical width is 8, 16, 32, or 64 bits.
+
 ## Related documents
 
 - [Event IR (EIR)](./event-ir.md)

@@ -2349,7 +2349,6 @@ impl SLTToSIRLowerer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn lower_region_slice<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -3136,6 +3135,20 @@ impl SLTToSIRLowerer {
                     BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb);
                 self.lower_region_slice_inner(builder, *inner, &composed, arena, cache)
             }
+            SLTNode::Unary(
+                op @ (UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot),
+                inner,
+            ) if access.msb < self.get_width(*inner, arena) => {
+                let input = self.lower_region_slice_inner(builder, *inner, access, arena, cache);
+                let width = access.msb - access.lsb + 1;
+                let result = if matches!(op, UnaryOp::ToTwoState) {
+                    builder.alloc_bit(width, self.get_bound_signed(*inner, arena))
+                } else {
+                    builder.alloc_logic(width)
+                };
+                builder.emit(SIRInstruction::Unary(result, *op, input));
+                result
+            }
             SLTNode::Binary(lhs, op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), rhs)
                 if access.msb < self.get_width(*lhs, arena)
                     && access.msb < self.get_width(*rhs, arena) =>
@@ -3167,6 +3180,36 @@ impl SLTToSIRLowerer {
                 self.lower_region_slice_mux_inner(
                     builder, *cond, *then_expr, *else_expr, access, arena, cache,
                 )
+            }
+            SLTNode::Concat(parts) => {
+                let mut part_lsb = 0usize;
+                let mut selected = Vec::new();
+                for (part, part_width) in parts.iter().rev() {
+                    let part_msb = part_lsb + *part_width - 1;
+                    let overlap_lsb = access.lsb.max(part_lsb);
+                    let overlap_msb = access.msb.min(part_msb);
+                    if overlap_lsb <= overlap_msb {
+                        selected.push(self.lower_region_slice_inner(
+                            builder,
+                            *part,
+                            &BitAccess::new(overlap_lsb - part_lsb, overlap_msb - part_lsb),
+                            arena,
+                            cache,
+                        ));
+                    }
+                    part_lsb += *part_width;
+                    if part_lsb > access.msb {
+                        break;
+                    }
+                }
+                selected.reverse();
+                if selected.len() == 1 {
+                    selected[0]
+                } else {
+                    let result = builder.alloc_logic(access.msb - access.lsb + 1);
+                    builder.emit(SIRInstruction::Concat(result, selected));
+                    result
+                }
             }
             _ => self.lower_slice_inner(builder, expr, access, arena, cache, None, true),
         }
