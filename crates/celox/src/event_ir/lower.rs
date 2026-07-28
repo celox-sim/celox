@@ -5878,6 +5878,12 @@ impl StaticPublicationComponent {
             && offset < self.offset.saturating_add(self.width)
             && self.offset < offset.saturating_add(width)
     }
+
+    fn contains(self, object: AbsoluteAddr, offset: usize, width: usize) -> bool {
+        self.object == object
+            && self.offset <= offset
+            && offset.saturating_add(width) <= self.offset.saturating_add(self.width)
+    }
 }
 
 /// Replace a static WORKING transaction by a direct STABLE publication only
@@ -5983,6 +5989,7 @@ fn capture_local_static_snapshot_publications(
     let mut component_blocks = BTreeMap::<StaticPublicationComponent, Vec<usize>>::new();
     let mut component_chunks = BTreeMap::<StaticPublicationComponent, usize>::new();
     let mut loads = Vec::<(BlockId, usize, Vec<StaticPublicationComponent>)>::new();
+    let mut cannot_use_working_snapshot = BTreeSet::new();
     for block in eu.blocks.values() {
         let local = local_by_block[&block.id];
         for (index, instruction) in block.instructions.iter().enumerate() {
@@ -5998,6 +6005,11 @@ fn capture_local_static_snapshot_publications(
                         })
                         .collect::<Vec<_>>();
                     if !overlapping.is_empty() {
+                        if overlapping.len() != 1
+                            || !overlapping[0].contains(address.absolute_addr(), *offset, *width)
+                        {
+                            cannot_use_working_snapshot.extend(overlapping.iter().copied());
+                        }
                         for &component in &overlapping {
                             component_blocks.entry(component).or_default().push(local);
                             *component_chunks.entry(component).or_default() +=
@@ -6009,10 +6021,20 @@ fn capture_local_static_snapshot_publications(
                 SIRInstruction::Store(address, SIROffset::Static(offset), width, ..)
                     if address.region == WORKING_REGION =>
                 {
-                    for &component in &candidates {
-                        if component.overlaps(address.absolute_addr(), *offset, *width) {
-                            component_blocks.entry(component).or_default().push(local);
-                        }
+                    let overlapping = candidates
+                        .iter()
+                        .copied()
+                        .filter(|component| {
+                            component.overlaps(address.absolute_addr(), *offset, *width)
+                        })
+                        .collect::<Vec<_>>();
+                    if overlapping.len() != 1
+                        || !overlapping[0].contains(address.absolute_addr(), *offset, *width)
+                    {
+                        cannot_use_working_snapshot.extend(overlapping.iter().copied());
+                    }
+                    for component in overlapping {
+                        component_blocks.entry(component).or_default().push(local);
                     }
                 }
                 _ => {}
@@ -6074,8 +6096,17 @@ fn capture_local_static_snapshot_publications(
             placement.insert(component, common);
         }
     }
-    candidates.retain(|component| placement.contains_key(component));
-    if candidates.is_empty() {
+    let register_captures = placement.keys().copied().collect::<BTreeSet<_>>();
+    let working_snapshots = candidates
+        .difference(&register_captures)
+        .copied()
+        .filter(|component| !cannot_use_working_snapshot.contains(component))
+        .collect::<BTreeSet<_>>();
+    let rewritten_components = register_captures
+        .union(&working_snapshots)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if rewritten_components.is_empty() {
         return Ok(());
     }
 
@@ -6108,6 +6139,22 @@ fn capture_local_static_snapshot_publications(
                 continue;
             }
             match instruction {
+                SIRInstruction::Load(destination, address, SIROffset::Static(offset), width)
+                    if address.region == STABLE_REGION
+                        && working_snapshots.iter().any(|component| {
+                            component.contains(address.absolute_addr(), offset, width)
+                        }) =>
+                {
+                    rewritten.push(SIRInstruction::Load(
+                        destination,
+                        RegionedAbsoluteAddr::from_absolute_addr(
+                            WORKING_REGION,
+                            address.absolute_addr(),
+                        ),
+                        SIROffset::Static(offset),
+                        width,
+                    ));
+                }
                 SIRInstruction::Commit(
                     source,
                     target,
@@ -6123,7 +6170,12 @@ fn capture_local_static_snapshot_publications(
                     let boundary = source.absolute_addr() == target.absolute_addr()
                         && ((source.region == STABLE_REGION && target.region == WORKING_REGION)
                             || (source.region == WORKING_REGION && target.region == STABLE_REGION));
-                    if !boundary || !candidates.contains(&component) {
+                    let remove = boundary
+                        && (register_captures.contains(&component)
+                            || (working_snapshots.contains(&component)
+                                && source.region == WORKING_REGION
+                                && target.region == STABLE_REGION));
+                    if !remove {
                         rewritten.push(SIRInstruction::Commit(
                             source,
                             target,
@@ -6141,7 +6193,7 @@ fn capture_local_static_snapshot_publications(
                     triggers,
                     captures,
                 ) if address.region == WORKING_REGION
-                    && candidates.iter().any(|component| {
+                    && rewritten_components.iter().any(|component| {
                         component.overlaps(address.absolute_addr(), offset, width)
                     }) =>
                 {
@@ -6734,6 +6786,192 @@ mod tests {
             instruction,
             SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
         )));
+    }
+
+    #[test]
+    fn cyclic_static_publication_uses_working_as_an_immutable_snapshot() {
+        let stable = regioned(STABLE_REGION, object(1));
+        let working = regioned(WORKING_REGION, object(1));
+        let bit = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1)],
+                        instructions: vec![SIRInstruction::Commit(
+                            stable,
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: Vec::new(),
+                        instructions: vec![SIRInstruction::Load(
+                            RegisterId(2),
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                        )],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(2), Vec::new()),
+                            false_block: (BlockId(3), Vec::new()),
+                        },
+                    },
+                ),
+                (
+                    BlockId(2),
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: Vec::new(),
+                        instructions: vec![SIRInstruction::Store(
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(1),
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                    },
+                ),
+                (
+                    BlockId(3),
+                    BasicBlock {
+                        id: BlockId(3),
+                        params: Vec::new(),
+                        instructions: vec![SIRInstruction::Commit(
+                            working,
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (RegisterId(2), bit(8)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let component = StaticPublicationComponent {
+            object: object(1),
+            offset: 0,
+            width: 8,
+        };
+
+        capture_local_static_snapshot_publications(&mut eu, &BTreeSet::from([component])).unwrap();
+        eu.verify_result().unwrap();
+
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Commit(source, target, SIROffset::Static(0), 8, _)]
+                if source.region == STABLE_REGION && target.region == WORKING_REGION
+        ));
+        assert!(matches!(
+            eu.blocks[&BlockId(1)].instructions.as_slice(),
+            [SIRInstruction::Load(_, address, SIROffset::Static(0), 8)]
+                if address.region == WORKING_REGION
+        ));
+        assert!(matches!(
+            eu.blocks[&BlockId(2)].instructions.as_slice(),
+            [SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)]
+                if address.region == STABLE_REGION
+        ));
+        assert!(eu.blocks[&BlockId(3)].instructions.is_empty());
+    }
+
+    #[test]
+    fn working_snapshot_rejects_a_load_outside_the_seeded_component() {
+        let stable = regioned(STABLE_REGION, object(1));
+        let working = regioned(WORKING_REGION, object(1));
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0)],
+                    instructions: vec![
+                        SIRInstruction::Commit(
+                            stable,
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Load(RegisterId(1), stable, SIROffset::Static(0), 16),
+                        SIRInstruction::Store(
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(0),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Commit(
+                            working,
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    RegisterId(0),
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    RegisterId(1),
+                    RegisterType::Bit {
+                        width: 16,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let before = eu.clone();
+        let component = StaticPublicationComponent {
+            object: object(1),
+            offset: 0,
+            width: 8,
+        };
+
+        capture_local_static_snapshot_publications(&mut eu, &BTreeSet::from([component])).unwrap();
+
+        assert_eq!(eu.blocks, before.blocks);
+        assert_eq!(eu.register_map, before.register_map);
     }
 
     fn instructions(
