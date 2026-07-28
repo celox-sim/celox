@@ -1474,9 +1474,6 @@ fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStage
     let control =
         ForwardControlFlowGraph::analyze_structure(successors, local_by_block[&process_item.entry])
             .ok()?;
-    if control.sccs.iter().any(|component| component.cyclic) {
-        return None;
-    }
     let block_by_region = process_item
         .blocks
         .iter()
@@ -1620,13 +1617,17 @@ fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStage
     for writer in 0..effects.len() {
         let writer_block = effects[writer].2;
         let writer_block_local = local_by_block[&writer_block];
+        let writer_component = control.scc_for_block[writer_block_local];
+        let writer_is_repeated = control.sccs[writer_component].cyclic;
         let control_read_is_late =
             control_reads
                 .iter()
                 .enumerate()
                 .any(|(reader_block, dependencies)| {
                     dependencies.contains(&writer)
-                        && (reader_block == writer_block_local
+                        && ((writer_is_repeated
+                            && control.scc_for_block[reader_block] == writer_component)
+                            || reader_block == writer_block_local
                             || !control
                                 .dominators
                                 .dominates(reader_block, writer_block_local))
@@ -1644,16 +1645,20 @@ fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStage
             })
             .collect::<Vec<_>>();
         let all_readers_precede = readers.iter().all(|&(reader, _)| {
+            let reader_block = effects[reader].2;
+            let reader_block_local = local_by_block[&reader_block];
+            if writer_is_repeated && control.scc_for_block[reader_block_local] == writer_component {
+                return false;
+            }
             if reader == writer {
                 return true;
             }
-            let reader_block = effects[reader].2;
             if reader_block == writer_block {
                 rank[reader] <= rank[writer]
             } else {
                 control
                     .dominators
-                    .dominates(local_by_block[&reader_block], writer_block_local)
+                    .dominates(reader_block_local, writer_block_local)
             }
         });
         publication_readers.push((
@@ -1670,7 +1675,7 @@ fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStage
         }
     }
     if process_item.blocks.len() == 1 && !deferred_effects.is_empty() {
-        deferred_effects.extend(direct_effects.drain(..));
+        deferred_effects.append(&mut direct_effects);
         deferred_effects.sort_unstable();
         deferred_effects.dedup();
     }
@@ -1716,7 +1721,7 @@ impl StatePublicationPlan {
         }
         let mut pure = vec![true; ir.processes().len()];
         for effect in ir.effects() {
-            let Some(process) = process_by_region.get(&effect.region).copied().or_else(|| {
+            let Some(process) = process_by_region.get(&effect.region).copied().or({
                 if let EffectKind::StageNextFf { process, .. } = &effect.kind {
                     Some(*process)
                 } else {
@@ -1769,9 +1774,6 @@ impl StatePublicationPlan {
         let mut direct_effects = stages
             .iter()
             .filter_map(|&(effect, writer, target, _, stage_kind)| {
-                if !pure[writer.0] {
-                    return None;
-                }
                 let writer_position = process_position[&writer];
                 let safe = ordered_processes.iter().copied().all(|reader| {
                     let reads_target = accesses[reader.0]
@@ -1800,9 +1802,6 @@ impl StatePublicationPlan {
         let mut deferred_direct_effects = HashSet::default();
         let mut publication_readers = HashMap::default();
         for &writer in ordered_processes {
-            if !pure[writer.0] {
-                continue;
-            }
             let writer_position = process_position[&writer];
             let Some(plan) = plan_local_stage_order(ir, writer) else {
                 continue;
@@ -6657,6 +6656,86 @@ mod tests {
         assert_eq!(memory_kinds, ["load", "load", "store", "store"]);
     }
 
+    #[test]
+    fn loop_cfg_does_not_block_publication_in_an_acyclic_suffix() {
+        fn lower() -> ExecutionUnit<RegionedAbsoluteAddr> {
+            let mut event = EventIr::new(
+                EventDomain::Clock {
+                    clock: object(100),
+                    resets: Vec::new(),
+                },
+                Arc::new(CombGraph::default()),
+            );
+            let process = event.add_process(0);
+            let entry = event.processes()[process.0].entry;
+            let loop_block = event.add_control_block(process);
+            let exit = event.add_control_block(process);
+            let target = range(1, 0, 0);
+            let condition = event.add_value(Value {
+                ty: ValueType::bit(1, false),
+                scope: ValueScope::Event,
+                region: event.root_region(),
+                kind: ValueKind::ReadClockSnapshot(target),
+            });
+            let value = event.add_value(Value {
+                ty: ValueType::bit(1, false),
+                scope: ValueScope::Event,
+                region: event.root_region(),
+                kind: ValueKind::Constant {
+                    value: BigUint::from(1u8),
+                    unknown: BigUint::default(),
+                },
+            });
+            event.set_terminator(
+                entry,
+                ControlTerminator::Jump {
+                    target: loop_block,
+                    arguments: Vec::new(),
+                },
+            );
+            event.set_terminator(
+                loop_block,
+                ControlTerminator::Branch {
+                    condition,
+                    true_target: loop_block,
+                    true_arguments: Vec::new(),
+                    false_target: exit,
+                    false_arguments: Vec::new(),
+                },
+            );
+            event.set_terminator(exit, ControlTerminator::Return);
+            let stage = add_stage(&mut event, process, exit, target.into(), value);
+            event.add_effect(Effect {
+                region: event.root_region(),
+                predecessors: vec![stage],
+                kind: EffectKind::CommitFfState {
+                    stages: vec![stage],
+                },
+            });
+            event.verify().unwrap();
+
+            lower_event_projection(
+                &event,
+                EventProjection::FusedClock,
+                &SLTNodeArena::new(),
+                false,
+                object(100),
+            )
+            .unwrap()
+        }
+
+        let after_loop = lower();
+        after_loop.verify_result().unwrap();
+        assert!(instructions(&after_loop).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
+        )));
+        assert!(!instructions(&after_loop).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+        )));
+    }
+
     fn instructions(
         unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     ) -> impl Iterator<Item = &SIRInstruction<RegionedAbsoluteAddr>> {
@@ -6779,6 +6858,67 @@ mod tests {
         assert!(instructions(&apply).all(|instruction| matches!(
             instruction,
             SIRInstruction::Commit(source, destination, SIROffset::Static(8), 8, _)
+                if source.region == WORKING_REGION && destination.region == STABLE_REGION
+        )));
+    }
+
+    #[test]
+    fn effectful_process_can_publish_an_independent_stage_directly() {
+        let (mut event, arena, process, block) = empty_clock_event();
+        let region = event.blocks()[block.0].region;
+        let value = event.add_value(Value {
+            ty: ValueType::bit(8, false),
+            scope: ValueScope::Process(process),
+            region,
+            kind: ValueKind::Constant {
+                value: BigUint::from(0x5au8),
+                unknown: BigUint::default(),
+            },
+        });
+        let observation = event.add_effect(Effect {
+            region,
+            predecessors: Vec::new(),
+            kind: EffectKind::RuntimeEvent {
+                site_id: 0,
+                arguments: vec![value],
+                guard: None,
+            },
+        });
+        let stage = event.add_effect(Effect {
+            region,
+            predecessors: vec![observation],
+            kind: EffectKind::StageNextFf {
+                process,
+                target: range(1, 0, 7).into(),
+                value,
+                guard: None,
+                priority: 0,
+                stage_kind: crate::event_ir::FfStageKind::Fragment,
+            },
+        });
+        finish_clock_event(&mut event, block, vec![stage]);
+
+        let fused = lower_event_projection(
+            &event,
+            EventProjection::FusedClock,
+            &arena,
+            false,
+            object(0),
+        )
+        .unwrap();
+        fused.verify_result().unwrap();
+        assert!(instructions(&fused).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
+                if address.region == STABLE_REGION
+        )));
+        assert!(!instructions(&fused).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+        )));
+        assert!(!instructions(&fused).any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Commit(source, destination, ..)
                 if source.region == WORKING_REGION && destination.region == STABLE_REGION
         )));
     }

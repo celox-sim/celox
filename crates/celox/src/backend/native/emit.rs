@@ -4837,6 +4837,7 @@ fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result
             _ if d == r12 => r12d,
             _ if d == r13 => r13d,
             _ if d == r14 => r14d,
+            _ if d == r15 => r15d,
             _ => unreachable!(),
         };
         asm.and(d32, imm as i32)?;
@@ -6337,6 +6338,19 @@ mod shift_encoding_tests {
             instructions.push(decoder.decode());
         }
         instructions
+    }
+
+    #[test]
+    fn and_u32_immediate_supports_r15() {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        emit_and_imm64(&mut asm, r15, u32::MAX as u64).unwrap();
+        let code = asm.assemble(0).unwrap();
+        let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
+        let instruction = decoder.decode();
+
+        assert_eq!(instruction.mnemonic(), Mnemonic::And);
+        assert_eq!(instruction.op0_register(), Register::R15D);
+        assert!(!decoder.can_decode());
     }
 
     #[test]
