@@ -19,8 +19,9 @@ pub use comb::{
     CombImportInvariant, CombLocalInput, CombRecipe, CombRecipeTarget, CombSnapshotInput,
     CombSnapshotKind,
 };
+pub(crate) use lower::ordered_clock_process_packets;
 pub(crate) use lower::ordered_clock_processes;
-pub use lower::{EventProjectionError, lower_event_projection};
+pub use lower::{EventProjectionError, lower_event_projection, lower_settled_clock_packets};
 pub use verify::{EventIrError, EventIrInvariant};
 
 use crate::ir::AbsoluteAddr;

@@ -2842,28 +2842,30 @@ fn collect_event_comb_sinks(event: &crate::event_ir::EventIr) -> Vec<Vec<usize>>
             .map(crate::event_ir::ProcessId)
             .collect(),
     );
-    for process in ordered_processes {
-        for effect in effects_by_process.remove(&process).unwrap_or_default() {
-            let mut work = Vec::new();
-            effect.kind.visit_value_operands(|value| work.push(value));
-            let mut visited = HashSet::default();
-            let mut paths = Vec::new();
-            while let Some(value) = work.pop() {
-                if !visited.insert(value) {
-                    continue;
-                }
-                match &event.values()[value.0].kind {
-                    ValueKind::ReadCombDefinition { definition, .. } => {
-                        paths.push(event.comb_definitions()[definition.0].recipe.0);
+    for packet in crate::event_ir::ordered_clock_process_packets(event, &ordered_processes) {
+        let mut paths = Vec::new();
+        for process in packet {
+            for effect in effects_by_process.remove(&process).unwrap_or_default() {
+                let mut work = Vec::new();
+                effect.kind.visit_value_operands(|value| work.push(value));
+                let mut visited = HashSet::default();
+                while let Some(value) = work.pop() {
+                    if !visited.insert(value) {
+                        continue;
                     }
-                    kind => kind.visit_operands(|operand| work.push(operand)),
+                    match &event.values()[value.0].kind {
+                        ValueKind::ReadCombDefinition { definition, .. } => {
+                            paths.push(event.comb_definitions()[definition.0].recipe.0);
+                        }
+                        kind => kind.visit_operands(|operand| work.push(operand)),
+                    }
                 }
             }
-            paths.sort_unstable();
-            paths.dedup();
-            if !paths.is_empty() {
-                sinks.push(paths);
-            }
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        if !paths.is_empty() {
+            sinks.push(paths);
         }
     }
     sinks
@@ -2939,13 +2941,9 @@ fn lower_clock_event_projections(
             let fused_start = std::env::var_os("CELOX_PHASE_TIMING")
                 .is_some()
                 .then(crate::timing::now);
-            settled_fused_units.push(crate::event_ir::lower_event_projection(
-                event,
-                crate::event_ir::EventProjection::FusedSettledClock,
-                arena,
-                four_state,
-                trigger,
-            )?);
+            let packets =
+                crate::event_ir::lower_settled_clock_packets(event, arena, four_state, trigger)?;
+            settled_fused_units.extend(packets);
             if let Some(start) = fused_start {
                 eprintln!(
                     "[eir] lower settled fused trigger {trigger} domain {domain}: {:?}",

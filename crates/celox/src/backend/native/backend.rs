@@ -266,14 +266,39 @@ fn collect_ff_compile_tasks(sir: &Program) -> (Vec<NativeCompileTask<'_>>, Nativ
         &mut tasks,
         &mut task_bindings,
     );
-    collect_ff_compile_tasks_from(
-        sir,
-        &sir.eval_comb_apply_ffs,
-        "eval_comb_apply_ff",
-        &mut tasks,
-        &mut task_bindings,
-    );
+    collect_comb_apply_compile_tasks(sir, &mut tasks, &mut task_bindings);
     (tasks, task_bindings)
+}
+
+fn collect_comb_apply_compile_tasks<'a>(
+    sir: &'a Program,
+    tasks: &mut Vec<NativeCompileTask<'a>>,
+    task_bindings: &mut NativeTaskBindings,
+) {
+    const LABEL: &str = "eval_comb_apply_ff";
+    for (addr, ff_units) in &sir.eval_apply_ffs {
+        let mut unit_refs = sir.eval_comb.iter().collect::<Vec<_>>();
+        let first_ff_unit =
+            (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
+        unit_refs.extend(ff_units);
+        let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
+        let index = if let Some(index) = tasks.iter().position(|task| {
+            task.label == LABEL && task.first_ff_unit == first_ff_unit && task.units == unit_refs
+        }) {
+            tasks[index].bindings.push(binding);
+            index
+        } else {
+            let index = tasks.len();
+            tasks.push(NativeCompileTask {
+                units: unit_refs,
+                label: LABEL,
+                first_ff_unit,
+                bindings: vec![binding],
+            });
+            index
+        };
+        task_bindings.insert((LABEL, *addr), index);
+    }
 }
 
 fn collect_ff_compile_tasks_from<'a>(

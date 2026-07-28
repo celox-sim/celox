@@ -156,6 +156,171 @@ pub fn lower_event_projection(
     .lower(projection)
 }
 
+/// Lower the settled clock projection as dependency packets.
+///
+/// A packet contains one feedback component (and any intervening processes
+/// needed to keep the source order contiguous).  Between packets, every read
+/// of a range written by a later packet has already completed, so a direct
+/// STABLE publication remains phase-correct.  Feedback readers stay in the
+/// same packet, where the ordinary stage-compute/publication scheduler keeps
+/// the event-entry snapshot visible until every reader has captured it.
+///
+/// The publication plan is global: WORKING is seeded only in the first packet
+/// and committed only in the last packet.  Splitting the executable body must
+/// not turn packet boundaries into FF publication barriers.
+pub fn lower_settled_clock_packets(
+    ir: &EventIr,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    four_state: bool,
+    trigger: AbsoluteAddr,
+) -> Result<Vec<ExecutionUnit<RegionedAbsoluteAddr>>, EventProjectionError> {
+    ir.verify()?;
+    if ir.comb_graph().slt_node_count() != arena.len() {
+        return Err(EventProjectionError::SltArenaMismatch {
+            expected: ir.comb_graph().slt_node_count(),
+            actual: arena.len(),
+        });
+    }
+    let selected_processes = active_processes(ir, trigger)?;
+    let selected = selected_processes.iter().copied().collect::<HashSet<_>>();
+    let state = StatePublicationPlan::build(ir, &selected_processes, &selected);
+    let packets = ordered_clock_process_packets(ir, &selected_processes);
+    let packet_count = packets.len();
+    packets
+        .into_iter()
+        .enumerate()
+        .map(|(index, packet)| {
+            ClockBodyLowering::new(ir, arena, four_state, state.clone(), packet, true)?
+                .lower_with_publication(
+                    EventProjection::FusedSettledClock,
+                    index == 0,
+                    index + 1 == packet_count,
+                )
+        })
+        .collect()
+}
+
+/// Partition an already ordered clock event at exactly the feedback ranges
+/// which cannot be published between processes.
+///
+/// `ordered_clock_processes` makes every acyclic state edge point forward
+/// (reader before writer).  A remaining backward edge therefore identifies a
+/// feedback component.  The interval closure below is a compact way to keep
+/// all members of each such component in one contiguous packet without
+/// constructing a process-pair matrix.
+pub(crate) fn ordered_clock_process_packets(
+    ir: &EventIr,
+    ordered: &[ProcessId],
+) -> Vec<Vec<ProcessId>> {
+    if ordered.is_empty() {
+        return vec![Vec::new()];
+    }
+    let position = ordered
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, process)| (process, position))
+        .collect::<HashMap<_, _>>();
+    let accesses = collect_process_state_accesses(ir, ordered);
+    let mut writer_intervals = Vec::new();
+    let mut writers_by_object = BTreeMap::<AbsoluteAddr, Vec<usize>>::new();
+    for effect in ir.effects() {
+        let EffectKind::StageNextFf {
+            process, target, ..
+        } = &effect.kind
+        else {
+            continue;
+        };
+        let Some(&writer) = position.get(process) else {
+            continue;
+        };
+        let Some(length) = target
+            .alias
+            .msb
+            .checked_sub(target.alias.lsb)
+            .and_then(|width| width.checked_add(1))
+        else {
+            continue;
+        };
+        writer_intervals.push(ExactInterval {
+            object: target.object,
+            start: target.alias.lsb,
+            length,
+            value: writer,
+        });
+        writers_by_object
+            .entry(target.object)
+            .or_default()
+            .push(writer);
+    }
+    for writers in writers_by_object.values_mut() {
+        writers.sort_unstable();
+        writers.dedup();
+    }
+    let Ok(writer_index) = DisjointIntervalMap::try_new(writer_intervals) else {
+        // Invalid overlapping drivers are diagnosed elsewhere. Keeping one
+        // packet is the only phase-safe result if they reach this adapter.
+        return vec![ordered.to_vec()];
+    };
+
+    let mut backward_edges = Vec::new();
+    for (reader, process) in ordered.iter().copied().enumerate() {
+        let mut writers = Vec::new();
+        for range in &accesses[process.0].static_reads {
+            let Some(length) = range.width() else {
+                continue;
+            };
+            if let Ok(overlapping) =
+                writer_index.overlapping(&range.object, range.access.lsb, length)
+            {
+                writers.extend(overlapping);
+            }
+        }
+        for object in &accesses[process.0].dynamic_reads {
+            if let Some(object_writers) = writers_by_object.get(object) {
+                writers.extend(object_writers.iter().copied());
+            }
+        }
+        writers.sort_unstable();
+        writers.dedup();
+        for writer in writers {
+            if writer < reader {
+                backward_edges.push((writer, reader));
+            }
+        }
+    }
+
+    packet_ranges_from_backward_edges(ordered.len(), backward_edges)
+        .into_iter()
+        .map(|(start, end)| ordered[start..end].to_vec())
+        .collect()
+}
+
+fn packet_ranges_from_backward_edges(
+    process_count: usize,
+    backward_edges: impl IntoIterator<Item = (usize, usize)>,
+) -> Vec<(usize, usize)> {
+    let mut span_end = (0..process_count).collect::<Vec<_>>();
+    for (writer, reader) in backward_edges {
+        if writer < reader && reader < process_count {
+            span_end[writer] = span_end[writer].max(reader);
+        }
+    }
+    let mut packets = Vec::new();
+    let mut start = 0;
+    while start < process_count {
+        let mut end = span_end[start];
+        let mut cursor = start + 1;
+        while cursor <= end {
+            end = end.max(span_end[cursor]);
+            cursor += 1;
+        }
+        packets.push((start, end + 1));
+        start = end + 1;
+    }
+    packets
+}
+
 fn active_processes(
     ir: &EventIr,
     trigger: AbsoluteAddr,
@@ -1517,7 +1682,7 @@ fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStage
     })
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct StatePublicationPlan {
     static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>>,
     fused_static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>>,
@@ -2693,8 +2858,17 @@ impl<'a> ClockBodyLowering<'a> {
     }
 
     fn lower(
+        self,
+        projection: EventProjection,
+    ) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, EventProjectionError> {
+        self.lower_with_publication(projection, true, true)
+    }
+
+    fn lower_with_publication(
         mut self,
         projection: EventProjection,
+        include_seed: bool,
+        include_commit: bool,
     ) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, EventProjectionError> {
         let placement_start = std::env::var_os("CELOX_PHASE_TIMING")
             .is_some()
@@ -2752,13 +2926,15 @@ impl<'a> ClockBodyLowering<'a> {
             &self.direct_stage_stores,
             fused,
         )?;
-        result
-            .blocks
-            .get_mut(&result.entry_block_id)
-            .expect("projection entry block exists")
-            .instructions
-            .splice(0..0, self.state.seeds(fused));
-        if fused {
+        if include_seed {
+            result
+                .blocks
+                .get_mut(&result.entry_block_id)
+                .expect("projection entry block exists")
+                .instructions
+                .splice(0..0, self.state.seeds(fused));
+        }
+        if fused && include_commit {
             result
                 .blocks
                 .get_mut(&self.final_block)
@@ -6108,6 +6284,22 @@ mod tests {
         ObjectRange::new(object(raw), BitAccess::new(lsb, msb))
     }
 
+    #[test]
+    fn clock_packet_ranges_keep_only_feedback_spans_together() {
+        assert_eq!(
+            packet_ranges_from_backward_edges(7, [(1, 3), (2, 5)]),
+            vec![(0, 1), (1, 6), (6, 7)]
+        );
+    }
+
+    #[test]
+    fn clock_packet_ranges_leave_acyclic_processes_independent() {
+        assert_eq!(
+            packet_ranges_from_backward_edges(4, []),
+            vec![(0, 1), (1, 2), (2, 3), (3, 4)]
+        );
+    }
+
     fn empty_clock_event() -> (
         EventIr,
         SLTNodeArena<AbsoluteAddr>,
@@ -6320,10 +6512,19 @@ mod tests {
         });
         event.verify().unwrap();
 
+        let ordered = ordered_clock_processes(&event, vec![upstream, downstream]);
+        assert_eq!(ordered, vec![downstream, upstream]);
         assert_eq!(
-            ordered_clock_processes(&event, vec![upstream, downstream]),
-            vec![downstream, upstream]
+            ordered_clock_process_packets(&event, &ordered),
+            vec![vec![downstream], vec![upstream]]
         );
+
+        let packets =
+            lower_settled_clock_packets(&event, &SLTNodeArena::new(), false, object(100)).unwrap();
+        assert_eq!(packets.len(), 2);
+        for packet in &packets {
+            packet.verify_result().unwrap();
+        }
     }
 
     #[test]
@@ -6351,8 +6552,20 @@ mod tests {
 
         let ordered = ordered_clock_processes(&event, vec![first, second, other_user]);
         assert_eq!(ordered[0], other_user);
+        let packets = ordered_clock_process_packets(&event, &ordered);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0], vec![other_user]);
+        assert_eq!(packets[1].len(), 2);
+        assert!(packets[1].contains(&first));
+        assert!(packets[1].contains(&second));
 
         let arena = SLTNodeArena::new();
+        let lowered_packets =
+            lower_settled_clock_packets(&event, &arena, false, object(100)).unwrap();
+        assert_eq!(lowered_packets.len(), 2);
+        for packet in &lowered_packets {
+            packet.verify_result().unwrap();
+        }
         let fused = lower_event_projection(
             &event,
             EventProjection::FusedClock,
