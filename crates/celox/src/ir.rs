@@ -172,6 +172,10 @@ pub struct Program {
     /// A shared asynchronous reset can activate more than one clock domain.
     pub clock_event_triggers: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Demand-driven comb→FF projection used when combinational state has not
+    /// already been settled before the clock edge. Each unit contains the
+    /// selected combinational cone and its FF publication effects in one CFG.
+    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
@@ -418,6 +422,7 @@ impl Program {
             };
 
         scan_units(&self.eval_apply_ffs, &mut addrs);
+        scan_units(&self.eval_comb_apply_ffs, &mut addrs);
         scan_units(&self.eval_only_ffs, &mut addrs);
         scan_units(&self.apply_ffs, &mut addrs);
 
@@ -429,6 +434,7 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
             .chain(self.apply_ffs.values())
         {
@@ -465,6 +471,7 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
         {
             for eu in units {
@@ -489,6 +496,7 @@ impl Program {
     pub fn materialization_home_extent_bits(&self) -> usize {
         self.eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
             .flat_map(|units| units.iter())
             .flat_map(|eu| eu.blocks.values())
@@ -511,6 +519,7 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
         {
             for eu in units {

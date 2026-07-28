@@ -9,13 +9,12 @@ mod control_region_feasibility;
 pub mod cost_model;
 mod dead_working_stores;
 #[cfg(target_arch = "x86_64")]
-mod fused_comb_dse;
-#[cfg(target_arch = "x86_64")]
 mod lane_aggregate_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
 mod pass_coalesce_stores;
+mod pass_comb_state_publication;
 mod pass_commit_sinking;
 mod pass_concat_folding;
 mod pass_control_flow_simplify;
@@ -79,12 +78,12 @@ pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsolut
 }
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn eliminate_dead_fused_comb_publications(
+pub(crate) fn eliminate_unobserved_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     provenance: &crate::ir::SirMergeProvenance,
     first_ff_unit: usize,
 ) -> Result<usize, String> {
-    fused_comb_dse::eliminate(eu, provenance, first_ff_unit)
+    pass_comb_state_publication::eliminate(eu, provenance, first_ff_unit)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -725,6 +724,7 @@ fn optimize_with_options(
     // event has sampled STABLE.  Keep the commit in the same unified generated
     // function, but place it in a final EU after all evaluator EUs.
     move_sparse_commits_to_event_tail(&mut program.eval_apply_ffs);
+    move_sparse_commits_to_event_tail(&mut program.eval_comb_apply_ffs);
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
@@ -801,8 +801,58 @@ fn optimize_with_options(
     }
     let eu_count: usize = program.eval_apply_ffs.values().map(|v| v.len()).sum();
     optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_passes, &options);
+    optimize_unit_groups_cached(&mut program.eval_comb_apply_ffs, &ff_passes, &options);
+
+    // A fused EventIR projection contains the same pure combinational
+    // dataflow as eval_comb, but the generic FF pipeline above deliberately
+    // stops before comb-specific canonicalization. Run that canonicalization
+    // after stage/publication effects have acquired their final CFG order.
+    // Every pass here already treats memory/effects as barriers; this phase
+    // changes only pure dataflow between those barriers.
+    let mut fused_comb_passes = ExecutionUnitPassManager::new();
+    if on(SirPass::BranchifyMux) {
+        fused_comb_passes.add_pass(BranchifyMuxPass);
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        fused_comb_passes.add_pass(LoopIdiomPass);
+    }
+    if on(SirPass::OptimizeBlocks) {
+        fused_comb_passes.add_pass(OptimizeBlocksPass {
+            skip_final_schedule: false,
+            element_widths: Arc::clone(&element_widths),
+        });
+    }
+    if on(SirPass::VectorizeConcat) {
+        fused_comb_passes.add_pass(VectorizeConcatPass);
+    }
+    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        fused_comb_passes.add_pass(LoopIdiomPass);
+    }
+    if on(SirPass::MaskedArrayAny) {
+        fused_comb_passes.add_pass(MaskedArrayAnyPass::for_program(program));
+    }
+    if on(SirPass::CircularPriority) {
+        fused_comb_passes.add_pass(CircularPriorityPass::for_program(program));
+    }
+    if on(SirPass::Gvn) {
+        fused_comb_passes.add_pass(GvnPass);
+        if on(SirPass::ControlFlowSimplify) {
+            fused_comb_passes.add_pass(PostGvnCfgCleanupPass);
+        }
+    }
+    optimize_unit_groups_cached(
+        &mut program.eval_comb_apply_ffs,
+        &fused_comb_passes,
+        &options,
+    );
+
     optimize_unified_commit_groups(
         &mut program.eval_apply_ffs,
+        on(SirPass::CommitSinking),
+        on(SirPass::InlineCommitForwarding),
+    );
+    optimize_unified_commit_groups(
+        &mut program.eval_comb_apply_ffs,
         on(SirPass::CommitSinking),
         on(SirPass::InlineCommitForwarding),
     );
@@ -819,6 +869,7 @@ fn optimize_with_options(
         ff_post_passes.add_pass(SplitCoalescedStoresPass);
     }
     optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_post_passes, &options);
+    optimize_unit_groups_cached(&mut program.eval_comb_apply_ffs, &ff_post_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }

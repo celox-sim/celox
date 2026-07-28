@@ -64,8 +64,6 @@ pub struct RegallocResult {
     pub assignment: AssignmentMap,
     /// Bytes of stack frame needed for spill slots.
     pub spill_frame_size: u32,
-    /// Complete, independently verified phi-edge parallel-copy plan.
-    pub(crate) ssa_destruction: super::ssa_destroy::SsaDestructionPlan,
 }
 
 #[derive(Default)]
@@ -204,32 +202,6 @@ fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
         error.instruction,
         error.values,
         error.message,
-    )
-}
-
-fn ssa_destruction_error(
-    phase: &'static str,
-    error: super::ssa_destroy::SsaDestructionError,
-) -> RegallocError {
-    let mut values = Vec::with_capacity(2);
-    if let Some(destination) = error.phi_destination {
-        values.push(destination);
-    }
-    if let Some(source) = error.source_value {
-        values.push(source);
-    }
-    let edge = match (error.predecessor, error.successor) {
-        (Some(predecessor), Some(successor)) => format!(" on {predecessor} -> {successor}"),
-        (None, Some(successor)) => format!(" at {successor}"),
-        _ => String::new(),
-    };
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.successor.or(error.predecessor),
-        None,
-        values,
-        format!("{}{edge}", error.message),
     )
 }
 
@@ -382,11 +354,6 @@ fn run_regalloc_in_place(
 
     let verify_start = timing.then(crate::timing::now);
     verify_assignment(func, &assignment)?;
-    let ssa_destruction = super::ssa_destroy::SsaDestructionPlan::build(func, &assignment)
-        .map_err(|error| ssa_destruction_error("SSA destruction planning", error))?;
-    ssa_destruction
-        .verify(func, &assignment, spill_frame_size)
-        .map_err(|error| ssa_destruction_error("SSA destruction verification", error))?;
     if let Some(start) = verify_start {
         eprintln!(
             "[regalloc-timing] label={label} verify elapsed={:?}",
@@ -414,7 +381,6 @@ fn run_regalloc_in_place(
     Ok(RegallocResult {
         assignment,
         spill_frame_size,
-        ssa_destruction,
     })
 }
 

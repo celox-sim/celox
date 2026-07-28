@@ -6173,6 +6173,41 @@ fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             break;
         }
 
+        // Do not remove adjacent candidates from the same predecessor
+        // snapshot.  Given A -> B, removing A can create new predecessors of
+        // B which are absent from `jump_preds`; removing B afterwards would
+        // then leave those predecessors targeting a deleted block.  A greedy
+        // independent set still removes a constant fraction of a long chain,
+        // so the number of whole-CFG rebuilds remains logarithmic.
+        let mut selected = HashSet::default();
+        let eligible = eligible
+            .into_iter()
+            .filter(|block_id| {
+                let adjacent_to_selected_predecessor = jump_preds
+                    .get(block_id)
+                    .is_some_and(|preds| preds.iter().any(|pred| selected.contains(pred)));
+                let adjacent_to_selected_successor = match &eu.blocks[block_id].terminator {
+                    SIRTerminator::Jump(target, _) => selected.contains(target),
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => selected.contains(&true_block.0) || selected.contains(&false_block.0),
+                    SIRTerminator::Switch { cases, default, .. } => {
+                        selected.contains(default)
+                            || cases.iter().any(|case| selected.contains(&case.target))
+                    }
+                    SIRTerminator::Return | SIRTerminator::Error(_) => false,
+                };
+                if adjacent_to_selected_predecessor || adjacent_to_selected_successor {
+                    false
+                } else {
+                    selected.insert(*block_id);
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+
         for block_id in eligible {
             if !eu.blocks.contains_key(&block_id) {
                 continue;
@@ -9913,6 +9948,73 @@ mod tests {
                 ..
             } if true_block.1 == vec![RegisterId(1)] && false_block.1 == vec![RegisterId(1)]
         ));
+    }
+
+    #[test]
+    fn inlines_chained_param_only_blocks_without_dangling_targets() {
+        let mut register_map = HashMap::default();
+        for reg in 0..4 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![imm(0, 3)],
+                terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: vec![RegisterId(1)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(2), vec![RegisterId(1)]),
+            },
+        );
+        blocks.insert(
+            BlockId(2),
+            BasicBlock {
+                id: BlockId(2),
+                params: vec![RegisterId(2)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(2)]),
+            },
+        );
+        blocks.insert(
+            BlockId(3),
+            BasicBlock {
+                id: BlockId(3),
+                params: vec![RegisterId(3)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        inline_param_only_jump_blocks(&mut eu);
+
+        assert!(!eu.blocks.contains_key(&BlockId(1)));
+        assert!(!eu.blocks.contains_key(&BlockId(2)));
+        assert!(matches!(
+            &eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(target, args)
+                if *target == BlockId(3) && args == &vec![RegisterId(0)]
+        ));
+        eu.verify();
     }
 
     #[test]

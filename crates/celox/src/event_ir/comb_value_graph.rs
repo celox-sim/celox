@@ -32,6 +32,7 @@ struct DemandSummary {
 struct MuxAssessment {
     benefit: u32,
     estimated_growth: u32,
+    contains_div_rem: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +108,8 @@ struct RecipeInputIndex {
 /// symbolic arena.
 pub(super) struct CombValueGraph {
     recipe_inputs: Vec<RecipeInputIndex>,
-    recipe_local_costs: Vec<ValueCost>,
     definition_costs: Vec<ValueCost>,
+    unique_recipe_cost_cache: RefCell<HashMap<CombRecipeId, ValueCost>>,
     demand_cache: RefCell<HashMap<(CombRecipeId, NodeId), DemandSummary>>,
     planned_muxes: HashSet<(CombRecipeId, NodeId)>,
     deferred_edges: HashSet<(CombRecipeId, CombDefinitionId)>,
@@ -122,11 +123,6 @@ impl CombValueGraph {
         allow_sparse_control: bool,
     ) -> Result<Self, CombValueGraphError> {
         let node_costs = build_node_costs(arena);
-        let recipe_local_costs = graph
-            .recipes()
-            .iter()
-            .map(|recipe| node_costs[recipe.root.0])
-            .collect::<Vec<_>>();
         let recipe_inputs = graph
             .recipes()
             .iter()
@@ -214,8 +210,8 @@ impl CombValueGraph {
         }
         let mut result = Self {
             recipe_inputs,
-            recipe_local_costs,
             definition_costs,
+            unique_recipe_cost_cache: RefCell::new(HashMap::default()),
             demand_cache: RefCell::new(HashMap::default()),
             planned_muxes: HashSet::default(),
             deferred_edges: HashSet::default(),
@@ -359,10 +355,15 @@ impl CombValueGraph {
                             work.extend(slt_children(node, arena));
                             continue;
                         }
-                        let deferred_dependencies =
+                        let mut deferred_dependencies =
                             self.deferred_dependencies_for_mux(graph, recipe, node, arena);
+                        deferred_dependencies.retain(|dependency| {
+                            !demanded_definitions[dependency.0]
+                                && definition_consumer_counts[dependency.0] == 1
+                        });
                         let assessment = self.deferred_work_assessment(
                             graph,
+                            arena,
                             &deferred_dependencies,
                             definition_consumer_counts,
                             demanded_definitions,
@@ -375,6 +376,7 @@ impl CombValueGraph {
                             deferred_dependencies,
                         };
                         if assessment.benefit >= MIN_BENEFIT
+                            && assessment.contains_div_rem
                             && !candidate.deferred_dependencies.is_empty()
                             && best.as_ref().is_none_or(|current: &MuxCandidate| {
                                 candidate_is_better(&candidate, current)
@@ -492,6 +494,7 @@ impl CombValueGraph {
     fn deferred_work_assessment(
         &self,
         graph: &CombGraph,
+        arena: &SLTNodeArena<AbsoluteAddr>,
         roots: &[CombDefinitionId],
         definition_consumer_counts: &[u32],
         demanded_definitions: &[bool],
@@ -500,10 +503,10 @@ impl CombValueGraph {
         let mut expensive_definitions = 0u32;
         let mut cheap_work = 0u32;
         let mut arm_local_definitions = 0u32;
-        let mut visited = HashSet::default();
+        let mut visited_definitions = HashSet::default();
         let mut work = roots.to_vec();
         while let Some(definition) = work.pop() {
-            if !visited.insert(definition) {
+            if !visited_definitions.insert(definition) {
                 continue;
             }
             // A shared or separately demanded definition retains its global
@@ -512,7 +515,7 @@ impl CombValueGraph {
                 continue;
             }
             let recipe = graph.definitions()[definition.0].recipe;
-            let local_cost = self.recipe_local_costs[recipe.0];
+            let local_cost = self.unique_recipe_cost(graph, recipe, arena);
             expensive_definitions =
                 expensive_definitions.saturating_add(u32::from(local_cost.contains_div_rem));
             cheap_work = cheap_work
@@ -526,7 +529,24 @@ impl CombValueGraph {
                 .saturating_mul(div_rem_cost)
                 .saturating_add(cheap_work),
             estimated_growth: 8u32.saturating_add(arm_local_definitions),
+            contains_div_rem: expensive_definitions != 0,
         }
+    }
+
+    fn unique_recipe_cost(
+        &self,
+        graph: &CombGraph,
+        recipe: CombRecipeId,
+        arena: &SLTNodeArena<AbsoluteAddr>,
+    ) -> ValueCost {
+        if let Some(cost) = self.unique_recipe_cost_cache.borrow().get(&recipe).copied() {
+            return cost;
+        }
+        let cost = unique_slt_cost(NodeId(graph.recipes()[recipe.0].root.0), arena);
+        self.unique_recipe_cost_cache
+            .borrow_mut()
+            .insert(recipe, cost);
+        cost
     }
 
     fn append_input_dependencies(
@@ -741,6 +761,28 @@ fn build_node_costs(arena: &SLTNodeArena<AbsoluteAddr>) -> Vec<ValueCost> {
     result
 }
 
+fn unique_slt_cost(root: NodeId, arena: &SLTNodeArena<AbsoluteAddr>) -> ValueCost {
+    let mut cost = ValueCost::default();
+    let mut visited = HashSet::default();
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        cost.instructions = cost.instructions.saturating_add(1).min(ValueCost::LIMIT);
+        cost.contains_div_rem |= matches!(
+            arena.get(node),
+            SLTNode::Binary(
+                _,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS,
+                _
+            )
+        );
+        work.extend(slt_children(node, arena));
+    }
+    cost
+}
+
 fn slt_children(node: NodeId, arena: &SLTNodeArena<AbsoluteAddr>) -> Vec<NodeId> {
     match arena.get(node) {
         SLTNode::Input { index, .. } => index.iter().map(|index| index.node).collect(),
@@ -794,4 +836,30 @@ fn candidate_rank_cmp(candidate: &MuxCandidate, current: &MuxCandidate) -> std::
             .benefit
             .cmp(&current.assessment.benefit)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+
+    use super::*;
+
+    #[test]
+    fn exact_recipe_cost_counts_shared_slt_nodes_once() {
+        let mut arena = SLTNodeArena::new();
+        let shared = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::default(),
+                1,
+                false,
+            ))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Add, shared))
+            .unwrap();
+
+        assert_eq!(build_node_costs(&arena)[root.0].instructions, 3);
+        assert_eq!(unique_slt_cost(root, &arena).instructions, 2);
+    }
 }

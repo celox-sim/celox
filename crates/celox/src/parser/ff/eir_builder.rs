@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
+use celox_analysis::cfg::ControlFlowGraph;
 use num_bigint::BigUint;
 use num_traits::One;
 use thiserror::Error;
@@ -9,8 +10,8 @@ use crate::{
     HashMap, HashSet,
     event_ir::{
         BitAccess, ControlBlockId, ControlTerminator, Effect, EffectId, EffectKind, EventIr,
-        ObjectAccess, ObjectRange, ProcessId, Value, ValueId, ValueKind, ValueOffset, ValueScope,
-        ValueType,
+        FfStageKind, ObjectAccess, ObjectRange, ProcessId, Value, ValueId, ValueKind, ValueOffset,
+        ValueScope, ValueType,
     },
     ir::{AbsoluteAddr, BlockId, InstanceId, RegisterId, RegisterType, SIROffset, UnaryOp},
 };
@@ -27,8 +28,8 @@ pub enum FfEirBuildError {
     MissingValue(RegisterId),
     #[error("FF EIR builder register {0} is absent")]
     MissingRegister(RegisterId),
-    #[error("FF EIR builder local {0} has no reaching value in block {1:?}")]
-    MissingLocalValue(VarId, BlockId),
+    #[error("FF EIR builder local {0:?} has no reaching value in block {1:?}")]
+    MissingLocalValue(LocalSlot, BlockId),
     #[error("FF EIR builder object {0} is absent from the AIR module")]
     MissingObject(VarId),
     #[error("FF EIR builder cannot resolve width of {0}: {1}")]
@@ -56,27 +57,35 @@ struct RecordedBlock {
     terminator: Option<RecordedTerminator>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LocalSlot {
+    Object(VarId),
+    FinalRange(usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FinalSinkPlan {
+    object: VarId,
+    access: BitAccess,
+    sink: BlockId,
+}
+
+impl FinalSinkPlan {
+    fn width(self) -> usize {
+        self.access.msb - self.access.lsb + 1
+    }
+
+    fn contains(self, object: VarId, offset: usize, width: usize) -> bool {
+        let Some(msb) = offset.checked_add(width.saturating_sub(1)) else {
+            return false;
+        };
+        self.object == object && self.access.lsb <= offset && msb <= self.access.msb
+    }
+}
 #[derive(Default)]
 struct FfEffectOrder {
     stage_frontier: HashMap<AbsoluteAddr, BTreeMap<usize, (usize, EffectId)>>,
     last_observation: Option<EffectId>,
-}
-
-#[derive(Clone)]
-enum PendingPredicatedEffect {
-    Stage {
-        region: crate::event_ir::RegionId,
-        target: ObjectAccess,
-        value: ValueId,
-        guard: Option<ValueId>,
-        priority: usize,
-    },
-    RuntimeEvent {
-        region: crate::event_ir::RegionId,
-        site_id: u32,
-        arguments: Vec<ValueId>,
-        guard: Option<ValueId>,
-    },
 }
 
 impl FfEffectOrder {
@@ -149,6 +158,24 @@ impl FfEirBuilder {
         }
     }
 
+    pub(crate) fn format_air(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        writeln!(&mut output, "registers:").unwrap();
+        for (index, register) in self.registers.iter().enumerate() {
+            writeln!(&mut output, "  r{index}: {register:?}").unwrap();
+        }
+        for (index, block) in self.blocks.iter().enumerate() {
+            writeln!(&mut output, "b{index}({:?}):", block.parameters).unwrap();
+            for (operation, item) in block.operations.iter().enumerate() {
+                writeln!(&mut output, "  i{operation}: {item:?}").unwrap();
+            }
+            writeln!(&mut output, "  {:?}", block.terminator).unwrap();
+        }
+        output
+    }
+
     fn block(&self, id: BlockId) -> Result<&RecordedBlock, FfEirBuildError> {
         self.blocks
             .get(id.0)
@@ -182,19 +209,11 @@ impl FfEirBuilder {
         resets: Vec<crate::ir::AbsoluteAddr>,
     ) -> Result<Vec<EffectId>, FfEirBuildError> {
         self.finish_recording()?;
-        if let Some(block_order) = self.acyclic_predication_order() {
-            return self.lower_predicated_into(
-                ir,
-                module,
-                instance_id,
-                source_order,
-                resets,
-                &block_order,
-            );
-        }
+        self.mark_write_only_publications();
+        let final_sinks = self.final_sink_plan(module)?;
         let process = ir.add_process_with_resets(source_order, resets);
         let process_blocks = self.create_control_blocks(ir, process);
-        let local_dataflow = self.analyze_local_liveness(module)?;
+        let local_dataflow = self.analyze_local_liveness(module, &final_sinks)?;
         let mut register_values = vec![None; self.registers.len()];
         let mut local_parameters = vec![HashMap::default(); self.blocks.len()];
 
@@ -223,7 +242,13 @@ impl FfEirBuilder {
             let eir_block = process_blocks[block.0];
             let region = ir.blocks()[eir_block.0].region;
             let mut locals = if block == BlockId(0) {
-                self.create_entry_locals(ir, module, instance_id, &local_dataflow.live_in[block.0])?
+                self.create_entry_locals(
+                    ir,
+                    module,
+                    instance_id,
+                    &local_dataflow.live_in[block.0],
+                    &final_sinks,
+                )?
             } else {
                 local_parameters[block.0].clone()
             };
@@ -240,10 +265,39 @@ impl FfEirBuilder {
                     &mut register_values,
                     &mut locals,
                     &mut block_effect_order[block.0],
-                    None,
-                    None,
                     &mut stages,
+                    &final_sinks,
                 )?;
+            }
+
+            let mut sink_ranges = final_sinks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, plan)| (plan.sink == block).then_some((index, *plan)))
+                .collect::<Vec<_>>();
+            sink_ranges.sort_unstable_by_key(|(_, plan)| (plan.object, plan.access));
+            for (index, plan) in sink_ranges {
+                let stage = ir.add_effect(Effect {
+                    region,
+                    predecessors: Vec::new(),
+                    kind: EffectKind::StageNextFf {
+                        process,
+                        target: ObjectAccess {
+                            object: AbsoluteAddr {
+                                instance_id,
+                                var_id: plan.object,
+                            },
+                            offset: ValueOffset::Static(plan.access.lsb),
+                            width: plan.width(),
+                            alias: plan.access,
+                        },
+                        value: locals[&LocalSlot::FinalRange(index)],
+                        guard: None,
+                        priority: stages.len(),
+                        stage_kind: FfStageKind::FinalProcessSink,
+                    },
+                });
+                stages.push(stage);
             }
             outgoing_locals[block.0] = locals;
         }
@@ -265,240 +319,6 @@ impl FfEirBuilder {
         }
 
         Ok(stages)
-    }
-
-    /// Convert an acyclic AIR process to one predicated value/effect region.
-    ///
-    /// Pure AIR operations become one dataflow graph. Control only survives as
-    /// predicates on state stages and observations, so the event scheduler can
-    /// choose which FF sink to complete instead of inheriting AIR block order.
-    fn lower_predicated_into(
-        &self,
-        ir: &mut EventIr,
-        module: &Module,
-        instance_id: InstanceId,
-        source_order: usize,
-        resets: Vec<crate::ir::AbsoluteAddr>,
-        block_order: &[BlockId],
-    ) -> Result<Vec<EffectId>, FfEirBuildError> {
-        #[derive(Clone)]
-        struct IncomingEdge {
-            predicate: ValueId,
-            always: bool,
-            arguments: Vec<RegisterId>,
-            predecessor: BlockId,
-        }
-
-        let process = ir.add_process_with_resets(source_order, resets);
-        let entry = ir.processes()[process.0].entry;
-        let region = ir.blocks()[entry.0].region;
-        let local_dataflow = self.analyze_local_liveness(module)?;
-        let mut register_values = vec![None; self.registers.len()];
-        let mut outgoing_locals = vec![HashMap::default(); self.blocks.len()];
-        let mut incoming = vec![Vec::<IncomingEdge>::new(); self.blocks.len()];
-        let mut stages = Vec::new();
-        let mut effect_order = FfEffectOrder::default();
-        let mut pending_effects = Vec::new();
-
-        let true_value = ir.add_value(Value {
-            ty: ValueType::bit(1, false),
-            scope: ValueScope::Process(process),
-            region,
-            kind: ValueKind::Constant {
-                value: BigUint::one(),
-                unknown: BigUint::default(),
-            },
-        });
-
-        for &block in block_order {
-            let (predicate, always) = if block == BlockId(0) {
-                (true_value, true)
-            } else {
-                let edges = &incoming[block.0];
-                debug_assert!(!edges.is_empty(), "predicated AIR block is reachable");
-                (
-                    merge_predicates(ir, process, region, edges.iter().map(|edge| edge.predicate)),
-                    edges.iter().any(|edge| edge.always),
-                )
-            };
-
-            if block != BlockId(0) {
-                let edges = &incoming[block.0];
-                for (index, parameter) in self.block(block)?.parameters.iter().copied().enumerate()
-                {
-                    let ty = value_type(self.register_type(parameter)?);
-                    let merged = merge_predicated_values(
-                        ir,
-                        process,
-                        region,
-                        ty,
-                        edges.iter().map(|edge| {
-                            (
-                                edge.predicate,
-                                register_value(&register_values, edge.arguments[index]),
-                            )
-                        }),
-                    )?;
-                    register_values[parameter.0] = Some(merged);
-                }
-            }
-
-            let mut locals = if block == BlockId(0) {
-                self.create_entry_locals(ir, module, instance_id, &local_dataflow.live_in[block.0])?
-            } else {
-                let mut locals = HashMap::default();
-                for object in &local_dataflow.parameter_order[block.0] {
-                    let ty = object_type(module, *object)?;
-                    let merged = merge_predicated_values(
-                        ir,
-                        process,
-                        region,
-                        ty,
-                        incoming[block.0].iter().map(|edge| {
-                            (
-                                edge.predicate,
-                                outgoing_locals[edge.predecessor.0]
-                                    .get(object)
-                                    .copied()
-                                    .ok_or(FfEirBuildError::MissingLocalValue(*object, block)),
-                            )
-                        }),
-                    )?;
-                    locals.insert(*object, merged);
-                }
-                locals
-            };
-
-            let guard = (!always).then_some(predicate);
-            for operation in &self.block(block)?.operations {
-                self.lower_operation(
-                    operation,
-                    ir,
-                    module,
-                    instance_id,
-                    process,
-                    region,
-                    block,
-                    &mut register_values,
-                    &mut locals,
-                    &mut effect_order,
-                    guard,
-                    Some(&mut pending_effects),
-                    &mut stages,
-                )?;
-            }
-            outgoing_locals[block.0] = locals;
-
-            match self
-                .block(block)?
-                .terminator
-                .as_ref()
-                .ok_or(FfEirBuildError::UnterminatedBlock(block))?
-            {
-                RecordedTerminator::Return => {}
-                RecordedTerminator::Air(FfTerminator::Error(_)) => {
-                    unreachable!("error terminators retain structured control")
-                }
-                RecordedTerminator::Air(FfTerminator::Jump(target, arguments)) => {
-                    incoming[target.0].push(IncomingEdge {
-                        predicate,
-                        always,
-                        arguments: arguments.clone(),
-                        predecessor: block,
-                    });
-                }
-                RecordedTerminator::Air(FfTerminator::Branch {
-                    condition,
-                    true_block,
-                    false_block,
-                }) => {
-                    let condition = normalize_condition(
-                        ir,
-                        process,
-                        region,
-                        register_value(&register_values, *condition)?,
-                    );
-                    let false_condition = ir.add_value(Value {
-                        ty: ValueType::bit(1, false),
-                        scope: ValueScope::Process(process),
-                        region,
-                        kind: ValueKind::Unary {
-                            op: UnaryOp::LogicNot,
-                            input: condition,
-                        },
-                    });
-                    let true_predicate = if always {
-                        condition
-                    } else {
-                        predicate_and(ir, process, region, predicate, condition)
-                    };
-                    let false_predicate = if always {
-                        false_condition
-                    } else {
-                        predicate_and(ir, process, region, predicate, false_condition)
-                    };
-                    incoming[true_block.0.0].push(IncomingEdge {
-                        predicate: true_predicate,
-                        always: false,
-                        arguments: true_block.1.clone(),
-                        predecessor: block,
-                    });
-                    incoming[false_block.0.0].push(IncomingEdge {
-                        predicate: false_predicate,
-                        always: false,
-                        arguments: false_block.1.clone(),
-                        predecessor: block,
-                    });
-                }
-            }
-        }
-
-        debug_assert!(stages.is_empty());
-        let stages =
-            emit_predicated_effects(ir, process, region, pending_effects, &mut effect_order);
-        ir.set_terminator(entry, ControlTerminator::Return);
-        Ok(stages)
-    }
-
-    /// Return a deterministic topological order when this process can be
-    /// represented as one predicated dataflow region. Loop and terminating
-    /// error regions keep their explicit CFG.
-    fn acyclic_predication_order(&self) -> Option<Vec<BlockId>> {
-        if self.blocks.iter().any(|block| {
-            matches!(
-                block.terminator,
-                Some(RecordedTerminator::Air(FfTerminator::Error(_)))
-            )
-        }) {
-            return None;
-        }
-
-        let mut indegree = vec![0usize; self.blocks.len()];
-        for block in 0..self.blocks.len() {
-            for successor in self.successors(BlockId(block)) {
-                indegree[successor.0] = indegree[successor.0].checked_add(1)?;
-            }
-        }
-        let mut ready = std::collections::BTreeSet::new();
-        for (block, degree) in indegree.iter().enumerate() {
-            if *degree == 0 {
-                ready.insert(block);
-            }
-        }
-        let mut order = Vec::with_capacity(self.blocks.len());
-        while let Some(block) = ready.pop_first() {
-            order.push(BlockId(block));
-            for successor in self.successors(BlockId(block)) {
-                indegree[successor.0] = indegree[successor.0].checked_sub(1)?;
-                if indegree[successor.0] == 0 {
-                    ready.insert(successor.0);
-                }
-            }
-        }
-        if order.len() != self.blocks.len() || order.first() != Some(&BlockId(0)) {
-            return None;
-        }
-        Some(order)
     }
 
     pub fn remap_runtime_ids(
@@ -540,7 +360,7 @@ impl FfEirBuilder {
         process_blocks: &[ControlBlockId],
         local_dataflow: &LocalDataflow,
         register_values: &mut [Option<ValueId>],
-        local_parameters: &mut [HashMap<VarId, ValueId>],
+        local_parameters: &mut [HashMap<LocalSlot, ValueId>],
         module: &Module,
     ) -> Result<(), FfEirBuildError> {
         for (block_index, block) in self.blocks.iter().enumerate() {
@@ -553,10 +373,10 @@ impl FfEirBuilder {
             if block_index == 0 {
                 continue;
             }
-            for object in &local_dataflow.parameter_order[block_index] {
-                let ty = object_type(module, *object)?;
+            for slot in &local_dataflow.parameter_order[block_index] {
+                let ty = local_slot_type(module, &local_dataflow.final_sinks, *slot)?;
                 let value = ir.add_block_parameter(eir_block, ty);
-                local_parameters[block_index].insert(*object, value);
+                local_parameters[block_index].insert(*slot, value);
             }
         }
         Ok(())
@@ -567,21 +387,36 @@ impl FfEirBuilder {
         ir: &mut EventIr,
         module: &Module,
         instance_id: InstanceId,
-        live_in: &HashSet<VarId>,
-    ) -> Result<HashMap<VarId, ValueId>, FfEirBuildError> {
-        let mut objects = live_in.iter().copied().collect::<Vec<_>>();
-        objects.sort_unstable();
+        live_in: &HashSet<LocalSlot>,
+        final_sinks: &[FinalSinkPlan],
+    ) -> Result<HashMap<LocalSlot, ValueId>, FfEirBuildError> {
+        let mut slots = live_in.iter().copied().collect::<Vec<_>>();
+        slots.sort_unstable();
         let mut values = HashMap::default();
-        for object in objects {
-            let ty = object_type(module, object)?;
-            let range = object_range(instance_id, object, 0, ty.width)?;
+        for slot in slots {
+            let (object, offset, ty) = match slot {
+                LocalSlot::Object(object) => {
+                    let ty = object_type(module, object)?;
+                    (object, 0, ty)
+                }
+                LocalSlot::FinalRange(index) => {
+                    let plan = final_sinks[index];
+                    let object_ty = object_type(module, plan.object)?;
+                    (
+                        plan.object,
+                        plan.access.lsb,
+                        part_type(object_ty, plan.width()),
+                    )
+                }
+            };
+            let range = object_range(instance_id, object, offset, ty.width)?;
             let value = ir.add_value(Value {
                 ty,
                 scope: ValueScope::Event,
                 region: ir.root_region(),
                 kind: ValueKind::ReadClockSnapshot(range),
             });
-            values.insert(object, value);
+            values.insert(slot, value);
         }
         Ok(values)
     }
@@ -597,11 +432,10 @@ impl FfEirBuilder {
         region: crate::event_ir::RegionId,
         block: BlockId,
         register_values: &mut [Option<ValueId>],
-        locals: &mut HashMap<VarId, ValueId>,
+        locals: &mut HashMap<LocalSlot, ValueId>,
         effect_order: &mut FfEffectOrder,
-        guard: Option<ValueId>,
-        pending_effects: Option<&mut Vec<PendingPredicatedEffect>>,
         stages: &mut Vec<EffectId>,
+        final_sinks: &[FinalSinkPlan],
     ) -> Result<(), FfEirBuildError> {
         match operation {
             FfBuildOp::Imm(destination, immediate) => {
@@ -688,9 +522,9 @@ impl FfEirBuilder {
                         register_values,
                     )?,
                     FfReadSource::ProcessLocal => {
-                        let base = *locals
-                            .get(object)
-                            .ok_or(FfEirBuildError::MissingLocalValue(*object, block))?;
+                        let base = *locals.get(&LocalSlot::Object(*object)).ok_or(
+                            FfEirBuildError::MissingLocalValue(LocalSlot::Object(*object), block),
+                        )?;
                         self.lower_select(
                             ir,
                             process,
@@ -713,75 +547,98 @@ impl FfEirBuilder {
                 value,
             } => {
                 let value = register_value(register_values, *value)?;
-                match target {
-                    FfWriteTarget::ProcessLocal => {
-                        let object_ty = object_type(module, *object)?;
-                        let complete =
-                            matches!(offset, SIROffset::Static(0)) && *width == object_ty.width;
-                        let updated = if complete {
-                            resize_if_needed(
-                                ir,
-                                ValueScope::Process(process),
-                                region,
-                                value,
-                                object_ty,
-                            )
-                        } else {
-                            let base = *locals
-                                .get(object)
-                                .ok_or(FfEirBuildError::MissingLocalValue(*object, block))?;
-                            ir.add_value(Value {
-                                ty: object_ty,
-                                scope: ValueScope::Process(process),
-                                region,
-                                kind: ValueKind::UpdateRange {
-                                    base,
-                                    offset: lower_value_offset(offset, register_values)?,
-                                    value,
-                                    width: *width,
-                                },
-                            })
+                let final_sink = match offset {
+                    SIROffset::Static(offset) if *target == FfWriteTarget::StagedState => {
+                        final_sinks
+                            .iter()
+                            .enumerate()
+                            .find(|(_, plan)| plan.contains(*object, *offset, *width))
+                    }
+                    _ => None,
+                };
+                if *target == FfWriteTarget::ProcessLocal || final_sink.is_some() {
+                    let (slot, value_offset, local_ty) = if let Some((index, plan)) = final_sink {
+                        (
+                            LocalSlot::FinalRange(index),
+                            match offset {
+                                SIROffset::Static(offset) => offset - plan.access.lsb,
+                                _ => unreachable!("final range accepts only static writes"),
+                            },
+                            part_type(object_type(module, *object)?, plan.width()),
+                        )
+                    } else {
+                        (
+                            LocalSlot::Object(*object),
+                            match offset {
+                                SIROffset::Static(offset) => *offset,
+                                _ => 0,
+                            },
+                            object_type(module, *object)?,
+                        )
+                    };
+                    let complete = matches!(offset, SIROffset::Static(_))
+                        && value_offset == 0
+                        && *width == local_ty.width;
+                    let updated = if complete {
+                        resize_if_needed(ir, ValueScope::Process(process), region, value, local_ty)
+                    } else {
+                        let base = *locals
+                            .get(&slot)
+                            .ok_or(FfEirBuildError::MissingLocalValue(slot, block))?;
+                        let local_offset = match offset {
+                            SIROffset::Static(_) if final_sink.is_some() => {
+                                ValueOffset::Static(value_offset)
+                            }
+                            _ => lower_value_offset(offset, register_values)?,
                         };
-                        locals.insert(*object, updated);
-                    }
-                    FfWriteTarget::StagedState => {
-                        let object_ty = object_type(module, *object)?;
-                        let target = object_access(
-                            instance_id,
-                            *object,
-                            offset,
-                            *width,
-                            object_ty.width,
-                            register_values,
-                        )?;
-                        if let Some(pending_effects) = pending_effects {
-                            let priority = pending_effects.len();
-                            pending_effects.push(PendingPredicatedEffect::Stage {
-                                region,
-                                target,
+                        ir.add_value(Value {
+                            ty: local_ty,
+                            scope: ValueScope::Process(process),
+                            region,
+                            kind: ValueKind::UpdateRange {
+                                base,
+                                offset: local_offset,
                                 value,
-                                guard,
-                                priority,
-                            });
-                        } else {
-                            let stage = EffectId(ir.effects().len());
-                            let predecessors =
-                                effect_order.stage_predecessors_and_update(&target, stage);
-                            let actual_stage = ir.add_effect(Effect {
-                                region,
-                                predecessors,
-                                kind: EffectKind::StageNextFf {
-                                    process,
-                                    target,
-                                    value,
-                                    guard,
-                                    priority: stages.len(),
-                                },
-                            });
-                            debug_assert_eq!(actual_stage, stage);
-                            stages.push(actual_stage);
-                        }
-                    }
+                                width: *width,
+                            },
+                        })
+                    };
+                    locals.insert(slot, updated);
+                } else {
+                    debug_assert!(matches!(
+                        target,
+                        FfWriteTarget::StagedState | FfWriteTarget::WriteOnlyPublication
+                    ));
+                    let write_only = *target == FfWriteTarget::WriteOnlyPublication;
+                    let object_ty = object_type(module, *object)?;
+                    let target = object_access(
+                        instance_id,
+                        *object,
+                        offset,
+                        *width,
+                        object_ty.width,
+                        register_values,
+                    )?;
+                    let stage = EffectId(ir.effects().len());
+                    let predecessors = effect_order.stage_predecessors_and_update(&target, stage);
+                    let actual_stage = ir.add_effect(Effect {
+                        region,
+                        predecessors,
+                        kind: EffectKind::StageNextFf {
+                            process,
+                            target,
+                            value,
+                            guard: None,
+                            priority: stages.len(),
+                            stage_kind: if write_only {
+                                FfStageKind::WriteOnlyPublication
+                            } else {
+                                FfStageKind::Fragment
+                            },
+                        },
+                    });
+                    debug_assert_eq!(actual_stage, stage);
+                    stages.push(actual_stage);
                 }
             }
             FfBuildOp::Concat(destination, inputs) => {
@@ -843,26 +700,17 @@ impl FfEirBuilder {
                     .iter()
                     .map(|argument| register_value(register_values, *argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(pending_effects) = pending_effects {
-                    pending_effects.push(PendingPredicatedEffect::RuntimeEvent {
-                        region,
+                let predecessors = effect_order.last_observation.iter().copied().collect();
+                let effect = ir.add_effect(Effect {
+                    region,
+                    predecessors,
+                    kind: EffectKind::RuntimeEvent {
                         site_id: *site_id,
                         arguments,
-                        guard,
-                    });
-                } else {
-                    let predecessors = effect_order.last_observation.iter().copied().collect();
-                    let effect = ir.add_effect(Effect {
-                        region,
-                        predecessors,
-                        kind: EffectKind::RuntimeEvent {
-                            site_id: *site_id,
-                            arguments,
-                            guard,
-                        },
-                    });
-                    effect_order.last_observation = Some(effect);
-                }
+                        guard: None,
+                    },
+                });
+                effect_order.last_observation = Some(effect);
             }
         }
         Ok(())
@@ -1109,8 +957,8 @@ impl FfEirBuilder {
         process: ProcessId,
         region: crate::event_ir::RegionId,
         process_blocks: &[ControlBlockId],
-        local_parameter_order: &[Vec<VarId>],
-        locals: &HashMap<VarId, ValueId>,
+        local_parameter_order: &[Vec<LocalSlot>],
+        locals: &HashMap<LocalSlot, ValueId>,
         register_values: &[Option<ValueId>],
     ) -> Result<ControlTerminator, FfEirBuildError> {
         let recorded = self
@@ -1201,10 +1049,289 @@ impl FfEirBuilder {
         }
     }
 
-    fn analyze_local_liveness(&self, module: &Module) -> Result<LocalDataflow, FfEirBuildError> {
+    fn mark_write_only_publications(&mut self) {
+        let read_objects = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.operations.iter())
+            .filter_map(|operation| match operation {
+                FfBuildOp::Read { object, .. } => Some(*object),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let write_only_objects = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.operations.iter())
+            .filter_map(|operation| match operation {
+                FfBuildOp::Write {
+                    object,
+                    target: FfWriteTarget::StagedState,
+                    ..
+                } if !read_objects.contains(object) => Some(*object),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        for block in &mut self.blocks {
+            for operation in &mut block.operations {
+                if let FfBuildOp::Write { object, target, .. } = operation
+                    && write_only_objects.contains(object)
+                    && *target == FfWriteTarget::StagedState
+                {
+                    *target = FfWriteTarget::WriteOnlyPublication;
+                }
+            }
+        }
+    }
+
+    fn final_sink_plan(&self, _module: &Module) -> Result<Vec<FinalSinkPlan>, FfEirBuildError> {
+        let successors = (0..self.blocks.len())
+            .map(|block| {
+                self.successors(BlockId(block))
+                    .into_iter()
+                    .map(|successor| successor.0)
+                    .collect()
+            })
+            .collect();
+        let Ok(cfg) = ControlFlowGraph::analyze_structure(successors, 0) else {
+            return Ok(Vec::new());
+        };
+
+        let mut writes = HashMap::<VarId, Vec<(usize, usize, usize)>>::default();
+        let mut reads = HashMap::<VarId, Vec<(usize, Option<(usize, usize)>)>>::default();
+        let mut dynamic_writes = HashSet::default();
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            for operation in &block.operations {
+                match operation {
+                    FfBuildOp::Write {
+                        object,
+                        target: FfWriteTarget::StagedState,
+                        offset,
+                        width,
+                        ..
+                    } => {
+                        if let SIROffset::Static(offset) = offset {
+                            writes
+                                .entry(*object)
+                                .or_default()
+                                .push((block_index, *offset, *width));
+                        } else {
+                            dynamic_writes.insert(*object);
+                        }
+                    }
+                    FfBuildOp::Read {
+                        object,
+                        source: FfReadSource::ClockSnapshot,
+                        offset,
+                        width,
+                        ..
+                    } => {
+                        reads.entry(*object).or_default().push((
+                            block_index,
+                            match offset {
+                                SIROffset::Static(offset) => Some((*offset, *width)),
+                                _ => None,
+                            },
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        struct Candidate {
+            plan: FinalSinkPlan,
+            live_in: Vec<bool>,
+            benefit: usize,
+        }
+
+        let mut candidates = Vec::new();
+        for (object, mut object_writes) in writes {
+            if dynamic_writes.contains(&object) {
+                continue;
+            }
+            object_writes.sort_unstable_by_key(|&(_, offset, width)| (offset, width));
+            let mut ranges = Vec::<BitAccess>::new();
+            for &(_, offset, width) in &object_writes {
+                let Some(access) = bit_access(offset, width) else {
+                    continue;
+                };
+                if let Some(last) = ranges.last_mut()
+                    && access.lsb <= last.msb
+                {
+                    last.msb = last.msb.max(access.msb);
+                } else {
+                    ranges.push(access);
+                }
+            }
+
+            for access in ranges {
+                let range_width = access.msb - access.lsb + 1;
+                if range_width > 64 {
+                    continue;
+                }
+                let range_writes = object_writes
+                    .iter()
+                    .copied()
+                    .filter(|&(_, offset, width)| {
+                        bit_access(offset, width)
+                            .is_some_and(|write| write.lsb <= access.msb && access.lsb <= write.msb)
+                    })
+                    .collect::<Vec<_>>();
+                let mut blocks = range_writes
+                    .iter()
+                    .map(|&(block, _, _)| block)
+                    .collect::<Vec<_>>();
+                blocks.extend(reads.get(&object).into_iter().flatten().filter_map(
+                    |&(block, read)| {
+                        let overlaps = read.is_none_or(|(offset, width)| {
+                            bit_access(offset, width).is_some_and(|read| {
+                                read.lsb <= access.msb && access.lsb <= read.msb
+                            })
+                        });
+                        overlaps.then_some(block)
+                    },
+                ));
+                blocks.sort_unstable();
+                blocks.dedup();
+                let Some((&first, rest)) = blocks.split_first() else {
+                    continue;
+                };
+                let mut sink = first;
+                let mut valid = true;
+                for &block in rest {
+                    let Some(common) = cfg.postdominators.common_postdominator(sink, block) else {
+                        valid = false;
+                        break;
+                    };
+                    sink = common;
+                }
+                if !valid || cfg.sccs[cfg.scc_for_block[sink]].cyclic {
+                    continue;
+                }
+
+                // Solve pruned accumulator liveness before mutating EIR. Every
+                // block parameter is a real pressure and edge-copy cost.
+                let mut uses = vec![false; self.blocks.len()];
+                let mut definitions = vec![false; self.blocks.len()];
+                for (block_index, block) in self.blocks.iter().enumerate() {
+                    let mut defined = false;
+                    for operation in &block.operations {
+                        let FfBuildOp::Write {
+                            object: written,
+                            target: FfWriteTarget::StagedState,
+                            offset: SIROffset::Static(offset),
+                            width,
+                            ..
+                        } = operation
+                        else {
+                            continue;
+                        };
+                        if *written != object
+                            || !(FinalSinkPlan {
+                                object,
+                                access,
+                                sink: BlockId(sink),
+                            })
+                            .contains(*written, *offset, *width)
+                        {
+                            continue;
+                        }
+                        let complete = *offset == access.lsb && *width == range_width;
+                        if !complete && !defined {
+                            uses[block_index] = true;
+                        }
+                        defined = true;
+                        definitions[block_index] = true;
+                    }
+                    if block_index == sink && !defined {
+                        uses[block_index] = true;
+                    }
+                }
+                let mut live_in = uses.clone();
+                let mut live_out = vec![false; self.blocks.len()];
+                let mut queued = vec![true; self.blocks.len()];
+                let mut worklist = (0..self.blocks.len()).collect::<VecDeque<_>>();
+                while let Some(block) = worklist.pop_front() {
+                    queued[block] = false;
+                    let new_out = cfg.successors[block]
+                        .iter()
+                        .any(|&successor| live_in[successor]);
+                    let new_in = uses[block] || (new_out && !definitions[block]);
+                    if new_out != live_out[block] || new_in != live_in[block] {
+                        live_out[block] = new_out;
+                        live_in[block] = new_in;
+                        for &predecessor in &cfg.predecessors[block] {
+                            if !queued[predecessor] {
+                                queued[predecessor] = true;
+                                worklist.push_back(predecessor);
+                            }
+                        }
+                    }
+                }
+                let boundary_cost = live_in
+                    .iter()
+                    .enumerate()
+                    .filter(|(block, live)| *block != 0 && **live)
+                    .count();
+                // Replacing N fragments by one sink saves N-1 Stores. A direct
+                // sink additionally removes one seed and one commit.
+                let benefit = range_writes.len().saturating_add(1);
+                if boundary_cost > benefit {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    plan: FinalSinkPlan {
+                        object,
+                        access,
+                        sink: BlockId(sink),
+                    },
+                    live_in,
+                    benefit,
+                });
+            }
+        }
+
+        candidates.sort_unstable_by_key(|candidate| {
+            (
+                std::cmp::Reverse(candidate.benefit),
+                candidate.live_in.iter().filter(|live| **live).count(),
+                candidate.plan.object,
+                candidate.plan.access,
+            )
+        });
+        let mut result = Vec::new();
+        let mut boundary_pressure = vec![0usize; self.blocks.len()];
+        for candidate in candidates {
+            // Leave most GPRs available to the value cone scheduled in each
+            // block. Zero-boundary accumulators consume no pressure budget.
+            if candidate
+                .live_in
+                .iter()
+                .enumerate()
+                .any(|(block, live)| *live && block != 0 && boundary_pressure[block] >= 2)
+            {
+                continue;
+            }
+            for (block, live) in candidate.live_in.into_iter().enumerate() {
+                if live && block != 0 {
+                    boundary_pressure[block] += 1;
+                }
+            }
+            result.push(candidate.plan);
+        }
+        result.sort_unstable_by_key(|plan| (plan.object, plan.access));
+        Ok(result)
+    }
+
+    fn analyze_local_liveness(
+        &self,
+        module: &Module,
+        final_sinks: &[FinalSinkPlan],
+    ) -> Result<LocalDataflow, FfEirBuildError> {
         let block_count = self.blocks.len();
-        let mut uses = vec![HashSet::default(); block_count];
-        let mut definitions = vec![HashSet::default(); block_count];
+        let mut uses = vec![HashSet::<LocalSlot>::default(); block_count];
+        let mut definitions = vec![HashSet::<LocalSlot>::default(); block_count];
         for (block_index, block) in self.blocks.iter().enumerate() {
             let mut defined = HashSet::default();
             for operation in &block.operations {
@@ -1214,27 +1341,50 @@ impl FfEirBuilder {
                         source: FfReadSource::ProcessLocal,
                         ..
                     } => {
-                        if !defined.contains(object) {
-                            uses[block_index].insert(*object);
+                        let slot = LocalSlot::Object(*object);
+                        if !defined.contains(&slot) {
+                            uses[block_index].insert(slot);
                         }
                     }
                     FfBuildOp::Write {
                         object,
-                        target: FfWriteTarget::ProcessLocal,
+                        target,
                         offset,
                         width,
                         ..
                     } => {
-                        let object_width = object_type(module, *object)?.width;
-                        let complete =
-                            matches!(offset, SIROffset::Static(0)) && *width == object_width;
-                        if !complete && !defined.contains(object) {
-                            uses[block_index].insert(*object);
+                        let (slot, complete) = if *target == FfWriteTarget::ProcessLocal {
+                            let object_width = object_type(module, *object)?.width;
+                            (
+                                LocalSlot::Object(*object),
+                                matches!(offset, SIROffset::Static(0)) && *width == object_width,
+                            )
+                        } else if let SIROffset::Static(offset) = offset
+                            && let Some((index, plan)) = final_sinks
+                                .iter()
+                                .enumerate()
+                                .find(|(_, plan)| plan.contains(*object, *offset, *width))
+                        {
+                            (
+                                LocalSlot::FinalRange(index),
+                                *offset == plan.access.lsb && *width == plan.width(),
+                            )
+                        } else {
+                            continue;
+                        };
+                        if !complete && !defined.contains(&slot) {
+                            uses[block_index].insert(slot);
                         }
-                        defined.insert(*object);
-                        definitions[block_index].insert(*object);
+                        defined.insert(slot);
+                        definitions[block_index].insert(slot);
                     }
                     _ => {}
+                }
+            }
+            for (index, plan) in final_sinks.iter().enumerate() {
+                let slot = LocalSlot::FinalRange(index);
+                if plan.sink.0 == block_index && !defined.contains(&slot) {
+                    uses[block_index].insert(slot);
                 }
             }
         }
@@ -1285,6 +1435,7 @@ impl FfEirBuilder {
         Ok(LocalDataflow {
             live_in,
             parameter_order,
+            final_sinks: final_sinks.to_vec(),
         })
     }
 }
@@ -1346,8 +1497,9 @@ impl FfBuilder for FfEirBuilder {
 }
 
 struct LocalDataflow {
-    live_in: Vec<HashSet<VarId>>,
-    parameter_order: Vec<Vec<VarId>>,
+    live_in: Vec<HashSet<LocalSlot>>,
+    parameter_order: Vec<Vec<LocalSlot>>,
+    final_sinks: Vec<FinalSinkPlan>,
 }
 
 fn object_type(module: &Module, object: VarId) -> Result<ValueType, FfEirBuildError> {
@@ -1362,6 +1514,20 @@ fn object_type(module: &Module, object: VarId) -> Result<ValueType, FfEirBuildEr
     } else {
         ValueType::logic(width, variable.r#type.signed)
     })
+}
+
+fn local_slot_type(
+    module: &Module,
+    final_sinks: &[FinalSinkPlan],
+    slot: LocalSlot,
+) -> Result<ValueType, FfEirBuildError> {
+    match slot {
+        LocalSlot::Object(object) => object_type(module, object),
+        LocalSlot::FinalRange(index) => {
+            let plan = final_sinks[index];
+            Ok(part_type(object_type(module, plan.object)?, plan.width()))
+        }
+    }
 }
 
 fn value_type(register: &RegisterType) -> ValueType {
@@ -1386,134 +1552,6 @@ fn width_mask(width: usize) -> BigUint {
 fn bit_access(offset: usize, width: usize) -> Option<BitAccess> {
     let msb = offset.checked_add(width)?.checked_sub(1)?;
     Some(BitAccess::new(offset, msb))
-}
-
-fn predicate_and(
-    ir: &mut EventIr,
-    process: ProcessId,
-    region: crate::event_ir::RegionId,
-    lhs: ValueId,
-    rhs: ValueId,
-) -> ValueId {
-    ir.add_value(Value {
-        ty: ValueType::bit(1, false),
-        scope: ValueScope::Process(process),
-        region,
-        kind: ValueKind::Binary {
-            op: crate::ir::BinaryOp::And,
-            lhs,
-            rhs,
-        },
-    })
-}
-
-fn merge_predicates(
-    ir: &mut EventIr,
-    process: ProcessId,
-    region: crate::event_ir::RegionId,
-    predicates: impl IntoIterator<Item = ValueId>,
-) -> ValueId {
-    let mut predicates = predicates.into_iter();
-    let mut result = predicates
-        .next()
-        .expect("a reachable predicated block has an incoming edge");
-    for predicate in predicates {
-        result = ir.add_value(Value {
-            ty: ValueType::bit(1, false),
-            scope: ValueScope::Process(process),
-            region,
-            kind: ValueKind::Binary {
-                op: crate::ir::BinaryOp::Or,
-                lhs: result,
-                rhs: predicate,
-            },
-        });
-    }
-    result
-}
-
-fn merge_predicated_values(
-    ir: &mut EventIr,
-    process: ProcessId,
-    region: crate::event_ir::RegionId,
-    ty: ValueType,
-    incoming: impl IntoIterator<Item = (ValueId, Result<ValueId, FfEirBuildError>)>,
-) -> Result<ValueId, FfEirBuildError> {
-    let mut incoming = incoming.into_iter();
-    let (_, first) = incoming
-        .next()
-        .expect("a reachable predicated block has an incoming value");
-    let mut result = resize_if_needed(ir, ValueScope::Process(process), region, first?, ty);
-    for (predicate, value) in incoming {
-        let value = resize_if_needed(ir, ValueScope::Process(process), region, value?, ty);
-        result = ir.add_value(Value {
-            ty,
-            scope: ValueScope::Process(process),
-            region,
-            kind: ValueKind::Mux {
-                condition: predicate,
-                then_value: value,
-                else_value: result,
-            },
-        });
-    }
-    Ok(result)
-}
-
-fn emit_predicated_effects(
-    ir: &mut EventIr,
-    process: ProcessId,
-    _region: crate::event_ir::RegionId,
-    pending: Vec<PendingPredicatedEffect>,
-    effect_order: &mut FfEffectOrder,
-) -> Vec<EffectId> {
-    let mut stages = Vec::new();
-    for effect in pending {
-        match effect {
-            PendingPredicatedEffect::Stage {
-                region,
-                target,
-                value,
-                guard,
-                priority,
-            } => {
-                let id = EffectId(ir.effects().len());
-                let predecessors = effect_order.stage_predecessors_and_update(&target, id);
-                let actual = ir.add_effect(Effect {
-                    region,
-                    predecessors,
-                    kind: EffectKind::StageNextFf {
-                        process,
-                        target,
-                        value,
-                        guard,
-                        priority,
-                    },
-                });
-                debug_assert_eq!(actual, id);
-                stages.push(actual);
-            }
-            PendingPredicatedEffect::RuntimeEvent {
-                region,
-                site_id,
-                arguments,
-                guard,
-            } => {
-                let predecessors = effect_order.last_observation.iter().copied().collect();
-                let id = ir.add_effect(Effect {
-                    region,
-                    predecessors,
-                    kind: EffectKind::RuntimeEvent {
-                        site_id,
-                        arguments,
-                        guard,
-                    },
-                });
-                effect_order.last_observation = Some(id);
-            }
-        }
-    }
-    stages
 }
 
 fn object_range(
@@ -1602,19 +1640,19 @@ fn edge_arguments(
     target: BlockId,
     event_target: ControlBlockId,
     explicit: &[RegisterId],
-    local_parameter_order: &[Vec<VarId>],
-    locals: &HashMap<VarId, ValueId>,
+    local_parameter_order: &[Vec<LocalSlot>],
+    locals: &HashMap<LocalSlot, ValueId>,
     register_values: &[Option<ValueId>],
 ) -> Result<Vec<ValueId>, FfEirBuildError> {
     let mut arguments = explicit
         .iter()
         .map(|register| register_value(register_values, *register))
         .collect::<Result<Vec<_>, _>>()?;
-    for object in &local_parameter_order[target.0] {
+    for slot in &local_parameter_order[target.0] {
         arguments.push(
             *locals
-                .get(object)
-                .ok_or(FfEirBuildError::MissingLocalValue(*object, target))?,
+                .get(slot)
+                .ok_or(FfEirBuildError::MissingLocalValue(*slot, target))?,
         );
     }
     let parameters = ir.blocks()[event_target.0].parameters.clone();
@@ -1754,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_air_branch_reads_and_stages_directly_to_verified_eir() {
+    fn merges_static_branch_writes_into_one_verified_final_ff_sink() {
         let code = r#"
 module Top (
     clk: input clock,
@@ -1807,20 +1845,21 @@ module Top (
 
         event.verify().unwrap();
         assert_eq!(event.processes().len(), 1);
-        assert_eq!(
-            event
-                .effects()
-                .iter()
-                .filter(|effect| matches!(effect.kind, EffectKind::StageNextFf { .. }))
-                .count(),
-            2
-        );
+        let stages = event
+            .effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                EffectKind::StageNextFf { stage_kind, .. } => Some(*stage_kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stages, vec![FfStageKind::FinalProcessSink]);
         assert!(
             event
-                .values()
+                .blocks()
                 .iter()
-                .any(|value| matches!(value.kind, ValueKind::Mux { .. })),
-            "predicated AIR control must retain its value merge"
+                .any(|block| matches!(block.terminator, Some(ControlTerminator::Branch { .. }))),
+            "AIR control must remain explicit EIR control"
         );
         assert!(
             event
@@ -1828,6 +1867,145 @@ module Top (
                 .iter()
                 .any(|value| matches!(value.kind, ValueKind::ReadClockSnapshot(_)))
         );
+    }
+
+    #[test]
+    fn sinks_a_small_static_range_without_accumulating_its_wide_object() {
+        let code = r#"
+module Top (
+    clk   : input  clock,
+    enable: input  logic,
+    data  : input  logic<32>,
+    q     : output logic<256>,
+) {
+    always_ff (clk) {
+        if enable {
+            q[95:64] = data;
+        } else {
+            q[95:64] = q[95:64];
+        }
+    }
+}
+"#;
+        let module = analyze_module(code);
+        let declaration = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = FfEirBuilder::new();
+        parser.parse_ff_group(&[declaration], &mut builder).unwrap();
+
+        let instance_id = InstanceId(0);
+        let clock = AbsoluteAddr {
+            instance_id,
+            var_id: declaration.clock.id,
+        };
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock,
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let stages = builder
+            .lower_into(&mut event, &module, instance_id, 0, Vec::new())
+            .unwrap();
+        event.add_effect(Effect {
+            region: event.root_region(),
+            predecessors: stages.clone(),
+            kind: EffectKind::CommitFfState { stages },
+        });
+        event.verify().unwrap();
+
+        let stage_targets = event
+            .effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                EffectKind::StageNextFf {
+                    target, stage_kind, ..
+                } => Some((target.clone(), *stage_kind)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stage_targets.len(), 1);
+        assert_eq!(stage_targets[0].0.offset, ValueOffset::Static(64));
+        assert_eq!(stage_targets[0].0.width, 32);
+        assert_eq!(stage_targets[0].0.alias, BitAccess::new(64, 95));
+        assert_eq!(stage_targets[0].1, FfStageKind::FinalProcessSink);
+    }
+
+    #[test]
+    fn marks_only_air_proven_write_only_state_for_direct_publication() {
+        let code = r#"
+module Top (
+    clk : input  clock,
+    data: input  logic<64>,
+) {
+    var write_only: logic<64>;
+    var feedback  : logic<64>;
+    always_ff (clk) {
+        write_only = data;
+        feedback = feedback + data;
+    }
+}
+"#;
+        let module = analyze_module(code);
+        let declaration = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        let write_only = module
+            .variables
+            .values()
+            .find(|variable| variable.token.beg.text.to_string() == "write_only")
+            .unwrap()
+            .id;
+        let feedback = module
+            .variables
+            .values()
+            .find(|variable| variable.token.beg.text.to_string() == "feedback")
+            .unwrap()
+            .id;
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = FfEirBuilder::new();
+        parser.parse_ff_group(&[declaration], &mut builder).unwrap();
+
+        let instance_id = InstanceId(0);
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: AbsoluteAddr {
+                    instance_id,
+                    var_id: declaration.clock.id,
+                },
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        builder
+            .lower_into(&mut event, &module, instance_id, 0, Vec::new())
+            .unwrap();
+        let kinds = event
+            .effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                EffectKind::StageNextFf {
+                    target, stage_kind, ..
+                } => Some((target.object.var_id, *stage_kind)),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(kinds[&write_only], FfStageKind::WriteOnlyPublication);
+        assert_ne!(kinds[&feedback], FfStageKind::WriteOnlyPublication);
     }
 
     #[test]

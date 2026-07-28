@@ -79,29 +79,50 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             let Some((concat_idx, args)) = concat else {
                 continue;
             };
-            let n_args = args.len();
-            let elem_width = width / n_args;
-            if elem_width == 0 || elem_width * n_args != width || n_args < 4 {
+            if args.len() < 4 {
+                continue;
+            }
+            let Some(arg_widths) = args
+                .iter()
+                .map(|source| eu.register_map.get(source).map(RegisterType::width))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if arg_widths.iter().any(|width| *width == 0 || *width > 64)
+                || arg_widths.iter().sum::<usize>() != width
+            {
                 continue;
             }
 
-            // Build 64-bit chunks (Concat args are MSB-first, offsets are LSB-first)
-            let args_lsb: Vec<RegisterId> = args.into_iter().rev().collect();
-            let elems_per_chunk = (64 / elem_width).max(1);
+            // Build <=64-bit chunks. Concat args are MSB-first while Store
+            // offsets grow from the LSB, and ordinary RTL packing can mix
+            // unrelated operand widths.
+            let args_lsb = args.into_iter().zip(arg_widths).rev().collect::<Vec<_>>();
+            let mut chunks = Vec::<Vec<(RegisterId, usize)>>::new();
+            for (source, source_width) in args_lsb {
+                if chunks.last().is_none_or(|chunk| {
+                    chunk.iter().map(|(_, width)| *width).sum::<usize>() + source_width > 64
+                }) {
+                    chunks.push(Vec::new());
+                }
+                chunks
+                    .last_mut()
+                    .expect("a chunk was created for the operand")
+                    .push((source, source_width));
+            }
             let mut insertions: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)> =
                 Vec::new();
-
-            for chunk_start in (0..n_args).step_by(elems_per_chunk) {
-                let chunk_end = (chunk_start + elems_per_chunk).min(n_args);
-                let chunk_elems = &args_lsb[chunk_start..chunk_end];
-                let chunk_offset = offset + chunk_start * elem_width;
-                let chunk_width = (chunk_end - chunk_start) * elem_width;
+            let mut chunk_offset = offset;
+            for chunk_elems in chunks {
+                let chunk_width = chunk_elems.iter().map(|(_, width)| *width).sum::<usize>();
 
                 let mut insts_to_insert: Vec<SIRInstruction<RegionedAbsoluteAddr>> = Vec::new();
 
                 let (store_src, insert_after) = if chunk_elems.len() == 1 {
-                    let pos = def_pos.get(&chunk_elems[0]).copied().unwrap_or(0);
-                    (chunk_elems[0], pos)
+                    let source = chunk_elems[0].0;
+                    let pos = def_pos.get(&source).copied().unwrap_or(0);
+                    (source, pos)
                 } else {
                     reg_counter += 1;
                     let chunk_reg = RegisterId(reg_counter);
@@ -110,11 +131,15 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 
                     let last_pos = chunk_elems
                         .iter()
-                        .filter_map(|r| def_pos.get(r).copied())
+                        .filter_map(|(source, _)| def_pos.get(source).copied())
                         .max()
                         .unwrap_or(0);
 
-                    let concat_args: Vec<RegisterId> = chunk_elems.iter().rev().copied().collect();
+                    let concat_args: Vec<RegisterId> = chunk_elems
+                        .iter()
+                        .rev()
+                        .map(|(source, _)| *source)
+                        .collect();
                     insts_to_insert.push(SIRInstruction::Concat(chunk_reg, concat_args));
 
                     (chunk_reg, last_pos)
@@ -130,6 +155,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                 ));
 
                 insertions.push((insert_after, insts_to_insert));
+                chunk_offset += chunk_width;
             }
 
             plans.push(SplitPlan {
@@ -286,5 +312,80 @@ mod tests {
         assert!(eu.blocks[&BlockId(0)].instructions.iter().any(
             |instruction| matches!(instruction, SIRInstruction::Concat(dst, _) if *dst == inner)
         ));
+    }
+
+    #[test]
+    fn splits_a_mixed_width_concat_by_actual_operand_width() {
+        let addr = make_addr();
+        let widths = [1, 6, 64, 5];
+        let mut register_map = crate::HashMap::default();
+        let mut instructions = Vec::new();
+        for (index, width) in widths.into_iter().enumerate() {
+            let register = RegisterId(index);
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(register, SIRValue::new(index as u64)));
+        }
+        let packed = RegisterId(4);
+        register_map.insert(packed, RegisterType::Logic { width: 76 });
+        instructions.push(SIRInstruction::Concat(
+            packed,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)],
+        ));
+        instructions.push(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(0),
+            76,
+            packed,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut blocks = crate::HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        split_coalesced_stores(&mut eu);
+
+        eu.verify_result().unwrap();
+        let mut stores = eu.blocks[&BlockId(0)]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, SIROffset::Static(offset), width, source, _, _) => {
+                    Some((*offset, *width, *source))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        stores.sort_unstable_by_key(|(offset, ..)| *offset);
+        assert_eq!(
+            stores
+                .iter()
+                .map(|(offset, width, _)| (*offset, *width))
+                .collect::<Vec<_>>(),
+            vec![(0, 5), (5, 64), (69, 7)]
+        );
+        assert!(
+            stores
+                .iter()
+                .all(|(_, width, source)| { eu.register_map[source].width() >= *width })
+        );
     }
 }

@@ -29,6 +29,11 @@ impl CompilationTrace {
         self.analyzer_ir.clone()
     }
 
+    /// Format the complete FF AIR captured before EventIR construction.
+    pub fn format_ff_air(&self) -> Option<String> {
+        self.ff_air.clone()
+    }
+
     /// Alias for format_post_optimized_sir
     pub fn format_program(&self) -> Option<String> {
         self.format_post_optimized_sir()
@@ -55,6 +60,9 @@ impl CompilationTrace {
         if let Some(ir) = self.format_analyzer_ir() {
             println!("=== Analyzer IR ===\n{}", ir);
         }
+        if let Some(air) = self.format_ff_air() {
+            println!("=== FF AIR ===\n{}", air);
+        }
         if let Some(clif) = &self.pre_optimized_clif {
             println!("=== Pre-optimized CLIF ===\n{}", clif);
         }
@@ -76,6 +84,43 @@ pub fn format_program(program: &Program) -> String {
 
     output.push_str("=== Evaluation Flip-Flops (eval_apply_ffs) ===\n");
     for (addr, execution_units) in &program.eval_apply_ffs {
+        output.push_str(&format!(
+            "Trigger Group: {} ({})\n",
+            program.get_path(addr),
+            addr
+        ));
+        for (idx, eu) in execution_units.iter().enumerate() {
+            output.push_str(&format!("  Execution Unit {}:\n", idx));
+            output.push_str(&format!("    Entry Block: {}\n", eu.entry_block_id.0));
+            output.push_str("    Registers:\n");
+            let mut reg_ids: Vec<_> = eu.register_map.keys().collect();
+            reg_ids.sort();
+            for id in reg_ids {
+                let ty = &eu.register_map[id];
+                match ty {
+                    crate::ir::RegisterType::Logic { width } => {
+                        output.push_str(&format!("      r{}: logic<{}>\n", id.0, width));
+                    }
+                    crate::ir::RegisterType::Bit { width, signed } => {
+                        let s = if *signed { "signed " } else { "" };
+                        output.push_str(&format!("      r{}: {}bit<{}>\n", id.0, s, width));
+                    }
+                }
+            }
+            for block_id in sir_dominance_order(eu) {
+                let block = &eu.blocks[&block_id];
+                output.push_str(&format!("    b{}:\n", block.id.0));
+                append_sir_block_params(&mut output, &block.params, "      ");
+                for inst in &block.instructions {
+                    output.push_str(&format!("      {}\n", format_instruction(inst, program)));
+                }
+                output.push_str(&format!("      {}\n", block.terminator));
+            }
+        }
+    }
+
+    output.push_str("\n=== Fused Comb/FF Projections (eval_comb_apply_ffs) ===\n");
+    for (addr, execution_units) in &program.eval_comb_apply_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),

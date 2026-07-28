@@ -395,14 +395,15 @@ module Top (
     assert_eq!(program.clock_event_irs.len(), 1);
     let event = program.clock_event_irs.values().next().unwrap();
     assert_eq!(event.processes().len(), 1);
-    assert_eq!(
-        event
-            .effects()
-            .iter()
-            .filter(|effect| matches!(effect.kind, crate::event_ir::EffectKind::StageNextFf { .. }))
-            .count(),
-        2
-    );
+    let stages = event
+        .effects()
+        .iter()
+        .filter_map(|effect| match effect.kind {
+            crate::event_ir::EffectKind::StageNextFf { stage_kind, .. } => Some(stage_kind),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages, vec![crate::event_ir::FfStageKind::FinalProcessSink]);
 }
 
 #[test]

@@ -22,6 +22,7 @@ pub struct TraceOptions {
     pub atomized_comb_blocks: bool,
     pub flattened_comb_blocks: bool,
     pub scheduled_units: bool,
+    pub ff_air: bool,
     pub pre_optimized_sir: bool,
     pub post_optimized_sir: bool,
     pub analyzer_ir: bool,
@@ -41,6 +42,8 @@ pub struct CompilationTrace {
     pub atomized_comb_blocks: Option<(Vec<LogicPath<AbsoluteAddr>>, SLTNodeArena<AbsoluteAddr>)>,
     pub flattened_comb_blocks: Option<(Vec<LogicPath<AbsoluteAddr>>, SLTNodeArena<AbsoluteAddr>)>,
     pub scheduled_units: Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Complete FF AIR recorded before EventIR/SSA construction.
+    pub ff_air: Option<String>,
     pub pre_optimized_sir: Option<crate::ir::Program>,
     pub post_optimized_sir: Option<crate::ir::Program>,
     /// SIR after native EU merging, StateSSA promotion, and merged-chain

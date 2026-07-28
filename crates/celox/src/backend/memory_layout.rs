@@ -519,6 +519,7 @@ pub(crate) fn collect_strided_array_layouts(
         .eval_comb
         .iter()
         .chain(program.eval_apply_ffs.values().flatten())
+        .chain(program.eval_comb_apply_ffs.values().flatten())
         .chain(program.eval_only_ffs.values().flatten())
         .chain(program.apply_ffs.values().flatten())
     {
@@ -584,6 +585,7 @@ fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
         .eval_apply_ffs
         .values()
         .flat_map(|v| v.iter())
+        .chain(program.eval_comb_apply_ffs.values().flat_map(|v| v.iter()))
         .chain(program.eval_only_ffs.values().flat_map(|v| v.iter()))
         .chain(program.apply_ffs.values().flat_map(|v| v.iter()));
     for eu in ff_eus {

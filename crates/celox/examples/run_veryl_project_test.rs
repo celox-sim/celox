@@ -85,18 +85,43 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         fs::create_dir_all(&output_dir)?;
         let trace_result = builder
+            .trace_ff_air()
             .trace_pre_optimized_sir()
             .trace_post_optimized_sir()
             .trace_mir()
             .build_with_trace();
         let celox::CompilationTraceResult { res, trace } = trace_result;
-        res.map_err(|error| format!("Celox build failed: {error:?}"))?;
         let pre_optimized_sir = trace
             .format_pre_optimized_sir()
             .ok_or("pre-optimized SIR trace was not captured")?;
+        let ff_air = trace
+            .format_ff_air()
+            .ok_or("FF AIR trace was not captured")?;
         let sir = trace
             .format_post_optimized_sir()
             .ok_or("post-optimized SIR trace was not captured")?;
+        let pre_sir_path = output_dir.join("pre_optimized.sir");
+        let ff_air_path = output_dir.join("ff.air");
+        let sir_path = output_dir.join("post_optimized.sir");
+        fs::write(&pre_sir_path, &pre_optimized_sir)?;
+        fs::write(&ff_air_path, &ff_air)?;
+        fs::write(&sir_path, &sir)?;
+        eprintln!(
+            "wrote pre-optimized SIR ({} bytes) to {}",
+            pre_optimized_sir.len(),
+            pre_sir_path.display()
+        );
+        eprintln!(
+            "wrote FF AIR ({} bytes) to {}",
+            ff_air.len(),
+            ff_air_path.display()
+        );
+        eprintln!(
+            "wrote post-optimized SIR ({} bytes) to {}",
+            sir.len(),
+            sir_path.display()
+        );
+        res.map_err(|error| format!("Celox build failed: {error:?}"))?;
         let native_sir = trace
             .format_native_optimized_sir()
             .ok_or("native optimized SIR trace was not captured")?;
@@ -107,28 +132,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         let state_layout = trace
             .native_state_layout
             .ok_or("native state-layout analysis was not captured")?;
-        let pre_sir_path = output_dir.join("pre_optimized.sir");
-        let sir_path = output_dir.join("post_optimized.sir");
         let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
         let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
         let state_layout_path = output_dir.join("native_state_layout.txt");
-        fs::write(&pre_sir_path, &pre_optimized_sir)?;
-        fs::write(&sir_path, &sir)?;
         fs::write(&native_sir_path, &native_sir)?;
         fs::write(&mir_path, &mir)?;
         fs::write(&reactive_graph_path, &reactive_graph)?;
         fs::write(&state_layout_path, &state_layout)?;
-        eprintln!(
-            "wrote pre-optimized SIR ({} bytes) to {}",
-            pre_optimized_sir.len(),
-            pre_sir_path.display()
-        );
-        eprintln!(
-            "wrote post-optimized SIR ({} bytes) to {}",
-            sir.len(),
-            sir_path.display()
-        );
         eprintln!(
             "wrote native optimized SIR ({} bytes) to {}",
             native_sir.len(),

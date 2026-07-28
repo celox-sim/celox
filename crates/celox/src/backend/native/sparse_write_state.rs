@@ -172,11 +172,16 @@ fn finish_zero_fill_group(
     let Some(&logical_width) = layout.widths.get(&object) else {
         return;
     };
-    let Some(sparse) = layout.sparse_layouts.get(&object) else {
-        return;
+    let multiple_native_chunks = if address.region == crate::ir::STABLE_REGION {
+        layout.plane_size(&object) > 8
+    } else {
+        layout
+            .sparse_layouts
+            .get(&object)
+            .is_some_and(|sparse| sparse.chunk_count > 1)
     };
     // A single native chunk already has a cheaper dedicated lowering.
-    if logical_width == 0 || sparse.chunk_count <= 1 || candidates.is_empty() {
+    if logical_width == 0 || !multiple_native_chunks || candidates.is_empty() {
         return;
     }
 
@@ -377,7 +382,8 @@ fn find_sparse_zero_fills(
                 triggers,
                 capture_sites,
             ) if is_sparse_origin_zero_fill_region(address.region)
-                && layout.sparse_layouts.contains_key(&address.absolute_addr())
+                && (address.region == crate::ir::STABLE_REGION
+                    || layout.sparse_layouts.contains_key(&address.absolute_addr()))
                 && *width != 0
                 && triggers.is_empty()
                 && capture_sites.is_empty() =>
@@ -403,7 +409,8 @@ fn find_sparse_zero_fills(
                     triggers,
                     capture_sites,
                 ) if is_sparse_origin_zero_fill_region(address.region)
-                    && layout.sparse_layouts.contains_key(&address.absolute_addr())
+                    && (address.region == crate::ir::STABLE_REGION
+                        || layout.sparse_layouts.contains_key(&address.absolute_addr()))
                     && *width != 0
                     && triggers.is_empty()
                     && capture_sites.is_empty()
@@ -1592,6 +1599,25 @@ mod tests {
         ]);
 
         let plans = find_sparse_zero_fills(&unit, &zero_fill_layout());
+        assert!(plans.is_member(BlockId(0), 1));
+        assert!(plans.is_member(BlockId(0), 2));
+        assert_eq!(plans.root(BlockId(0), 2), Some(address(STABLE_REGION, 0)));
+        assert!(plans.is_dead_zero_definition(BlockId(0), 0));
+    }
+
+    #[test]
+    fn direct_stable_zero_fill_does_not_require_a_sparse_home() {
+        let unit = zero_fill_unit(vec![
+            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            zero_store_in_region(STABLE_REGION, 0, 0),
+            zero_store_in_region(STABLE_REGION, 0, 64),
+        ]);
+        let mut layout = zero_fill_layout();
+        layout
+            .sparse_layouts
+            .remove(&address(STABLE_REGION, 0).absolute_addr());
+
+        let plans = find_sparse_zero_fills(&unit, &layout);
         assert!(plans.is_member(BlockId(0), 1));
         assert!(plans.is_member(BlockId(0), 2));
         assert_eq!(plans.root(BlockId(0), 2), Some(address(STABLE_REGION, 0)));

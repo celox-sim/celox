@@ -869,6 +869,12 @@ impl From<crate::backend::native::regalloc::RegallocError> for ChainedEmitError 
     }
 }
 
+impl From<SsaDestructionError> for ChainedEmitError {
+    fn from(error: SsaDestructionError) -> Self {
+        Self::SsaDestruction(error)
+    }
+}
+
 impl From<IcedError> for ChainedEmitError {
     fn from(error: IcedError) -> Self {
         Self::Assembly(error)
@@ -4863,16 +4869,6 @@ pub fn emit_chained_eus(
     emit_chained_eu_list(units, layout, four_state, label, None)
 }
 
-pub(crate) fn emit_chained_eus_with_trace(
-    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    trace: &mut NativeFunctionTrace,
-) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_list(units, layout, four_state, label, Some(trace))
-}
-
 fn emit_chained_eu_list(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &crate::backend::MemoryLayout,
@@ -4884,46 +4880,7 @@ fn emit_chained_eu_list(
     emit_chained_eu_refs(&unit_refs, layout, four_state, label, None, trace)
 }
 
-/// Compile the established combinational schedule and one settled-state FF
-/// projection as one optimization/allocation unit.
-pub fn emit_comb_eval_apply_eus(
-    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-) -> Result<EmitResult, ChainedEmitError> {
-    let units = comb_units.iter().chain(ff_units).collect::<Vec<_>>();
-    emit_chained_eu_refs(
-        &units,
-        layout,
-        four_state,
-        label,
-        Some(comb_units.len()),
-        None,
-    )
-}
-
-pub(crate) fn emit_comb_eval_apply_eus_with_trace(
-    comb_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    ff_units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    trace: &mut NativeFunctionTrace,
-) -> Result<EmitResult, ChainedEmitError> {
-    let units = comb_units.iter().chain(ff_units).collect::<Vec<_>>();
-    emit_chained_eu_refs(
-        &units,
-        layout,
-        four_state,
-        label,
-        Some(comb_units.len()),
-        Some(trace),
-    )
-}
-
-fn emit_chained_eu_refs(
+pub(crate) fn emit_chained_eu_refs(
     units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
@@ -4943,6 +4900,39 @@ fn emit_chained_eu_refs(
 
     // SIR-level EU merge: combine all EUs into one SIR EU
     let merge_start = timing.then(crate::timing::now);
+    for (unit_index, unit) in units.iter().enumerate() {
+        if let Err(error) = unit.verify_result() {
+            let context = error
+                .block
+                .and_then(|block| unit.blocks.get(&block))
+                .map(|block| {
+                    let source = error
+                        .instruction
+                        .and_then(|instruction| block.instructions.get(instruction))
+                        .and_then(|instruction| match instruction {
+                            crate::ir::SIRInstruction::Store(_, _, _, source, _, _) => {
+                                Some(*source)
+                            }
+                            _ => None,
+                        });
+                    let definition = source.and_then(|source| {
+                        unit.blocks.values().find_map(|block| {
+                            block
+                                .instructions
+                                .iter()
+                                .find(|instruction| instruction.defined_register() == Some(source))
+                                .map(|instruction| format!("; definition: {instruction}"))
+                        })
+                    });
+                    format!("\n{block}{}", definition.as_deref().unwrap_or_default())
+                })
+                .unwrap_or_default();
+            return Err(ChainedEmitError::Analysis {
+                phase: "before native source-unit merge",
+                message: format!("{label} source unit {unit_index}: {error}{context}"),
+            });
+        }
+    }
     let (mut sir_eu, merge_provenance) = crate::ir::merge_sir_eu_refs_with_provenance(units);
     let sir_boundaries = merge_provenance.unit_entries[1..].to_vec();
     let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
@@ -4952,22 +4942,22 @@ fn emit_chained_eu_refs(
     verify_sir(&sir_eu, "before native StateSSA")?;
     if let Some(first_ff_unit) = first_ff_unit {
         let dse_start = timing.then(crate::timing::now);
-        let removed = crate::optimizer::coalescing::eliminate_dead_fused_comb_publications(
+        let removed = crate::optimizer::coalescing::eliminate_unobserved_comb_state_stores(
             &mut sir_eu,
             &merge_provenance,
             first_ff_unit,
         )
         .map_err(|message| ChainedEmitError::Analysis {
-            phase: "fused comb publication DSE",
+            phase: "comb/FF state-publication DSE",
             message,
         })?;
         if removed != 0 {
             crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-            verify_sir(&sir_eu, "after fused comb publication DSE")?;
+            verify_sir(&sir_eu, "after comb/FF state-publication DSE")?;
         }
         if let Some(start) = dse_start {
             eprintln!(
-                "[native-timing] fused comb publication DSE removed={} elapsed={:?}",
+                "[native-timing] comb/FF state-publication DSE removed={} elapsed={:?}",
                 removed,
                 start.elapsed()
             );
@@ -5169,24 +5159,6 @@ fn emit_chained_eu_refs(
             start.elapsed()
         );
     }
-    if copy_stats {
-        let stats = ra.ssa_destruction.stats();
-        eprintln!(
-            "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} register_swaps={} cycle_breaks={} temporary_cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
-            stats.edges,
-            stats.rows,
-            stats.identity_rows,
-            stats.effective_copies,
-            stats.identity_only_edges,
-            stats.direct_moves,
-            stats.register_swaps,
-            stats.cycle_breaks,
-            stats.temporary_cycle_breaks,
-            stats.ready_queue_pops,
-            stats.dependency_releases,
-            stats.max_effective_copies_per_edge,
-        );
-    }
     let post_regalloc_start = timing.then(crate::timing::now);
     super::mir_opt::post_regalloc_peephole(&mut mfunc);
     super::mir_opt::post_regalloc_cleanup(&mut mfunc);
@@ -5234,6 +5206,29 @@ fn emit_chained_eu_refs(
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
     dump_native_block_context(label, "after_regalloc", &sir_eu, &mfunc);
+    // Post-allocation peepholes and CFG cleanup can change the physical value
+    // present on a phi edge. Build the edge-copy plan from this final MIR, not
+    // from the pre-cleanup allocation input.
+    let ssa_destruction = SsaDestructionPlan::build(&mfunc, &ra.assignment)?;
+    ssa_destruction.verify(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+    if copy_stats {
+        let stats = ssa_destruction.stats();
+        eprintln!(
+            "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} register_swaps={} cycle_breaks={} temporary_cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
+            stats.edges,
+            stats.rows,
+            stats.identity_rows,
+            stats.effective_copies,
+            stats.identity_only_edges,
+            stats.direct_moves,
+            stats.register_swaps,
+            stats.cycle_breaks,
+            stats.temporary_cycle_breaks,
+            stats.ready_queue_pops,
+            stats.dependency_releases,
+            stats.max_effective_copies_per_edge,
+        );
+    }
     let emit_start = timing.then(crate::timing::now);
     let result = emit_with_plan(
         &mfunc,
@@ -5243,7 +5238,7 @@ fn emit_chained_eu_refs(
             .merged_total_size
             .checked_add(layout.triggered_bits_total_size)
             .expect("native simulation-state size overflow"),
-        &ra.ssa_destruction,
+        &ssa_destruction,
     )?;
     if let Some(trace) = trace {
         trace.disassembly = disassemble_with_block_offsets(

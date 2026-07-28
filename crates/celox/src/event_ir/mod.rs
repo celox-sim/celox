@@ -19,6 +19,7 @@ pub use comb::{
     CombImportInvariant, CombLocalInput, CombRecipe, CombRecipeTarget, CombSnapshotInput,
     CombSnapshotKind,
 };
+pub(crate) use lower::ordered_clock_processes;
 pub use lower::{EventProjectionError, lower_event_projection};
 pub use verify::{EventIrError, EventIrInvariant};
 
@@ -439,6 +440,20 @@ pub struct Effect {
     pub kind: EffectKind,
 }
 
+/// Publication shape of an FF state update.
+///
+/// `Fragment` preserves an individual AIR write. `FinalProcessSink` is the
+/// single SSA-merged next-state value for one object at the process exit.
+/// `WriteOnlyPublication` is an AIR-proved family whose process never reads
+/// the target object. The latter two may be published directly once every
+/// old-state reader in other processes has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfStageKind {
+    Fragment,
+    WriteOnlyPublication,
+    FinalProcessSink,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectKind {
     StageNextFf {
@@ -447,6 +462,7 @@ pub enum EffectKind {
         value: ValueId,
         guard: Option<ValueId>,
         priority: usize,
+        stage_kind: FfStageKind,
     },
     WritePersistentMemory {
         object: AbsoluteAddr,

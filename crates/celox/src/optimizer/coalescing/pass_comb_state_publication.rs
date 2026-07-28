@@ -37,12 +37,14 @@ fn mark_reaching(state: &StateSsa, version: MemoryVersionId, live: &mut [bool]) 
     }
 }
 
-/// Eliminate stable-state publications from the combinational prefix of a
-/// fused comb/FF function when their MemorySSA versions cannot reach a load.
+/// Remove stable-state Stores in the combinational prefix which are not
+/// observed by the FF sink.
 ///
-/// The fused call marks combinational state dirty on return, so a prefix Store
-/// is not an externally observable exit value.  Trigger/capture Stores,
-/// dynamic aliases, invalid slot shapes, and FF-suffix Stores stay explicit.
+/// A combined comb/FF call does not publish settled combinational state on
+/// return: the clock transition makes that state dirty.  Consequently a comb
+/// Store is required only when its exact StateSSA version reaches a load in
+/// the FF suffix (or another read before it is overwritten).  Stores carrying
+/// runtime effects and accesses with imprecise aliases remain explicit.
 pub(super) fn eliminate(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     provenance: &crate::ir::SirMergeProvenance,
@@ -50,10 +52,11 @@ pub(super) fn eliminate(
 ) -> Result<usize, String> {
     if first_ff_unit == 0 || first_ff_unit >= provenance.unit_entries.len() {
         return Err(format!(
-            "invalid fused phase cut: first_ff_unit={first_ff_unit} units={}",
+            "invalid comb/FF phase cut: first_ff_unit={first_ff_unit} units={}",
             provenance.unit_entries.len()
         ));
     }
+
     let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
     let state =
         StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| error.to_string())?;
@@ -73,8 +76,8 @@ pub(super) fn eliminate(
         }
     }
 
-    // An imprecise/overlapping slot cannot be rewritten from its exact
-    // MemorySSA name. Keep every definition touching that slot.
+    // If StateSSA cannot name a range precisely, retain all definitions for
+    // that slot.  Deleting an imprecise state transition is never a fallback.
     for (slot, facts) in state.slots.iter().enumerate() {
         if !(facts.escapes || facts.has_kill || facts.has_effectful_store) {
             continue;
@@ -98,8 +101,9 @@ pub(super) fn eliminate(
         }
     }
 
-    // If StateSSA rejected a shape, only delete it when no static or dynamic
-    // read can alias it at all.
+    // StateSSA intentionally rejects some access shapes.  Such a Store can
+    // still be removed when no static or dynamic read in the combined
+    // function can alias it.
     let mut static_reads = HashMap::<RegionedAbsoluteAddr, Vec<StaticRange>>::default();
     let mut dynamic_reads = HashSet::<RegionedAbsoluteAddr>::default();
     for block in eu.blocks.values() {
@@ -161,12 +165,14 @@ pub(super) fn eliminate(
             {
                 continue;
             }
+
             if let Some(accesses) = definitions.get(&(block_id, instruction)) {
                 if accesses.iter().all(|&access| !live[access]) {
                     remove.insert((block_id, instruction));
                 }
                 continue;
             }
+
             let range = StaticRange {
                 addr: *addr,
                 start: *start,
@@ -250,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_comb_publications_reaching_the_ff_suffix() {
+    fn keeps_only_comb_state_observed_by_the_ff_sink() {
         let comb = unit(vec![store(0, 0), store(1, 1)]);
         let ff = unit(vec![SIRInstruction::Load(
             RegisterId(0),

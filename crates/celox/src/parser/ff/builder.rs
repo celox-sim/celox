@@ -21,6 +21,7 @@ pub(crate) enum FfReadSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FfWriteTarget {
     StagedState,
+    WriteOnlyPublication,
     ProcessLocal,
 }
 

@@ -442,6 +442,11 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    pub fn trace_ff_air(mut self) -> Self {
+        self.options.trace.ff_air = true;
+        self
+    }
+
     pub fn trace_pre_optimized_sir(mut self) -> Self {
         self.options.trace.pre_optimized_sir = true;
         self

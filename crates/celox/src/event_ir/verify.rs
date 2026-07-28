@@ -1079,6 +1079,7 @@ mod tests {
                 value: next,
                 guard: None,
                 priority: 0,
+                stage_kind: crate::event_ir::FfStageKind::Fragment,
             },
         });
         ir.add_effect(Effect {
@@ -1165,6 +1166,7 @@ mod tests {
                 value: next,
                 guard: None,
                 priority: 0,
+                stage_kind: crate::event_ir::FfStageKind::Fragment,
             },
         });
         ir.add_effect(Effect {

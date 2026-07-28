@@ -1,9 +1,14 @@
-use std::collections::BTreeMap;
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
+};
 
 use celox_analysis::cfg::{CfgError, ForwardControlFlowGraph};
 use celox_analysis::dag_schedule::{
     DagScheduleError, schedule_min_live_values_in_domains_with_weights,
 };
+use celox_analysis::graph::StronglyConnectedComponents;
+use celox_analysis::interval::{DisjointIntervalMap, ExactInterval};
 use num_bigint::BigUint;
 use num_traits::One;
 use thiserror::Error;
@@ -131,7 +136,7 @@ pub fn lower_event_projection(
 
     let selected_processes = active_processes(ir, trigger)?;
     let selected = selected_processes.iter().copied().collect::<HashSet<_>>();
-    let state = StatePublicationPlan::build(ir, &selected);
+    let state = StatePublicationPlan::build(ir, &selected_processes, &selected);
     if projection == EventProjection::ApplyClock {
         return Ok(lower_apply_projection(&state));
     }
@@ -162,7 +167,10 @@ fn active_processes(
         });
     };
     if trigger == *clock {
-        return Ok((0..ir.processes().len()).map(ProcessId).collect());
+        return Ok(ordered_clock_processes(
+            ir,
+            (0..ir.processes().len()).map(ProcessId).collect(),
+        ));
     }
     if !resets.contains(&trigger) {
         return Err(EventProjectionError::InvalidTrigger {
@@ -170,38 +178,1690 @@ fn active_processes(
             domain: ir.domain().clone(),
         });
     }
-    Ok(ir
-        .processes()
+    Ok(ordered_clock_processes(
+        ir,
+        ir.processes()
+            .iter()
+            .enumerate()
+            .filter_map(|(process, item)| {
+                item.resets.contains(&trigger).then_some(ProcessId(process))
+            })
+            .collect(),
+    ))
+}
+
+/// Order independent FF processes from state consumers toward state
+/// producers. Every RHS observes the immutable event-entry snapshot, so this
+/// changes no HDL value. It does shorten the lifetime of an upstream stage's
+/// old state in an acyclic pipeline. Processes with externally observable
+/// effects delimit reorderable runs.
+pub(crate) fn ordered_clock_processes(ir: &EventIr, selected: Vec<ProcessId>) -> Vec<ProcessId> {
+    let selected_set = selected.iter().copied().collect::<HashSet<_>>();
+    let mut process_by_region = HashMap::default();
+    for block in ir.blocks() {
+        process_by_region.insert(block.region, block.process);
+    }
+    let mut pure = vec![true; ir.processes().len()];
+    let mut writes = vec![Vec::<super::ObjectRange>::new(); ir.processes().len()];
+    for effect in ir.effects() {
+        let Some(&process) = process_by_region.get(&effect.region) else {
+            continue;
+        };
+        if !selected_set.contains(&process) {
+            continue;
+        }
+        match &effect.kind {
+            EffectKind::StageNextFf { target, .. } => {
+                writes[process.0].push(super::ObjectRange::new(target.object, target.alias));
+            }
+            EffectKind::CommitFfState { .. } => {}
+            _ => pure[process.0] = false,
+        }
+    }
+
+    let mut result = Vec::with_capacity(selected.len());
+    let mut run = Vec::new();
+    let flush = |run: &mut Vec<ProcessId>, result: &mut Vec<ProcessId>| {
+        if run.is_empty() {
+            return;
+        }
+        result.extend(order_pure_process_run(ir, run, &writes));
+        run.clear();
+    };
+    for process in selected {
+        if pure[process.0] {
+            run.push(process);
+        } else {
+            flush(&mut run, &mut result);
+            result.push(process);
+        }
+    }
+    flush(&mut run, &mut result);
+    let accesses = collect_process_state_accesses(ir, &result);
+    let mut repaired = Vec::with_capacity(result.len());
+    let mut start = 0;
+    while start < result.len() {
+        if !pure[result[start].0] {
+            repaired.push(result[start]);
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < result.len() && pure[result[end].0] {
+            end += 1;
+        }
+        repaired.extend(repair_publication_order(
+            ir,
+            result[start..end].to_vec(),
+            &accesses,
+            &pure,
+        ));
+        start = end;
+    }
+    repaired
+}
+
+fn interleavable_process_runs(ir: &EventIr, processes: &[ProcessId]) -> Vec<Vec<ProcessId>> {
+    let is_interleavable = |process: ProcessId| {
+        let item = &ir.processes()[process.0];
+        if item.blocks.len() != 1 {
+            return false;
+        }
+        let block = item.blocks[0];
+        if !matches!(
+            ir.blocks()[block.0].terminator,
+            Some(ControlTerminator::Return)
+        ) {
+            return false;
+        }
+        ir.effects()
+            .iter()
+            .filter(|effect| effect.region == ir.blocks()[block.0].region)
+            .all(|effect| {
+                matches!(
+                    effect.kind,
+                    EffectKind::StageNextFf { process: owner, .. } if owner == process
+                )
+            })
+    };
+
+    let mut result = Vec::new();
+    let mut run = Vec::new();
+    for &process in processes {
+        if is_interleavable(process) {
+            run.push(process);
+        } else {
+            if !run.is_empty() {
+                result.push(std::mem::take(&mut run));
+            }
+            result.push(vec![process]);
+        }
+    }
+    if !run.is_empty() {
+        result.push(run);
+    }
+    result
+}
+
+#[derive(Debug, Default)]
+struct ProcessStateAccesses {
+    static_reads: Vec<super::ObjectRange>,
+    dynamic_reads: Vec<AbsoluteAddr>,
+    comb_definitions: Vec<CombDefinitionId>,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum StateDependencyNode {
+    Value(ValueId),
+    CombDefinition(CombDefinitionId),
+}
+
+struct StateDependencyResolver<'a> {
+    ir: &'a EventIr,
+    writer_index: DisjointIntervalMap<AbsoluteAddr, usize>,
+    writers_by_object: BTreeMap<AbsoluteAddr, Vec<usize>>,
+    cache: HashMap<StateDependencyNode, Vec<usize>>,
+}
+
+impl<'a> StateDependencyResolver<'a> {
+    fn new(ir: &'a EventIr, writers: &[(EffectId, super::ObjectRange)]) -> Option<Self> {
+        let mut intervals = Vec::with_capacity(writers.len());
+        let mut writers_by_object = BTreeMap::<AbsoluteAddr, Vec<usize>>::new();
+        for (local, &(_, range)) in writers.iter().enumerate() {
+            intervals.push(ExactInterval {
+                object: range.object,
+                start: range.access.lsb,
+                length: range.width()?,
+                value: local,
+            });
+            writers_by_object
+                .entry(range.object)
+                .or_default()
+                .push(local);
+        }
+        Some(Self {
+            ir,
+            writer_index: DisjointIntervalMap::try_new(intervals).ok()?,
+            writers_by_object,
+            cache: HashMap::default(),
+        })
+    }
+
+    fn resolve_roots(&mut self, roots: &[ValueId]) -> Option<Vec<usize>> {
+        let mut result = Vec::new();
+        for &value in roots {
+            self.resolve(StateDependencyNode::Value(value))?;
+            result.extend(&self.cache[&StateDependencyNode::Value(value)]);
+        }
+        result.sort_unstable();
+        result.dedup();
+        Some(result)
+    }
+
+    fn resolve(&mut self, root: StateDependencyNode) -> Option<()> {
+        let mut active = HashSet::default();
+        let mut stack = vec![(root, false)];
+        while let Some((node, finish)) = stack.pop() {
+            if self.cache.contains_key(&node) {
+                continue;
+            }
+            if finish {
+                active.remove(&node);
+                let mut dependencies = self.direct_dependencies(node)?;
+                for child in self.children(node) {
+                    dependencies.extend(self.cache.get(&child)?);
+                }
+                dependencies.sort_unstable();
+                dependencies.dedup();
+                self.cache.insert(node, dependencies);
+                continue;
+            }
+            if !active.insert(node) {
+                // A loop-carried value needs an explicit event-entry phi
+                // materialization before it can participate in direct
+                // publication. Retain WORKING publication for this process.
+                return None;
+            }
+            stack.push((node, true));
+            for child in self.children(node).into_iter().rev() {
+                if self.cache.contains_key(&child) {
+                    continue;
+                }
+                if active.contains(&child) {
+                    return None;
+                }
+                stack.push((child, false));
+            }
+        }
+        Some(())
+    }
+
+    fn children(&self, node: StateDependencyNode) -> Vec<StateDependencyNode> {
+        match node {
+            StateDependencyNode::Value(value) => {
+                let mut children = Vec::new();
+                match &self.ir.values()[value.0].kind {
+                    ValueKind::ReadCombDefinition { definition, .. } => {
+                        children.push(StateDependencyNode::CombDefinition(*definition));
+                    }
+                    kind => kind.visit_operands(|operand| {
+                        children.push(StateDependencyNode::Value(operand));
+                    }),
+                }
+                children
+            }
+            StateDependencyNode::CombDefinition(definition) => {
+                let recipe = &self.ir.comb_graph().recipes()
+                    [self.ir.comb_definitions()[definition.0].recipe.0];
+                recipe
+                    .dependencies
+                    .iter()
+                    .map(|dependency| StateDependencyNode::CombDefinition(dependency.definition))
+                    .collect()
+            }
+        }
+    }
+
+    fn direct_dependencies(&self, node: StateDependencyNode) -> Option<Vec<usize>> {
+        let mut result = Vec::new();
+        let mut add_static = |range: super::ObjectRange| -> Option<()> {
+            result.extend(
+                self.writer_index
+                    .overlapping(&range.object, range.access.lsb, range.width()?)
+                    .ok()?,
+            );
+            Some(())
+        };
+        match node {
+            StateDependencyNode::Value(value) => match &self.ir.values()[value.0].kind {
+                ValueKind::ReadClockSnapshot(range) => add_static(*range)?,
+                ValueKind::ReadPersistentMemory {
+                    object,
+                    offset: ValueOffset::Static(offset),
+                    width,
+                } => {
+                    let msb = offset.checked_add(width.saturating_sub(1))?;
+                    add_static(super::ObjectRange::new(
+                        *object,
+                        super::BitAccess::new(*offset, msb),
+                    ))?;
+                }
+                ValueKind::ReadPersistentMemory { object, .. } => {
+                    if let Some(writers) = self.writers_by_object.get(object) {
+                        result.extend(writers);
+                    }
+                }
+                _ => {}
+            },
+            StateDependencyNode::CombDefinition(definition) => {
+                let recipe = &self.ir.comb_graph().recipes()
+                    [self.ir.comb_definitions()[definition.0].recipe.0];
+                for snapshot in &recipe.snapshot_inputs {
+                    add_static(snapshot.range)?;
+                }
+            }
+        }
+        Some(result)
+    }
+}
+
+fn collect_process_state_accesses(
+    ir: &EventIr,
+    processes: &[ProcessId],
+) -> Vec<ProcessStateAccesses> {
+    let selected = processes.iter().copied().collect::<HashSet<_>>();
+    let mut roots = vec![Vec::<ValueId>::new(); ir.processes().len()];
+    let mut process_by_region = HashMap::default();
+    for block in ir.blocks() {
+        process_by_region.insert(block.region, block.process);
+        if selected.contains(&block.process) {
+            block
+                .terminator
+                .as_ref()
+                .expect("verified EIR block is terminated")
+                .visit_value_operands(|value| roots[block.process.0].push(value));
+        }
+    }
+    for effect in ir.effects() {
+        let process = match &effect.kind {
+            EffectKind::StageNextFf { process, .. } => Some(*process),
+            EffectKind::CommitFfState { .. } => None,
+            _ => process_by_region.get(&effect.region).copied(),
+        };
+        let Some(process) = process.filter(|process| selected.contains(process)) else {
+            continue;
+        };
+        effect
+            .kind
+            .visit_value_operands(|value| roots[process.0].push(value));
+    }
+
+    let mut result = (0..ir.processes().len())
+        .map(|_| ProcessStateAccesses::default())
+        .collect::<Vec<_>>();
+    for &process in processes {
+        let accesses = &mut result[process.0];
+        let mut visited = HashSet::default();
+        let mut work = std::mem::take(&mut roots[process.0]);
+        while let Some(value) = work.pop() {
+            if !visited.insert(value) {
+                continue;
+            }
+            match &ir.values()[value.0].kind {
+                ValueKind::ReadClockSnapshot(range) => accesses.static_reads.push(*range),
+                ValueKind::ReadPersistentMemory {
+                    object,
+                    offset: ValueOffset::Static(offset),
+                    width,
+                } => {
+                    if let Some(msb) = offset.checked_add(width.saturating_sub(1)) {
+                        accesses.static_reads.push(super::ObjectRange::new(
+                            *object,
+                            super::BitAccess::new(*offset, msb),
+                        ));
+                    }
+                }
+                ValueKind::ReadPersistentMemory { object, .. } => {
+                    accesses.dynamic_reads.push(*object);
+                }
+                ValueKind::ReadCombDefinition { definition, .. } => {
+                    accesses.comb_definitions.push(*definition);
+                }
+                _ => {}
+            }
+            ir.values()[value.0]
+                .kind
+                .visit_operands(|operand| work.push(operand));
+        }
+
+        let mut definitions = std::mem::take(&mut accesses.comb_definitions);
+        let mut visited_definitions = HashSet::default();
+        while let Some(definition) = definitions.pop() {
+            if !visited_definitions.insert(definition) {
+                continue;
+            }
+            accesses.comb_definitions.push(definition);
+            let recipe = &ir.comb_graph().recipes()[ir.comb_definitions()[definition.0].recipe.0];
+            accesses
+                .static_reads
+                .extend(recipe.snapshot_inputs.iter().map(|input| input.range));
+            definitions.extend(
+                recipe
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.definition),
+            );
+        }
+        accesses.static_reads.sort_unstable();
+        accesses.static_reads.dedup();
+        accesses.dynamic_reads.sort_unstable();
+        accesses.dynamic_reads.dedup();
+        accesses.comb_definitions.sort_unstable();
+        accesses.comb_definitions.dedup();
+    }
+    result
+}
+
+/// Minimize the actual state-publication components left by process ordering.
+/// A static byte component either publishes directly or pays for one merged
+/// WORKING seed/commit pair. An object with a dynamic write publishes directly
+/// only when every one of its stages can do so; otherwise it pays for one
+/// sparse commit. Counting one graph edge per reader cannot represent either
+/// all-or-nothing cost.
+fn repair_publication_order(
+    ir: &EventIr,
+    mut order: Vec<ProcessId>,
+    accesses: &[ProcessStateAccesses],
+    pure: &[bool],
+) -> Vec<ProcessId> {
+    #[derive(Clone)]
+    struct Requirement {
+        writer: ProcessId,
+        readers: Vec<ProcessId>,
+    }
+    #[derive(Clone)]
+    struct Candidate {
+        dynamic: bool,
+        cost: usize,
+        requirements: Vec<Requirement>,
+    }
+    #[derive(Clone, Copy)]
+    struct Stage {
+        writer: ProcessId,
+        target: super::ObjectRange,
+        dynamic: bool,
+        eligible: bool,
+    }
+
+    let selected = order.iter().copied().collect::<HashSet<_>>();
+    let overlaps = |lhs: super::ObjectRange, rhs: super::ObjectRange| {
+        lhs.object == rhs.object
+            && lhs.access.lsb <= rhs.access.msb
+            && rhs.access.lsb <= lhs.access.msb
+    };
+    let mut local_direct = HashSet::default();
+    for &process in &order {
+        if !pure[process.0] {
+            continue;
+        }
+        if let Some(plan) = plan_local_stage_order(ir, process) {
+            local_direct.extend(plan.direct_effects);
+            local_direct.extend(plan.deferred_effects);
+        }
+    }
+    let readers_for = |writer: ProcessId, target: super::ObjectRange| {
+        order
+            .iter()
+            .copied()
+            .filter(|reader| {
+                *reader != writer
+                    && (accesses[reader.0].dynamic_reads.contains(&target.object)
+                        || accesses[reader.0]
+                            .static_reads
+                            .iter()
+                            .copied()
+                            .any(|read| overlaps(read, target)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut stages_by_object = BTreeMap::<AbsoluteAddr, Vec<Stage>>::new();
+    for (index, effect) in ir.effects().iter().enumerate() {
+        let EffectKind::StageNextFf {
+            process,
+            target,
+            stage_kind,
+            ..
+        } = &effect.kind
+        else {
+            continue;
+        };
+        if selected.contains(process) && pure[process.0] {
+            let range = super::ObjectRange::new(target.object, target.alias);
+            let has_local_read = accesses[process.0].dynamic_reads.contains(&target.object)
+                || accesses[process.0]
+                    .static_reads
+                    .iter()
+                    .copied()
+                    .any(|read| overlaps(read, range));
+            let eligible = !has_local_read
+                || matches!(
+                    stage_kind,
+                    super::FfStageKind::FinalProcessSink | super::FfStageKind::WriteOnlyPublication
+                )
+                || local_direct.contains(&EffectId(index));
+            stages_by_object
+                .entry(target.object)
+                .or_default()
+                .push(Stage {
+                    writer: *process,
+                    target: range,
+                    dynamic: !matches!(target.offset, ValueOffset::Static(_)),
+                    eligible,
+                });
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for (_object, stages) in stages_by_object {
+        if stages.iter().any(|stage| stage.dynamic) {
+            if stages.iter().all(|stage| stage.eligible) {
+                let mut readers_by_writer = BTreeMap::<ProcessId, BTreeSet<ProcessId>>::new();
+                for stage in &stages {
+                    readers_by_writer
+                        .entry(stage.writer)
+                        .or_default()
+                        .extend(readers_for(stage.writer, stage.target));
+                }
+                let requirements = readers_by_writer
+                    .into_iter()
+                    .filter_map(|(writer, readers)| {
+                        (!readers.is_empty()).then_some(Requirement {
+                            writer,
+                            readers: readers.into_iter().collect(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !requirements.is_empty() {
+                    candidates.push(Candidate {
+                        dynamic: true,
+                        cost: stages
+                            .iter()
+                            .map(|stage| stage.target.access.msb.saturating_add(1))
+                            .max()
+                            .unwrap_or(1),
+                        requirements,
+                    });
+                }
+            }
+            continue;
+        }
+
+        // StatePublicationPlan merges byte-adjacent ranges across every
+        // writer of one object.  Model exactly that component here: one
+        // unresolved member retains the shared WORKING seed/commit pair, so
+        // making only one writer direct has no publication benefit.
+        let mut ranges = stages
+            .into_iter()
+            .map(|stage| {
+                (
+                    stage.target.access.lsb & !7,
+                    stage.target.access.msb | 7,
+                    stage,
+                )
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(|(start, end, stage)| {
+            (*start, *end, stage.writer, stage.target.access)
+        });
+        let mut component_start = 0;
+        while component_start < ranges.len() {
+            let mut component_end = component_start + 1;
+            let mut covered_end = ranges[component_start].1;
+            while component_end < ranges.len()
+                && ranges[component_end].0 <= covered_end.saturating_add(1)
+            {
+                covered_end = covered_end.max(ranges[component_end].1);
+                component_end += 1;
+            }
+            let component = &ranges[component_start..component_end];
+            if component.iter().all(|(_, _, stage)| stage.eligible) {
+                let mut readers_by_writer = BTreeMap::<ProcessId, BTreeSet<ProcessId>>::new();
+                for (_, _, stage) in component {
+                    readers_by_writer
+                        .entry(stage.writer)
+                        .or_default()
+                        .extend(readers_for(stage.writer, stage.target));
+                }
+                let requirements = readers_by_writer
+                    .into_iter()
+                    .filter_map(|(writer, readers)| {
+                        (!readers.is_empty()).then_some(Requirement {
+                            writer,
+                            readers: readers.into_iter().collect(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !requirements.is_empty() {
+                    candidates.push(Candidate {
+                        dynamic: false,
+                        cost: covered_end - ranges[component_start].0 + 1,
+                        requirements,
+                    });
+                }
+            }
+            component_start = component_end;
+        }
+    }
+    if candidates.is_empty() {
+        return order;
+    }
+    let affinity_position = order
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, process)| (process, position))
+        .collect::<HashMap<_, _>>();
+
+    let unavoidable_cost = |candidate_order: &[ProcessId]| {
+        let positions = candidate_order
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, process)| (process, position))
+            .collect::<HashMap<_, _>>();
+        let mut dynamic_count = 0usize;
+        let mut dynamic_cost = 0usize;
+        let mut static_count = 0usize;
+        let mut static_cost = 0usize;
+        for candidate in &candidates {
+            let unresolved = candidate.requirements.iter().any(|requirement| {
+                requirement
+                    .readers
+                    .iter()
+                    .any(|reader| positions[reader] > positions[&requirement.writer])
+            });
+            if !unresolved {
+                continue;
+            }
+            if candidate.dynamic {
+                dynamic_count += 1;
+                dynamic_cost = dynamic_cost.saturating_add(candidate.cost);
+            } else {
+                static_count += 1;
+                static_cost = static_cost.saturating_add(candidate.cost);
+            }
+        }
+        (dynamic_count, dynamic_cost, static_count, static_cost)
+    };
+
+    loop {
+        let current_cost = unavoidable_cost(&order);
+        let mut best = None::<((usize, usize, usize, usize), usize, usize, Vec<ProcessId>)>;
+        for candidate in &candidates {
+            for requirement in &candidate.requirements {
+                let writer_position = order
+                    .iter()
+                    .position(|process| *process == requirement.writer)
+                    .expect("a publication candidate belongs to the selected process run");
+                let last_reader = requirement
+                    .readers
+                    .iter()
+                    .filter_map(|reader| order.iter().position(|process| process == reader))
+                    .max()
+                    .expect("a publication candidate has a reader");
+                if last_reader < writer_position {
+                    continue;
+                }
+                let mut repaired = order.clone();
+                repaired.remove(writer_position);
+                let insertion = requirement
+                    .readers
+                    .iter()
+                    .filter_map(|reader| repaired.iter().position(|process| process == reader))
+                    .max()
+                    .map(|position| position + 1)
+                    .unwrap_or(repaired.len());
+                repaired.insert(insertion, requirement.writer);
+                let repaired_cost = unavoidable_cost(&repaired);
+                if repaired_cost >= current_cost {
+                    continue;
+                }
+                let movement = writer_position.abs_diff(insertion);
+                let replacement = (repaired_cost, requirement.readers.len(), movement, repaired);
+                if best.as_ref().is_none_or(|current| {
+                    (replacement.0, replacement.1, replacement.2)
+                        < (current.0, current.1, current.2)
+                }) {
+                    best = Some(replacement);
+                }
+            }
+        }
+        let Some((_, _, _, repaired)) = best else {
+            break;
+        };
+        order = repaired;
+    }
+
+    // Publication has many equivalent minima. Restore every adjacent
+    // affinity-order inversion which does not change that minimum. This keeps
+    // shared comb consumers close without giving back a direct publication,
+    // and terminates because each swap removes one inversion.
+    loop {
+        let cost = unavoidable_cost(&order);
+        let mut changed = false;
+        for index in 0..order.len().saturating_sub(1) {
+            if affinity_position[&order[index]] < affinity_position[&order[index + 1]] {
+                continue;
+            }
+            order.swap(index, index + 1);
+            if unavoidable_cost(&order) == cost {
+                changed = true;
+            } else {
+                order.swap(index, index + 1);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    order
+}
+
+fn order_feedback_component(
+    nodes: &[usize],
+    successors: &[Vec<(usize, usize)>],
+    predecessors: &[Vec<(usize, usize)>],
+    affinity_rank: &[usize],
+) -> Vec<usize> {
+    if nodes.len() < 2 {
+        return nodes.to_vec();
+    }
+    let node_set = nodes.iter().copied().collect::<HashSet<_>>();
+    let mut active = vec![false; successors.len()];
+    let mut incoming = vec![0usize; successors.len()];
+    let mut outgoing = vec![0usize; successors.len()];
+    let mut version = vec![0usize; successors.len()];
+    for &node in nodes {
+        active[node] = true;
+        outgoing[node] = successors[node]
+            .iter()
+            .filter(|(target, _)| node_set.contains(target))
+            .map(|(_, weight)| *weight)
+            .sum();
+        incoming[node] = predecessors[node]
+            .iter()
+            .filter(|(source, _)| node_set.contains(source))
+            .map(|(_, weight)| *weight)
+            .sum();
+    }
+
+    let mut sources = BinaryHeap::new();
+    let mut sinks = BinaryHeap::new();
+    let mut scores = BinaryHeap::new();
+    let push = |node: usize,
+                sources: &mut BinaryHeap<_>,
+                sinks: &mut BinaryHeap<_>,
+                scores: &mut BinaryHeap<_>,
+                incoming: &[usize],
+                outgoing: &[usize],
+                version: &[usize]| {
+        let tie = (Reverse(affinity_rank[node]), Reverse(node), version[node]);
+        if incoming[node] == 0 {
+            sources.push((tie.0, tie.1, tie.2));
+        }
+        if outgoing[node] == 0 {
+            sinks.push((tie.0, tie.1, tie.2));
+        }
+        scores.push((
+            outgoing[node] as i128 - incoming[node] as i128,
+            tie.0,
+            tie.1,
+            tie.2,
+        ));
+    };
+    for &node in nodes {
+        push(
+            node,
+            &mut sources,
+            &mut sinks,
+            &mut scores,
+            &incoming,
+            &outgoing,
+            &version,
+        );
+    }
+
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    while left.len() + right.len() < nodes.len() {
+        let pop_zero = |heap: &mut BinaryHeap<(Reverse<usize>, Reverse<usize>, usize)>,
+                        active: &[bool],
+                        version: &[usize],
+                        degree: &[usize]| {
+            while let Some((_, Reverse(node), item_version)) = heap.pop() {
+                if active[node] && version[node] == item_version && degree[node] == 0 {
+                    return Some(node);
+                }
+            }
+            None
+        };
+        let selected = if let Some(source) = pop_zero(&mut sources, &active, &version, &incoming) {
+            (source, true)
+        } else if let Some(sink) = pop_zero(&mut sinks, &active, &version, &outgoing) {
+            (sink, false)
+        } else {
+            let node = loop {
+                let Some((_, _, Reverse(node), item_version)) = scores.pop() else {
+                    return nodes.to_vec();
+                };
+                if active[node] && version[node] == item_version {
+                    break node;
+                }
+            };
+            (node, true)
+        };
+        let (node, place_left) = selected;
+        active[node] = false;
+        if place_left {
+            left.push(node);
+        } else {
+            right.push(node);
+        }
+
+        for &(target, weight) in &successors[node] {
+            if !active[target] {
+                continue;
+            }
+            incoming[target] = incoming[target].saturating_sub(weight);
+            version[target] += 1;
+            push(
+                target,
+                &mut sources,
+                &mut sinks,
+                &mut scores,
+                &incoming,
+                &outgoing,
+                &version,
+            );
+        }
+        for &(source, weight) in &predecessors[node] {
+            if !active[source] {
+                continue;
+            }
+            outgoing[source] = outgoing[source].saturating_sub(weight);
+            version[source] += 1;
+            push(
+                source,
+                &mut sources,
+                &mut sinks,
+                &mut scores,
+                &incoming,
+                &outgoing,
+                &version,
+            );
+        }
+    }
+    right.reverse();
+    left.extend(right);
+    left
+}
+
+fn order_pure_process_run(
+    ir: &EventIr,
+    run: &[ProcessId],
+    writes: &[Vec<super::ObjectRange>],
+) -> Vec<ProcessId> {
+    if run.len() < 2 {
+        return run.to_vec();
+    }
+
+    // Merge repeated/partial writes from one process before constructing the
+    // disjoint writer index. Different FF processes may not drive overlapping
+    // ranges in one clock event; if malformed input reaches this point, retain
+    // source order rather than deriving a false scheduling freedom.
+    let mut ranges_by_writer = BTreeMap::<(AbsoluteAddr, usize), Vec<super::BitAccess>>::new();
+    for (local, process) in run.iter().copied().enumerate() {
+        for range in &writes[process.0] {
+            ranges_by_writer
+                .entry((range.object, local))
+                .or_default()
+                .push(range.access);
+        }
+    }
+    let mut intervals = Vec::new();
+    let mut writers_by_object = BTreeMap::<AbsoluteAddr, Vec<usize>>::new();
+    let mut writer_by_resource = Vec::<usize>::new();
+    let mut resource_weights = Vec::<usize>::new();
+    for ((object, writer), mut ranges) in ranges_by_writer {
+        ranges.sort_unstable_by_key(|range| (range.lsb, range.msb));
+        let mut merged = Vec::<super::BitAccess>::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut()
+                && range.lsb <= last.msb.saturating_add(1)
+            {
+                last.msb = last.msb.max(range.msb);
+            } else {
+                merged.push(range);
+            }
+        }
+        for range in merged {
+            let Some(length) = range
+                .msb
+                .checked_sub(range.lsb)
+                .and_then(|width| width.checked_add(1))
+            else {
+                return run.to_vec();
+            };
+            let resource = writer_by_resource.len();
+            writer_by_resource.push(writer);
+            resource_weights.push(length.saturating_add(63) / 64);
+            writers_by_object.entry(object).or_default().push(resource);
+            intervals.push(ExactInterval {
+                object,
+                start: range.lsb,
+                length,
+                value: resource,
+            });
+        }
+    }
+    for resources in writers_by_object.values_mut() {
+        resources.sort_unstable();
+        resources.dedup();
+    }
+    let Ok(writer_index) = DisjointIntervalMap::try_new(intervals) else {
+        return run.to_vec();
+    };
+
+    // consumer -> producer is the preferred process order. It is an affinity
+    // edge only: every stage still reads event-entry state and commits at the
+    // common publication barrier.
+    let comb_resource_base = resource_weights.len();
+    resource_weights.extend(
+        ir.comb_definitions()
+            .iter()
+            .map(|definition| definition.target.width().unwrap_or(1).saturating_add(63) / 64),
+    );
+    let mut process_resources = vec![Vec::<usize>::new(); run.len()];
+    let mut successors = vec![Vec::<usize>::new(); run.len()];
+    let add_static_read = |reader: usize,
+                           range: super::ObjectRange,
+                           successors: &mut [Vec<usize>],
+                           process_resources: &mut [Vec<usize>]| {
+        let Some(length) = range.width() else {
+            return;
+        };
+        let Ok(overlapping) = writer_index.overlapping(&range.object, range.access.lsb, length)
+        else {
+            return;
+        };
+        for resource in overlapping {
+            let writer = writer_by_resource[resource];
+            if writer != reader {
+                successors[reader].push(writer);
+            }
+            process_resources[reader].push(resource);
+        }
+    };
+    let add_dynamic_read = |reader: usize,
+                            object: AbsoluteAddr,
+                            successors: &mut [Vec<usize>],
+                            process_resources: &mut [Vec<usize>]| {
+        if let Some(resources) = writers_by_object.get(&object) {
+            for &resource in resources {
+                let writer = writer_by_resource[resource];
+                if writer != reader {
+                    successors[reader].push(writer);
+                }
+                process_resources[reader].push(resource);
+            }
+        }
+    };
+
+    let accesses = collect_process_state_accesses(ir, run);
+    for (reader, process) in run.iter().copied().enumerate() {
+        for &range in &accesses[process.0].static_reads {
+            add_static_read(reader, range, &mut successors, &mut process_resources);
+        }
+        for &object in &accesses[process.0].dynamic_reads {
+            add_dynamic_read(reader, object, &mut successors, &mut process_resources);
+        }
+        for &definition in &accesses[process.0].comb_definitions {
+            process_resources[reader].push(comb_resource_base + definition.0);
+        }
+    }
+
+    for resources in &mut process_resources {
+        resources.sort_unstable();
+        resources.dedup();
+    }
+    let mut weighted_successors = vec![HashMap::<usize, usize>::default(); run.len()];
+    for (reader, resources) in process_resources.iter().enumerate() {
+        for &resource in resources {
+            let Some(&writer) = writer_by_resource.get(resource) else {
+                continue;
+            };
+            if reader != writer {
+                *weighted_successors[reader].entry(writer).or_insert(0) +=
+                    resource_weights[resource].max(1);
+            }
+        }
+    }
+    let weighted_successors = weighted_successors
+        .into_iter()
+        .map(|row| {
+            let mut row = row.into_iter().collect::<Vec<_>>();
+            row.sort_unstable();
+            row
+        })
+        .collect::<Vec<_>>();
+    let mut weighted_predecessors = vec![Vec::<(usize, usize)>::new(); run.len()];
+    for (source, row) in weighted_successors.iter().enumerate() {
+        for &(target, weight) in row {
+            weighted_predecessors[target].push((source, weight));
+        }
+    }
+    for row in &mut weighted_predecessors {
+        row.sort_unstable();
+    }
+    successors = weighted_successors
+        .iter()
+        .map(|row| row.iter().map(|(target, _)| *target).collect())
+        .collect();
+
+    // Feedback does not remove ordering freedom. Model every shared old-state
+    // range and comb definition as one value node used by process sinks. The
+    // bottom-up weighted scheduler then minimizes the number of simultaneously
+    // live materializations and keeps all users of one global value together.
+    let mut used_resources = process_resources
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    used_resources.sort_unstable();
+    used_resources.dedup();
+    let dense_resource = used_resources
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(dense, resource)| (resource, dense))
+        .collect::<HashMap<_, _>>();
+    let node_count = run.len() + used_resources.len();
+    let mut materialization_dependencies = vec![Vec::<usize>::new(); node_count];
+    let mut materialization_values = vec![Vec::<usize>::new(); node_count];
+    for process in 0..run.len() {
+        materialization_dependencies[process].extend(
+            process_resources[process]
+                .iter()
+                .map(|resource| run.len() + dense_resource[resource]),
+        );
+        materialization_values[process] = materialization_dependencies[process].clone();
+    }
+    let mut weights = vec![0usize; run.len()];
+    weights.extend(
+        used_resources
+            .iter()
+            .map(|resource| resource_weights[*resource]),
+    );
+    let affinity_order = schedule_min_live_values_in_domains_with_weights(
+        &materialization_dependencies,
+        &materialization_values,
+        &vec![0usize; node_count],
+        &weights,
+    )
+    .ok()
+    .map(|order| {
+        order
+            .into_iter()
+            .filter(|node| *node < run.len())
+            .collect::<Vec<_>>()
+    })
+    .filter(|order| order.len() == run.len())
+    .unwrap_or_else(|| (0..run.len()).collect());
+    let mut affinity_rank = vec![usize::MAX; run.len()];
+    for (rank, process) in affinity_order.into_iter().enumerate() {
+        affinity_rank[process] = rank;
+    }
+
+    let Ok(sccs) = StronglyConnectedComponents::analyze(&successors) else {
+        return run.to_vec();
+    };
+    let component_count = sccs.components.len();
+    let mut outgoing = vec![Vec::<usize>::new(); component_count];
+    let mut indegree = vec![0usize; component_count];
+    let mut keys = vec![usize::MAX; component_count];
+    for (component, item) in sccs.components.iter().enumerate() {
+        keys[component] = item
+            .nodes
+            .iter()
+            .map(|node| affinity_rank[*node])
+            .min()
+            .unwrap_or(usize::MAX);
+        for &node in &item.nodes {
+            for &successor in &successors[node] {
+                let target = sccs.component_for_node[successor];
+                if component != target {
+                    outgoing[component].push(target);
+                }
+            }
+        }
+        outgoing[component].sort_unstable();
+        outgoing[component].dedup();
+        for &target in &outgoing[component] {
+            indegree[target] = indegree[target].saturating_add(1);
+        }
+    }
+    let mut ready = BTreeSet::new();
+    for component in 0..component_count {
+        if indegree[component] == 0 {
+            ready.insert((keys[component], component));
+        }
+    }
+    let mut ordered = Vec::with_capacity(run.len());
+    while let Some((_, component)) = ready.pop_first() {
+        let nodes = order_feedback_component(
+            &sccs.components[component].nodes,
+            &weighted_successors,
+            &weighted_predecessors,
+            &affinity_rank,
+        );
+        ordered.extend(nodes.into_iter().map(|local| run[local]));
+        for &target in &outgoing[component] {
+            indegree[target] = indegree[target].saturating_sub(1);
+            if indegree[target] == 0 {
+                ready.insert((keys[target], target));
+            }
+        }
+    }
+    if ordered.len() == run.len() {
+        ordered
+    } else {
+        run.to_vec()
+    }
+}
+
+struct LocalStageOrder {
+    ranks: Vec<(EffectId, usize)>,
+    direct_effects: Vec<EffectId>,
+    deferred_effects: Vec<EffectId>,
+    publication_readers: Vec<(EffectId, Vec<EffectId>)>,
+}
+
+fn plan_local_stage_order(ir: &EventIr, process: ProcessId) -> Option<LocalStageOrder> {
+    let process_item = &ir.processes()[process.0];
+    let local_by_block = process_item
+        .blocks
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(local, block)| (block, local))
+        .collect::<HashMap<_, _>>();
+    let successors = process_item
+        .blocks
+        .iter()
+        .copied()
+        .map(|block| {
+            control_successors(ir, block)
+                .into_iter()
+                .map(|successor| local_by_block[&successor])
+                .collect()
+        })
+        .collect();
+    let control =
+        ForwardControlFlowGraph::analyze_structure(successors, local_by_block[&process_item.entry])
+            .ok()?;
+    if control.sccs.iter().any(|component| component.cyclic) {
+        return None;
+    }
+    let block_by_region = process_item
+        .blocks
+        .iter()
+        .copied()
+        .map(|block| (ir.blocks()[block.0].region, block))
+        .collect::<HashMap<_, _>>();
+    let mut effects = Vec::<(EffectId, super::ObjectRange, ControlBlockId)>::new();
+    for (index, effect) in ir.effects().iter().enumerate() {
+        let EffectKind::StageNextFf {
+            process: owner,
+            target,
+            ..
+        } = &effect.kind
+        else {
+            continue;
+        };
+        if *owner != process {
+            continue;
+        }
+        let &block = block_by_region.get(&effect.region)?;
+        effects.push((
+            EffectId(index),
+            super::ObjectRange::new(target.object, target.alias),
+            block,
+        ));
+    }
+    if effects.is_empty() {
+        return None;
+    }
+    let local_by_effect = effects
         .iter()
         .enumerate()
-        .filter_map(|(process, item)| item.resets.contains(&trigger).then_some(ProcessId(process)))
-        .collect())
+        .map(|(local, &(effect, _, _))| (effect, local))
+        .collect::<HashMap<_, _>>();
+    let writer_ranges = effects
+        .iter()
+        .map(|&(effect, range, _)| (effect, range))
+        .collect::<Vec<_>>();
+    let mut resolver = StateDependencyResolver::new(ir, &writer_ranges)?;
+    let mut reads = vec![Vec::<usize>::new(); effects.len()];
+    for (local, &(effect, _, _)) in effects.iter().enumerate() {
+        let mut roots = Vec::new();
+        ir.effects()[effect.0]
+            .kind
+            .visit_value_operands(|value| roots.push(value));
+        reads[local] = resolver.resolve_roots(&roots)?;
+    }
+
+    let mut hard_successors = vec![Vec::<usize>::new(); effects.len()];
+    for (local, &(effect, _, block)) in effects.iter().enumerate() {
+        for predecessor in &ir.effects()[effect.0].predecessors {
+            let &predecessor = local_by_effect.get(predecessor)?;
+            let predecessor_block = effects[predecessor].2;
+            if predecessor_block == block && predecessor != local {
+                hard_successors[predecessor].push(local);
+            } else if predecessor_block != block
+                && !control
+                    .dominators
+                    .dominates(local_by_block[&predecessor_block], local_by_block[&block])
+            {
+                return None;
+            }
+        }
+    }
+    for successors in &mut hard_successors {
+        successors.sort_unstable();
+        successors.dedup();
+    }
+
+    // State edges are preferences rather than hard dependencies: a feedback
+    // SCC cannot satisfy every consumer-before-writer edge. Prefer nodes which
+    // consume many not-yet-overwritten resources and whose own target has few
+    // remaining consumers, while always respecting effect-token order.
+    let mut incoming_soft = vec![0usize; effects.len()];
+    for dependencies in &reads {
+        for &writer in dependencies {
+            incoming_soft[writer] = incoming_soft[writer].saturating_add(1);
+        }
+    }
+    let score = (0..effects.len())
+        .map(|node| reads[node].len() as isize - incoming_soft[node] as isize)
+        .collect::<Vec<_>>();
+    let mut nodes_by_block = vec![Vec::new(); process_item.blocks.len()];
+    for (node, &(_, _, block)) in effects.iter().enumerate() {
+        nodes_by_block[local_by_block[&block]].push(node);
+    }
+    let mut rank = vec![usize::MAX; effects.len()];
+    let mut ranks = Vec::with_capacity(effects.len());
+    for nodes in nodes_by_block {
+        let node_set = nodes.iter().copied().collect::<HashSet<_>>();
+        let mut hard_indegree = HashMap::<usize, usize>::default();
+        for &node in &nodes {
+            hard_indegree.entry(node).or_insert(0);
+            for &successor in &hard_successors[node] {
+                if node_set.contains(&successor) {
+                    *hard_indegree.entry(successor).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut ready = BTreeSet::new();
+        for &node in &nodes {
+            if hard_indegree[&node] == 0 {
+                ready.insert((-score[node], effects[node].0.0, node));
+            }
+        }
+        let mut block_order = Vec::with_capacity(nodes.len());
+        while let Some((_, _, node)) = ready.pop_first() {
+            block_order.push(node);
+            for &successor in &hard_successors[node] {
+                if !node_set.contains(&successor) {
+                    continue;
+                }
+                let indegree = hard_indegree.get_mut(&successor)?;
+                *indegree = indegree.saturating_sub(1);
+                if *indegree == 0 {
+                    ready.insert((-score[successor], effects[successor].0.0, successor));
+                }
+            }
+        }
+        if block_order.len() != nodes.len() {
+            return None;
+        }
+        for (position, node) in block_order.into_iter().enumerate() {
+            rank[node] = position;
+            ranks.push((effects[node].0, position));
+        }
+    }
+
+    let mut control_reads = vec![Vec::<usize>::new(); process_item.blocks.len()];
+    for (block_local, &block) in process_item.blocks.iter().enumerate() {
+        let mut roots = Vec::new();
+        ir.blocks()[block.0]
+            .terminator
+            .as_ref()?
+            .visit_value_operands(|value| roots.push(value));
+        control_reads[block_local] = resolver.resolve_roots(&roots)?;
+    }
+    let mut direct_effects = Vec::new();
+    let mut deferred_effects = Vec::new();
+    let mut publication_readers = Vec::new();
+    for writer in 0..effects.len() {
+        let writer_block = effects[writer].2;
+        let writer_block_local = local_by_block[&writer_block];
+        let control_read_is_late =
+            control_reads
+                .iter()
+                .enumerate()
+                .any(|(reader_block, dependencies)| {
+                    dependencies.contains(&writer)
+                        && (reader_block == writer_block_local
+                            || !control
+                                .dominators
+                                .dominates(reader_block, writer_block_local))
+                });
+        if control_read_is_late {
+            continue;
+        }
+        let readers = reads
+            .iter()
+            .enumerate()
+            .filter_map(|(reader, dependencies)| {
+                dependencies
+                    .contains(&writer)
+                    .then_some((reader, effects[reader].0))
+            })
+            .collect::<Vec<_>>();
+        let all_readers_precede = readers.iter().all(|&(reader, _)| {
+            if reader == writer {
+                return true;
+            }
+            let reader_block = effects[reader].2;
+            if reader_block == writer_block {
+                rank[reader] <= rank[writer]
+            } else {
+                control
+                    .dominators
+                    .dominates(local_by_block[&reader_block], writer_block_local)
+            }
+        });
+        publication_readers.push((
+            effects[writer].0,
+            readers.iter().map(|&(_, effect)| effect).collect(),
+        ));
+        if all_readers_precede {
+            direct_effects.push(effects[writer].0);
+        } else if readers
+            .iter()
+            .all(|&(reader, _)| effects[reader].2 == writer_block)
+        {
+            deferred_effects.push(effects[writer].0);
+        }
+    }
+    if process_item.blocks.len() == 1 && !deferred_effects.is_empty() {
+        deferred_effects.extend(direct_effects.drain(..));
+        deferred_effects.sort_unstable();
+        deferred_effects.dedup();
+    }
+    Some(LocalStageOrder {
+        ranks,
+        direct_effects,
+        deferred_effects,
+        publication_readers,
+    })
 }
 
 #[derive(Debug, Default)]
 struct StatePublicationPlan {
     static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>>,
+    fused_static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>>,
     sparse_widths: BTreeMap<AbsoluteAddr, usize>,
+    fused_sparse_widths: BTreeMap<AbsoluteAddr, usize>,
     sparse_objects: HashSet<AbsoluteAddr>,
+    fused_sparse_objects: HashSet<AbsoluteAddr>,
+    direct_effects: HashSet<EffectId>,
+    deferred_direct_effects: HashSet<EffectId>,
+    publication_readers: HashMap<EffectId, Vec<EffectId>>,
+    stage_ranks: HashMap<EffectId, usize>,
+    capturable_static_components: BTreeSet<StaticPublicationComponent>,
 }
 
 impl StatePublicationPlan {
-    fn build(ir: &EventIr, selected_processes: &HashSet<ProcessId>) -> Self {
-        let mut sparse_objects = HashSet::default();
+    fn build(
+        ir: &EventIr,
+        ordered_processes: &[ProcessId],
+        selected_processes: &HashSet<ProcessId>,
+    ) -> Self {
+        let accesses = collect_process_state_accesses(ir, ordered_processes);
+        let process_position = ordered_processes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, process)| (process, position))
+            .collect::<HashMap<_, _>>();
+        let mut process_by_region = HashMap::default();
+        for block in ir.blocks() {
+            process_by_region.insert(block.region, block.process);
+        }
+        let mut pure = vec![true; ir.processes().len()];
         for effect in ir.effects() {
-            if let EffectKind::StageNextFf {
-                process, target, ..
-            } = &effect.kind
-                && selected_processes.contains(process)
-                && !matches!(target.offset, ValueOffset::Static(_))
+            let Some(process) = process_by_region.get(&effect.region).copied().or_else(|| {
+                if let EffectKind::StageNextFf { process, .. } = &effect.kind {
+                    Some(*process)
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            if selected_processes.contains(&process)
+                && !matches!(
+                    effect.kind,
+                    EffectKind::StageNextFf { .. } | EffectKind::CommitFfState { .. }
+                )
             {
-                sparse_objects.insert(target.object);
+                pure[process.0] = false;
+            }
+        }
+        let overlaps = |lhs: super::ObjectRange, rhs: super::ObjectRange| {
+            lhs.object == rhs.object
+                && lhs.access.lsb <= rhs.access.msb
+                && rhs.access.lsb <= lhs.access.msb
+        };
+        let mut stages = Vec::<(
+            EffectId,
+            ProcessId,
+            super::ObjectRange,
+            bool,
+            super::FfStageKind,
+        )>::new();
+        for (index, effect) in ir.effects().iter().enumerate() {
+            let EffectKind::StageNextFf {
+                process,
+                target,
+                stage_kind,
+                ..
+            } = &effect.kind
+            else {
+                continue;
+            };
+            if selected_processes.contains(process) {
+                stages.push((
+                    EffectId(index),
+                    *process,
+                    super::ObjectRange::new(target.object, target.alias),
+                    !matches!(target.offset, ValueOffset::Static(_)),
+                    *stage_kind,
+                ));
+            }
+        }
+        let mut direct_effects = stages
+            .iter()
+            .filter_map(|&(effect, writer, target, _, stage_kind)| {
+                if !pure[writer.0] {
+                    return None;
+                }
+                let writer_position = process_position[&writer];
+                let safe = ordered_processes.iter().copied().all(|reader| {
+                    let reads_target = accesses[reader.0]
+                        .static_reads
+                        .iter()
+                        .copied()
+                        .any(|read| overlaps(read, target))
+                        || accesses[reader.0].dynamic_reads.contains(&target.object);
+                    !reads_target
+                        || (reader == writer
+                            && matches!(
+                                stage_kind,
+                                super::FfStageKind::FinalProcessSink
+                                    | super::FfStageKind::WriteOnlyPublication
+                            ))
+                        || (reader != writer && process_position[&reader] < writer_position)
+                });
+                safe.then_some(effect)
+            })
+            .collect::<HashSet<_>>();
+        let stage_by_effect = stages
+            .iter()
+            .map(|&(effect, process, target, ..)| (effect, (process, target)))
+            .collect::<HashMap<_, _>>();
+        let mut stage_ranks = HashMap::default();
+        let mut deferred_direct_effects = HashSet::default();
+        let mut publication_readers = HashMap::default();
+        for &writer in ordered_processes {
+            if !pure[writer.0] {
+                continue;
+            }
+            let writer_position = process_position[&writer];
+            let Some(plan) = plan_local_stage_order(ir, writer) else {
+                continue;
+            };
+            let LocalStageOrder {
+                ranks,
+                direct_effects: local_direct_effects,
+                deferred_effects,
+                publication_readers: local_publication_readers,
+            } = plan;
+            stage_ranks.extend(ranks);
+            for (effect, deferred) in local_direct_effects
+                .into_iter()
+                .map(|effect| (effect, false))
+                .chain(deferred_effects.into_iter().map(|effect| (effect, true)))
+            {
+                let Some(&(owner, target)) = stage_by_effect.get(&effect) else {
+                    continue;
+                };
+                debug_assert_eq!(owner, writer);
+                let cross_process_safe = ordered_processes.iter().copied().all(|reader| {
+                    if reader == writer {
+                        return true;
+                    }
+                    let reads_target = accesses[reader.0]
+                        .static_reads
+                        .iter()
+                        .copied()
+                        .any(|read| overlaps(read, target))
+                        || accesses[reader.0].dynamic_reads.contains(&target.object);
+                    !reads_target || process_position[&reader] < writer_position
+                });
+                if cross_process_safe {
+                    direct_effects.insert(effect);
+                    if deferred {
+                        deferred_direct_effects.insert(effect);
+                    }
+                    if deferred
+                        && let Some((_, readers)) = local_publication_readers
+                            .iter()
+                            .find(|(writer, _)| *writer == effect)
+                    {
+                        publication_readers.insert(effect, readers.clone());
+                    }
+                }
             }
         }
 
+        // Straight-line FF processes are not semantic scheduling barriers.
+        // Split every stage in one such run into compute/publication nodes and
+        // require publication only after all run-local consumers have
+        // captured the corresponding event-entry state.  This breaks
+        // process-level feedback cycles without introducing WORKING memory:
+        //
+        //   A_next = f(B), B_next = g(A)
+        //     => compute A, compute B, publish A, publish B
+        //
+        // Overlapping writers are left to the existing priority-preserving
+        // path because the disjoint range index cannot prove one publication
+        // order for them.
+        for run in interleavable_process_runs(ir, ordered_processes) {
+            if run.len() < 2 {
+                continue;
+            }
+            let run_set = run.iter().copied().collect::<HashSet<_>>();
+            let run_stages = stages
+                .iter()
+                .copied()
+                .filter(|(_, process, ..)| run_set.contains(process))
+                .collect::<Vec<_>>();
+            let writer_ranges = run_stages
+                .iter()
+                .map(|&(effect, _, target, ..)| (effect, target))
+                .collect::<Vec<_>>();
+            let Some(mut resolver) = StateDependencyResolver::new(ir, &writer_ranges) else {
+                continue;
+            };
+            let mut readers_by_writer = HashMap::<EffectId, Vec<EffectId>>::default();
+            let mut resolved = true;
+            for &(reader, ..) in &run_stages {
+                let mut roots = Vec::new();
+                ir.effects()[reader.0]
+                    .kind
+                    .visit_value_operands(|value| roots.push(value));
+                let Some(writers) = resolver.resolve_roots(&roots) else {
+                    resolved = false;
+                    break;
+                };
+                for writer in writers {
+                    readers_by_writer
+                        .entry(writer_ranges[writer].0)
+                        .or_default()
+                        .push(reader);
+                }
+            }
+            if !resolved {
+                continue;
+            }
+
+            for &(effect, writer, target, ..) in &run_stages {
+                let writer_position = process_position[&writer];
+                let external_read_is_late = ordered_processes.iter().copied().any(|reader| {
+                    if run_set.contains(&reader) {
+                        return false;
+                    }
+                    let reads_target = accesses[reader.0]
+                        .static_reads
+                        .iter()
+                        .copied()
+                        .any(|read| overlaps(read, target))
+                        || accesses[reader.0].dynamic_reads.contains(&target.object);
+                    reads_target && process_position[&reader] > writer_position
+                });
+                if external_read_is_late {
+                    continue;
+                }
+                direct_effects.insert(effect);
+                deferred_direct_effects.insert(effect);
+                let readers = readers_by_writer.entry(effect).or_default();
+                readers.sort_unstable();
+                readers.dedup();
+                publication_readers
+                    .entry(effect)
+                    .or_default()
+                    .extend(readers.iter().copied());
+            }
+        }
+        for readers in publication_readers.values_mut() {
+            readers.sort_unstable();
+            readers.dedup();
+        }
+
+        // A sparse dynamic commit can touch any aliased bit of its object, and
+        // a static WORKING commit copies complete touched bytes. Neither may
+        // run after an overlapping direct STABLE store. Recompute sparse
+        // objects while demoting conflicts until the publication partition is
+        // stable.
+        let sparse_objects = stages
+            .iter()
+            .filter_map(|&(_, _, target, dynamic, _)| dynamic.then_some(target.object))
+            .collect::<HashSet<_>>();
+        let mut stages_by_object = BTreeMap::<AbsoluteAddr, Vec<usize>>::new();
+        for (stage, &(_, _, target, _, _)) in stages.iter().enumerate() {
+            stages_by_object
+                .entry(target.object)
+                .or_default()
+                .push(stage);
+        }
+        for stage_indices in stages_by_object.values() {
+            // One non-direct dynamic write makes the sparse commit capable of
+            // touching any aliased byte in the object. If every staged writer
+            // belongs to an earlier process and no later process reads one of
+            // those ranges, publish once at that process boundary and retain
+            // direct publication for the write-only suffix.
+            let has_non_direct_dynamic = stage_indices.iter().copied().any(|stage| {
+                let (effect, _, _, dynamic, _) = stages[stage];
+                dynamic && !direct_effects.contains(&effect)
+            });
+            if has_non_direct_dynamic {
+                for &stage in stage_indices {
+                    direct_effects.remove(&stages[stage].0);
+                }
+                continue;
+            }
+
+            // Static WORKING commits copy complete touched bytes. Connected
+            // byte-overlap components therefore have one publication mode:
+            // if one member requires WORKING, every direct member in that
+            // component must be demoted. A demoted dynamic member turns the
+            // whole object sparse, handled after this sweep.
+            let mut byte_ranges = stage_indices
+                .iter()
+                .copied()
+                .map(|stage| {
+                    let target = stages[stage].2;
+                    (target.access.lsb & !7, target.access.msb | 7, stage)
+                })
+                .collect::<Vec<_>>();
+            byte_ranges.sort_unstable();
+            let mut component_start = 0;
+            let mut demoted_dynamic = false;
+            while component_start < byte_ranges.len() {
+                let mut component_end = component_start + 1;
+                let mut covered_end = byte_ranges[component_start].1;
+                while component_end < byte_ranges.len()
+                    && byte_ranges[component_end].0 <= covered_end
+                {
+                    covered_end = covered_end.max(byte_ranges[component_end].1);
+                    component_end += 1;
+                }
+                let requires_working = byte_ranges[component_start..component_end]
+                    .iter()
+                    .any(|&(_, _, stage)| !direct_effects.contains(&stages[stage].0));
+                if requires_working {
+                    for &(_, _, stage) in &byte_ranges[component_start..component_end] {
+                        let (effect, _, _, dynamic, _) = stages[stage];
+                        if direct_effects.remove(&effect) {
+                            demoted_dynamic |= dynamic;
+                        }
+                    }
+                }
+                component_start = component_end;
+            }
+            if demoted_dynamic {
+                for &stage in stage_indices {
+                    direct_effects.remove(&stages[stage].0);
+                }
+            }
+        }
+        let fused_sparse_objects = stages
+            .iter()
+            .filter_map(|&(effect, _, target, dynamic, _)| {
+                (dynamic && !direct_effects.contains(&effect)).then_some(target.object)
+            })
+            .collect::<HashSet<_>>();
+        deferred_direct_effects.retain(|effect| direct_effects.contains(effect));
+        publication_readers.retain(|effect, _| direct_effects.contains(effect));
+
         let mut static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>> = BTreeMap::new();
+        let mut fused_static_ranges: BTreeMap<AbsoluteAddr, Vec<super::BitAccess>> =
+            BTreeMap::new();
         let mut sparse_widths: BTreeMap<AbsoluteAddr, usize> = BTreeMap::new();
-        for effect in ir.effects() {
+        let mut fused_sparse_widths: BTreeMap<AbsoluteAddr, usize> = BTreeMap::new();
+        for (index, effect) in ir.effects().iter().enumerate() {
             let EffectKind::StageNextFf {
                 process, target, ..
             } = &effect.kind
@@ -224,19 +1884,96 @@ impl StatePublicationPlan {
                     .or_default()
                     .push(target.alias);
             }
+            if fused_sparse_objects.contains(&target.object) {
+                fused_sparse_widths
+                    .entry(target.object)
+                    .and_modify(|width| {
+                        *width = (*width).max(target.alias.msb.saturating_add(1));
+                    })
+                    .or_insert_with(|| target.alias.msb.saturating_add(1));
+            } else if !direct_effects.contains(&EffectId(index)) {
+                fused_static_ranges
+                    .entry(target.object)
+                    .or_default()
+                    .push(target.alias);
+            }
         }
         for ranges in static_ranges.values_mut() {
             *ranges = merge_ranges(std::mem::take(ranges));
         }
+        for ranges in fused_static_ranges.values_mut() {
+            *ranges = merge_ranges(std::mem::take(ranges));
+        }
+        let mut capturable_static_components = BTreeSet::new();
+        for (&object, ranges) in &fused_static_ranges {
+            for range in ranges {
+                let component = super::ObjectRange::new(object, *range);
+                let mut first = usize::MAX;
+                let mut last = 0usize;
+                let mut has_writer = false;
+                let mut safe = true;
+                for &(_, writer, target, dynamic, _) in &stages {
+                    if dynamic || !overlaps(target, component) {
+                        continue;
+                    }
+                    has_writer = true;
+                    safe &= pure[writer.0];
+                    let position = process_position[&writer];
+                    first = first.min(position);
+                    last = last.max(position);
+                }
+                for &reader in ordered_processes {
+                    let reads_component = accesses[reader.0]
+                        .static_reads
+                        .iter()
+                        .copied()
+                        .any(|read| overlaps(read, component))
+                        || accesses[reader.0].dynamic_reads.contains(&object);
+                    if reads_component {
+                        safe &= pure[reader.0];
+                        let position = process_position[&reader];
+                        first = first.min(position);
+                        last = last.max(position);
+                    }
+                }
+                if !has_writer || !safe || first == usize::MAX {
+                    continue;
+                }
+                if ordered_processes[first..=last]
+                    .iter()
+                    .any(|process| !pure[process.0])
+                {
+                    continue;
+                }
+                capturable_static_components.insert(StaticPublicationComponent {
+                    object,
+                    offset: range.lsb,
+                    width: range.msb - range.lsb + 1,
+                });
+            }
+        }
         Self {
             static_ranges,
+            fused_static_ranges,
             sparse_widths,
+            fused_sparse_widths,
             sparse_objects,
+            fused_sparse_objects,
+            direct_effects,
+            deferred_direct_effects,
+            publication_readers,
+            stage_ranks,
+            capturable_static_components,
         }
     }
 
-    fn seeds(&self) -> Vec<SIRInstruction<RegionedAbsoluteAddr>> {
-        self.static_ranges
+    fn seeds(&self, fused: bool) -> Vec<SIRInstruction<RegionedAbsoluteAddr>> {
+        let static_ranges = if fused {
+            &self.fused_static_ranges
+        } else {
+            &self.static_ranges
+        };
+        static_ranges
             .iter()
             .flat_map(|(&object, ranges)| {
                 ranges.iter().map(move |range| {
@@ -252,9 +1989,13 @@ impl StatePublicationPlan {
             .collect()
     }
 
-    fn commits(&self) -> Vec<SIRInstruction<RegionedAbsoluteAddr>> {
-        let mut result = self
-            .static_ranges
+    fn commits(&self, fused: bool) -> Vec<SIRInstruction<RegionedAbsoluteAddr>> {
+        let static_ranges = if fused {
+            &self.fused_static_ranges
+        } else {
+            &self.static_ranges
+        };
+        let mut result = static_ranges
             .iter()
             .flat_map(|(&object, ranges)| {
                 ranges.iter().map(move |range| {
@@ -268,7 +2009,12 @@ impl StatePublicationPlan {
                 })
             })
             .collect::<Vec<_>>();
-        result.extend(self.sparse_widths.iter().map(|(&object, &width)| {
+        let sparse_widths = if fused {
+            &self.fused_sparse_widths
+        } else {
+            &self.sparse_widths
+        };
+        result.extend(sparse_widths.iter().map(|(&object, &width)| {
             SIRInstruction::Commit(
                 regioned(SPARSE_WORKING_REGION, object),
                 regioned(STABLE_REGION, object),
@@ -280,10 +2026,39 @@ impl StatePublicationPlan {
         result
     }
 
-    fn stage_region(&self, object: AbsoluteAddr) -> u32 {
-        if self.sparse_objects.contains(&object) {
+    fn is_direct_effect(&self, effect: EffectId) -> bool {
+        self.direct_effects.contains(&effect)
+    }
+
+    fn is_deferred_direct_effect(&self, effect: EffectId) -> bool {
+        self.deferred_direct_effects.contains(&effect)
+    }
+
+    fn publication_readers(&self, effect: EffectId) -> &[EffectId] {
+        self.publication_readers
+            .get(&effect)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn stage_rank(&self, effect: EffectId) -> Option<usize> {
+        self.stage_ranks.get(&effect).copied()
+    }
+
+    fn stage_region(&self, object: AbsoluteAddr, fused: bool) -> u32 {
+        let sparse_objects = if fused {
+            &self.fused_sparse_objects
+        } else {
+            &self.sparse_objects
+        };
+        let static_ranges = if fused {
+            &self.fused_static_ranges
+        } else {
+            &self.static_ranges
+        };
+        if sparse_objects.contains(&object) {
             SPARSE_WORKING_REGION
-        } else if self.static_ranges.contains_key(&object) {
+        } else if static_ranges.contains_key(&object) {
             WORKING_REGION
         } else {
             STABLE_REGION
@@ -319,7 +2094,7 @@ fn lower_apply_projection(state: &StatePublicationPlan) -> ExecutionUnit<Regione
     let block = BasicBlock {
         id: BlockId(0),
         params: Vec::new(),
-        instructions: state.commits(),
+        instructions: state.commits(false),
         terminator: SIRTerminator::Return,
     };
     ExecutionUnit {
@@ -611,6 +2386,8 @@ struct CombMaterializationId(usize);
 enum BlockScheduleNode {
     CombDefinition(CombMaterializationId, CombDefinitionId),
     CombValue(ValueId),
+    StageCompute(EffectId),
+    StagePublish(Vec<EffectId>),
     Effects(Vec<EffectId>),
     Exit,
 }
@@ -620,6 +2397,13 @@ struct ScheduledBlockNode {
     process: ProcessId,
     block: ControlBlockId,
     node: BlockScheduleNode,
+}
+
+#[derive(Clone)]
+struct PreparedStage {
+    value: RegisterId,
+    offset: SIROffset,
+    guard: Option<RegisterId>,
 }
 
 fn effect_guard(kind: &EffectKind) -> Option<ValueId> {
@@ -634,12 +2418,150 @@ fn effect_guard(kind: &EffectKind) -> Option<ValueId> {
     }
 }
 
-type SltCachesByRecipe = HashMap<CombRecipeId, HashMap<NodeId, RegisterId>>;
+type SltInputBinding = Vec<(crate::ir::VarAtomBase<AbsoluteAddr>, RegisterId)>;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum SltSemanticKey {
+    Node {
+        node: NodeId,
+        children: Vec<usize>,
+    },
+    Input {
+        node: NodeId,
+        indices: Vec<usize>,
+        bindings: SltInputBinding,
+    },
+    Opaque {
+        node: NodeId,
+        bindings: SltInputBinding,
+    },
+}
+
+#[derive(Default)]
+struct SemanticSltCache {
+    identities: HashMap<SltSemanticKey, usize>,
+    environment_dependent: Vec<bool>,
+    values: HashMap<usize, RegisterId>,
+}
+
+impl SemanticSltCache {
+    fn prepare(
+        &mut self,
+        root: NodeId,
+        arena: &SLTNodeArena<AbsoluteAddr>,
+        inputs: &HashMap<crate::ir::VarAtomBase<AbsoluteAddr>, RegisterId>,
+        cache: &mut HashMap<NodeId, RegisterId>,
+    ) -> HashMap<NodeId, usize> {
+        let mut semantic_ids = HashMap::default();
+        let mut work = vec![(root, false)];
+        while let Some((node, expanded)) = work.pop() {
+            if semantic_ids.contains_key(&node) {
+                continue;
+            }
+            if !expanded {
+                work.push((node, true));
+                for child in slt_value_children(arena.get(node)).into_iter().rev() {
+                    if !semantic_ids.contains_key(&child) {
+                        work.push((child, false));
+                    }
+                }
+                continue;
+            }
+
+            let key = match arena.get(node) {
+                crate::logic_tree::SLTNode::Input {
+                    variable,
+                    index,
+                    access,
+                    ..
+                } => {
+                    let mut bindings = inputs
+                        .iter()
+                        .filter_map(|(range, register)| {
+                            (range.id == *variable
+                                && (!index.is_empty() || range.access.overlaps(access)))
+                            .then_some((*range, *register))
+                        })
+                        .collect::<SltInputBinding>();
+                    bindings.sort_unstable();
+                    SltSemanticKey::Input {
+                        node,
+                        indices: index
+                            .iter()
+                            .map(|index| semantic_ids[&index.node])
+                            .collect(),
+                        bindings,
+                    }
+                }
+                crate::logic_tree::SLTNode::ForFold { .. }
+                | crate::logic_tree::SLTNode::ForFoldGroup { .. } => {
+                    let mut bindings = inputs
+                        .iter()
+                        .map(|(range, register)| (*range, *register))
+                        .collect::<SltInputBinding>();
+                    bindings.sort_unstable();
+                    SltSemanticKey::Opaque { node, bindings }
+                }
+                source => SltSemanticKey::Node {
+                    node,
+                    children: slt_value_children(source)
+                        .into_iter()
+                        .map(|child| semantic_ids[&child])
+                        .collect(),
+                },
+            };
+            let environment_dependent = match &key {
+                SltSemanticKey::Node { children, .. } => children
+                    .iter()
+                    .any(|identity| self.environment_dependent[*identity]),
+                SltSemanticKey::Input {
+                    indices, bindings, ..
+                } => {
+                    !bindings.is_empty()
+                        || indices
+                            .iter()
+                            .any(|identity| self.environment_dependent[*identity])
+                }
+                SltSemanticKey::Opaque { bindings, .. } => !bindings.is_empty(),
+            };
+            let identity = if let Some(&identity) = self.identities.get(&key) {
+                identity
+            } else {
+                let identity = self.identities.len();
+                self.identities.insert(key, identity);
+                self.environment_dependent.push(environment_dependent);
+                identity
+            };
+            if let Some(&register) = self.values.get(&identity) {
+                cache.entry(node).or_insert(register);
+            }
+            semantic_ids.insert(node, identity);
+        }
+        semantic_ids
+    }
+
+    fn record(
+        &mut self,
+        semantic_ids: &HashMap<NodeId, usize>,
+        cache: &HashMap<NodeId, RegisterId>,
+    ) {
+        for (&node, &identity) in semantic_ids {
+            if let Some(&register) = cache.get(&node) {
+                self.values.entry(identity).or_insert(register);
+            }
+        }
+    }
+
+    fn clear_environment_dependent_values(&mut self) {
+        self.values
+            .retain(|identity, _| !self.environment_dependent[*identity]);
+    }
+}
+
 #[derive(Default)]
 struct BlockMaterializationCache {
     comb: HashMap<CombDefinitionId, RegisterId>,
-    unbound_slt: HashMap<NodeId, RegisterId>,
-    slt_by_recipe: SltCachesByRecipe,
+    semantic_slt: SemanticSltCache,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -715,6 +2637,10 @@ struct ClockBodyLowering<'a> {
     homed_comb_definitions: Vec<bool>,
     comb_home_offsets: Vec<Option<usize>>,
     comb_home_loads: HashSet<RegisterId>,
+    comb_home_stores: HashSet<(BlockId, usize)>,
+    stage_stores: HashSet<(BlockId, usize)>,
+    direct_stage_stores: HashSet<(BlockId, usize)>,
+    prepared_stages: HashMap<EffectId, PreparedStage>,
     comb_values_by_block: Vec<Vec<ValueId>>,
     comb_definitions_by_block: Vec<Vec<(CombMaterializationId, CombDefinitionId)>>,
     selected_processes: Vec<ProcessId>,
@@ -754,6 +2680,10 @@ impl<'a> ClockBodyLowering<'a> {
             homed_comb_definitions: vec![false; ir.comb_definitions().len()],
             comb_home_offsets: vec![None; ir.comb_definitions().len()],
             comb_home_loads: HashSet::default(),
+            comb_home_stores: HashSet::default(),
+            stage_stores: HashSet::default(),
+            direct_stage_stores: HashSet::default(),
+            prepared_stages: HashMap::default(),
             comb_values_by_block: vec![Vec::new(); ir.blocks().len()],
             comb_definitions_by_block: vec![Vec::new(); ir.blocks().len()],
             selected_processes,
@@ -787,9 +2717,15 @@ impl<'a> ClockBodyLowering<'a> {
         self.builder
             .seal_block(SIRTerminator::Jump(first_entry, Vec::new()));
 
-        for process in self.selected_processes.clone() {
-            for block in self.control.dominator_preorder(process) {
-                self.lower_block(process, block)?;
+        let mut merged_away_blocks = Vec::new();
+        for run in interleavable_process_runs(self.ir, &self.selected_processes) {
+            if run.len() > 1 {
+                merged_away_blocks.extend(self.lower_interleaved_process_run(&run)?);
+            } else {
+                let process = run[0];
+                for block in self.control.dominator_preorder(process) {
+                    self.lower_block(process, block)?;
+                }
             }
         }
         if let Some(start) = emission_start {
@@ -798,47 +2734,64 @@ impl<'a> ClockBodyLowering<'a> {
 
         self.builder.switch_to_block(self.final_block);
         self.builder.seal_block(SIRTerminator::Return);
-        let (blocks, register_map, _) = self.builder.drain();
-        let mut result = map_clock_body(blocks, register_map, &self.state, &self.comb_home_loads)?;
+        let (mut blocks, register_map, _) = self.builder.drain();
+        for block in merged_away_blocks {
+            blocks.remove(&block);
+        }
+        let fused = matches!(
+            projection,
+            EventProjection::FusedClock | EventProjection::FusedSettledClock
+        );
+        let mut result = map_clock_body(
+            blocks,
+            register_map,
+            &self.state,
+            &self.comb_home_loads,
+            &self.comb_home_stores,
+            &self.stage_stores,
+            &self.direct_stage_stores,
+            fused,
+        )?;
         result
             .blocks
             .get_mut(&result.entry_block_id)
             .expect("projection entry block exists")
             .instructions
-            .splice(0..0, self.state.seeds());
-        if matches!(
-            projection,
-            EventProjection::FusedClock | EventProjection::FusedSettledClock
-        ) {
+            .splice(0..0, self.state.seeds(fused));
+        if fused {
             result
                 .blocks
                 .get_mut(&self.final_block)
                 .expect("projection final block exists")
                 .instructions
-                .extend(self.state.commits());
+                .extend(self.state.commits(true));
+            capture_local_static_snapshot_publications(
+                &mut result,
+                &self.state.capturable_static_components,
+            )?;
         }
         Ok(result)
     }
 
     fn create_blocks(&mut self) -> Result<(), EventProjectionError> {
-        for (index, block) in self.ir.blocks().iter().enumerate() {
-            if !self.selected_process_set.contains(&block.process) {
-                continue;
+        for process in self.selected_processes.clone() {
+            for block_id in self.control.dominator_preorder(process) {
+                let block = &self.ir.blocks()[block_id.0];
+                if self.ir.processes()[block.process.0].entry == block_id
+                    && !block.parameters.is_empty()
+                {
+                    return Err(EventProjectionError::ProcessEntryParameter {
+                        process: block.process,
+                    });
+                }
+                let mut parameters = Vec::with_capacity(block.parameters.len());
+                for &value in &block.parameters {
+                    let register = self.alloc_type(self.ir.values()[value.0].ty);
+                    self.parameter_registers[value.0] = Some(register);
+                    parameters.push(register);
+                }
+                self.sir_blocks[block_id.0] = self.builder.new_block_with(parameters);
             }
-            if self.ir.processes()[block.process.0].entry == ControlBlockId(index)
-                && !block.parameters.is_empty()
-            {
-                return Err(EventProjectionError::ProcessEntryParameter {
-                    process: block.process,
-                });
-            }
-            let mut parameters = Vec::with_capacity(block.parameters.len());
-            for &value in &block.parameters {
-                let register = self.alloc_type(self.ir.values()[value.0].ty);
-                self.parameter_registers[value.0] = Some(register);
-                parameters.push(register);
-            }
-            self.sir_blocks[index] = self.builder.new_block_with(parameters);
         }
         self.final_block = self.builder.new_block();
 
@@ -911,7 +2864,10 @@ impl<'a> ClockBodyLowering<'a> {
         let mut definition_nodes = HashMap::default();
         let mut value_nodes = HashMap::default();
         let mut effect_nodes = HashMap::default();
+        let mut stage_compute_nodes = HashMap::default();
         let mut guarded_groups = HashMap::<(ProcessId, ControlBlockId, ValueId), usize>::default();
+        let mut guarded_stage_publish_groups =
+            HashMap::<(ProcessId, ControlBlockId, Option<ValueId>), usize>::default();
         for &(process, block) in blocks {
             for &(materialization, definition) in &self.comb_definitions_by_block[block.0] {
                 let node = nodes.len();
@@ -933,6 +2889,37 @@ impl<'a> ClockBodyLowering<'a> {
             }
             for &effect in &self.effects_by_block[block.0] {
                 let guard = effect_guard(&self.ir.effects()[effect.0].kind);
+                if self.state.is_deferred_direct_effect(effect) {
+                    let compute = nodes.len();
+                    nodes.push(ScheduledBlockNode {
+                        process,
+                        block,
+                        node: BlockScheduleNode::StageCompute(effect),
+                    });
+                    stage_compute_nodes.insert(effect, compute);
+
+                    let publish_key = (process, block, guard);
+                    let publish =
+                        if let Some(&publish) = guarded_stage_publish_groups.get(&publish_key) {
+                            let BlockScheduleNode::StagePublish(group) = &mut nodes[publish].node
+                            else {
+                                unreachable!("stage publication groups contain only stage effects");
+                            };
+                            group.push(effect);
+                            publish
+                        } else {
+                            let publish = nodes.len();
+                            nodes.push(ScheduledBlockNode {
+                                process,
+                                block,
+                                node: BlockScheduleNode::StagePublish(vec![effect]),
+                            });
+                            guarded_stage_publish_groups.insert(publish_key, publish);
+                            publish
+                        };
+                    effect_nodes.insert(effect, publish);
+                    continue;
+                }
                 if let Some(guard) = guard
                     && let Some(&node) = guarded_groups.get(&(process, block, guard))
                 {
@@ -953,6 +2940,18 @@ impl<'a> ClockBodyLowering<'a> {
                 if let Some(guard) = guard {
                     guarded_groups.insert((process, block, guard), node);
                 }
+            }
+        }
+        for scheduled in &mut nodes {
+            if let BlockScheduleNode::Effects(effects) | BlockScheduleNode::StagePublish(effects) =
+                &mut scheduled.node
+            {
+                effects.sort_unstable_by_key(|effect| {
+                    (
+                        self.state.stage_rank(*effect).unwrap_or(usize::MAX),
+                        effect.0,
+                    )
+                });
             }
         }
         let exit = nodes.len();
@@ -990,6 +2989,12 @@ impl<'a> ClockBodyLowering<'a> {
                     }
                 }
             }
+            value_dependencies[node].extend(
+                dependencies[node]
+                    .iter()
+                    .copied()
+                    .filter(|producer| carries_register(*producer, node)),
+            );
         }
         for (&value, &node) in &value_nodes {
             let mut visited = HashSet::default();
@@ -1007,6 +3012,29 @@ impl<'a> ClockBodyLowering<'a> {
                     .copied()
                     .filter(|producer| carries_register(*producer, node)),
             );
+        }
+        for (&effect, &node) in &stage_compute_nodes {
+            let mut visited = HashSet::default();
+            self.ir.effects()[effect.0]
+                .kind
+                .visit_value_operands(|value| {
+                    self.collect_local_value_producers(
+                        value,
+                        &value_nodes,
+                        &definition_nodes,
+                        &mut dependencies[node],
+                        &mut visited,
+                        None,
+                    );
+                });
+            value_dependencies[node].extend(dependencies[node].iter().copied().filter(
+                |producer| {
+                    matches!(
+                        &nodes[*producer].node,
+                        BlockScheduleNode::CombDefinition(..) | BlockScheduleNode::CombValue(..)
+                    ) && carries_register(*producer, node)
+                },
+            ));
         }
         for node in 0..nodes.len() {
             let BlockScheduleNode::Effects(group) = &nodes[node].node else {
@@ -1043,6 +3071,60 @@ impl<'a> ClockBodyLowering<'a> {
                 },
             ));
         }
+        for node in 0..nodes.len() {
+            let BlockScheduleNode::StagePublish(group) = &nodes[node].node else {
+                continue;
+            };
+            for &effect in group {
+                let compute = stage_compute_nodes[&effect];
+                dependencies[node].push(compute);
+                value_dependencies[node].push(compute);
+                for predecessor in &self.ir.effects()[effect.0].predecessors {
+                    if let Some(&predecessor) = effect_nodes.get(predecessor)
+                        && predecessor != node
+                    {
+                        dependencies[node].push(predecessor);
+                    }
+                }
+                for &reader in self.state.publication_readers(effect) {
+                    if let Some(&reader) = stage_compute_nodes.get(&reader) {
+                        dependencies[node].push(reader);
+                    } else if let Some(&reader) = effect_nodes.get(&reader)
+                        && reader != node
+                    {
+                        dependencies[node].push(reader);
+                    }
+                }
+            }
+        }
+        let mut rank_by_stage_node = HashMap::<usize, usize>::default();
+        for (&effect, &node) in &effect_nodes {
+            let Some(rank) = self.state.stage_rank(effect) else {
+                continue;
+            };
+            rank_by_stage_node
+                .entry(node)
+                .and_modify(|current| *current = (*current).min(rank))
+                .or_insert(rank);
+        }
+        let mut ranked_stage_nodes =
+            HashMap::<(ProcessId, ControlBlockId), Vec<(usize, usize)>>::default();
+        for (node, rank) in rank_by_stage_node {
+            ranked_stage_nodes
+                .entry((nodes[node].process, nodes[node].block))
+                .or_default()
+                .push((rank, node));
+        }
+        for mut block_nodes in ranked_stage_nodes.into_values() {
+            block_nodes.sort_unstable();
+            for pair in block_nodes.windows(2) {
+                let predecessor = pair[0].1;
+                let node = pair[1].1;
+                if predecessor != node {
+                    dependencies[node].push(predecessor);
+                }
+            }
+        }
 
         // Exit is the block scheduling barrier. Every local computation and
         // effect must precede it, while only values consumed by the actual
@@ -1074,7 +3156,14 @@ impl<'a> ClockBodyLowering<'a> {
             row.sort_unstable();
             row.dedup();
         }
-        let domains = nodes.iter().map(|node| node.process.0).collect::<Vec<_>>();
+        let domains = if blocks.len() > 1 {
+            // The complete straight-line run is one materialization domain:
+            // values may legally cross former process boundaries, and the
+            // scheduler must be able to interleave their ready cones.
+            vec![0; nodes.len()]
+        } else {
+            nodes.iter().map(|node| node.process.0).collect::<Vec<_>>()
+        };
         let value_weights = nodes
             .iter()
             .map(|node| match node.node {
@@ -1089,7 +3178,17 @@ impl<'a> ClockBodyLowering<'a> {
                     let ty = self.ir.values()[value.0].ty;
                     self.register_chunks(ty.width, ty.four_state)
                 }
-                BlockScheduleNode::Effects(_) | BlockScheduleNode::Exit => 0,
+                BlockScheduleNode::StageCompute(effect) => {
+                    let EffectKind::StageNextFf { target, .. } = &self.ir.effects()[effect.0].kind
+                    else {
+                        unreachable!("only FF stages have split compute nodes");
+                    };
+                    self.register_chunks(target.width, self.four_state)
+                        .saturating_add(2)
+                }
+                BlockScheduleNode::StagePublish(_)
+                | BlockScheduleNode::Effects(_)
+                | BlockScheduleNode::Exit => 0,
             })
             .collect::<Vec<_>>();
         let order = schedule_min_live_values_in_domains_with_weights(
@@ -1146,17 +3245,27 @@ impl<'a> ClockBodyLowering<'a> {
         });
     }
 
-    fn lower_block(
+    fn emit_region_schedule(
         &mut self,
-        process: ProcessId,
-        block: ControlBlockId,
+        schedule: Vec<ScheduledBlockNode>,
+        cache: &mut HashMap<ValueId, RegisterId>,
+        materialization_cache: &mut BlockMaterializationCache,
+        reset_process_local_caches: bool,
     ) -> Result<(), EventProjectionError> {
-        self.builder.switch_to_block(self.sir_blocks[block.0]);
-        let mut cache = self.block_anchors(block);
-        let mut materialization_cache = BlockMaterializationCache::default();
-        for scheduled in self.block_schedule(block)? {
-            debug_assert_eq!(scheduled.process, process);
-            debug_assert_eq!(scheduled.block, block);
+        let mut active_process = None;
+        for scheduled in schedule {
+            let process = scheduled.process;
+            let block = scheduled.block;
+            if reset_process_local_caches && active_process != Some(process) {
+                if active_process.is_some() {
+                    cache.clear();
+                    materialization_cache.comb.clear();
+                    materialization_cache
+                        .semantic_slt
+                        .clear_environment_dependent_values();
+                }
+                active_process = Some(process);
+            }
             match scheduled.node {
                 BlockScheduleNode::CombDefinition(materialization, definition) => {
                     let mut values = ValueMaterializer::new_with_caches(
@@ -1180,8 +3289,8 @@ impl<'a> ClockBodyLowering<'a> {
                         &mut self.builder,
                         process,
                         block,
-                        &mut cache,
-                        std::mem::take(&mut materialization_cache),
+                        cache,
+                        std::mem::take(materialization_cache),
                     );
                     values.scheduled_comb_definitions.insert(definition);
                     let register = values.materialize_comb_definition(definition)?;
@@ -1189,6 +3298,10 @@ impl<'a> ClockBodyLowering<'a> {
                         let target = self.ir.comb_definitions()[definition.0].target;
                         let home_offset = values.comb_home_offsets[definition.0]
                             .expect("a homed definition has a private slot");
+                        let store_location = (
+                            values.builder.current_block(),
+                            values.builder.current_instruction_index(),
+                        );
                         values.builder.emit(SIRInstruction::Store(
                             target.object,
                             SIROffset::Static(home_offset),
@@ -1199,8 +3312,9 @@ impl<'a> ClockBodyLowering<'a> {
                             Vec::new(),
                             Vec::new(),
                         ));
+                        self.comb_home_stores.insert(store_location);
                     }
-                    materialization_cache = values.into_caches();
+                    *materialization_cache = values.into_caches();
                     let previous = self.placed_comb_definitions[materialization.0]
                         .replace(PlacedValue { block, register });
                     assert!(
@@ -1230,11 +3344,11 @@ impl<'a> ClockBodyLowering<'a> {
                         &mut self.builder,
                         process,
                         block,
-                        &mut cache,
-                        std::mem::take(&mut materialization_cache),
+                        cache,
+                        std::mem::take(materialization_cache),
                     );
                     let register = values.materialize(value)?;
-                    materialization_cache = values.into_caches();
+                    *materialization_cache = values.into_caches();
                     let previous = self
                         .placed_comb_values
                         .insert((process, value), PlacedValue { block, register });
@@ -1243,18 +3357,37 @@ impl<'a> ClockBodyLowering<'a> {
                         "one placed comb value is emitted exactly once"
                     );
                 }
+                BlockScheduleNode::StageCompute(effect) => {
+                    self.lower_stage_compute(process, block, effect, cache, materialization_cache)?;
+                }
+                BlockScheduleNode::StagePublish(effects) => {
+                    self.lower_stage_publish_group(&effects)?;
+                }
                 BlockScheduleNode::Effects(effects) => {
                     self.lower_effect_group(
                         process,
                         block,
                         &effects,
-                        &mut cache,
-                        &mut materialization_cache,
+                        cache,
+                        materialization_cache,
                     )?;
                 }
                 BlockScheduleNode::Exit => break,
             }
         }
+        Ok(())
+    }
+
+    fn lower_block(
+        &mut self,
+        process: ProcessId,
+        block: ControlBlockId,
+    ) -> Result<(), EventProjectionError> {
+        self.builder.switch_to_block(self.sir_blocks[block.0]);
+        let mut cache = self.block_anchors(block);
+        let mut materialization_cache = BlockMaterializationCache::default();
+        let schedule = self.block_schedule(block)?;
+        self.emit_region_schedule(schedule, &mut cache, &mut materialization_cache, false)?;
 
         let terminator = self.ir.blocks()[block.0]
             .terminator
@@ -1368,6 +3501,31 @@ impl<'a> ClockBodyLowering<'a> {
         Ok(())
     }
 
+    fn lower_interleaved_process_run(
+        &mut self,
+        processes: &[ProcessId],
+    ) -> Result<Vec<BlockId>, EventProjectionError> {
+        let blocks = processes
+            .iter()
+            .copied()
+            .map(|process| (process, self.ir.processes()[process.0].entry))
+            .collect::<Vec<_>>();
+        let first = blocks[0].1;
+        self.builder.switch_to_block(self.sir_blocks[first.0]);
+        let mut cache = HashMap::default();
+        let mut materialization_cache = BlockMaterializationCache::default();
+        let schedule = self.region_schedule(&blocks)?;
+        self.emit_region_schedule(schedule, &mut cache, &mut materialization_cache, true)?;
+        let continuation = self.continuation_by_process[processes.last().unwrap().0];
+        self.builder
+            .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
+        Ok(blocks
+            .iter()
+            .skip(1)
+            .map(|(_, block)| self.sir_blocks[block.0])
+            .collect())
+    }
+
     fn lower_control_edge(
         &mut self,
         process: ProcessId,
@@ -1405,6 +3563,125 @@ impl<'a> ClockBodyLowering<'a> {
         let arguments = values.materialize_many(arguments)?;
         self.builder
             .seal_block(SIRTerminator::Jump(self.sir_blocks[target.0], arguments));
+        Ok(())
+    }
+
+    fn lower_stage_compute(
+        &mut self,
+        process: ProcessId,
+        block: ControlBlockId,
+        effect: EffectId,
+        cache: &mut HashMap<ValueId, RegisterId>,
+        materialization_cache: &mut BlockMaterializationCache,
+    ) -> Result<(), EventProjectionError> {
+        let EffectKind::StageNextFf {
+            target,
+            value,
+            guard,
+            ..
+        } = &self.ir.effects()[effect.0].kind
+        else {
+            unreachable!("only FF stages have split compute nodes");
+        };
+        let target = target.clone();
+        let value = *value;
+        let guard = *guard;
+        let mut values = ValueMaterializer::new_with_caches(
+            self.ir,
+            self.comb_value_graph
+                .as_ref()
+                .expect("reachable comb values have a sparse graph"),
+            self.arena,
+            &self.slt,
+            self.settled_comb_reads,
+            &self.control,
+            self.event_control
+                .as_ref()
+                .expect("a non-empty clock projection has an event CFG"),
+            &self.placed_comb_values,
+            &self.comb_materialization_by_definition,
+            &self.placed_comb_definitions,
+            &self.homed_comb_definitions,
+            &self.comb_home_offsets,
+            &mut self.comb_home_loads,
+            &mut self.builder,
+            process,
+            block,
+            cache,
+            std::mem::take(materialization_cache),
+        );
+        let guard = guard.map(|guard| values.materialize(guard)).transpose()?;
+        let value = values.materialize(value)?;
+        let offset = values.materialize_offset(&target.offset)?;
+        *materialization_cache = values.into_caches();
+        let previous = self.prepared_stages.insert(
+            effect,
+            PreparedStage {
+                value,
+                offset,
+                guard,
+            },
+        );
+        assert!(previous.is_none(), "one FF stage is computed exactly once");
+        Ok(())
+    }
+
+    fn emit_prepared_stage(&mut self, effect: EffectId) {
+        let EffectKind::StageNextFf { target, .. } = &self.ir.effects()[effect.0].kind else {
+            unreachable!("only FF stages have split publication nodes");
+        };
+        let prepared = self.prepared_stages[&effect].clone();
+        let store_location = (
+            self.builder.current_block(),
+            self.builder.current_instruction_index(),
+        );
+        self.builder.emit(SIRInstruction::Store(
+            target.object,
+            prepared.offset,
+            target.width,
+            prepared.value,
+            Vec::new(),
+            Vec::new(),
+        ));
+        self.stage_stores.insert(store_location);
+        debug_assert!(self.state.is_direct_effect(effect));
+        self.direct_stage_stores.insert(store_location);
+    }
+
+    fn lower_stage_publish_group(
+        &mut self,
+        effects: &[EffectId],
+    ) -> Result<(), EventProjectionError> {
+        let Some(&first) = effects.first() else {
+            return Ok(());
+        };
+        let guard = self.prepared_stages[&first].guard;
+        debug_assert!(
+            effects
+                .iter()
+                .all(|effect| self.prepared_stages[effect].guard == guard)
+        );
+        let Some(condition) = guard else {
+            for &effect in effects {
+                self.emit_prepared_stage(effect);
+            }
+            return Ok(());
+        };
+
+        let effect_block = self.builder.new_block();
+        let continuation = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (effect_block, Vec::new()),
+            false_block: (continuation, Vec::new()),
+        });
+        self.builder.switch_to_block(effect_block);
+        for &effect in effects {
+            self.emit_prepared_stage(effect);
+        }
+        self.builder
+            .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
+        self.builder.switch_to_block(continuation);
         Ok(())
     }
 
@@ -1539,6 +3816,7 @@ impl<'a> ClockBodyLowering<'a> {
                     self.emit_stage(
                         process,
                         block,
+                        effect_id,
                         target,
                         *value,
                         &mut store_cache,
@@ -1548,7 +3826,15 @@ impl<'a> ClockBodyLowering<'a> {
                         .seal_block(SIRTerminator::Jump(continuation, Vec::new()));
                     self.builder.switch_to_block(continuation);
                 } else {
-                    self.emit_stage(process, block, target, *value, cache, materialization_cache)?;
+                    self.emit_stage(
+                        process,
+                        block,
+                        effect_id,
+                        target,
+                        *value,
+                        cache,
+                        materialization_cache,
+                    )?;
                 }
             }
             EffectKind::RuntimeEvent {
@@ -1695,11 +3981,13 @@ impl<'a> ClockBodyLowering<'a> {
         &mut self,
         process: ProcessId,
         block: ControlBlockId,
+        effect: EffectId,
         target: &super::ObjectAccess,
         value: ValueId,
         cache: &mut HashMap<ValueId, RegisterId>,
         materialization_cache: &mut BlockMaterializationCache,
     ) -> Result<(), EventProjectionError> {
+        let direct = self.state.is_direct_effect(effect);
         let mut values = ValueMaterializer::new_with_caches(
             self.ir,
             self.comb_value_graph
@@ -1726,6 +4014,10 @@ impl<'a> ClockBodyLowering<'a> {
         );
         let value = values.materialize(value)?;
         let offset = values.materialize_offset(&target.offset)?;
+        let store_location = (
+            values.builder.current_block(),
+            values.builder.current_instruction_index(),
+        );
         values.builder.emit(SIRInstruction::Store(
             target.object,
             offset,
@@ -1735,6 +4027,10 @@ impl<'a> ClockBodyLowering<'a> {
             Vec::new(),
         ));
         *materialization_cache = values.into_caches();
+        self.stage_stores.insert(store_location);
+        if direct {
+            self.direct_stage_stores.insert(store_location);
+        }
         Ok(())
     }
 
@@ -1978,7 +4274,7 @@ impl<'a> ClockBodyLowering<'a> {
                 self.ir.comb_graph(),
                 self.arena,
                 &demanded_definitions,
-                !self.four_state,
+                false,
             )
             .map_err(|error| match error {
                 CombValueGraphError::DefinitionCycle(definition) => {
@@ -2093,7 +4389,8 @@ impl<'a> ClockBodyLowering<'a> {
                 continue;
             };
             let definition = CombDefinitionId(definition);
-            let block = event_control.hoist_out_of_cycles(placement);
+            let placement = event_control.hoist_out_of_cycles(placement);
+            let block = placement;
             let materialization = CombMaterializationId(self.placed_comb_definitions.len());
             self.placed_comb_definitions.push(None);
             self.comb_definitions_by_block[block.0].push((materialization, definition));
@@ -2104,7 +4401,6 @@ impl<'a> ClockBodyLowering<'a> {
                 "one definition has one event-version materialization"
             );
         }
-
         for values in &mut self.comb_values_by_block {
             values.sort_unstable();
             values.dedup();
@@ -2176,8 +4472,7 @@ struct ValueMaterializer<'a, 'cache, 'builder> {
     scheduled_comb_definitions: HashSet<CombDefinitionId>,
     sparse_control_depth: usize,
     sparse_controlled_recipes: HashSet<CombRecipeId>,
-    unbound_slt_cache: HashMap<NodeId, RegisterId>,
-    slt_caches_by_recipe: SltCachesByRecipe,
+    semantic_slt_cache: SemanticSltCache,
 }
 
 impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
@@ -2266,8 +4561,7 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
             scheduled_comb_definitions: HashSet::default(),
             sparse_control_depth: 0,
             sparse_controlled_recipes: HashSet::default(),
-            unbound_slt_cache: caches.unbound_slt,
-            slt_caches_by_recipe: caches.slt_by_recipe,
+            semantic_slt_cache: caches.semantic_slt,
         }
     }
 
@@ -2284,8 +4578,7 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
     fn into_caches(self) -> BlockMaterializationCache {
         BlockMaterializationCache {
             comb: self.comb_cache,
-            unbound_slt: self.unbound_slt_cache,
-            slt_by_recipe: self.slt_caches_by_recipe,
+            semantic_slt: self.semantic_slt_cache,
         }
     }
 
@@ -2926,23 +5219,18 @@ impl<'a, 'cache, 'builder> ValueMaterializer<'a, 'cache, 'builder> {
             );
         }
         if cache.is_empty() && self.sparse_control_depth == 0 {
-            // With no scoped overrides NodeId alone is an immutable event
-            // value and can be shared across recipes. Otherwise one
-            // CombRecipe names one fixed binding of every overridden range.
-            // Keying by the complete register environment would retain one
-            // large key per materialized prefix.
-            let shared_cache = if inputs.is_empty() {
-                &mut self.unbound_slt_cache
-            } else {
-                self.slt_caches_by_recipe.entry(recipe).or_default()
-            };
-            Ok(self.slt.lower_with_scoped_inputs(
+            let semantic_ids = self
+                .semantic_slt_cache
+                .prepare(root, self.arena, &inputs, &mut cache);
+            let result = self.slt.lower_with_scoped_inputs(
                 self.builder,
                 root,
                 self.arena,
-                shared_cache,
+                &mut cache,
                 &inputs,
-            ))
+            );
+            self.semantic_slt_cache.record(&semantic_ids, &cache);
+            Ok(result)
         } else {
             Ok(self.slt.lower_with_scoped_inputs(
                 self.builder,
@@ -3402,16 +5690,333 @@ fn slt_tree_has_effects(root: NodeId, arena: &SLTNodeArena<AbsoluteAddr>) -> boo
     false
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct StaticPublicationComponent {
+    object: AbsoluteAddr,
+    offset: usize,
+    width: usize,
+}
+
+impl StaticPublicationComponent {
+    fn overlaps(self, object: AbsoluteAddr, offset: usize, width: usize) -> bool {
+        self.object == object
+            && offset < self.offset.saturating_add(self.width)
+            && self.offset < offset.saturating_add(width)
+    }
+}
+
+/// Replace a static WORKING transaction by a direct STABLE publication only
+/// when the old snapshot can be captured at a local CFG dominator.
+fn capture_local_static_snapshot_publications(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    approved: &BTreeSet<StaticPublicationComponent>,
+) -> Result<(), EventProjectionError> {
+    if approved.is_empty() {
+        return Ok(());
+    }
+    let mut seeds = BTreeSet::new();
+    let mut commits = BTreeSet::new();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            let SIRInstruction::Commit(source, target, SIROffset::Static(offset), width, _) =
+                instruction
+            else {
+                continue;
+            };
+            if source.absolute_addr() != target.absolute_addr() {
+                continue;
+            }
+            let component = StaticPublicationComponent {
+                object: source.absolute_addr(),
+                offset: *offset,
+                width: *width,
+            };
+            if source.region == STABLE_REGION && target.region == WORKING_REGION {
+                seeds.insert(component);
+            } else if source.region == WORKING_REGION && target.region == STABLE_REGION {
+                commits.insert(component);
+            }
+        }
+    }
+    let mut candidates = seeds
+        .intersection(&commits)
+        .copied()
+        .filter(|component| approved.contains(component))
+        .collect::<BTreeSet<_>>();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let mut dynamic_objects = HashSet::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            match instruction {
+                SIRInstruction::Load(_, address, SIROffset::Dynamic(_), _)
+                    if address.region == STABLE_REGION =>
+                {
+                    dynamic_objects.insert(address.absolute_addr());
+                }
+                SIRInstruction::Store(address, SIROffset::Dynamic(_), ..)
+                    if address.region == WORKING_REGION =>
+                {
+                    dynamic_objects.insert(address.absolute_addr());
+                }
+                _ => {}
+            }
+        }
+    }
+    candidates.retain(|component| !dynamic_objects.contains(&component.object));
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable();
+    let local_by_block = block_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(local, block)| (block, local))
+        .collect::<HashMap<_, _>>();
+    let successors = block_ids
+        .iter()
+        .map(|block| {
+            let block = &eu.blocks[block];
+            match &block.terminator {
+                SIRTerminator::Jump(target, _) => vec![local_by_block[target]],
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => vec![
+                    local_by_block[&true_block.0],
+                    local_by_block[&false_block.0],
+                ],
+                SIRTerminator::Switch { cases, default, .. } => cases
+                    .iter()
+                    .map(|case| local_by_block[&case.target])
+                    .chain(std::iter::once(local_by_block[default]))
+                    .collect(),
+                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+            }
+        })
+        .collect();
+    let cfg =
+        ForwardControlFlowGraph::analyze_structure(successors, local_by_block[&eu.entry_block_id])
+            .map_err(|source| EventProjectionError::EventControlFlowAnalysis { source })?;
+
+    let mut component_blocks = BTreeMap::<StaticPublicationComponent, Vec<usize>>::new();
+    let mut component_chunks = BTreeMap::<StaticPublicationComponent, usize>::new();
+    let mut loads = Vec::<(BlockId, usize, Vec<StaticPublicationComponent>)>::new();
+    for block in eu.blocks.values() {
+        let local = local_by_block[&block.id];
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            match instruction {
+                SIRInstruction::Load(_, address, SIROffset::Static(offset), width)
+                    if address.region == STABLE_REGION =>
+                {
+                    let overlapping = candidates
+                        .iter()
+                        .copied()
+                        .filter(|component| {
+                            component.overlaps(address.absolute_addr(), *offset, *width)
+                        })
+                        .collect::<Vec<_>>();
+                    if !overlapping.is_empty() {
+                        for &component in &overlapping {
+                            component_blocks.entry(component).or_default().push(local);
+                            *component_chunks.entry(component).or_default() +=
+                                width.saturating_add(63) / 64;
+                        }
+                        loads.push((block.id, index, overlapping));
+                    }
+                }
+                SIRInstruction::Store(address, SIROffset::Static(offset), width, ..)
+                    if address.region == WORKING_REGION =>
+                {
+                    for &component in &candidates {
+                        if component.overlaps(address.absolute_addr(), *offset, *width) {
+                            component_blocks.entry(component).or_default().push(local);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let hoist_out_of_cycle = |mut block: usize| {
+        loop {
+            let component = cfg.scc_for_block[block];
+            if !cfg.sccs[component].cyclic {
+                return Some(block);
+            }
+            let mut parent = cfg.dominators.idom[block]?;
+            while cfg.scc_for_block[parent] == component {
+                parent = cfg.dominators.idom[parent]?;
+            }
+            block = parent;
+        }
+    };
+    let mut placement = BTreeMap::<StaticPublicationComponent, usize>::new();
+    for &component in &candidates {
+        let Some(blocks) = component_blocks.get(&component) else {
+            continue;
+        };
+        let Some(common) = blocks.iter().copied().reduce(|left, right| {
+            cfg.dominators
+                .lca(left, right)
+                .expect("reachable blocks have a common dominator")
+        }) else {
+            continue;
+        };
+        let Some(common) = hoist_out_of_cycle(common) else {
+            continue;
+        };
+        let maximum_distance = blocks
+            .iter()
+            .copied()
+            .map(|mut block| {
+                let mut distance = 0usize;
+                while block != common {
+                    block = cfg.dominators.idom[block]
+                        .expect("a common dominator reaches every component block");
+                    distance = distance.saturating_add(1);
+                }
+                distance
+            })
+            .max()
+            .unwrap_or(0);
+        // Entry placement recreates one whole-function live range and was
+        // measured to be substantially slower than the WORKING transaction.
+        // Keep the initial capture subset within four machine-register chunks
+        // and six dominator edges; larger windows need pressure-aware spill
+        // costing rather than a fixed publication preference.
+        if common != cfg.root
+            && component_chunks.get(&component).copied().unwrap_or(0) <= 4
+            && maximum_distance <= 6
+        {
+            placement.insert(component, common);
+        }
+    }
+    candidates.retain(|component| placement.contains_key(component));
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let mut load_placement = HashMap::<(BlockId, usize), usize>::default();
+    for (block, index, overlapping) in loads {
+        let mut placements = overlapping
+            .into_iter()
+            .filter_map(|component| placement.get(&component).copied());
+        let Some(first) = placements.next() else {
+            continue;
+        };
+        let common = placements.fold(first, |left, right| {
+            cfg.dominators
+                .lca(left, right)
+                .expect("reachable placements have a common dominator")
+        });
+        load_placement.insert((block, index), common);
+    }
+
+    let mut hoisted =
+        BTreeMap::<usize, Vec<(BlockId, usize, SIRInstruction<RegionedAbsoluteAddr>)>>::new();
+    for block in eu.blocks.values_mut() {
+        let mut rewritten = Vec::with_capacity(block.instructions.len());
+        for (index, instruction) in block.instructions.drain(..).enumerate() {
+            if let Some(&target) = load_placement.get(&(block.id, index)) {
+                hoisted
+                    .entry(target)
+                    .or_default()
+                    .push((block.id, index, instruction));
+                continue;
+            }
+            match instruction {
+                SIRInstruction::Commit(
+                    source,
+                    target,
+                    SIROffset::Static(offset),
+                    width,
+                    triggers,
+                ) => {
+                    let component = StaticPublicationComponent {
+                        object: source.absolute_addr(),
+                        offset,
+                        width,
+                    };
+                    let boundary = source.absolute_addr() == target.absolute_addr()
+                        && ((source.region == STABLE_REGION && target.region == WORKING_REGION)
+                            || (source.region == WORKING_REGION && target.region == STABLE_REGION));
+                    if !boundary || !candidates.contains(&component) {
+                        rewritten.push(SIRInstruction::Commit(
+                            source,
+                            target,
+                            SIROffset::Static(offset),
+                            width,
+                            triggers,
+                        ));
+                    }
+                }
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(offset),
+                    width,
+                    source,
+                    triggers,
+                    captures,
+                ) if address.region == WORKING_REGION
+                    && candidates.iter().any(|component| {
+                        component.overlaps(address.absolute_addr(), offset, width)
+                    }) =>
+                {
+                    rewritten.push(SIRInstruction::Store(
+                        RegionedAbsoluteAddr::from_absolute_addr(
+                            STABLE_REGION,
+                            address.absolute_addr(),
+                        ),
+                        SIROffset::Static(offset),
+                        width,
+                        source,
+                        triggers,
+                        captures,
+                    ));
+                }
+                instruction => rewritten.push(instruction),
+            }
+        }
+        block.instructions = rewritten;
+    }
+    for (local, mut instructions) in hoisted {
+        instructions.sort_unstable_by_key(|(block, index, _)| (*block, *index));
+        eu.blocks
+            .get_mut(&block_ids[local])
+            .expect("capture placement block exists")
+            .instructions
+            .splice(
+                0..0,
+                instructions
+                    .into_iter()
+                    .map(|(_, _, instruction)| instruction),
+            );
+    }
+    Ok(())
+}
+
 fn map_clock_body(
     blocks: HashMap<BlockId, BasicBlock<AbsoluteAddr>>,
     register_map: HashMap<RegisterId, RegisterType>,
     state: &StatePublicationPlan,
     comb_home_loads: &HashSet<RegisterId>,
+    comb_home_stores: &HashSet<(BlockId, usize)>,
+    stage_stores: &HashSet<(BlockId, usize)>,
+    direct_stage_stores: &HashSet<(BlockId, usize)>,
+    fused: bool,
 ) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, EventProjectionError> {
     let mut mapped = HashMap::default();
     for (block_id, block) in blocks {
         let mut instructions = Vec::with_capacity(block.instructions.len());
-        for instruction in block.instructions {
+        for (instruction_index, instruction) in block.instructions.into_iter().enumerate() {
             let instruction = match instruction {
                 SIRInstruction::Load(destination, address, offset, width) => {
                     let region = if comb_home_loads.contains(&destination) {
@@ -3422,10 +6027,15 @@ fn map_clock_body(
                     SIRInstruction::Load(destination, regioned(region, address), offset, width)
                 }
                 SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
-                    let region = if state.stage_region(address) == STABLE_REGION {
+                    let location = (block_id, instruction_index);
+                    let region = if comb_home_stores.contains(&location) {
                         MATERIALIZATION_HOME_REGION
+                    } else if fused && direct_stage_stores.contains(&location) {
+                        STABLE_REGION
+                    } else if stage_stores.contains(&location) {
+                        state.stage_region(address, fused)
                     } else {
-                        state.stage_region(address)
+                        MATERIALIZATION_HOME_REGION
                     };
                     SIRInstruction::Store(
                         regioned(region, address),
@@ -3533,6 +6143,7 @@ mod tests {
                 value,
                 guard: None,
                 priority: 0,
+                stage_kind: crate::event_ir::FfStageKind::Fragment,
             },
         })
     }
@@ -3547,6 +6158,292 @@ mod tests {
         event.verify().unwrap();
     }
 
+    fn add_process_stage(
+        event: &mut EventIr,
+        source_order: usize,
+        target: ObjectRange,
+        read: Option<ObjectRange>,
+    ) -> (ProcessId, EffectId) {
+        let process = event.add_process(source_order);
+        let block = event.processes()[process.0].entry;
+        let (scope, region) = if read.is_some() {
+            (ValueScope::Event, event.root_region())
+        } else {
+            (ValueScope::Process(process), event.blocks()[block.0].region)
+        };
+        let value = event.add_value(Value {
+            ty: ValueType::bit(
+                target.width().expect("test target has a valid width"),
+                false,
+            ),
+            scope,
+            region,
+            kind: read.map_or_else(
+                || ValueKind::Constant {
+                    value: BigUint::default(),
+                    unknown: BigUint::default(),
+                },
+                ValueKind::ReadClockSnapshot,
+            ),
+        });
+        let stage = add_stage(event, process, block, target.into(), value);
+        event.set_terminator(block, ControlTerminator::Return);
+        (process, stage)
+    }
+
+    #[test]
+    fn publication_order_uses_transfer_cost_instead_of_reader_edge_count() {
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(100),
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let mut processes = Vec::new();
+        for source_order in 0..4 {
+            let process = event.add_process(source_order);
+            let block = event.processes()[process.0].entry;
+            event.set_terminator(block, ControlTerminator::Return);
+            processes.push(process);
+        }
+        for (writer, target) in [
+            (processes[0], range(1, 0, 511)),
+            (processes[1], range(2, 0, 511)),
+        ] {
+            let block = event.processes()[writer.0].entry;
+            let value = event.add_value(Value {
+                ty: ValueType::bit(512, false),
+                scope: ValueScope::Process(writer),
+                region: event.blocks()[block.0].region,
+                kind: ValueKind::Constant {
+                    value: BigUint::default(),
+                    unknown: BigUint::default(),
+                },
+            });
+            event.add_effect(Effect {
+                region: event.blocks()[block.0].region,
+                predecessors: Vec::new(),
+                kind: EffectKind::StageNextFf {
+                    process: writer,
+                    target: target.into(),
+                    value,
+                    guard: None,
+                    priority: 0,
+                    stage_kind: crate::event_ir::FfStageKind::Fragment,
+                },
+            });
+        }
+
+        let mut accesses = (0..4)
+            .map(|_| ProcessStateAccesses::default())
+            .collect::<Vec<_>>();
+        accesses[processes[0].0].static_reads.push(range(2, 0, 511));
+        accesses[processes[1].0].static_reads.push(range(1, 0, 511));
+        accesses[processes[2].0].static_reads.push(range(1, 0, 511));
+        accesses[processes[2].0].static_reads.push(range(2, 0, 511));
+        accesses[processes[3].0].static_reads.push(range(2, 0, 511));
+        let repaired = repair_publication_order(&event, processes.clone(), &accesses, &[true; 4]);
+        let position = repaired
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, process)| (process, position))
+            .collect::<HashMap<_, _>>();
+
+        assert!(position[&processes[2]] < position[&processes[0]]);
+        assert!(position[&processes[1]] < position[&processes[3]]);
+    }
+
+    #[test]
+    fn publication_order_treats_adjacent_writers_as_one_commit_component() {
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(100),
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let mut processes = Vec::new();
+        for (source_order, target) in [range(1, 0, 63), range(1, 64, 64)].into_iter().enumerate() {
+            let process = event.add_process(source_order);
+            let block = event.processes()[process.0].entry;
+            let value = event.add_value(Value {
+                ty: ValueType::bit(target.width().unwrap(), false),
+                scope: ValueScope::Process(process),
+                region: event.blocks()[block.0].region,
+                kind: ValueKind::Constant {
+                    value: BigUint::default(),
+                    unknown: BigUint::default(),
+                },
+            });
+            add_stage(&mut event, process, block, target.into(), value);
+            event.set_terminator(block, ControlTerminator::Return);
+            processes.push(process);
+        }
+
+        // Each writer consumes the other's old value.  Either process order
+        // leaves one direct-publication constraint unsatisfied, so the one
+        // byte-adjacent WORKING component remains in both cases.  Reordering
+        // merely because the unresolved writer is narrower would be a false
+        // profitability signal.
+        let mut accesses = (0..2)
+            .map(|_| ProcessStateAccesses::default())
+            .collect::<Vec<_>>();
+        accesses[processes[0].0].static_reads.push(range(1, 64, 64));
+        accesses[processes[1].0].static_reads.push(range(1, 0, 63));
+
+        assert_eq!(
+            repair_publication_order(&event, processes.clone(), &accesses, &[true; 2]),
+            processes
+        );
+    }
+
+    #[test]
+    fn clock_process_order_runs_an_acyclic_pipeline_downstream_first() {
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(100),
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let (upstream, upstream_stage) = add_process_stage(&mut event, 0, range(1, 0, 7), None);
+        let (downstream, downstream_stage) =
+            add_process_stage(&mut event, 1, range(2, 0, 7), Some(range(1, 0, 7)));
+        event.add_effect(Effect {
+            region: event.root_region(),
+            predecessors: vec![upstream_stage, downstream_stage],
+            kind: EffectKind::CommitFfState {
+                stages: vec![upstream_stage, downstream_stage],
+            },
+        });
+        event.verify().unwrap();
+
+        assert_eq!(
+            ordered_clock_processes(&event, vec![upstream, downstream]),
+            vec![downstream, upstream]
+        );
+    }
+
+    #[test]
+    fn feedback_process_order_groups_users_of_one_old_state() {
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(100),
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let (first, first_stage) =
+            add_process_stage(&mut event, 0, range(1, 0, 7), Some(range(2, 0, 7)));
+        let (second, second_stage) =
+            add_process_stage(&mut event, 1, range(2, 0, 7), Some(range(1, 0, 7)));
+        let (other_user, other_stage) =
+            add_process_stage(&mut event, 2, range(3, 0, 7), Some(range(1, 0, 7)));
+        let stages = vec![first_stage, second_stage, other_stage];
+        event.add_effect(Effect {
+            region: event.root_region(),
+            predecessors: stages.clone(),
+            kind: EffectKind::CommitFfState { stages },
+        });
+        event.verify().unwrap();
+
+        let ordered = ordered_clock_processes(&event, vec![first, second, other_user]);
+        assert_eq!(ordered[0], other_user);
+
+        let arena = SLTNodeArena::new();
+        let fused = lower_event_projection(
+            &event,
+            EventProjection::FusedClock,
+            &arena,
+            false,
+            object(100),
+        )
+        .unwrap();
+        fused.verify_result().unwrap();
+        let stable_stores = instructions(&fused)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
+                )
+            })
+            .count();
+        let working_stores = instructions(&fused)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+                )
+            })
+            .count();
+        assert_eq!((stable_stores, working_stores), (3, 0));
+    }
+
+    #[test]
+    fn local_feedback_computes_old_state_reads_before_direct_publication() {
+        let mut event = EventIr::new(
+            EventDomain::Clock {
+                clock: object(100),
+                resets: Vec::new(),
+            },
+            Arc::new(CombGraph::default()),
+        );
+        let process = event.add_process(0);
+        let block = event.processes()[process.0].entry;
+        let mut stages = Vec::new();
+        for (target, read) in [
+            (range(1, 0, 7), range(2, 0, 7)),
+            (range(2, 0, 7), range(1, 0, 7)),
+        ] {
+            let value = event.add_value(Value {
+                ty: ValueType::bit(8, false),
+                scope: ValueScope::Event,
+                region: event.root_region(),
+                kind: ValueKind::ReadClockSnapshot(read),
+            });
+            stages.push(add_stage(&mut event, process, block, target.into(), value));
+        }
+        finish_clock_event(&mut event, block, stages);
+
+        let arena = SLTNodeArena::new();
+        let fused = lower_event_projection(
+            &event,
+            EventProjection::FusedClock,
+            &arena,
+            false,
+            object(100),
+        )
+        .unwrap();
+        fused.verify_result().unwrap();
+        let stable_stores = instructions(&fused)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
+                )
+            })
+            .count();
+        let working_stores = instructions(&fused)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+                )
+            })
+            .count();
+        assert_eq!((stable_stores, working_stores), (2, 0));
+        let memory_kinds = instructions(&fused)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(..) => Some("load"),
+                SIRInstruction::Store(..) => Some("store"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(memory_kinds, ["load", "load", "store", "store"]);
+    }
+
     fn instructions(
         unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     ) -> impl Iterator<Item = &SIRInstruction<RegionedAbsoluteAddr>> {
@@ -3555,6 +6452,50 @@ mod tests {
         blocks
             .into_iter()
             .flat_map(move |block| unit.blocks[&block].instructions.iter())
+    }
+
+    #[test]
+    fn semantic_slt_cache_ignores_unrelated_input_bindings() {
+        let source = object(1);
+        let mut arena = SLTNodeArena::new();
+        let input = arena
+            .alloc(SLTNode::Input {
+                variable: source,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let one = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::default(),
+                8,
+                false,
+            ))
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Binary(input, BinaryOp::Add, one))
+            .unwrap();
+        let mut semantic = SemanticSltCache::default();
+        let mut first_inputs = HashMap::default();
+        first_inputs.insert(VarAtomBase::new(object(2), 0, 7), RegisterId(20));
+        let mut first_cache = HashMap::default();
+        let first_ids = semantic.prepare(root, &arena, &first_inputs, &mut first_cache);
+        first_cache.insert(root, RegisterId(30));
+        semantic.record(&first_ids, &first_cache);
+
+        let mut unrelated_inputs = HashMap::default();
+        unrelated_inputs.insert(VarAtomBase::new(object(3), 0, 7), RegisterId(21));
+        let mut unrelated_cache = HashMap::default();
+        semantic.prepare(root, &arena, &unrelated_inputs, &mut unrelated_cache);
+        assert_eq!(unrelated_cache.get(&root), Some(&RegisterId(30)));
+
+        let mut relevant_inputs = HashMap::default();
+        relevant_inputs.insert(VarAtomBase::new(source, 0, 7), RegisterId(22));
+        let mut relevant_cache = HashMap::default();
+        semantic.prepare(root, &arena, &relevant_inputs, &mut relevant_cache);
+        assert!(!relevant_cache.contains_key(&root));
     }
 
     #[test]
@@ -3582,20 +6523,14 @@ mod tests {
         )
         .unwrap();
         fused.verify_result().unwrap();
-        assert!(instructions(&fused).any(|instruction| matches!(
-            instruction,
-            SIRInstruction::Commit(source, destination, SIROffset::Static(8), 8, _)
-                if source.region == STABLE_REGION && destination.region == WORKING_REGION
-        )));
+        assert!(
+            !instructions(&fused)
+                .any(|instruction| matches!(instruction, SIRInstruction::Commit(..)))
+        );
         assert!(instructions(&fused).any(|instruction| matches!(
             instruction,
             SIRInstruction::Store(address, SIROffset::Static(8), 8, _, _, _)
-                if address.region == WORKING_REGION
-        )));
-        assert!(instructions(&fused).any(|instruction| matches!(
-            instruction,
-            SIRInstruction::Commit(source, destination, SIROffset::Static(8), 8, _)
-                if source.region == WORKING_REGION && destination.region == STABLE_REGION
+                if address.region == STABLE_REGION
         )));
 
         let evaluate = lower_event_projection(
@@ -3636,7 +6571,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_stage_uses_sparse_state_without_a_dense_seed() {
+    fn independent_dynamic_stage_publishes_directly() {
         let (mut event, arena, process, block) = empty_clock_event();
         let region = event.blocks()[block.0].region;
         let index = event.add_value(Value {
@@ -3689,9 +6624,9 @@ mod tests {
         assert!(instructions(&fused).any(|instruction| matches!(
             instruction,
             SIRInstruction::Store(address, SIROffset::Dynamic(_), 8, _, _, _)
-                if address.region == SPARSE_WORKING_REGION
+                if address.region == STABLE_REGION
         )));
-        assert!(instructions(&fused).any(|instruction| matches!(
+        assert!(!instructions(&fused).any(|instruction| matches!(
             instruction,
             SIRInstruction::Commit(source, destination, SIROffset::Static(0), 32, _)
                 if source.region == SPARSE_WORKING_REGION
@@ -3931,7 +6866,7 @@ mod tests {
         assert!(instructions(&fused).any(|instruction| matches!(
             instruction,
             SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
-                if address.absolute_addr() == ff && address.region == WORKING_REGION
+                if address.absolute_addr() == ff && address.region == STABLE_REGION
         )));
 
         let settled = lower_event_projection(
@@ -3961,12 +6896,12 @@ mod tests {
         assert!(instructions(&settled).any(|instruction| matches!(
             instruction,
             SIRInstruction::Store(address, SIROffset::Static(0), 8, _, _, _)
-                if address.absolute_addr() == ff && address.region == WORKING_REGION
+                if address.absolute_addr() == ff && address.region == STABLE_REGION
         )));
     }
 
     #[test]
-    fn cross_definition_mux_materializes_only_the_selected_dependency_arm() {
+    fn cross_definition_mux_stays_branchless_until_sir_profitability_is_known() {
         let condition = object(1);
         let numerator_a = object(2);
         let denominator_a = object(3);
@@ -4098,22 +7033,15 @@ mod tests {
                 (divisions != 0).then_some((block.id, divisions))
             })
             .collect::<Vec<_>>();
-        assert_eq!(division_blocks.len(), 2);
-        assert!(division_blocks.iter().all(|(_, divisions)| *divisions == 1));
-        assert!(fused.blocks.values().any(|block| {
-            let SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } = &block.terminator
-            else {
-                return false;
-            };
-            let arm_blocks = [true_block.0, false_block.0];
-            division_blocks
-                .iter()
-                .all(|(division_block, _)| arm_blocks.contains(division_block))
-        }));
+        assert_eq!(division_blocks.len(), 1);
+        assert_eq!(division_blocks[0].1, 2);
+        assert!(
+            fused
+                .blocks
+                .values()
+                .all(|block| !matches!(block.terminator, SIRTerminator::Branch { .. })),
+            "cross-definition control conversion needs post-SIR cost information"
+        );
 
         let four_state =
             lower_event_projection(&event, EventProjection::FusedClock, &arena, true, object(0))
@@ -4662,6 +7590,7 @@ mod tests {
                 value: settled,
                 guard: Some(condition),
                 priority: 0,
+                stage_kind: crate::event_ir::FfStageKind::Fragment,
             },
         });
         finish_clock_event(&mut event, block, vec![stage]);
