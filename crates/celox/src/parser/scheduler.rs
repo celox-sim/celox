@@ -2171,7 +2171,6 @@ fn schedule_acyclic_path_region(
     dependencies: &[Vec<usize>],
     value_dependencies: &[Vec<usize>],
     local_by_path: &mut [usize],
-    ff_sinks: &[Vec<usize>],
 ) -> Option<Vec<Vec<usize>>> {
     for (local, &path) in paths.iter().enumerate() {
         if path >= local_by_path.len() || local_by_path[path] != usize::MAX {
@@ -2208,48 +2207,8 @@ fn schedule_acyclic_path_region(
             row.sort_unstable();
             row.dedup();
         }
-
-        // Model each FF staging RHS as a virtual exit use of the exact
-        // combinational definitions it reads. Chaining virtual exits leaves
-        // only the first FF sink initially ready in the reverse scheduler.
-        // Once selected, its live definitions have a non-positive pressure
-        // delta and their complete ready cone is closed before the next sink.
-        // The virtual nodes are removed from the final LogicPath order.
-        let mut virtual_sinks = Vec::new();
-        for sink in ff_sinks {
-            let mut definitions = sink
-                .iter()
-                .filter_map(|path| {
-                    let local = *local_by_path.get(*path)?;
-                    (local != usize::MAX).then_some(local)
-                })
-                .collect::<Vec<_>>();
-            definitions.sort_unstable();
-            definitions.dedup();
-            if definitions.is_empty() {
-                continue;
-            }
-            let node = local_dependencies.len();
-            local_dependencies.push(definitions.clone());
-            local_values.push(definitions);
-            virtual_sinks.push(node);
-        }
-        for pair in virtual_sinks.windows(2) {
-            local_dependencies[pair[0]].push(pair[1]);
-        }
-        for node in &virtual_sinks {
-            local_dependencies[*node].sort_unstable();
-            local_dependencies[*node].dedup();
-        }
-
         let order = schedule_min_live_values(&local_dependencies, &local_values).ok()?;
-        Some(
-            order
-                .into_iter()
-                .filter(|local| *local < paths.len())
-                .map(|local| vec![paths[local]])
-                .collect(),
-        )
+        Some(order.into_iter().map(|local| vec![paths[local]]).collect())
     })();
 
     for &path in paths {
@@ -2266,7 +2225,6 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     dependencies: &[Vec<usize>],
     value_dependencies: &[Vec<usize>],
     input: &[LogicPath<Addr>],
-    ff_sinks: &[Vec<usize>],
 ) -> Option<Vec<Vec<usize>>> {
     if dependencies.len() != input.len() || value_dependencies.len() != input.len() {
         return None;
@@ -2286,7 +2244,6 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
             dependencies,
             value_dependencies,
             local_by_path,
-            ff_sinks,
         )?);
         pending.clear();
         Some(())
@@ -2316,7 +2273,6 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
 ///    - **Strategy A (Static Unrolling)**: For DAG parts or loops with small, predictable convergence bounds.
 ///    - **Strategy B (Dynamic Convergence)**: For complex SCCs or potential "True Loops", implementing
 ///      runtime oscillation detection and convergence-based repetition.
-#[cfg(test)]
 pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     input: Vec<LogicPath<Addr>>,
     arena: &SLTNodeArena<Addr>,
@@ -2325,28 +2281,6 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     four_state: bool,
     _var_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
-) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
-    sort_with_ff_sinks(
-        input,
-        arena,
-        ignored_loops,
-        true_loops,
-        four_state,
-        _var_widths,
-        first_runtime_error_code,
-        &[],
-    )
-}
-
-pub fn sort_with_ff_sinks<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    input: Vec<LogicPath<Addr>>,
-    arena: &SLTNodeArena<Addr>,
-    ignored_loops: &HashSet<(Addr, Addr)>,
-    true_loops: &HashMap<(Addr, Addr), usize>,
-    four_state: bool,
-    _var_widths: &HashMap<Addr, usize>,
-    first_runtime_error_code: i64,
-    ff_sinks: &[Vec<usize>],
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     // 1. Build bit-range MemoryDefs/MemoryUses and their semantic graph.
     // This is the source dataflow adapter; interval indexing and DAG
@@ -2385,7 +2319,7 @@ pub fn sort_with_ff_sinks<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     // Hard ordering edges constrain the result without inventing liveness;
     // only Def-to-Use edges influence adjacency. No source-width estimate is
     // used as a proxy for eventual machine-register pressure.
-    let sccs = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input, ff_sinks)
+    let sccs = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input)
         .ok_or(SchedulerError::InvalidDependencyGraph)?;
 
     let mut builder = SIRBuilder::new();
@@ -2785,8 +2719,7 @@ mod tests {
     use super::{
         ExactFoldGroup, ExactIndexedLoadKey, FoldGroupReadFacts, NormalizedIndexExpr,
         best_weighted_fold_family, build_fold_group_schedule_index, build_logic_path_memory_ssa,
-        collect_node_input_deps, prepare_atomic_fold_group_results, schedule_acyclic_path_region,
-        sort, stable_topological_sccs,
+        collect_node_input_deps, prepare_atomic_fold_group_results, sort, stable_topological_sccs,
     };
     use crate::ir::{BinaryOp, BitAccess, SIRBuilder, SIRInstruction, SIRTerminator, VarAtomBase};
     use crate::logic_tree::{
@@ -2830,29 +2763,6 @@ mod tests {
             stable_topological_sccs(unordered, &adj, &[Some(0), Some(0), Some(1)]).unwrap();
 
         assert_eq!(ordered, vec![vec![0], vec![2], vec![1]]);
-    }
-
-    #[test]
-    fn ff_virtual_sinks_finish_operand_cones_at_the_phase_boundary() {
-        // Two independent chains 0 -> 1 and 2 -> 3 feed consecutive FF
-        // stages. The first stage's cone is emitted last, immediately before
-        // the FF phase; the second stage's cone precedes it.
-        let paths = vec![0, 1, 2, 3];
-        let dependencies = vec![vec![1], vec![], vec![3], vec![]];
-        let value_dependencies = dependencies.clone();
-        let mut local_by_path = vec![usize::MAX; paths.len()];
-
-        let scheduled = schedule_acyclic_path_region(
-            &paths,
-            &dependencies,
-            &value_dependencies,
-            &mut local_by_path,
-            &[vec![1], vec![3]],
-        )
-        .unwrap();
-
-        assert_eq!(scheduled, vec![vec![2], vec![3], vec![0], vec![1]]);
-        assert_eq!(local_by_path, vec![usize::MAX; paths.len()]);
     }
 
     fn simple_path(

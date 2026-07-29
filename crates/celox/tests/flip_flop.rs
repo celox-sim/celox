@@ -1769,7 +1769,7 @@ fn test_single_clock_optimization() {
 }
 
 #[test]
-fn test_independent_clocks_use_fused_projections() {
+fn test_multi_clock_no_optimization() {
     let code = r#"
         module Top (clk1: input clock, clk2: input clock, d1: input logic<8>, q1: output logic<8>) {
             always_ff (clk1) { q1 = d1; }
@@ -1778,8 +1778,8 @@ fn test_independent_clocks_use_fused_projections() {
     "#;
     let trace = setup_and_trace(code, "Top");
     let program = trace.post_optimized_sir.unwrap();
-    assert!(program.eval_only_ffs.is_empty());
-    assert!(program.apply_ffs.is_empty());
+    assert!(!program.eval_only_ffs.is_empty());
+    assert!(!program.apply_ffs.is_empty());
 }
 
 #[test]

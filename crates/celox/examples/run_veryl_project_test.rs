@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
@@ -85,7 +85,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         fs::create_dir_all(&output_dir)?;
         let trace_result = builder
-            .trace_ff_air()
             .trace_pre_optimized_sir()
             .trace_post_optimized_sir()
             .trace_mir()
@@ -94,27 +93,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         let pre_optimized_sir = trace
             .format_pre_optimized_sir()
             .ok_or("pre-optimized SIR trace was not captured")?;
-        let ff_air = trace
-            .format_ff_air()
-            .ok_or("FF AIR trace was not captured")?;
         let sir = trace
             .format_post_optimized_sir()
             .ok_or("post-optimized SIR trace was not captured")?;
         let pre_sir_path = output_dir.join("pre_optimized.sir");
-        let ff_air_path = output_dir.join("ff.air");
         let sir_path = output_dir.join("post_optimized.sir");
         fs::write(&pre_sir_path, &pre_optimized_sir)?;
-        fs::write(&ff_air_path, &ff_air)?;
         fs::write(&sir_path, &sir)?;
         eprintln!(
             "wrote pre-optimized SIR ({} bytes) to {}",
             pre_optimized_sir.len(),
             pre_sir_path.display()
-        );
-        eprintln!(
-            "wrote FF AIR ({} bytes) to {}",
-            ff_air.len(),
-            ff_air_path.display()
         );
         eprintln!(
             "wrote post-optimized SIR ({} bytes) to {}",
@@ -193,33 +182,59 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let compile_start = Instant::now();
-    let (result, compile_elapsed, execute_elapsed) = match opts.backend {
+    let (result, compile_elapsed, execute_elapsed, execute_cpu_elapsed) = match opts.backend {
         Backend::Native => {
             let mut sim = builder.build_native()?;
             let testbench = compile_initial_testbench(&sim)
                 .ok_or("no initial block found — this module is not a native testbench")?;
             let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let result = run_compiled_testbench(&mut sim, &testbench);
-            (result, compile_elapsed, execute_start.elapsed())
+            (
+                result,
+                compile_elapsed,
+                execute_start.elapsed(),
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+            )
         }
         Backend::Cranelift => {
             let mut sim = builder.build_cranelift()?;
             let testbench = compile_initial_testbench(&sim)
                 .ok_or("no initial block found — this module is not a native testbench")?;
             let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let result = run_compiled_testbench(&mut sim, &testbench);
-            (result, compile_elapsed, execute_start.elapsed())
+            (
+                result,
+                compile_elapsed,
+                execute_start.elapsed(),
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+            )
         }
     };
     let elapsed = total_start.elapsed();
-    println!(
-        "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
-        opts.test,
-        compile_elapsed.as_nanos(),
-        execute_elapsed.as_nanos()
-    );
+    if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
+        println!(
+            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
+            opts.test,
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos(),
+            execute_cpu_elapsed.as_nanos()
+        );
+    } else {
+        println!(
+            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
+            opts.test,
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos()
+        );
+    }
 
     match result {
         TestResult::Pass => {
@@ -239,6 +254,26 @@ fn run() -> Result<(), Box<dyn Error>> {
             Err(message.into())
         }
     }
+}
+
+#[cfg(unix)]
+fn process_cpu_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) };
+    (result == 0).then(|| {
+        Duration::new(
+            time.tv_sec.try_into().unwrap_or_default(),
+            time.tv_nsec.try_into().unwrap_or_default(),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn process_cpu_time() -> Option<Duration> {
+    None
 }
 
 fn parse_args() -> Result<Options, String> {

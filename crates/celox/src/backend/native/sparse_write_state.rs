@@ -1479,8 +1479,6 @@ mod tests {
             total_size: 0,
             working_offsets: HashMap::default(),
             working_base_offset: 0,
-            materialization_home_base_offset: 0,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 0,
             sparse_layouts,

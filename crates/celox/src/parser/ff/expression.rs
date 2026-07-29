@@ -3,8 +3,8 @@ use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
 use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, RegisterType, SIROffset, SIRValue, STABLE_REGION, UnaryOp,
-    VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
+    SIRTerminator, SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 use crate::parser::{
     LoweringPhase, ParserError,
@@ -23,8 +23,6 @@ use veryl_analyzer::ir::{
     VarSelect, VarSelectOp,
 };
 use veryl_analyzer::symbol::Affiliation;
-
-use super::builder::{FfBuildOp, FfBuilder, FfReadSource, FfTerminator, FfWriteTarget};
 
 fn expression_has_side_effect(expr: &Expression) -> bool {
     let input_has_side_effect =
@@ -86,41 +84,46 @@ fn expression_has_side_effect(expr: &Expression) -> bool {
     }
 }
 
-fn add_offset_term(
+fn add_offset_term<A>(
     accumulator: &mut Option<RegisterId>,
     term: RegisterId,
-    builder: &mut impl FfBuilder,
+    builder: &mut SIRBuilder<A>,
 ) {
     if let Some(current) = *accumulator {
         let next = builder.alloc_bit(64, false);
-        builder.emit(FfBuildOp::Binary(next, current, BinaryOp::Add, term));
+        builder.emit(SIRInstruction::Binary(next, current, BinaryOp::Add, term));
         *accumulator = Some(next);
     } else {
         *accumulator = Some(term);
     }
 }
 
-fn add_offset_constant(
+fn add_offset_constant<A>(
     accumulator: &mut Option<RegisterId>,
     value: u64,
-    builder: &mut impl FfBuilder,
+    builder: &mut SIRBuilder<A>,
 ) {
     if value == 0 {
         return;
     }
     let constant = builder.alloc_bit(64, false);
-    builder.emit(FfBuildOp::Imm(constant, SIRValue::new(value)));
+    builder.emit(SIRInstruction::Imm(constant, SIRValue::new(value)));
     add_offset_term(accumulator, constant, builder);
 }
 
-fn scale_offset(value: RegisterId, scale: usize, builder: &mut impl FfBuilder) -> RegisterId {
+fn scale_offset<A>(value: RegisterId, scale: usize, builder: &mut SIRBuilder<A>) -> RegisterId {
     if scale == 1 {
         return value;
     }
     let scale_reg = builder.alloc_bit(64, false);
-    builder.emit(FfBuildOp::Imm(scale_reg, SIRValue::new(scale as u64)));
+    builder.emit(SIRInstruction::Imm(scale_reg, SIRValue::new(scale as u64)));
     let result = builder.alloc_bit(64, false);
-    builder.emit(FfBuildOp::Binary(result, value, BinaryOp::Mul, scale_reg));
+    builder.emit(SIRInstruction::Binary(
+        result,
+        value,
+        BinaryOp::Mul,
+        scale_reg,
+    ));
     result
 }
 
@@ -207,11 +210,11 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn emit_register_slice(
+    fn emit_register_slice<A>(
         &mut self,
         src_reg: RegisterId,
         access: BitAccess,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> RegisterId {
         let src_width = ir_builder.register(&src_reg).width();
         if access.lsb == 0 && access.msb + 1 == src_width {
@@ -223,12 +226,12 @@ impl<'a> FfParser<'a> {
             src_reg
         } else {
             let shift_amt_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(FfBuildOp::Imm(
+            ir_builder.emit(SIRInstruction::Imm(
                 shift_amt_reg,
                 SIRValue::new(access.lsb as u64),
             ));
             let shifted_reg = ir_builder.alloc_logic(src_width);
-            ir_builder.emit(FfBuildOp::Binary(
+            ir_builder.emit(SIRInstruction::Binary(
                 shifted_reg,
                 src_reg,
                 BinaryOp::Shr,
@@ -242,13 +245,13 @@ impl<'a> FfParser<'a> {
         } else {
             let mask_val = (BigUint::from(1u64) << slice_width) - BigUint::from(1u64);
             let mask_reg = ir_builder.alloc_bit(slice_width, false);
-            ir_builder.emit(FfBuildOp::Imm(mask_reg, SIRValue::new(mask_val)));
+            ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
             let sliced_reg = if ir_builder.register(&src_reg).is_signed() {
                 ir_builder.alloc_bit(slice_width, true)
             } else {
                 ir_builder.alloc_logic(slice_width)
             };
-            ir_builder.emit(FfBuildOp::Binary(
+            ir_builder.emit(SIRInstruction::Binary(
                 sliced_reg,
                 shifted_reg,
                 BinaryOp::And,
@@ -258,16 +261,16 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn emit_register_dynamic_slice(
+    fn emit_register_dynamic_slice<A>(
         &mut self,
         src_reg: RegisterId,
         offset_reg: RegisterId,
         width: usize,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> RegisterId {
         let src_width = ir_builder.register(&src_reg).width();
         let shifted = ir_builder.alloc_logic(src_width);
-        ir_builder.emit(FfBuildOp::Binary(
+        ir_builder.emit(SIRInstruction::Binary(
             shifted,
             src_reg,
             BinaryOp::Shr,
@@ -278,7 +281,7 @@ impl<'a> FfParser<'a> {
         }
 
         let mask = ir_builder.alloc_bit(width, false);
-        ir_builder.emit(FfBuildOp::Imm(
+        ir_builder.emit(SIRInstruction::Imm(
             mask,
             SIRValue::new((BigUint::from(1u64) << width) - BigUint::from(1u64)),
         ));
@@ -287,7 +290,12 @@ impl<'a> FfParser<'a> {
         } else {
             ir_builder.alloc_logic(width)
         };
-        ir_builder.emit(FfBuildOp::Binary(selected, shifted, BinaryOp::And, mask));
+        ir_builder.emit(SIRInstruction::Binary(
+            selected,
+            shifted,
+            BinaryOp::And,
+            mask,
+        ));
         selected
     }
 
@@ -300,7 +308,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let formal_width = self
             .module
@@ -336,9 +344,9 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    fn coerce_register_to_formal(
+    fn coerce_register_to_formal<A>(
         &self,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         reg: RegisterId,
         target_width: usize,
         extend_signed: bool,
@@ -355,12 +363,12 @@ impl<'a> FfParser<'a> {
                 }
                 RegisterType::Bit { .. } => {
                     let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
-                    ir_builder.emit(FfBuildOp::Unary(bit_reg, UnaryOp::Ident, widened));
+                    ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::Ident, widened));
                     bit_reg
                 }
                 RegisterType::Logic { .. } => {
                     let bit_reg = ir_builder.alloc_bit(target_width, result_signed);
-                    ir_builder.emit(FfBuildOp::Unary(bit_reg, UnaryOp::ToTwoState, widened));
+                    ir_builder.emit(SIRInstruction::Unary(bit_reg, UnaryOp::ToTwoState, widened));
                     bit_reg
                 }
             }
@@ -371,7 +379,7 @@ impl<'a> FfParser<'a> {
             // Bit register here would incorrectly discard the formal's X/Z
             // state merely to encode its signed flag.
             let logic_reg = ir_builder.alloc_logic(target_width);
-            ir_builder.emit(FfBuildOp::Unary(logic_reg, UnaryOp::Ident, widened));
+            ir_builder.emit(SIRInstruction::Unary(logic_reg, UnaryOp::Ident, widened));
             logic_reg
         }
     }
@@ -386,7 +394,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<bool, ParserError> {
         let Some(formal) = self.module.variables.get(&var_id) else {
             return Ok(false);
@@ -546,7 +554,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
 
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
         // Keep unpacked-array indexing separate from packed bit selection.
         // Backends may give array elements a physical stride different from
@@ -687,7 +695,7 @@ impl<'a> FfParser<'a> {
                 element_index
             } else {
                 let element_index = ir_builder.alloc_bit(64, false);
-                ir_builder.emit(FfBuildOp::Imm(
+                ir_builder.emit(SIRInstruction::Imm(
                     element_index,
                     SIRValue::new(static_element_index),
                 ));
@@ -736,7 +744,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
         self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
         let idx_reg = self.stack.pop_back().unwrap();
@@ -746,10 +754,10 @@ impl<'a> FfParser<'a> {
             Ok(idx_reg)
         } else {
             let s_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(FfBuildOp::Imm(s_reg, SIRValue::new(stride as u64)));
+            ir_builder.emit(SIRInstruction::Imm(s_reg, SIRValue::new(stride as u64)));
 
             let m_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(FfBuildOp::Binary(m_reg, idx_reg, BinaryOp::Mul, s_reg));
+            ir_builder.emit(SIRInstruction::Binary(m_reg, idx_reg, BinaryOp::Mul, s_reg));
             Ok(m_reg)
         }
     }
@@ -771,7 +779,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let is_local_let = {
             let variable = &self.module.variables[&var_id];
@@ -830,18 +838,17 @@ impl<'a> FfParser<'a> {
 
         let offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
-        let source = if self.local_working_vars.contains(&var_id) {
-            FfReadSource::ProcessLocal
+        let load_region = if self.local_working_vars.contains(&var_id) {
+            WORKING_REGION
         } else {
-            FfReadSource::ClockSnapshot
+            STABLE_REGION
         };
-        ir_builder.emit(FfBuildOp::Read {
-            destination: dest_reg,
-            object: var_id,
-            source,
+        ir_builder.emit(SIRInstruction::Load(
+            dest_reg,
+            convert(var_id, load_region),
             offset,
             width,
-        });
+        ));
 
         self.stack.push_back(dest_reg);
 
@@ -869,7 +876,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
 
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let src_reg = self.stack.pop_back().expect("invalid ir");
 
@@ -888,7 +895,11 @@ impl<'a> FfParser<'a> {
             && matches!(ir_builder.register(&src_reg), RegisterType::Logic { .. })
         {
             let converted = ir_builder.alloc_bit(target_width, target_type.signed);
-            ir_builder.emit(FfBuildOp::Unary(converted, UnaryOp::ToTwoState, src_reg));
+            ir_builder.emit(SIRInstruction::Unary(
+                converted,
+                UnaryOp::ToTwoState,
+                src_reg,
+            ));
             converted
         } else {
             src_reg
@@ -907,18 +918,14 @@ impl<'a> FfParser<'a> {
             sources,
             ir_builder,
         )?;
-        let target = if self.local_working_vars.contains(&dst.id) {
-            FfWriteTarget::ProcessLocal
-        } else {
-            FfWriteTarget::StagedState
-        };
-        ir_builder.emit(FfBuildOp::Write {
-            object: dst.id,
-            target,
+        ir_builder.emit(SIRInstruction::Store(
+            convert(dst.id, domain.region()),
             offset,
-            width: target_width,
-            value: src_reg,
-        });
+            target_width,
+            src_reg,
+            Vec::new(),
+            Vec::new(),
+        ));
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
         let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
@@ -928,6 +935,8 @@ impl<'a> FfParser<'a> {
             for i in access.lsb..=access.msb {
                 bits.insert(i);
             }
+        } else {
+            self.dynamic_write_vars.insert(dst.id);
         }
         self.dynamic_defined_vars.insert(dst.id);
 
@@ -943,13 +952,13 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn op_binary(
+    pub(super) fn op_binary<A>(
         &mut self,
         op: &Op,
         width: usize,
         left_source_signed: bool,
         right_source_signed: bool,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) {
         let right = self.stack.pop_back().expect("invalid ir");
         let left = self.stack.pop_back().expect("invalid ir");
@@ -958,25 +967,25 @@ impl<'a> FfParser<'a> {
         match op {
             Op::BitXnor => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Binary(tmp, left, BinaryOp::Xor, right));
+                ir_builder.emit(SIRInstruction::Binary(tmp, left, BinaryOp::Xor, right));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::BitNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::BitNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
             Op::BitNand => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Binary(tmp, left, BinaryOp::And, right));
+                ir_builder.emit(SIRInstruction::Binary(tmp, left, BinaryOp::And, right));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::BitNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::BitNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
             Op::BitNor => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Binary(tmp, left, BinaryOp::Or, right));
+                ir_builder.emit(SIRInstruction::Binary(tmp, left, BinaryOp::Or, right));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::BitNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::BitNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
@@ -985,7 +994,7 @@ impl<'a> FfParser<'a> {
 
         let dest_reg = ir_builder.alloc_logic(width);
         let op = resolve_binary_op(*op, left_source_signed, right_source_signed);
-        ir_builder.emit(FfBuildOp::Binary(dest_reg, left, op, right));
+        ir_builder.emit(SIRInstruction::Binary(dest_reg, left, op, right));
         self.stack.push_back(dest_reg);
     }
 
@@ -998,7 +1007,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         self.parse_expression_in_context(
             left, targets, domain, convert, sources, ir_builder, None,
@@ -1015,16 +1024,16 @@ impl<'a> FfParser<'a> {
         // produces a one-bit 4-state truth value; ToTwoState maps its X result
         // to zero so an indeterminate LHS continues into the full operation.
         let not_lhs = ir_builder.alloc_logic(1);
-        ir_builder.emit(FfBuildOp::Unary(not_lhs, UnaryOp::LogicNot, lhs));
+        ir_builder.emit(SIRInstruction::Unary(not_lhs, UnaryOp::LogicNot, lhs));
         let shortcut_truth = if is_and {
             not_lhs
         } else {
             let truth = ir_builder.alloc_logic(1);
-            ir_builder.emit(FfBuildOp::Unary(truth, UnaryOp::LogicNot, not_lhs));
+            ir_builder.emit(SIRInstruction::Unary(truth, UnaryOp::LogicNot, not_lhs));
             truth
         };
         let shortcut = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Unary(
+        ir_builder.emit(SIRInstruction::Unary(
             shortcut,
             UnaryOp::ToTwoState,
             shortcut_truth,
@@ -1034,12 +1043,12 @@ impl<'a> FfParser<'a> {
         let result_param = ir_builder.alloc_logic(1);
         let merge_block = ir_builder.new_block_with(vec![result_param]);
         let shortcut_value = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Imm(
+        ir_builder.emit(SIRInstruction::Imm(
             shortcut_value,
             SIRValue::new(if is_and { 0u8 } else { 1u8 }),
         ));
-        ir_builder.seal_block(FfTerminator::Branch {
-            condition: shortcut,
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: shortcut,
             true_block: (merge_block, vec![shortcut_value]),
             false_block: (rhs_block, vec![]),
         });
@@ -1056,7 +1065,7 @@ impl<'a> FfParser<'a> {
             )
         });
         let evaluated = ir_builder.alloc_logic(1);
-        ir_builder.emit(FfBuildOp::Binary(
+        ir_builder.emit(SIRInstruction::Binary(
             evaluated,
             lhs,
             if is_and {
@@ -1066,7 +1075,7 @@ impl<'a> FfParser<'a> {
             },
             rhs,
         ));
-        ir_builder.seal_block(FfTerminator::Jump(merge_block, vec![evaluated]));
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![evaluated]));
 
         ir_builder.switch_to_block(merge_block);
         if let (Some((pre_defined, pre_dynamic)), Some((rhs_defined, rhs_dynamic))) =
@@ -1079,32 +1088,32 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn op_unary(&mut self, op: &Op, width: usize, ir_builder: &mut impl FfBuilder) {
+    pub(super) fn op_unary<A>(&mut self, op: &Op, width: usize, ir_builder: &mut SIRBuilder<A>) {
         let expr = self.stack.pop_back().expect("invalid ir");
 
         // Decompose Reduction Nand/Nor/Xnor into existing reduction + Not
         match op {
             Op::BitNand => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(tmp, UnaryOp::And, expr));
+                ir_builder.emit(SIRInstruction::Unary(tmp, UnaryOp::And, expr));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::LogicNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::LogicNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
             Op::BitNor => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(tmp, UnaryOp::Or, expr));
+                ir_builder.emit(SIRInstruction::Unary(tmp, UnaryOp::Or, expr));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::LogicNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::LogicNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
             Op::BitXnor => {
                 let tmp = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(tmp, UnaryOp::Xor, expr));
+                ir_builder.emit(SIRInstruction::Unary(tmp, UnaryOp::Xor, expr));
                 let dest = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Unary(dest, UnaryOp::LogicNot, tmp));
+                ir_builder.emit(SIRInstruction::Unary(dest, UnaryOp::LogicNot, tmp));
                 self.stack.push_back(dest);
                 return;
             }
@@ -1167,7 +1176,7 @@ impl<'a> FfParser<'a> {
             Op::Condition => unreachable!("Condition node must not be lowered by op_unary"),
             Op::Repeat => unreachable!("Repeat node must be lowered by repeat-specific path"),
         };
-        ir_builder.emit(FfBuildOp::Unary(dest_reg, op, expr));
+        ir_builder.emit(SIRInstruction::Unary(dest_reg, op, expr));
         self.stack.push_back(dest_reg);
     }
 
@@ -1179,7 +1188,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let mut current_offset = 0;
         let rhs_width = ir_builder.register(&rhs_reg).width();
@@ -1196,9 +1205,12 @@ impl<'a> FfParser<'a> {
                     let shifted_reg = ir_builder.alloc_logic(rhs_width);
 
                     let shift_amt_reg = ir_builder.alloc_bit(64, false);
-                    ir_builder.emit(FfBuildOp::Imm(shift_amt_reg, SIRValue::new(current_offset)));
+                    ir_builder.emit(SIRInstruction::Imm(
+                        shift_amt_reg,
+                        SIRValue::new(current_offset),
+                    ));
 
-                    ir_builder.emit(FfBuildOp::Binary(
+                    ir_builder.emit(SIRInstruction::Binary(
                         shifted_reg,
                         rhs_reg,
                         BinaryOp::Shr,
@@ -1212,10 +1224,10 @@ impl<'a> FfParser<'a> {
                 } else {
                     let mask_val = (BigUint::from(1u64) << part_width) - BigUint::from(1u64);
                     let mask_reg = ir_builder.alloc_bit(part_width, false);
-                    ir_builder.emit(FfBuildOp::Imm(mask_reg, SIRValue::new(mask_val)));
+                    ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
 
                     let final_reg = ir_builder.alloc_logic(part_width);
-                    ir_builder.emit(FfBuildOp::Binary(
+                    ir_builder.emit(SIRInstruction::Binary(
                         final_reg,
                         shifted_reg,
                         BinaryOp::And,
@@ -1240,7 +1252,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let expected_width: usize = assign_statement
             .dst
@@ -1269,11 +1281,11 @@ impl<'a> FfParser<'a> {
         )
     }
 
-    pub(super) fn op_constant(
+    pub(super) fn op_constant<A>(
         &mut self,
         v: SIRValue,
         width: usize,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) {
         let reg = if v.mask.is_zero() {
             ir_builder.alloc_bit(width, false)
@@ -1281,7 +1293,7 @@ impl<'a> FfParser<'a> {
             ir_builder.alloc_logic(width)
         };
 
-        ir_builder.emit(FfBuildOp::Imm(reg, v));
+        ir_builder.emit(SIRInstruction::Imm(reg, v));
         self.stack.push_back(reg);
     }
 
@@ -1330,7 +1342,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         match &call.kind {
             SystemFunctionKind::Bits(input) => {
@@ -1351,19 +1363,19 @@ impl<'a> FfParser<'a> {
                 let width = ir_builder.register(&arg).width();
 
                 let mut result = ir_builder.alloc_bit(32, false);
-                ir_builder.emit(FfBuildOp::Imm(result, SIRValue::new(0u8)));
+                ir_builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
                 for k in 1..=width {
                     let threshold = ir_builder.alloc_bit(width, false);
-                    ir_builder.emit(FfBuildOp::Imm(
+                    ir_builder.emit(SIRInstruction::Imm(
                         threshold,
                         SIRValue::new(BigUint::from(1u8) << (k - 1)),
                     ));
                     let cond = ir_builder.alloc_bit(1, false);
-                    ir_builder.emit(FfBuildOp::Binary(cond, arg, BinaryOp::GtU, threshold));
+                    ir_builder.emit(SIRInstruction::Binary(cond, arg, BinaryOp::GtU, threshold));
                     let value = ir_builder.alloc_bit(32, false);
-                    ir_builder.emit(FfBuildOp::Imm(value, SIRValue::new(k as u64)));
+                    ir_builder.emit(SIRInstruction::Imm(value, SIRValue::new(k as u64)));
                     let next = ir_builder.alloc_logic(32);
-                    ir_builder.emit(FfBuildOp::Mux(next, cond, value, result));
+                    ir_builder.emit(SIRInstruction::Mux(next, cond, value, result));
                     result = next;
                 }
                 self.stack.push_back(result);
@@ -1377,15 +1389,20 @@ impl<'a> FfParser<'a> {
                 let width = ir_builder.register(&arg).width();
 
                 let zero = ir_builder.alloc_bit(width, false);
-                ir_builder.emit(FfBuildOp::Imm(zero, SIRValue::new(0u8)));
+                ir_builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                 let one = ir_builder.alloc_bit(width, false);
-                ir_builder.emit(FfBuildOp::Imm(one, SIRValue::new(1u8)));
+                ir_builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
 
                 let arg_minus_one = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Binary(arg_minus_one, arg, BinaryOp::Sub, one));
+                ir_builder.emit(SIRInstruction::Binary(
+                    arg_minus_one,
+                    arg,
+                    BinaryOp::Sub,
+                    one,
+                ));
 
                 let overlap = ir_builder.alloc_logic(width);
-                ir_builder.emit(FfBuildOp::Binary(
+                ir_builder.emit(SIRInstruction::Binary(
                     overlap,
                     arg,
                     BinaryOp::And,
@@ -1393,13 +1410,18 @@ impl<'a> FfParser<'a> {
                 ));
 
                 let non_zero = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(FfBuildOp::Binary(non_zero, arg, BinaryOp::Ne, zero));
+                ir_builder.emit(SIRInstruction::Binary(non_zero, arg, BinaryOp::Ne, zero));
 
                 let no_overlap = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(FfBuildOp::Binary(no_overlap, overlap, BinaryOp::Eq, zero));
+                ir_builder.emit(SIRInstruction::Binary(
+                    no_overlap,
+                    overlap,
+                    BinaryOp::Eq,
+                    zero,
+                ));
 
                 let result = ir_builder.alloc_logic(1);
-                ir_builder.emit(FfBuildOp::Binary(
+                ir_builder.emit(SIRInstruction::Binary(
                     result,
                     non_zero,
                     BinaryOp::LogicAnd,
@@ -1422,7 +1444,7 @@ impl<'a> FfParser<'a> {
                     RegisterType::Logic { .. } => ir_builder.alloc_logic(width),
                     RegisterType::Bit { .. } => ir_builder.alloc_bit(width, signed),
                 };
-                ir_builder.emit(FfBuildOp::Unary(casted, UnaryOp::Ident, src));
+                ir_builder.emit(SIRInstruction::Unary(casted, UnaryOp::Ident, src));
                 self.stack.push_back(casted);
                 Ok(())
             }
@@ -1445,7 +1467,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         let context_width = context.map(|context| context.width);
@@ -1697,7 +1719,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         if matches!(op, Op::LogicAnd | Op::LogicOr) {
@@ -1757,7 +1779,7 @@ impl<'a> FfParser<'a> {
             } else {
                 UnaryOp::Ident
             };
-            ir_builder.emit(FfBuildOp::Unary(casted, cast_op, src));
+            ir_builder.emit(SIRInstruction::Unary(casted, cast_op, src));
             let casted = if let Some(context) = context {
                 self.cast_reg_width_ext(ir_builder, casted, context.width, context.signed)
             } else {
@@ -1802,13 +1824,13 @@ impl<'a> FfParser<'a> {
 
             let result = if exp == 0 {
                 let one = ir_builder.alloc_bit(width, false);
-                ir_builder.emit(FfBuildOp::Imm(one, SIRValue::new(1u32)));
+                ir_builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u32)));
                 one
             } else {
                 let mut acc = base;
                 for _ in 1..exp {
                     let next = ir_builder.alloc_logic(width);
-                    ir_builder.emit(FfBuildOp::Binary(next, acc, BinaryOp::Mul, base));
+                    ir_builder.emit(SIRInstruction::Binary(next, acc, BinaryOp::Mul, base));
                     acc = next;
                 }
                 acc
@@ -1864,7 +1886,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         let is_reduction = matches!(
@@ -1915,7 +1937,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         let branch_context = ValueContext {
@@ -1955,7 +1977,7 @@ impl<'a> FfParser<'a> {
             )?;
             let else_val = self.stack.pop_back().unwrap();
             let result = ir_builder.alloc_logic(result_width);
-            ir_builder.emit(FfBuildOp::Mux(result, cond_reg, then_val, else_val));
+            ir_builder.emit(SIRInstruction::Mux(result, cond_reg, then_val, else_val));
             self.stack.push_back(result);
             return Ok(());
         }
@@ -1966,24 +1988,32 @@ impl<'a> FfParser<'a> {
         // A known condition evaluates only the selected arm. An X/Z
         // condition evaluates both arms and merges their bits.
         let not_cond = ir_builder.alloc_logic(1);
-        ir_builder.emit(FfBuildOp::Unary(not_cond, UnaryOp::LogicNot, cond_reg));
+        ir_builder.emit(SIRInstruction::Unary(not_cond, UnaryOp::LogicNot, cond_reg));
         let known_false = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Unary(known_false, UnaryOp::ToTwoState, not_cond));
+        ir_builder.emit(SIRInstruction::Unary(
+            known_false,
+            UnaryOp::ToTwoState,
+            not_cond,
+        ));
         let true_truth = ir_builder.alloc_logic(1);
-        ir_builder.emit(FfBuildOp::Unary(true_truth, UnaryOp::LogicNot, not_cond));
+        ir_builder.emit(SIRInstruction::Unary(
+            true_truth,
+            UnaryOp::LogicNot,
+            not_cond,
+        ));
         let known_true = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Unary(
+        ir_builder.emit(SIRInstruction::Unary(
             known_true,
             UnaryOp::ToTwoState,
             true_truth,
         ));
 
         let dummy_then = ir_builder.alloc_logic(result_width);
-        ir_builder.emit(FfBuildOp::Imm(dummy_then, SIRValue::new(0u8)));
+        ir_builder.emit(SIRInstruction::Imm(dummy_then, SIRValue::new(0u8)));
         let direct_else = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Imm(direct_else, SIRValue::new(0u8)));
+        ir_builder.emit(SIRInstruction::Imm(direct_else, SIRValue::new(0u8)));
         let merge_else = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Imm(merge_else, SIRValue::new(1u8)));
+        ir_builder.emit(SIRInstruction::Imm(merge_else, SIRValue::new(1u8)));
 
         let then_block = ir_builder.new_block();
         let carried_then = ir_builder.alloc_logic(result_width);
@@ -1992,8 +2022,8 @@ impl<'a> FfParser<'a> {
         let result = ir_builder.alloc_logic(result_width);
         let merge_block = ir_builder.new_block_with(vec![result]);
 
-        ir_builder.seal_block(FfTerminator::Branch {
-            condition: known_false,
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: known_false,
             true_block: (else_block, vec![dummy_then, direct_else]),
             false_block: (then_block, vec![]),
         });
@@ -2012,8 +2042,8 @@ impl<'a> FfParser<'a> {
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_ternary_defined.clone());
         let then_dynamic =
             std::mem::replace(&mut self.dynamic_defined_vars, pre_ternary_dynamic.clone());
-        ir_builder.seal_block(FfTerminator::Branch {
-            condition: known_true,
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: known_true,
             true_block: (merge_block, vec![then_val]),
             false_block: (else_block, vec![then_val, merge_else]),
         });
@@ -2032,16 +2062,21 @@ impl<'a> FfParser<'a> {
         let else_defined = std::mem::take(&mut self.defined_ranges);
         let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
         let merged = ir_builder.alloc_logic(result_width);
-        ir_builder.emit(FfBuildOp::Mux(merged, cond_reg, carried_then, else_val));
+        ir_builder.emit(SIRInstruction::Mux(
+            merged,
+            cond_reg,
+            carried_then,
+            else_val,
+        ));
         let direct_else_block = ir_builder.new_block();
-        ir_builder.seal_block(FfTerminator::Branch {
-            condition: needs_merge,
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: needs_merge,
             true_block: (merge_block, vec![merged]),
             false_block: (direct_else_block, vec![]),
         });
 
         ir_builder.switch_to_block(direct_else_block);
-        ir_builder.seal_block(FfTerminator::Jump(merge_block, vec![else_val]));
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
 
         ir_builder.switch_to_block(merge_block);
         self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
@@ -2058,13 +2093,13 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
 
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let mut total_width = 0;
 
         // Create accumulator with initial value 0
         let mut acc_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Imm(acc_reg, SIRValue::new(0u32)));
+        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
 
         // Parse sequentially from right (LSB)
         for (expr, replication) in exprs.iter().rev() {
@@ -2092,11 +2127,14 @@ impl<'a> FfParser<'a> {
                 // Generate left shift amount
 
                 let shift_amt_reg = ir_builder.alloc_bit(64, false);
-                ir_builder.emit(FfBuildOp::Imm(shift_amt_reg, SIRValue::new(total_width)));
+                ir_builder.emit(SIRInstruction::Imm(
+                    shift_amt_reg,
+                    SIRValue::new(total_width),
+                ));
 
                 // Shift target to current position
                 let shifted_part_reg = ir_builder.alloc_logic(next_total_width);
-                ir_builder.emit(FfBuildOp::Binary(
+                ir_builder.emit(SIRInstruction::Binary(
                     shifted_part_reg,
                     part_reg,
                     BinaryOp::Shl,
@@ -2105,7 +2143,7 @@ impl<'a> FfParser<'a> {
 
                 // Integrate into accumulator
                 let next_acc_reg = ir_builder.alloc_logic(next_total_width);
-                ir_builder.emit(FfBuildOp::Binary(
+                ir_builder.emit(SIRInstruction::Binary(
                     next_acc_reg,
                     acc_reg,
                     BinaryOp::Or,
@@ -2123,14 +2161,14 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    pub(super) fn emit_concat_registers(
+    pub(super) fn emit_concat_registers<A>(
         &mut self,
         parts: &[(RegisterId, usize)],
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> RegisterId {
         if parts.is_empty() {
             let reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(FfBuildOp::Imm(reg, SIRValue::new(0u32)));
+            ir_builder.emit(SIRInstruction::Imm(reg, SIRValue::new(0u32)));
             return reg;
         }
         if parts.len() == 1 {
@@ -2139,16 +2177,19 @@ impl<'a> FfParser<'a> {
 
         let mut total_width = 0usize;
         let mut acc_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(FfBuildOp::Imm(acc_reg, SIRValue::new(0u32)));
+        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
 
         for (part_reg, part_width) in parts.iter().rev() {
             let next_total_width = total_width + *part_width;
 
             let shift_amt_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(FfBuildOp::Imm(shift_amt_reg, SIRValue::new(total_width)));
+            ir_builder.emit(SIRInstruction::Imm(
+                shift_amt_reg,
+                SIRValue::new(total_width),
+            ));
 
             let shifted_part_reg = ir_builder.alloc_logic(next_total_width);
-            ir_builder.emit(FfBuildOp::Binary(
+            ir_builder.emit(SIRInstruction::Binary(
                 shifted_part_reg,
                 *part_reg,
                 BinaryOp::Shl,
@@ -2156,7 +2197,7 @@ impl<'a> FfParser<'a> {
             ));
 
             let next_acc_reg = ir_builder.alloc_logic(next_total_width);
-            ir_builder.emit(FfBuildOp::Binary(
+            ir_builder.emit(SIRInstruction::Binary(
                 next_acc_reg,
                 acc_reg,
                 BinaryOp::Or,
@@ -2178,7 +2219,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         _context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         let mut parts: Vec<(RegisterId, usize)> = Vec::new();
@@ -2240,7 +2281,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let mut parts: Vec<(RegisterId, usize)> = Vec::new();
         let mut explicit_width = 0usize;
@@ -2344,7 +2385,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context_width: Option<usize>,
     ) -> Result<(), ParserError> {
         let context = context_width.map(|width| ValueContext {
@@ -2363,7 +2404,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         let context_width = context.map(|context| context.width);
@@ -2458,7 +2499,6 @@ impl<'a> FfParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::SIRBuilder;
     use crate::parser::BuildConfig;
     use veryl_analyzer::{
         Analyzer, Context, attribute_table,

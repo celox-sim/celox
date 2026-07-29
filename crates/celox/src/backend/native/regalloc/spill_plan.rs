@@ -853,11 +853,11 @@ struct TransitionPoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct AllocationCandidateScore {
     blocked_by_deferred_reload: bool,
+    pressure_delta: isize,
     continuation_tie: std::cmp::Reverse<bool>,
     resident_operand_tie: std::cmp::Reverse<usize>,
     operand_tie: std::cmp::Reverse<usize>,
     materialization_cost: u32,
-    pressure_delta: isize,
     preferred_rank: usize,
     source: usize,
 }
@@ -917,9 +917,18 @@ impl AllocationReadyQueue {
             (!score.blocked_by_deferred_reload && projected <= register_capacity)
                 .then_some((score, instruction))
         });
+        let best_projected = if best_score.pressure_delta < 0 {
+            current_resident.saturating_sub(best_score.pressure_delta.unsigned_abs())
+        } else {
+            current_resident.saturating_add(best_score.pressure_delta as usize)
+        };
+        let best_is_legal =
+            !best_score.blocked_by_deferred_reload && best_projected <= register_capacity;
         let (score, instruction) = if let Some(demanded) = demanded {
             demanded
-        } else if !best_score.blocked_by_deferred_reload && best_score.continuation_tie.0 {
+        } else if best_is_legal
+            && (best_score.continuation_tie.0 || current_resident >= register_capacity)
+        {
             (best_score, best_instruction)
         } else if !source_score.blocked_by_deferred_reload && source_projected <= register_capacity
         {
@@ -1356,6 +1365,7 @@ impl<'a> BlockTransitionPlanner<'a> {
             .saturating_sub(isize::try_from(dying).unwrap_or(isize::MAX));
         Ok(AllocationCandidateScore {
             blocked_by_deferred_reload,
+            pressure_delta,
             continuation_tie: std::cmp::Reverse(
                 self.last_definition
                     .is_some_and(|value| uses.contains(&value)),
@@ -1370,7 +1380,6 @@ impl<'a> BlockTransitionPlanner<'a> {
             // root only creates another value which must displace such work.
             operand_tie: std::cmp::Reverse(uses.len()),
             materialization_cost,
-            pressure_delta,
             // Preserve the incoming ISel order as the deterministic final
             // tie-breaker after dependency locality and the current W/S
             // transition have made no distinction.

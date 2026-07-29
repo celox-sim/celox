@@ -5281,7 +5281,6 @@ fn compile_terminator(
 fn compute_byte_offset(layout: &MemoryLayout, abs: &AbsoluteAddr, region: u32) -> usize {
     match region {
         STABLE_REGION => layout.offsets[abs],
-        crate::ir::MATERIALIZATION_HOME_REGION => layout.materialization_home_base_offset,
         crate::ir::SPARSE_WORKING_REGION => layout.sparse_base_offset + layout.sparse_offsets[abs],
         _ => layout.working_base_offset + layout.working_offsets[abs],
     }
@@ -5751,8 +5750,6 @@ mod bit_count_tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset,
-            materialization_home_base_offset: working_base_offset,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: working_base_offset,
             sparse_layouts: HashMap::default(),

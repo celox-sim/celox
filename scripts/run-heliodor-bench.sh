@@ -288,7 +288,7 @@ parse_celox_timing_marker() {
     local expected_test="$2"
     local required="$3"
     local line marker_count=0 marker_valid=0 marker_test="" compile_elapsed="" execute_elapsed=""
-    local pattern='^CELOX_TEST_TIMING test=([^[:space:]]+) compile_ns=([0-9]+) execute_ns=([0-9]+)$'
+    local pattern='^CELOX_TEST_TIMING test=([^[:space:]]+) compile_ns=([0-9]+) execute_ns=([0-9]+)( execute_cpu_ns=[0-9]+)?$'
 
     CELOX_COMPILE_ELAPSED_NS="NA"
     CELOX_EXECUTE_ELAPSED_NS="NA"

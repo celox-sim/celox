@@ -31,14 +31,14 @@ fn remap_for_fold_runtime_event_sites<A: std::hash::Hash + Eq + Clone>(
         })
 }
 
-fn verify_slt_roots<'arena, A>(
-    arena: &'arena SLTNodeArena<A>,
+fn verify_slt_roots<A>(
+    arena: &SLTNodeArena<A>,
     paths: &[LogicPath<A>],
     observers: &[CombObserver<A>],
     variable_widths: &HashMap<A, usize>,
     variable_signedness: &HashMap<A, bool>,
     phase: &'static str,
-) -> Result<SLTNodeFacts<'arena, A>, ParserError>
+) -> Result<(), ParserError>
 where
     A: Hash + Eq + Clone,
 {
@@ -356,7 +356,7 @@ where
         }
     }
 
-    Ok(facts)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -527,9 +527,9 @@ pub mod module;
 pub mod registry;
 mod scheduler;
 use crate::ir::{
-    AbsoluteAddr, CombObserver, DomainKind, GlueAddr, InstanceId, InstancePath, LogicPathId,
-    ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION, SimModule,
-    VarAtomBase, VariableInfo,
+    AbsoluteAddr, CombObserver, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath,
+    LogicPathId, ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION,
+    SimModule, VarAtomBase, VariableInfo,
 };
 use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena, SLTNodeFacts};
 pub use scheduler::SchedulerError;
@@ -644,18 +644,6 @@ pub enum ParserError {
 
     #[error("SLT construction failed: {0}")]
     SltConstruction(#[from] crate::logic_tree::SLTNodeFactsError),
-
-    #[error("EIR combinational import failed: {0}")]
-    EirCombImport(#[from] crate::event_ir::CombImportError),
-
-    #[error("EIR FF AIR import failed: {0}")]
-    EirFfImport(#[from] crate::parser::ff::FfEirBuildError),
-
-    #[error("EIR verification failed: {0}")]
-    EirVerify(#[from] crate::event_ir::EventIrError),
-
-    #[error("EIR projection failed: {0}")]
-    EirProjection(#[from] crate::event_ir::EventProjectionError),
 }
 
 impl ParserError {
@@ -723,10 +711,6 @@ impl miette::Diagnostic for ParserError {
             ParserError::SltVerify { .. } | ParserError::SltConstruction(_) => {
                 Some(Box::new("slt_verify"))
             }
-            ParserError::EirCombImport(_) => Some(Box::new("eir_comb_import")),
-            ParserError::EirFfImport(_) => Some(Box::new("eir_ff_import")),
-            ParserError::EirVerify(_) => Some(Box::new("eir_verify")),
-            ParserError::EirProjection(_) => Some(Box::new("eir_projection")),
         }
     }
 
@@ -1158,9 +1142,11 @@ pub(crate) fn flatten(
     );
     let (
         mut global_arena,
+        mut eval_apply_ffs,
+        mut eval_only_ffs,
+        mut apply_ffs,
         mut comb_blocks,
         mut comb_observers,
-        ff_eir_processes,
         mut runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
@@ -1205,6 +1191,22 @@ pub(crate) fn flatten(
             reset_clock_map.insert(canonical_reset, canonical_clock);
         }
     }
+
+    let (topological_clocks, cascaded_clocks) = timed_sub!(
+        "analyze_clock_dependencies",
+        analyze_clock_dependencies(
+            &mut eval_apply_ffs,
+            &mut eval_only_ffs,
+            &mut apply_ffs,
+            &comb_blocks,
+            &global_arena,
+            &clock_domains,
+            &expanded,
+            &instance_modules,
+            &modules,
+            config,
+        )
+    );
 
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.flattened_comb_blocks
@@ -1278,7 +1280,7 @@ pub(crate) fn flatten(
             });
     }
 
-    let slt_facts = verify_slt_roots(
+    verify_slt_roots(
         &global_arena,
         &comb_blocks,
         &comb_observers,
@@ -1286,28 +1288,9 @@ pub(crate) fn flatten(
         &var_signedness,
         "after flattening symbolic logic",
     )?;
-    let comb_graph = std::sync::Arc::new(crate::event_ir::CombGraph::import(
-        &comb_blocks,
-        &global_arena,
-        &slt_facts,
-    )?);
-    let (clock_event_irs, clock_event_triggers) = timed_sub!(
-        "build_clock_event_irs",
-        build_clock_event_irs(
-            ff_eir_processes,
-            comb_graph.clone(),
-            module_ir,
-            &instance_modules,
-            if trace_opts.ff_air {
-                trace.as_deref_mut()
-            } else {
-                None
-            },
-        )
-    )?;
-    let clock_comb_sinks = collect_clock_comb_sinks(&clock_event_irs);
+
     let sched_start = flatten_timing.then(crate::timing::now);
-    let schedule = match scheduler::sort_with_ff_sinks(
+    let schedule = match scheduler::sort(
         comb_blocks,
         &global_arena,
         &ignored_loops,
@@ -1315,17 +1298,12 @@ pub(crate) fn flatten(
         four_state,
         &var_widths,
         next_runtime_error_code,
-        &clock_comb_sinks,
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
             let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
             let program = Program {
-                comb_graph: std::sync::Arc::new(crate::event_ir::CombGraph::default()),
-                clock_event_irs: HashMap::default(),
-                clock_event_triggers: HashMap::default(),
                 eval_apply_ffs: HashMap::default(),
-                eval_comb_apply_ffs: HashMap::default(),
                 eval_only_ffs: HashMap::default(),
                 apply_ffs: HashMap::default(),
                 eval_comb: Vec::new(),
@@ -1371,46 +1349,60 @@ pub(crate) fn flatten(
     }
     runtime_errors.extend(schedule.runtime_errors);
     let comb_semantic_regions = schedule.semantic_regions;
-    let scheduled = map_stable_execution_units(schedule.execution_units);
-    let (topological_clocks, cascaded_clocks, event_signals) = timed_sub!(
-        "analyze_clock_dependencies",
-        analyze_clock_dependencies(
-            &clock_event_irs,
-            &comb_graph,
-            &clock_domains,
-            &expanded,
-            &instance_modules,
-            &modules,
-            config,
-        )
-    );
-    let needs_split_projections =
-        clock_events_require_split_projections(&clock_event_triggers, &cascaded_clocks);
-    let (mut eval_apply_ffs, mut eval_comb_apply_ffs, mut eval_only_ffs, mut apply_ffs) = timed_sub!(
-        "lower_clock_event_projections",
-        lower_clock_event_projections(
-            &clock_event_irs,
-            &clock_event_triggers,
-            &global_arena,
-            four_state,
-            needs_split_projections,
-        )
-    )?;
-    for signal in event_signals {
-        eval_apply_ffs.entry(signal).or_default();
-        eval_comb_apply_ffs.entry(signal).or_default();
-        if needs_split_projections {
-            eval_only_ffs.entry(signal).or_default();
-            apply_ffs.entry(signal).or_default();
-        }
-    }
-    let eval_comb = scheduled.clone();
+    let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
+        .execution_units
+        .into_iter()
+        .map(|eu| crate::ir::ExecutionUnit {
+            entry_block_id: eu.entry_block_id,
+            blocks: eu
+                .blocks
+                .into_iter()
+                .map(|(id, bb)| {
+                    (
+                        id,
+                        crate::ir::BasicBlock {
+                            id: bb.id,
+                            params: bb.params,
+                            instructions: bb
+                                .instructions
+                                .into_iter()
+                                .map(|inst| {
+                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
+                                        region: STABLE_REGION,
+                                        instance_id: addr.instance_id,
+                                        var_id: addr.var_id,
+                                    })
+                                })
+                                .collect(),
+                            terminator: bb.terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map: eu.register_map,
+        })
+        .collect();
+    let eval_comb = schduled.clone();
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
     {
-        t.scheduled_units = Some(scheduled.clone());
+        t.scheduled_units = Some(schduled.clone());
     }
+
+    // The unified function is the normal fast path.  Split evaluator/apply
+    // functions are needed only when scheduling can evaluate several active
+    // domains or must cascade through a derived clock.
+    let active_ff_domains = eval_apply_ffs
+        .values()
+        .filter(|units| !units.is_empty())
+        .count();
+    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    let (eval_only_ffs, apply_ffs) = if needs_split_path {
+        (eval_only_ffs, apply_ffs)
+    } else {
+        (HashMap::default(), HashMap::default())
+    };
 
     // Extract initial block statements from root module (for native testbenches)
     let initial_statements = module_ir.get(root_id).and_then(|root_module| {
@@ -1441,11 +1433,7 @@ pub(crate) fn flatten(
         })
         .collect();
     let program = Program {
-        comb_graph,
-        clock_event_irs,
-        clock_event_triggers,
         eval_apply_ffs,
-        eval_comb_apply_ffs,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -1495,11 +1483,7 @@ pub(crate) fn flatten(
     }
 
     let mut program = program;
-    for units in program
-        .eval_apply_ffs
-        .values_mut()
-        .chain(program.eval_comb_apply_ffs.values_mut())
-    {
+    for units in program.eval_apply_ffs.values_mut() {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
@@ -1607,69 +1591,6 @@ pub(crate) fn flatten(
     dump_addr_map_if_requested(&program);
 
     Ok(program)
-}
-
-fn clock_events_require_split_projections(
-    clock_event_triggers: &HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
-    cascaded_clocks: &BTreeSet<AbsoluteAddr>,
-) -> bool {
-    clock_event_triggers
-        .values()
-        .any(|domains| domains.len() > 1)
-        || !cascaded_clocks.is_empty()
-}
-
-#[cfg(test)]
-mod clock_projection_tests {
-    use super::clock_events_require_split_projections;
-    use crate::ir::{AbsoluteAddr, InstanceId};
-    use std::collections::BTreeSet;
-    use veryl_analyzer::ir::VarId;
-
-    fn address(instance: usize) -> AbsoluteAddr {
-        AbsoluteAddr {
-            instance_id: InstanceId(instance),
-            var_id: VarId::default(),
-        }
-    }
-
-    #[test]
-    fn one_clock_and_its_async_reset_use_only_the_fused_projection() {
-        let clock = address(0);
-        let reset = address(1);
-        let triggers = [(clock, vec![clock]), (reset, vec![clock])]
-            .into_iter()
-            .collect();
-
-        assert!(!clock_events_require_split_projections(
-            &triggers,
-            &BTreeSet::new()
-        ));
-    }
-
-    #[test]
-    fn one_trigger_for_multiple_clock_domains_requires_split_projections() {
-        let reset = address(0);
-        let triggers = [(reset, vec![address(1), address(2)])]
-            .into_iter()
-            .collect();
-
-        assert!(clock_events_require_split_projections(
-            &triggers,
-            &BTreeSet::new()
-        ));
-    }
-
-    #[test]
-    fn cascaded_clock_requires_split_projections() {
-        let clock = address(0);
-        let triggers = [(clock, vec![clock])].into_iter().collect();
-
-        assert!(clock_events_require_split_projections(
-            &triggers,
-            &BTreeSet::from([clock])
-        ));
-    }
 }
 
 fn dump_addr_map_if_requested(program: &Program) {
@@ -2065,14 +1986,6 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
         )
         .chain(
             program
-                .eval_comb_apply_ffs
-                .values()
-                .flatten()
-                .enumerate()
-                .map(|(unit, eu)| ("eval_comb_apply_ffs", unit, eu)),
-        )
-        .chain(
-            program
                 .eval_only_ffs
                 .values()
                 .flatten()
@@ -2220,16 +2133,14 @@ fn verify_region_contract(
     group: &'static str,
     eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
-    use crate::ir::{
-        MATERIALIZATION_HOME_REGION, SIRInstruction, SIROffset, SPARSE_WORKING_REGION,
-    };
+    use crate::ir::{SIRInstruction, SIROffset, SPARSE_WORKING_REGION};
 
     for block in eu.blocks.values() {
         for (index, inst) in block.instructions.iter().enumerate() {
             match inst {
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
-                    if addr.region > MATERIALIZATION_HOME_REGION =>
+                    if addr.region > SPARSE_WORKING_REGION =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.KNOWN_MEMORY_REGION",
@@ -2239,8 +2150,7 @@ fn verify_region_contract(
                     ));
                 }
                 SIRInstruction::Commit(src, dst, _, _, _)
-                    if src.region > MATERIALIZATION_HOME_REGION
-                        || dst.region > MATERIALIZATION_HOME_REGION =>
+                    if src.region > SPARSE_WORKING_REGION || dst.region > SPARSE_WORKING_REGION =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.KNOWN_MEMORY_REGION",
@@ -2259,10 +2169,7 @@ fn verify_region_contract(
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region == SPARSE_WORKING_REGION
-                        && !matches!(
-                            group,
-                            "eval_only_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
-                        ) =>
+                        && !matches!(group, "eval_only_ffs" | "eval_apply_ffs") =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.SPARSE_STORE_IN_EVALUATOR",
@@ -2275,10 +2182,7 @@ fn verify_region_contract(
                     if src.region == SPARSE_WORKING_REGION =>
                 {
                     if dst.region != STABLE_REGION
-                        || !matches!(
-                            group,
-                            "apply_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
-                        )
+                        || !matches!(group, "apply_ffs" | "eval_apply_ffs")
                         || !matches!(offset, SIROffset::Static(0))
                         || !triggers.is_empty()
                     {
@@ -2296,32 +2200,6 @@ fn verify_region_contract(
                         block.id,
                         index,
                         "SPARSE is populated by Store, not by Commit",
-                    ));
-                }
-                SIRInstruction::Commit(src, dst, _, _, _)
-                    if src.region == MATERIALIZATION_HOME_REGION
-                        || dst.region == MATERIALIZATION_HOME_REGION =>
-                {
-                    return Err(crate::ir::verify::SirVerifyError::instruction(
-                        "REGION.HOME_IS_NOT_COMMIT_STATE",
-                        block.id,
-                        index,
-                        "materialization homes are accessed only by Load and Store",
-                    ));
-                }
-                SIRInstruction::Load(_, addr, _, _)
-                | SIRInstruction::Store(addr, _, _, _, _, _)
-                    if addr.region == MATERIALIZATION_HOME_REGION
-                        && !matches!(
-                            group,
-                            "eval_only_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
-                        ) =>
-                {
-                    return Err(crate::ir::verify::SirVerifyError::instruction(
-                        "REGION.HOME_OUTSIDE_CLOCK_EVALUATION",
-                        block.id,
-                        index,
-                        format!("materialization home access is not valid in {group}"),
                     ));
                 }
                 _ => {}
@@ -2431,6 +2309,69 @@ pub fn parse(
     }
 
     Ok(program)
+}
+
+fn relocate_executation_unit_with_errors<A, B>(
+    eu: &ExecutionUnit<A>,
+    f: &impl Fn(&A) -> B,
+    runtime_error_codes: &HashMap<i64, i64>,
+    runtime_event_sites: &HashMap<u32, u32>,
+) -> ExecutionUnit<B> {
+    ExecutionUnit {
+        entry_block_id: eu.entry_block_id,
+        blocks: eu
+            .blocks
+            .iter()
+            .map(|(id, block)| {
+                (
+                    *id,
+                    crate::ir::BasicBlock {
+                        id: block.id,
+                        instructions: block
+                            .instructions
+                            .iter()
+                            .map(|inst| match inst {
+                                crate::ir::SIRInstruction::RuntimeEvent { site_id, args } => {
+                                    crate::ir::SIRInstruction::RuntimeEvent {
+                                        site_id: runtime_event_sites
+                                            .get(site_id)
+                                            .copied()
+                                            .unwrap_or(*site_id),
+                                        args: args.clone(),
+                                    }
+                                }
+                                crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id,
+                                    args,
+                                    fatal_error_code,
+                                    consume_enabled,
+                                } => crate::ir::SIRInstruction::CombCaptureEvent {
+                                    site_id: runtime_event_sites
+                                        .get(site_id)
+                                        .copied()
+                                        .unwrap_or(*site_id),
+                                    args: args.clone(),
+                                    fatal_error_code: *fatal_error_code,
+                                    consume_enabled: *consume_enabled,
+                                },
+                                _ => inst.map_addr(f),
+                            })
+                            .collect(),
+                        params: block.params.clone(),
+                        terminator: match block.terminator {
+                            crate::ir::SIRTerminator::Error(code) => {
+                                crate::ir::SIRTerminator::Error(
+                                    runtime_error_codes.get(&code).copied().unwrap_or(code),
+                                )
+                            }
+                            ref terminator => terminator.clone(),
+                        },
+                    },
+                )
+            })
+            .collect(),
+        register_map: eu.register_map.clone(),
+    }
 }
 
 fn unify_clock_domains(
@@ -2561,15 +2502,6 @@ fn unify_clock_domains(
     clock_domains
 }
 
-#[derive(Clone)]
-struct RelocatedFfEirProcess {
-    clock: AbsoluteAddr,
-    resets: Vec<AbsoluteAddr>,
-    instance_id: InstanceId,
-    source_order: usize,
-    builder: ff::FfEirBuilder,
-}
-
 fn relocate_units(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
@@ -2581,9 +2513,11 @@ fn relocate_units(
 ) -> Result<
     (
         SLTNodeArena<AbsoluteAddr>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
         Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
         Vec<crate::ir::CombObserver<AbsoluteAddr>>,
-        Vec<RelocatedFfEirProcess>,
         HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
         Vec<crate::ir::RuntimeEventSite>,
         i64,
@@ -2591,9 +2525,18 @@ fn relocate_units(
     ParserError,
 > {
     let mut global_arena = SLTNodeArena::<AbsoluteAddr>::new();
+    let mut eval_apply_ffs: HashMap<
+        AbsoluteAddr,
+        Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>,
+    > = HashMap::default();
+    let mut eval_only_ffs: HashMap<
+        AbsoluteAddr,
+        Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>,
+    > = HashMap::default();
+    let mut apply_ffs: HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>> =
+        HashMap::default();
     let mut comb_blocks = Vec::new();
     let mut comb_observers = Vec::new();
-    let mut ff_eir_processes = Vec::new();
     let mut runtime_errors = HashMap::default();
     let mut runtime_event_sites = Vec::new();
     let mut next_runtime_error_code = 2000;
@@ -2674,344 +2617,157 @@ fn relocate_units(
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
 
-        for process in &sim_module.ff_eir_processes {
-            let clock = AbsoluteAddr {
+        // Relocate sequential blocks for this instance
+        for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
+            let clock_addr = AbsoluteAddr {
                 instance_id: *id,
-                var_id: process.trigger_set.clock,
+                var_id: trigger_set.clock,
             };
-            let clock = clock_domains.get(&clock).copied().unwrap_or(clock);
-            let resets = process
-                .trigger_set
-                .resets
-                .iter()
-                .map(|reset| {
-                    let reset = AbsoluteAddr {
+            let canonical_addr = clock_domains
+                .get(&clock_addr)
+                .copied()
+                .unwrap_or(clock_addr);
+
+            eval_apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
+                        region: addr.region,
                         instance_id: *id,
-                        var_id: *reset,
-                    };
-                    clock_domains.get(&reset).copied().unwrap_or(reset)
-                })
-                .collect();
-            let mut builder = process.builder.clone();
-            builder.remap_runtime_ids(&runtime_event_site_map, &runtime_error_codes)?;
-            ff_eir_processes.push(RelocatedFfEirProcess {
-                clock,
-                resets,
+                        var_id: addr.var_id,
+                    },
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                ),
+            );
+
+            for &reset in &trigger_set.resets {
+                let reset_addr = AbsoluteAddr {
+                    instance_id: *id,
+                    var_id: reset,
+                };
+                let canonical_addr = clock_domains
+                    .get(&reset_addr)
+                    .copied()
+                    .unwrap_or(reset_addr);
+                eval_apply_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
+                            region: addr.region,
+                            instance_id: *id,
+                            var_id: addr.var_id,
+                        },
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                    ),
+                );
+            }
+        }
+
+        for (trigger_set, eu) in &sim_module.eval_only_ff_blocks {
+            let clock_addr = AbsoluteAddr {
                 instance_id: *id,
-                source_order: process.source_order,
-                builder,
-            });
+                var_id: trigger_set.clock,
+            };
+            let canonical_addr = clock_domains
+                .get(&clock_addr)
+                .copied()
+                .unwrap_or(clock_addr);
+            eval_only_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
+                        region: addr.region,
+                        instance_id: *id,
+                        var_id: addr.var_id,
+                    },
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                ),
+            );
+
+            for &reset in &trigger_set.resets {
+                let reset_addr = AbsoluteAddr {
+                    instance_id: *id,
+                    var_id: reset,
+                };
+                let canonical_addr = clock_domains
+                    .get(&reset_addr)
+                    .copied()
+                    .unwrap_or(reset_addr);
+                eval_only_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
+                            region: addr.region,
+                            instance_id: *id,
+                            var_id: addr.var_id,
+                        },
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                    ),
+                );
+            }
+        }
+
+        for (trigger_set, eu) in &sim_module.apply_ff_blocks {
+            let clock_addr = AbsoluteAddr {
+                instance_id: *id,
+                var_id: trigger_set.clock,
+            };
+            let canonical_addr = clock_domains
+                .get(&clock_addr)
+                .copied()
+                .unwrap_or(clock_addr);
+            apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| RegionedAbsoluteAddr {
+                        region: addr.region,
+                        instance_id: *id,
+                        var_id: addr.var_id,
+                    },
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                ),
+            );
+
+            for &reset in &trigger_set.resets {
+                let reset_addr = AbsoluteAddr {
+                    instance_id: *id,
+                    var_id: reset,
+                };
+                let canonical_addr = clock_domains
+                    .get(&reset_addr)
+                    .copied()
+                    .unwrap_or(reset_addr);
+                apply_ffs.entry(canonical_addr).or_default().push(
+                    relocate_executation_unit_with_errors(
+                        eu,
+                        &|addr| RegionedAbsoluteAddr {
+                            region: addr.region,
+                            instance_id: *id,
+                            var_id: addr.var_id,
+                        },
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                    ),
+                );
+            }
         }
     }
     Ok((
         global_arena,
+        eval_apply_ffs,
+        eval_only_ffs,
+        apply_ffs,
         comb_blocks,
         comb_observers,
-        ff_eir_processes,
         runtime_errors,
         runtime_event_sites,
         next_runtime_error_code,
     ))
-}
-
-fn build_clock_event_irs(
-    processes: Vec<RelocatedFfEirProcess>,
-    comb_graph: std::sync::Arc<crate::event_ir::CombGraph>,
-    module_ir: &HashMap<ModuleId, &Module>,
-    instance_modules: &HashMap<InstanceId, ModuleId>,
-    mut trace: Option<&mut crate::debug::CompilationTrace>,
-) -> Result<
-    (
-        HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
-        HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
-    ),
-    ParserError,
-> {
-    let mut by_clock: HashMap<AbsoluteAddr, Vec<RelocatedFfEirProcess>> = HashMap::default();
-    for process in processes {
-        by_clock.entry(process.clock).or_default().push(process);
-    }
-
-    let mut clock_events = HashMap::default();
-    let mut trigger_domains: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
-    for (clock, mut processes) in by_clock {
-        use std::fmt::Write as _;
-
-        let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
-        let domain_start = timing.then(crate::timing::now);
-        processes.sort_unstable_by_key(|process| (process.instance_id, process.source_order));
-        if let Some(trace) = trace.as_deref_mut() {
-            let output = trace.ff_air.get_or_insert_with(String::new);
-            writeln!(output, "clock {clock}:").unwrap();
-            for process in &processes {
-                writeln!(
-                    output,
-                    "  process instance={} source_order={} resets={:?}",
-                    process.instance_id.0, process.source_order, process.resets
-                )
-                .unwrap();
-                for line in process.builder.format_air().lines() {
-                    writeln!(output, "    {line}").unwrap();
-                }
-            }
-        }
-        let mut resets = processes
-            .iter()
-            .flat_map(|process| process.resets.iter().copied())
-            .collect::<Vec<_>>();
-        resets.sort_unstable();
-        resets.dedup();
-
-        let mut event = crate::event_ir::EventIr::new(
-            crate::event_ir::EventDomain::Clock {
-                clock,
-                resets: resets.clone(),
-            },
-            comb_graph.clone(),
-        );
-        let mut stages = Vec::new();
-        for (source_order, process) in processes.into_iter().enumerate() {
-            let module_id = instance_modules[&process.instance_id];
-            let module = module_ir[&module_id];
-            stages.extend(process.builder.lower_into(
-                &mut event,
-                module,
-                process.instance_id,
-                source_order,
-                process.resets,
-            )?);
-        }
-        if let Some(start) = domain_start {
-            eprintln!("[eir] import clock domain {clock}: {:?}", start.elapsed());
-        }
-        event.add_effect(crate::event_ir::Effect {
-            region: event.root_region(),
-            predecessors: stages.clone(),
-            kind: crate::event_ir::EffectKind::CommitFfState { stages },
-        });
-        let verify_start = timing.then(crate::timing::now);
-        event.verify()?;
-        if let Some(start) = verify_start {
-            eprintln!("[eir] verify clock domain {clock}: {:?}", start.elapsed());
-        }
-        clock_events.insert(clock, std::sync::Arc::new(event));
-
-        trigger_domains.entry(clock).or_default().push(clock);
-        for reset in resets {
-            trigger_domains.entry(reset).or_default().push(clock);
-        }
-    }
-    for domains in trigger_domains.values_mut() {
-        domains.sort_unstable();
-        domains.dedup();
-    }
-    Ok((clock_events, trigger_domains))
-}
-
-/// Recover the exact combinational definition roots consumed by each FF
-/// staging effect. These groups are scheduling sinks, not new executable
-/// operations: the ordinary LogicPath scheduler uses them to finish one FF
-/// operand cone at a time near the clock phase boundary.
-fn collect_clock_comb_sinks(
-    clock_events: &HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
-) -> Vec<Vec<usize>> {
-    let mut clocks = clock_events.keys().copied().collect::<Vec<_>>();
-    clocks.sort_unstable();
-    clocks
-        .into_iter()
-        .flat_map(|clock| collect_event_comb_sinks(&clock_events[&clock]))
-        .collect()
-}
-
-fn collect_event_comb_sinks(event: &crate::event_ir::EventIr) -> Vec<Vec<usize>> {
-    use crate::event_ir::{EffectKind, ValueKind};
-
-    let mut sinks = Vec::new();
-    let mut effects_by_process = HashMap::default();
-    for effect in event.effects() {
-        if let EffectKind::StageNextFf { process, .. } = &effect.kind {
-            effects_by_process
-                .entry(*process)
-                .or_insert_with(Vec::new)
-                .push(effect);
-        }
-    }
-    let ordered_processes = crate::event_ir::ordered_clock_processes(
-        event,
-        (0..event.processes().len())
-            .map(crate::event_ir::ProcessId)
-            .collect(),
-    );
-    for packet in crate::event_ir::ordered_clock_process_packets(event, &ordered_processes) {
-        let mut paths = Vec::new();
-        for process in packet {
-            for effect in effects_by_process.remove(&process).unwrap_or_default() {
-                let mut work = Vec::new();
-                effect.kind.visit_value_operands(|value| work.push(value));
-                let mut visited = HashSet::default();
-                while let Some(value) = work.pop() {
-                    if !visited.insert(value) {
-                        continue;
-                    }
-                    match &event.values()[value.0].kind {
-                        ValueKind::ReadCombDefinition { definition, .. } => {
-                            paths.push(event.comb_definitions()[definition.0].recipe.0);
-                        }
-                        kind => kind.visit_operands(|operand| work.push(operand)),
-                    }
-                }
-            }
-        }
-        paths.sort_unstable();
-        paths.dedup();
-        if !paths.is_empty() {
-            sinks.push(paths);
-        }
-    }
-    sinks
-}
-
-fn map_stable_execution_units(
-    units: Vec<crate::ir::ExecutionUnit<AbsoluteAddr>>,
-) -> Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> {
-    units
-        .into_iter()
-        .map(|eu| crate::ir::ExecutionUnit {
-            entry_block_id: eu.entry_block_id,
-            blocks: eu
-                .blocks
-                .into_iter()
-                .map(|(id, bb)| {
-                    (
-                        id,
-                        crate::ir::BasicBlock {
-                            id: bb.id,
-                            params: bb.params,
-                            instructions: bb
-                                .instructions
-                                .into_iter()
-                                .map(|inst| {
-                                    inst.into_map_addr(|addr| RegionedAbsoluteAddr {
-                                        region: STABLE_REGION,
-                                        instance_id: addr.instance_id,
-                                        var_id: addr.var_id,
-                                    })
-                                })
-                                .collect(),
-                            terminator: bb.terminator,
-                        },
-                    )
-                })
-                .collect(),
-            register_map: eu.register_map,
-        })
-        .collect()
-}
-
-type ClockProjectionMaps = (
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-    HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
-);
-
-fn lower_clock_event_projections(
-    clock_events: &HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
-    trigger_domains: &HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
-    arena: &SLTNodeArena<AbsoluteAddr>,
-    four_state: bool,
-    include_split_projections: bool,
-) -> Result<ClockProjectionMaps, ParserError> {
-    let mut settled_fused = HashMap::default();
-    let mut unsettled_fused = HashMap::default();
-    let mut evaluate = HashMap::default();
-    let mut apply = HashMap::default();
-    let mut triggers = trigger_domains.keys().copied().collect::<Vec<_>>();
-    triggers.sort_unstable();
-
-    for trigger in triggers {
-        let domains = &trigger_domains[&trigger];
-        let mut settled_fused_units = Vec::with_capacity(domains.len());
-        let mut unsettled_fused_units = Vec::with_capacity(domains.len());
-        let mut evaluate_units =
-            include_split_projections.then(|| Vec::with_capacity(domains.len()));
-        let mut apply_units = include_split_projections.then(|| Vec::with_capacity(domains.len()));
-        for domain in domains {
-            let event = &clock_events[domain];
-            let fused_start = std::env::var_os("CELOX_PHASE_TIMING")
-                .is_some()
-                .then(crate::timing::now);
-            let packets =
-                crate::event_ir::lower_settled_clock_packets(event, arena, four_state, trigger)?;
-            settled_fused_units.extend(packets);
-            if let Some(start) = fused_start {
-                eprintln!(
-                    "[eir] lower settled fused trigger {trigger} domain {domain}: {:?}",
-                    start.elapsed()
-                );
-            }
-            let fused_start = std::env::var_os("CELOX_PHASE_TIMING")
-                .is_some()
-                .then(crate::timing::now);
-            unsettled_fused_units.push(crate::event_ir::lower_event_projection(
-                event,
-                crate::event_ir::EventProjection::FusedClock,
-                arena,
-                four_state,
-                trigger,
-            )?);
-            if let Some(start) = fused_start {
-                eprintln!(
-                    "[eir] lower fused trigger {trigger} domain {domain}: {:?}",
-                    start.elapsed()
-                );
-            }
-            if let (Some(evaluate_units), Some(apply_units)) =
-                (&mut evaluate_units, &mut apply_units)
-            {
-                let evaluate_start = std::env::var_os("CELOX_PHASE_TIMING")
-                    .is_some()
-                    .then(crate::timing::now);
-                evaluate_units.push(crate::event_ir::lower_event_projection(
-                    event,
-                    crate::event_ir::EventProjection::EvaluateClock,
-                    arena,
-                    four_state,
-                    trigger,
-                )?);
-                if let Some(start) = evaluate_start {
-                    eprintln!(
-                        "[eir] lower evaluate trigger {trigger} domain {domain}: {:?}",
-                        start.elapsed()
-                    );
-                }
-                let apply_start = std::env::var_os("CELOX_PHASE_TIMING")
-                    .is_some()
-                    .then(crate::timing::now);
-                apply_units.push(crate::event_ir::lower_event_projection(
-                    event,
-                    crate::event_ir::EventProjection::ApplyClock,
-                    arena,
-                    four_state,
-                    trigger,
-                )?);
-                if let Some(start) = apply_start {
-                    eprintln!(
-                        "[eir] lower apply trigger {trigger} domain {domain}: {:?}",
-                        start.elapsed()
-                    );
-                }
-            }
-        }
-        settled_fused.insert(trigger, settled_fused_units);
-        unsettled_fused.insert(trigger, unsettled_fused_units);
-        if let (Some(evaluate_units), Some(apply_units)) = (evaluate_units, apply_units) {
-            evaluate.insert(trigger, evaluate_units);
-            apply.insert(trigger, apply_units);
-        }
-    }
-
-    Ok((settled_fused, unsettled_fused, evaluate, apply))
 }
 
 fn build_comb_observer_capture_paths(
@@ -3518,97 +3274,95 @@ fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
 }
 
 fn analyze_clock_dependencies(
-    clock_events: &HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
-    comb_graph: &crate::event_ir::CombGraph,
+    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     config: &BuildConfig,
-) -> (
-    Vec<AbsoluteAddr>,
-    BTreeSet<AbsoluteAddr>,
-    BTreeSet<AbsoluteAddr>,
-) {
+) -> (Vec<AbsoluteAddr>, BTreeSet<AbsoluteAddr>) {
     // Build static clock dependency graph & Topo Sort
     let mut clock_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
-    let unique_clocks: BTreeSet<AbsoluteAddr> = clock_events.keys().copied().collect();
+    let mut unique_clocks: BTreeSet<AbsoluteAddr> = BTreeSet::new();
 
-    // 1. Identify all variables written by FFs from semantic StageNextFf
-    // effects. Clock analysis must not recover this information from an
-    // already lowered Store instruction.
+    // 1. Identify all variables written by FFs (direct sequential outputs)
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
-    for (domain_clock, event) in clock_events {
-        for effect in event.effects() {
-            let crate::event_ir::EffectKind::StageNextFf { target, .. } = &effect.kind else {
-                continue;
-            };
-            let target_object = target.object;
-            let canonical_target = clock_domains
-                .get(&target_object)
-                .copied()
-                .unwrap_or(target_object);
-            ff_outputs.insert(target_object);
-            if canonical_target != *domain_clock && unique_clocks.contains(&canonical_target) {
-                clock_deps
-                    .entry(canonical_target)
-                    .or_default()
-                    .insert(*domain_clock);
+    unique_clocks.extend(eval_apply_ffs.keys().copied());
+
+    for (domain_clock, eus) in &*eval_apply_ffs {
+        for eu in eus {
+            for bb in eu.blocks.values() {
+                for inst in &bb.instructions {
+                    if let crate::ir::SIRInstruction::Store(target_addr, ..) = inst {
+                        // Direct sequential dependency: the target is driven by this clock
+                        let abs = target_addr.absolute_addr();
+                        let canonical_target = clock_domains.get(&abs).copied().unwrap_or(abs);
+
+                        ff_outputs.insert(abs);
+
+                        if canonical_target != *domain_clock
+                            && unique_clocks.contains(&canonical_target)
+                        {
+                            clock_deps
+                                .entry(canonical_target)
+                                .or_default()
+                                .insert(*domain_clock);
+                        }
+                    }
+                }
             }
         }
     }
 
-    // 2. Build the source -> target combinational graph directly from the
-    // resolved CombGraph. This is linear in the imported dependency graph and
-    // does not rescan every SLT cone.
+    // 2. Build combinational dependency graph (target -> sources)
     let acd_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
     let acd_start = acd_timing.then(crate::timing::now);
-    let mut comb_users: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
-    for definition in comb_graph.definitions() {
-        let target = definition.target.object;
-        let recipe = &comb_graph.recipes()[definition.recipe.0];
-        for dependency in &recipe.dependencies {
-            let source = comb_graph.definitions()[dependency.definition.0]
-                .target
-                .object;
-            comb_users.entry(source).or_default().insert(target);
-        }
-        for snapshot in &recipe.snapshot_inputs {
-            comb_users
-                .entry(snapshot.range.object)
-                .or_default()
-                .insert(target);
+    let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
+    for path in comb_blocks {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let target_abs = target.id;
+        let mut sources = crate::HashSet::default();
+        crate::flatting::collect_inputs(path.expr, arena, &mut sources);
+        for source in sources {
+            comb_deps.entry(target_abs).or_default().insert(source.id);
         }
     }
     if let Some(s) = acd_start {
         eprintln!(
-            "[acd] comb dependency build ({} source objects): {:?}",
-            comb_users.len(),
+            "[acd] comb_deps build ({} blocks): {:?}",
+            comb_deps.len(),
             s.elapsed()
         );
     }
 
-    // 3. Propagate FF outputs once through the reverse dependency graph.
+    // 3. Propagate FF outputs through combinational graph to find all derived variables
     let fp_start = acd_timing.then(crate::timing::now);
     let mut derived_from_ff: BTreeSet<AbsoluteAddr> = ff_outputs.clone();
-    let mut worklist = ff_outputs
-        .iter()
-        .copied()
-        .collect::<std::collections::VecDeque<_>>();
-    while let Some(source) = worklist.pop_front() {
-        if let Some(users) = comb_users.get(&source) {
-            for &target in users {
-                if derived_from_ff.insert(target) {
-                    worklist.push_back(target);
+    let mut changed = true;
+    let mut fp_rounds = 0u32;
+    while changed {
+        changed = false;
+        fp_rounds += 1;
+        for (target, sources) in &comb_deps {
+            if !derived_from_ff.contains(target) {
+                // If any source is derived from an FF, the target is too
+                if sources.iter().any(|s| derived_from_ff.contains(s)) {
+                    derived_from_ff.insert(*target);
+                    changed = true;
                 }
             }
         }
     }
     if let Some(s) = fp_start {
         eprintln!(
-            "[acd] propagation: {} source objects, {} derived objects, {:?}",
-            comb_users.len(),
-            derived_from_ff.len(),
+            "[acd] fixpoint: {fp_rounds} rounds, {} entries, {:?}",
+            comb_deps.len(),
             s.elapsed()
         );
     }
@@ -3668,8 +3422,7 @@ fn analyze_clock_dependencies(
         }
     }
 
-    // Include other potential event signals (like synchronous resets) so they can be scheduled.
-    let mut event_signals = unique_clocks.clone();
+    // Include other potential event signals (like synchronous resets) so they can be scheduled
     for id in expanded.values() {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
@@ -3688,7 +3441,10 @@ fn analyze_clock_dependencies(
                     var_id: *var_id,
                 };
                 let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
-                event_signals.insert(canonical);
+                // Add empty execution units so it becomes a valid event domain for scheduling
+                eval_apply_ffs.entry(canonical).or_default();
+                eval_only_ffs.entry(canonical).or_default();
+                apply_ffs.entry(canonical).or_default();
 
                 if !visited.contains(&canonical) {
                     topo_visit(
@@ -3711,5 +3467,5 @@ fn analyze_clock_dependencies(
         }
     }
 
-    (topological_clocks, cascaded_clocks, event_signals)
+    (topological_clocks, cascaded_clocks)
 }

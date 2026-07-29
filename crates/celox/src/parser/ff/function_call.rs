@@ -1,8 +1,7 @@
-use super::builder::FfBuilder;
 use super::{Domain, FfParser};
 use crate::{
     HashMap, HashSet,
-    ir::VarAtomBase,
+    ir::{SIRBuilder, VarAtomBase},
     parser::{
         LoweringPhase, ParserError,
         bitaccess::{build_partial_assign_expr, is_static_access},
@@ -772,7 +771,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
             return Err(ParserError::unsupported(
@@ -858,7 +857,7 @@ impl<'a> FfParser<'a> {
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut impl FfBuilder,
+        ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
             return Err(ParserError::unsupported(

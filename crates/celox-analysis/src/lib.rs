@@ -7,7 +7,6 @@
 pub mod cfg;
 pub mod dag_schedule;
 pub mod dependence;
-pub mod graph;
 pub mod interval;
 pub mod memory;
 pub mod memory_ssa;

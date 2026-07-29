@@ -8,7 +8,7 @@
 //! Function signature: `fn(unified_mem: *mut u8) -> i64`
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use iced_x86::BlockEncoderOptions;
@@ -264,6 +264,151 @@ fn saved_gpr_xmm(index: usize) -> AsmRegisterXmm {
         5 => xmm14,
         _ => unreachable!("x86-64 has at most six allocatable callee-saved GPRs"),
     }
+}
+
+/// A small post-allocation cache for the hottest ordinary qword spill slots.
+///
+/// The GPR allocator deliberately does not model vector registers.  XMM6-8
+/// are otherwise unused by the emitter, so keeping three physical spill slots
+/// there removes repeated arena traffic without changing MIR allocation or
+/// extending any GPR live range.
+#[derive(Debug, Clone, Copy, Default)]
+struct SpillRegisterCache {
+    offsets: [Option<i32>; 3],
+}
+
+impl SpillRegisterCache {
+    fn register(self, offset: i32) -> Option<AsmRegisterXmm> {
+        self.offsets
+            .iter()
+            .position(|candidate| *candidate == Some(offset))
+            .map(|index| match index {
+                0 => xmm6,
+                1 => xmm7,
+                2 => xmm8,
+                _ => unreachable!("spill register cache has exactly three registers"),
+            })
+    }
+}
+
+fn ranges_overlap(left_offset: i32, left_size: u32, right_offset: i32, right_size: u32) -> bool {
+    let left_start = i64::from(left_offset);
+    let left_end = left_start + i64::from(left_size);
+    let right_start = i64::from(right_offset);
+    let right_end = right_start + i64::from(right_size);
+    left_start < right_end && right_start < left_end
+}
+
+fn select_spill_register_cache(func: &MFunction, plan: &SsaDestructionPlan) -> SpillRegisterCache {
+    let mut access_counts = HashMap::<i32, usize>::new();
+    let mut incompatible_ranges = Vec::<(i32, u32)>::new();
+    let mut indexed_stack_access = false;
+
+    for block in &func.blocks {
+        for inst in &block.insts {
+            match inst {
+                MInst::Load {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size: OpSize::S64,
+                    ..
+                }
+                | MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size: OpSize::S64,
+                    ..
+                } => {
+                    *access_counts.entry(*offset).or_default() += 1;
+                }
+                MInst::Load {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::AndStoreImm {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::OrStoreImm {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                } => incompatible_ranges.push((*offset, size.bytes())),
+                MInst::BranchPred {
+                    predicate:
+                        BranchPredicate::MemoryNonZero {
+                            base: BaseReg::StackFrame,
+                            offset,
+                            size,
+                        },
+                    ..
+                } => incompatible_ranges.push((*offset, size.bytes())),
+                MInst::LoadIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
+                }
+                | MInst::StoreIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
+                }
+                | MInst::OrStoreIndexed {
+                    base: BaseReg::StackFrame,
+                    ..
+                } => indexed_stack_access = true,
+                _ => {}
+            }
+        }
+    }
+
+    // An indexed frame access cannot be proven disjoint from any candidate.
+    // Emission verification normally rejects it, but keep selection safe when
+    // called independently by unit tests as well.
+    if indexed_stack_access {
+        return SpillRegisterCache::default();
+    }
+
+    let mut edge_slots = HashSet::<i32>::new();
+    for edge in plan.edges() {
+        for row in &edge.rows {
+            if let ParallelCopyDestination::Stack(offset) = row.destination {
+                edge_slots.insert(offset);
+            }
+            if let ParallelCopySource::Stack(offset) = row.source {
+                edge_slots.insert(offset);
+            }
+        }
+    }
+
+    let mut candidates = access_counts
+        .into_iter()
+        .filter(|(offset, count)| {
+            *count >= 4
+                && !edge_slots.contains(offset)
+                && !incompatible_ranges
+                    .iter()
+                    .any(|&(other_offset, other_size)| {
+                        ranges_overlap(*offset, OpSize::S64.bytes(), other_offset, other_size)
+                    })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|(offset, count)| (std::cmp::Reverse(*count), *offset));
+
+    let mut cache = SpillRegisterCache::default();
+    for (destination, (offset, _)) in cache.offsets.iter_mut().zip(candidates) {
+        *destination = Some(offset);
+    }
+    cache
 }
 
 thread_local! {
@@ -1743,6 +1888,7 @@ fn emit_planned(
 
     let mut epilogue_label = asm.create_label();
     let use_counts = count_vreg_uses(func, plan);
+    let spill_register_cache = select_spill_register_cache(func, plan);
 
     // ── Prologue ──
     {
@@ -1888,6 +2034,7 @@ fn emit_planned(
                             &use_counts,
                             assignment,
                             func,
+                            spill_register_cache,
                         )?
                     {
                         inst_idx += 2;
@@ -1903,6 +2050,7 @@ fn emit_planned(
                             assignment,
                             func,
                             &constant_table_labels,
+                            spill_register_cache,
                             Some(block_labels.label_mut(index)),
                         )?
                     } else {
@@ -1912,6 +2060,7 @@ fn emit_planned(
                             assignment,
                             func,
                             &constant_table_labels,
+                            spill_register_cache,
                             None,
                         )?
                     };
@@ -2086,6 +2235,7 @@ fn try_emit_stack_reload_fold(
     use_counts: &HashMap<VReg, usize>,
     assignment: &AssignmentMap,
     func: &MFunction,
+    spill_register_cache: SpillRegisterCache,
 ) -> Result<bool, IcedError> {
     let MInst::Load {
         dst,
@@ -2096,6 +2246,9 @@ fn try_emit_stack_reload_fold(
     else {
         return Ok(false);
     };
+    if spill_register_cache.register(*offset).is_some() {
+        return Ok(false);
+    }
     if use_counts.get(dst).copied().unwrap_or(0) != 1 || !next.uses().contains(dst) {
         return Ok(false);
     }
@@ -2811,6 +2964,7 @@ fn emit_inst(
     assignment: &AssignmentMap,
     func: &MFunction,
     constant_table_labels: &[CodeLabel],
+    spill_register_cache: SpillRegisterCache,
     mut continuation_label: Option<&mut CodeLabel>,
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
@@ -2862,6 +3016,12 @@ fn emit_inst(
             size,
         } => {
             let d_preg = resolve(assignment, *dst);
+            if let (BaseReg::StackFrame, OpSize::S64, Some(register)) =
+                (*base, *size, spill_register_cache.register(*offset))
+            {
+                asm.movq(preg_to_reg64(d_preg), register)?;
+                return Ok(false);
+            }
             let mem = mem_operand(*base, *offset);
             match size {
                 OpSize::S8 => {
@@ -2890,6 +3050,12 @@ fn emit_inst(
             size,
         } => {
             let s_preg = resolve(assignment, *src);
+            if let (BaseReg::StackFrame, OpSize::S64, Some(register)) =
+                (*base, *size, spill_register_cache.register(*offset))
+            {
+                asm.movq(register, preg_to_reg64(s_preg))?;
+                return Ok(false);
+            }
             let mem = mem_operand(*base, *offset);
             match size {
                 OpSize::S8 => {
@@ -6123,6 +6289,105 @@ mod shift_encoding_tests {
             disassemble(&[0x90, 0xc3], 0x1000),
             "  0x00001000  nop\n  0x00001001  ret\n"
         );
+    }
+
+    #[test]
+    fn repeated_qword_spill_accesses_use_an_unallocated_xmm_register() {
+        let mut vregs = VRegAllocator::new();
+        let seed = vregs.alloc();
+        let first_load = vregs.alloc();
+        let first_increment = vregs.alloc();
+        let second_load = vregs.alloc();
+        let second_increment = vregs.alloc();
+        let final_load = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: seed,
+            value: 7,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: seed,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: first_load,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::AddImm {
+            dst: first_increment,
+            src: first_load,
+            imm: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: first_increment,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: second_load,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::AddImm {
+            dst: second_increment,
+            src: second_load,
+            imm: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: second_increment,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Load {
+            dst: final_load,
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: final_load,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+        func.verify();
+
+        let mut assignment = AssignmentMap::default();
+        for (value, register) in [
+            (seed, PhysReg::RAX),
+            (first_load, PhysReg::RBX),
+            (first_increment, PhysReg::RCX),
+            (second_load, PhysReg::RDX),
+            (second_increment, PhysReg::RSI),
+            (final_load, PhysReg::R8),
+        ] {
+            assignment.set(value, register);
+        }
+
+        let emitted = emit(&func, &assignment, 8).unwrap();
+        let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+        let mut uses_xmm6 = false;
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            uses_xmm6 |= instruction.op0_register() == Register::XMM6
+                || instruction.op1_register() == Register::XMM6;
+        }
+        assert!(uses_xmm6);
+
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut arena = [0u8; 128];
+        assert_eq!(unsafe { jit.call(&mut arena) }, 0);
+        assert_eq!(u64::from_le_bytes(arena[..8].try_into().unwrap()), 9);
     }
 
     #[test]

@@ -163,19 +163,7 @@ pub struct CombObserver<A = AbsoluteAddr> {
 
 #[derive(Clone)]
 pub struct Program {
-    /// Shared event-level combinational definition graph. Recipe node IDs
-    /// refer to `arena`; both are immutable after flattening.
-    pub comb_graph: std::sync::Arc<crate::event_ir::CombGraph>,
-    /// Canonical EIR graph for each primary clock domain.
-    pub clock_event_irs: HashMap<AbsoluteAddr, std::sync::Arc<crate::event_ir::EventIr>>,
-    /// Trigger signal to the primary clock-domain EIR graphs activated by it.
-    /// A shared asynchronous reset can activate more than one clock domain.
-    pub clock_event_triggers: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    /// Demand-driven comb→FF projection used when combinational state has not
-    /// already been settled before the clock edge. Each unit contains the
-    /// selected combinational cone and its FF publication effects in one CFG.
-    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
@@ -387,8 +375,9 @@ impl Program {
         self.num_events
     }
 
-    /// Collect the set of `AbsoluteAddr` values that need compact FF staging
-    /// storage. Compiler materialization homes use a separate unpacked arena.
+    /// Collect the set of `AbsoluteAddr` values that are accessed in the working
+    /// region (region != STABLE). These are the only variables that need working
+    /// region space.
     pub fn collect_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
         let mut addrs = std::collections::HashSet::new();
 
@@ -422,96 +411,10 @@ impl Program {
             };
 
         scan_units(&self.eval_apply_ffs, &mut addrs);
-        scan_units(&self.eval_comb_apply_ffs, &mut addrs);
         scan_units(&self.eval_only_ffs, &mut addrs);
         scan_units(&self.apply_ffs, &mut addrs);
 
         addrs
-    }
-
-    pub fn collect_ff_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
-        let mut addrs = std::collections::HashSet::new();
-        for units in self
-            .eval_apply_ffs
-            .values()
-            .chain(self.eval_comb_apply_ffs.values())
-            .chain(self.eval_only_ffs.values())
-            .chain(self.apply_ffs.values())
-        {
-            for eu in units {
-                for block in eu.blocks.values() {
-                    for inst in &block.instructions {
-                        match inst {
-                            SIRInstruction::Store(addr, _, _, _, _, _)
-                                if addr.region == WORKING_REGION =>
-                            {
-                                addrs.insert(addr.absolute_addr());
-                            }
-                            SIRInstruction::Commit(src, dst, _, _, _) => {
-                                if src.region == WORKING_REGION {
-                                    addrs.insert(src.absolute_addr());
-                                }
-                                if dst.region == WORKING_REGION {
-                                    addrs.insert(dst.absolute_addr());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        addrs
-    }
-
-    pub fn collect_materialization_home_region_addrs(
-        &self,
-    ) -> std::collections::HashSet<AbsoluteAddr> {
-        let mut addrs = std::collections::HashSet::new();
-        for units in self
-            .eval_apply_ffs
-            .values()
-            .chain(self.eval_comb_apply_ffs.values())
-            .chain(self.eval_only_ffs.values())
-        {
-            for eu in units {
-                for block in eu.blocks.values() {
-                    for inst in &block.instructions {
-                        match inst {
-                            SIRInstruction::Load(_, addr, _, _)
-                            | SIRInstruction::Store(addr, _, _, _, _, _)
-                                if addr.region == MATERIALIZATION_HOME_REGION =>
-                            {
-                                addrs.insert(addr.absolute_addr());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        addrs
-    }
-
-    pub fn materialization_home_extent_bits(&self) -> usize {
-        self.eval_apply_ffs
-            .values()
-            .chain(self.eval_comb_apply_ffs.values())
-            .chain(self.eval_only_ffs.values())
-            .flat_map(|units| units.iter())
-            .flat_map(|eu| eu.blocks.values())
-            .flat_map(|block| block.instructions.iter())
-            .filter_map(|instruction| match instruction {
-                SIRInstruction::Load(_, address, SIROffset::Static(offset), width)
-                | SIRInstruction::Store(address, SIROffset::Static(offset), width, _, _, _)
-                    if address.region == MATERIALIZATION_HOME_REGION =>
-                {
-                    offset.checked_add(*width)
-                }
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
     }
 
     pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
@@ -519,7 +422,6 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
-            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
         {
             for eu in units {
@@ -718,9 +620,6 @@ pub struct InstancePath(pub Vec<(StrId, usize)>);
 pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
 pub const SPARSE_WORKING_REGION: u32 = 2;
-/// Event-local homes used to cut values which cross FF process allocation
-/// boundaries. This is compiler scratch state, not published RTL state.
-pub const MATERIALIZATION_HOME_REGION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RegionedVarAddrBase<V> {
@@ -781,6 +680,9 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 pub struct RelocationModule {
     #[cfg(test)]
     pub variables: HashMap<VarId, Variable>,
+    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
     pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
 }
@@ -790,7 +692,10 @@ impl fmt::Debug for RelocationModule {
         let mut ds = f.debug_struct("RelocationModule");
         #[cfg(test)]
         ds.field("variables", &"<omitted>");
-        ds.field("comb_blocks", &self.comb_blocks)
+        ds.field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
+            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
+            .field("apply_ff_blocks", &self.apply_ff_blocks)
+            .field("comb_blocks", &self.comb_blocks)
             .field("comb_observers", &self.comb_observers)
             .finish()
     }
@@ -852,7 +757,9 @@ impl<A: Display> Display for ExecutionUnit<A> {
 pub struct SimModule {
     pub name: StrId,
     pub variables: HashMap<VarId, Variable>,
-    pub(crate) ff_eir_processes: Vec<crate::parser::ff::ModuleFfEirProcess>,
+    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
     pub comb_observers: Vec<CombObserver<VarId>>,
@@ -871,7 +778,9 @@ impl fmt::Debug for SimModule {
         f.debug_struct("SimModule")
             .field("name", &self.name)
             .field("variables", &"<omitted>")
-            .field("ff_eir_processes", &self.ff_eir_processes.len())
+            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
+            .field("apply_ff_blocks", &self.apply_ff_blocks)
+            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
             .field("glue_blocks", &self.glue_blocks)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_boundaries", &self.comb_boundaries)
@@ -905,9 +814,8 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
 
 /// Exact source-unit provenance for a merged SIR function.
 ///
-/// Block IDs are renumbered while merging, so a boundary block alone cannot
-/// identify every block on either side of a phase cut.  Keep the source-unit
-/// index for each merged block instead.
+/// Unlike a list of boundary block IDs, this remains valid when an input
+/// execution unit has a nonzero entry ID or sparse block IDs.
 #[derive(Debug, Clone)]
 pub(crate) struct SirMergeProvenance {
     pub unit_entries: Vec<BlockId>,

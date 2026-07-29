@@ -41,6 +41,15 @@ assert_eq "$CELOX_REPORTED_ELAPSED_NS" 11 "pass reported elapsed"
 assert_eq "$CELOX_COMPILE_ELAPSED_NS" 4 "pass compile elapsed"
 assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 5 "pass execute elapsed"
 
+cpu_timed_log="$TMP/cpu-timed.log"
+write_log "$cpu_timed_log" \
+    'CELOX_TEST_TIMING test=boot_cpu compile_ns=6 execute_ns=7 execute_cpu_ns=8' \
+    'CELOX_TEST_RESULT test=boot_cpu status=pass elapsed_ns=15'
+classify_celox_result "$cpu_timed_log" boot_cpu 0 0 \
+    || fail "timing marker with CPU time was rejected: $CELOX_RESULT_DIAGNOSTIC"
+assert_eq "$CELOX_COMPILE_ELAPSED_NS" 6 "CPU-timed compile elapsed"
+assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 7 "CPU-timed execute elapsed"
+
 timed_veryl_log="$TMP/timed-veryl.log"
 write_log "$timed_veryl_log" \
     'VERYL_TEST_TIMING test=boot compile_ns=6 execute_ns=7' \

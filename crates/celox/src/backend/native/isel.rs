@@ -1940,10 +1940,6 @@ impl<'a> ISelContext<'a> {
     /// Resolve the mask byte offset for a variable.
     /// The mask is stored immediately after the value in memory.
     fn mask_byte_offset(&self, addr: &RegionedAbsoluteAddr, bit_offset: usize) -> i32 {
-        if addr.region == crate::ir::MATERIALIZATION_HOME_REGION {
-            return self.byte_offset(addr, bit_offset)
-                + self.layout.materialization_home_plane_size as i32;
-        }
         let abs_addr = addr.absolute_addr();
         self.byte_offset(addr, bit_offset) + self.layout.plane_size(&abs_addr) as i32
     }
@@ -2002,9 +1998,6 @@ impl<'a> ISelContext<'a> {
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
-        if addr.region == crate::ir::MATERIALIZATION_HOME_REGION && bit_offset.is_multiple_of(8) {
-            return Self::exact_storage_access_size(width_bits);
-        }
         if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr()) {
             if width_bits == array.element_width && bit_offset.is_multiple_of(array.element_width) {
                 return Self::exact_storage_access_size(width_bits);
@@ -14114,8 +14107,6 @@ mod tests {
             total_size: 0,
             working_offsets: HashMap::default(),
             working_base_offset: 0,
-            materialization_home_base_offset: 0,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 0,
             sparse_layouts: HashMap::default(),
@@ -16515,8 +16506,6 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
-            materialization_home_base_offset: 24,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -16735,8 +16724,6 @@ mod tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset: total_size,
-            materialization_home_base_offset: total_size,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
@@ -16972,8 +16959,6 @@ mod tests {
             total_size,
             working_offsets: HashMap::default(),
             working_base_offset: total_size,
-            materialization_home_base_offset: total_size,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
@@ -17124,8 +17109,6 @@ mod tests {
             total_size: 112,
             working_offsets: HashMap::default(),
             working_base_offset: 112,
-            materialization_home_base_offset: 112,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 112,
             sparse_layouts: HashMap::default(),
@@ -17839,8 +17822,6 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
-            materialization_home_base_offset: 24,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -18044,8 +18025,6 @@ mod tests {
             total_size: state_size,
             working_offsets: HashMap::default(),
             working_base_offset: state_size,
-            materialization_home_base_offset: state_size,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: state_size,
             sparse_layouts: HashMap::default(),
@@ -18276,8 +18255,6 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
-            materialization_home_base_offset: 24,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
@@ -18445,8 +18422,6 @@ mod tests {
             total_size: 24,
             working_offsets: HashMap::default(),
             working_base_offset: 24,
-            materialization_home_base_offset: 24,
-            materialization_home_plane_size: 0,
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),

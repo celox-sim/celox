@@ -141,11 +141,6 @@ impl<Addr> SIRBuilder<Addr> {
     pub fn current_block(&self) -> BlockId {
         self.current_block_id.expect("No active block")
     }
-
-    pub fn current_instruction_index(&self) -> usize {
-        self.blocks[&self.current_block()].instructions.len()
-    }
-
     pub fn emit(&mut self, inst: SIRInstruction<Addr>) {
         self.blocks
             .get_mut(&self.current_block())
