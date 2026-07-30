@@ -99,14 +99,14 @@ pub(crate) fn legalize_lane_aggregate_inputs(
                     let captured = std::mem::take(inputs);
                     let mut group_start = 0usize;
                     while group_start < captured.len() {
-                        let packed_word = layout[group_start].1 <= 16;
-                        let capacity = if packed_word { 8 } else { 4 };
-                        let stride = if packed_word { 2 } else { 8 };
+                        let size = LaneAggregateInputSize::for_width(layout[group_start].1);
+                        let capacity = size.capacity();
+                        let stride = size.stride();
                         let base = layout[group_start].2;
                         let mut group_end = group_start + 1;
                         while group_end < captured.len()
                             && group_end - group_start < capacity
-                            && (layout[group_end].1 <= 16) == packed_word
+                            && LaneAggregateInputSize::for_width(layout[group_end].1) == size
                             && layout[group_end].2
                                 == base
                                     + u32::try_from((group_end - group_start) * stride)
@@ -130,7 +130,7 @@ pub(crate) fn legalize_lane_aggregate_inputs(
                                 .checked_add(base)
                                 .expect("lane aggregate input offset"),
                             srcs: Uses::from_slice(srcs),
-                            packed_word,
+                            size,
                         });
                         group_start = group_end;
                     }
@@ -368,7 +368,7 @@ mod tests {
                 MInst::LaneAggregateInput {
                     base_offset,
                     srcs,
-                    packed_word: false,
+                    size: LaneAggregateInputSize::S64,
                 } if usize::try_from(*base_offset).unwrap() == start * 8
                     && srcs.as_slice() == &inputs[start..end]
             ));

@@ -657,6 +657,47 @@ impl SparseCommitDescriptor {
 // MIR instructions
 // ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneAggregateInputSize {
+    S16,
+    S32,
+    S64,
+}
+
+impl LaneAggregateInputSize {
+    pub(crate) fn for_width(width: usize) -> Self {
+        if width <= 16 {
+            Self::S16
+        } else if width <= 32 {
+            Self::S32
+        } else {
+            Self::S64
+        }
+    }
+
+    pub(crate) const fn stride(self) -> usize {
+        match self {
+            Self::S16 => 2,
+            Self::S32 => 4,
+            Self::S64 => 8,
+        }
+    }
+
+    pub(crate) const fn capacity(self) -> usize {
+        match self {
+            Self::S16 => 8,
+            Self::S32 | Self::S64 => 4,
+        }
+    }
+
+    pub(crate) const fn capture_bytes(self) -> usize {
+        match self {
+            Self::S16 | Self::S32 => 16,
+            Self::S64 => 32,
+        }
+    }
+}
+
 /// Word-level SSA instruction. All operands are virtual registers.
 ///
 /// Instructions use 3-operand form (dst, src1, src2). The emit phase
@@ -786,7 +827,7 @@ pub enum MInst {
     LaneAggregateInput {
         base_offset: u32,
         srcs: Uses,
-        packed_word: bool,
+        size: LaneAggregateInputSize,
     },
     /// Execute one sink-local root of a verified lane-aggregate plan.
     ///
@@ -1373,11 +1414,11 @@ impl fmt::Display for MInst {
             MInst::LaneAggregateInput {
                 base_offset,
                 srcs,
-                packed_word,
+                size,
             } => {
                 write!(
                     f,
-                    "lane_aggregate_input base_offset={base_offset}, packed_word={packed_word}, inputs={}",
+                    "lane_aggregate_input base_offset={base_offset}, size={size:?}, inputs={}",
                     srcs.len()
                 )
             }

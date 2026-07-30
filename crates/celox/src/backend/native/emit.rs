@@ -225,16 +225,10 @@ impl NativeArenaLayout {
                     .ok()?
                     .checked_add(usize::try_from(*input_bytes).ok()?),
                 MInst::LaneAggregateInput {
-                    base_offset,
-                    srcs,
-                    packed_word,
+                    base_offset, size, ..
                 } => usize::try_from(*base_offset)
                     .ok()?
-                    .checked_add(if *packed_word {
-                        16
-                    } else {
-                        srcs.len().checked_mul(8)?
-                    }),
+                    .checked_add(size.capture_bytes()),
                 _ => None,
             })
             .max()
@@ -4047,14 +4041,11 @@ fn lane_aggregate_qword_result_is_canonical(plan: &LaneAggregatePlan, node_index
     };
     match &node.operation {
         LaneAggregatePlanOp::StateRead(_) => true,
-        // Captured SSA values use machine-word storage. Their declared SIR
-        // width does not prove that bits above that width were normalized
-        // before the capture. The scalar aggregate emitter masks these
-        // frontiers explicitly; the qword SIMD path must preserve that
-        // contract instead of treating a word-load zero extension as logical
-        // width canonicalization.
+        // Scalar aggregate inputs are truncated into 16-, 32-, or 64-bit
+        // slots. Loading a complete slot into a qword vector is canonical.
+        // A logical width narrower than its slot still needs an explicit mask.
         LaneAggregatePlanOp::BroadcastScalar(_) | LaneAggregatePlanOp::SsaPack { .. } => {
-            node.lane_width == 64
+            matches!(node.lane_width, 16 | 32 | 64)
         }
         LaneAggregatePlanOp::Constant(values) => {
             node.lane_width == 64 || values.iter().all(|value| value >> node.lane_width == 0)
@@ -4170,6 +4161,9 @@ fn emit_lane_aggregate_ymm_qword_node(
             if node.lane_width <= 16 {
                 asm.movzx(preg_to_reg32(gpr), word_ptr(memory))?;
                 asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
+            } else if node.lane_width <= 32 {
+                asm.mov(preg_to_reg32(gpr), dword_ptr(memory))?;
+                asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
             } else {
                 asm.vpbroadcastq(destination, qword_ptr(memory))?;
             }
@@ -4186,6 +4180,16 @@ fn emit_lane_aggregate_ymm_qword_node(
                 asm.vpmovzxwq(
                     destination,
                     qword_ptr(mem_operand(BaseReg::StackFrame, base)),
+                )?;
+            } else if node.lane_width <= 32
+                && offsets
+                    .iter()
+                    .enumerate()
+                    .all(|(lane, offset)| *offset == base + (lane * 4) as i32)
+            {
+                asm.vpmovzxdq(
+                    destination,
+                    xmmword_ptr(mem_operand(BaseReg::StackFrame, base)),
                 )?;
             } else if offsets
                 .iter()
@@ -4219,6 +4223,27 @@ fn emit_lane_aggregate_ymm_qword_node(
                     asm.movzx(
                         preg_to_reg32(gpr),
                         word_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
+                    )?;
+                    asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
+                } else if node.lane_width <= 32 {
+                    asm.mov(
+                        preg_to_reg32(gpr),
+                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[0])),
+                    )?;
+                    asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
+                    asm.mov(
+                        preg_to_reg32(gpr),
+                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[1])),
+                    )?;
+                    asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
+                    asm.mov(
+                        preg_to_reg32(gpr),
+                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[2])),
+                    )?;
+                    asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
+                    asm.mov(
+                        preg_to_reg32(gpr),
+                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
                     )?;
                     asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
                 } else {
@@ -5979,16 +6004,43 @@ fn emit_inst(
         MInst::LaneAggregateInput {
             base_offset,
             srcs,
-            packed_word,
-        } => {
-            if *packed_word {
+            size,
+        } => match size {
+            LaneAggregateInputSize::S16 => {
                 debug_assert!(srcs.len() <= 8);
                 asm.pxor(xmm0, xmm0)?;
                 for (lane, src) in srcs.iter().enumerate() {
                     asm.pinsrw(xmm0, preg_to_reg32(resolve(assignment, *src)), lane as u32)?;
                 }
                 asm.movdqu(xmmword_ptr(aggregate_input_operand(*base_offset)), xmm0)?;
-            } else {
+            }
+            LaneAggregateInputSize::S32 => {
+                debug_assert!(srcs.len() <= 4);
+                if func.target_features.avx2() {
+                    asm.vpxor(xmm0, xmm0, xmm0)?;
+                    for (lane, src) in srcs.iter().enumerate() {
+                        asm.vpinsrd(
+                            xmm0,
+                            xmm0,
+                            preg_to_reg32(resolve(assignment, *src)),
+                            lane as u32,
+                        )?;
+                    }
+                    asm.vmovdqu(xmmword_ptr(aggregate_input_operand(*base_offset)), xmm0)?;
+                } else {
+                    for (lane, src) in srcs.iter().enumerate() {
+                        asm.mov(
+                            dword_ptr(aggregate_input_operand(
+                                base_offset
+                                    .checked_add(u32::try_from(lane * 4).unwrap())
+                                    .unwrap(),
+                            )),
+                            preg_to_reg32(resolve(assignment, *src)),
+                        )?;
+                    }
+                }
+            }
+            LaneAggregateInputSize::S64 => {
                 debug_assert!(srcs.len() <= 4);
                 if func.target_features.avx2() {
                     asm.vpxor(ymm0, ymm0, ymm0)?;
@@ -6026,7 +6078,7 @@ fn emit_inst(
                     }
                 }
             }
-        }
+        },
         MInst::LaneAggregate {
             dst,
             plan,
@@ -6059,16 +6111,19 @@ fn emit_inst(
                 let byte_offset = input_base_offset
                     .checked_add(input_layout[index].2)
                     .expect("aggregate input offset");
-                if input_layout[index].1 <= 16 {
-                    asm.mov(
+                match LaneAggregateInputSize::for_width(input_layout[index].1) {
+                    LaneAggregateInputSize::S16 => asm.mov(
                         word_ptr(aggregate_input_operand(byte_offset)),
                         preg_to_reg16(resolve(assignment, *input)),
-                    )?;
-                } else {
-                    asm.mov(
+                    )?,
+                    LaneAggregateInputSize::S32 => asm.mov(
+                        dword_ptr(aggregate_input_operand(byte_offset)),
+                        preg_to_reg32(resolve(assignment, *input)),
+                    )?,
+                    LaneAggregateInputSize::S64 => asm.mov(
                         qword_ptr(aggregate_input_operand(byte_offset)),
                         preg_to_reg64(resolve(assignment, *input)),
-                    )?;
+                    )?,
                 }
             }
             let input_stack_offsets = input_layout
@@ -9196,6 +9251,43 @@ mod shift_encoding_tests {
         ];
         assert_eq!(
             execute_predicate_recipe(nodes, 3, 4, &[(scalar, 0xfff5)]),
+            0b1111
+        );
+    }
+
+    #[test]
+    fn lane_aggregate_ymm_qword_zero_extends_a_32_bit_scalar_slot() {
+        use crate::ir::RegisterId;
+        use crate::lane_aggregate_plan::{LaneAggregatePlanNode, LaneAggregatePlanOp};
+
+        let lanes = (10..14).map(RegisterId).collect::<Vec<_>>();
+        let scalar = RegisterId(0);
+        let expected = 0x8000_0005;
+        let nodes = vec![
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(scalar),
+                children: Vec::new(),
+                lanes: lanes.clone(),
+                lane_width: 32,
+                lane_count: 4,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Constant(vec![expected; 4]),
+                children: Vec::new(),
+                lanes: lanes.clone(),
+                lane_width: 32,
+                lane_count: 4,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Binary(BinaryOp::Eq),
+                children: vec![0, 1],
+                lanes,
+                lane_width: 1,
+                lane_count: 4,
+            },
+        ];
+        assert_eq!(
+            execute_predicate_recipe(nodes, 2, 4, &[(scalar, 0xffff_ffff_8000_0005)],),
             0b1111
         );
     }

@@ -111,6 +111,16 @@ pub(crate) struct LaneAggregateBitLocation {
 }
 
 impl LaneAggregatePlan {
+    pub(crate) fn scalar_input_slot_bytes(width: usize) -> usize {
+        if width <= 16 {
+            2
+        } else if width <= 32 {
+            4
+        } else {
+            8
+        }
+    }
+
     pub(crate) fn scalar_inputs_for_root(&self, root_index: usize) -> Option<Vec<RegisterId>> {
         let root = self.roots.get(root_index)?;
         let mut inputs = BTreeSet::new();
@@ -193,14 +203,13 @@ impl LaneAggregatePlan {
         let mut cursor = 0usize;
         let mut input = 0usize;
         while input < widths.len() {
-            let packed_word = widths[input].1 <= 16;
-            let capacity = if packed_word { 8 } else { 4 };
-            let stride = if packed_word { 2 } else { 8 };
-            let alignment = capacity * stride;
+            let stride = Self::scalar_input_slot_bytes(widths[input].1);
+            let alignment = if stride == 8 { 32 } else { 16 };
+            let capacity = alignment / stride;
             let mut end = input;
             while end < widths.len()
                 && end - input < capacity
-                && (widths[end].1 <= 16) == packed_word
+                && Self::scalar_input_slot_bytes(widths[end].1) == stride
             {
                 end += 1;
             }
