@@ -241,11 +241,12 @@ impl Program {
                 !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
+        crate::optimizer::coalescing::retain_final_identity_aliases(self, four_state);
         let layout = crate::backend::MemoryLayout::build(self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
         if !self.address_aliases.is_empty() {
-            let aliased: crate::HashSet<AbsoluteAddr> = self
+            let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = self
                 .address_aliases
                 .iter()
                 .filter(|(alias_addr, canonical_addr)| {
@@ -255,34 +256,12 @@ impl Program {
                         .zip(layout.offsets.get(canonical_addr))
                         .is_some_and(|(a, c)| a == c)
                 })
-                .map(|(addr, _)| *addr)
+                .map(|(&alias, &canonical)| (alias, canonical))
                 .collect();
             if !aliased.is_empty() {
-                for eu in &mut self.eval_comb {
-                    for block in eu.blocks.values_mut() {
-                        for inst in &mut block.instructions {
-                            if let SIRInstruction::Store(addr, _, width, _, triggers, _) = inst {
-                                if aliased.contains(&addr.absolute_addr()) {
-                                    if triggers.is_empty() {
-                                        // Mark for removal
-                                        *width = 0;
-                                    } else {
-                                        // Self-copy: set width=0 so backend skips
-                                        // the Load+Store but still emits trigger code.
-                                        *width = 0;
-                                    }
-                                }
-                            }
-                        }
-                        block.instructions.retain(|inst| {
-                            !matches!(
-                                inst,
-                                SIRInstruction::Store(_, _, 0, _, triggers, _)
-                                    if triggers.is_empty()
-                            )
-                        });
-                    }
-                }
+                crate::optimizer::coalescing::remove_final_identity_alias_stores(
+                    self, &aliased, four_state,
+                );
             }
         }
 
@@ -1727,6 +1706,21 @@ impl fmt::Display for SIROffset {
 }
 
 impl SIROffset {
+    /// Returns the constant offset in the object's packed logical bit space.
+    ///
+    /// `PackedElements` differs from `Static` in the physical layouts a
+    /// backend may select, but both name an exact logical range. Analyses
+    /// which only reason about aliasing must not treat `PackedElements` as a
+    /// dynamic or unknown access.
+    pub fn constant_bit_offset(&self) -> Option<usize> {
+        match self {
+            SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+                Some(*bit_offset)
+            }
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+        }
+    }
+
     pub fn dynamic_registers(&self) -> [Option<RegisterId>; 2] {
         match self {
             SIROffset::Static(_) => [None, None],

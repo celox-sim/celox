@@ -54,6 +54,30 @@ pub(super) fn optimize_program_identity_stores(
     program: &mut Program,
     four_state: bool,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
+    let metadata = address_metadata(program);
+
+    // Without a phase-correct StateSSA proof, both FF reads and writes require
+    // a distinct persistent home. The split FF forms contain the exact FF
+    // accesses without misclassifying the fused unit's complete comb graph.
+    let mut blocked_aliases = ff_referenced_addresses(program);
+    blocked_aliases.extend(
+        program
+            .comb_observers
+            .iter()
+            .flat_map(|observer| observer.written_inputs.iter().copied()),
+    );
+    blocked_aliases.extend(program.initial_memory_values.iter().map(|init| init.addr));
+
+    optimize_eval_comb_identity_stores(
+        &mut program.eval_comb,
+        &metadata,
+        &blocked_aliases,
+        &program.address_aliases,
+        four_state,
+    )
+}
+
+fn address_metadata(program: &Program) -> HashMap<AbsoluteAddr, AddressMetadata> {
     let mut metadata = HashMap::default();
     for (&instance_id, module_id) in &program.instance_module {
         if let Some(variables) = program.module_variables.get(module_id) {
@@ -71,26 +95,7 @@ pub(super) fn optimize_program_identity_stores(
             }
         }
     }
-
-    // These addresses cannot safely become the removable side of an alias.
-    // FF references are rejected by MemoryLayout too, but rejecting them here
-    // keeps address_aliases itself limited to candidates that can take effect.
-    let mut blocked_aliases = ff_addresses(program);
-    blocked_aliases.extend(
-        program
-            .comb_observers
-            .iter()
-            .flat_map(|observer| observer.written_inputs.iter().copied()),
-    );
-    blocked_aliases.extend(program.initial_memory_values.iter().map(|init| init.addr));
-
-    optimize_eval_comb_identity_stores(
-        &mut program.eval_comb,
-        &metadata,
-        &blocked_aliases,
-        &program.address_aliases,
-        four_state,
-    )
+    metadata
 }
 
 fn optimize_eval_comb_identity_stores(
@@ -111,6 +116,162 @@ fn optimize_eval_comb_identity_stores(
     let commits = select_identity_commits(&facts, metadata, existing_aliases, &aliases, four_state);
     rewrite_identity_stores_as_commits(units, &commits);
     aliases
+}
+
+/// Revalidate whole-object aliases against the final optimized SIR.
+///
+/// Alias discovery runs before the final comb cleanup and fused units are
+/// lowered independently.  Therefore address identity alone is not enough:
+/// every remaining write to the removable side must still be the exact
+/// full-width identity recipe that justified sharing its home.
+pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
+    if program.address_aliases.is_empty() {
+        return;
+    }
+    let metadata = address_metadata(program);
+    let aliases = program.address_aliases.clone();
+    let mut valid = aliases.keys().copied().collect::<HashSet<_>>();
+
+    retain_aliases_valid_for_units(
+        &program.eval_comb,
+        &aliases,
+        &metadata,
+        four_state,
+        &mut valid,
+    );
+    for units in program.eval_comb_apply_ffs.values() {
+        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
+    }
+    program
+        .address_aliases
+        .retain(|alias, _| valid.contains(alias));
+}
+
+/// Remove only the exact final-SIR Store sites whose identity recipes were
+/// re-proved and whose homes were actually merged by MemoryLayout.
+pub(crate) fn remove_final_identity_alias_stores(
+    program: &mut Program,
+    validated_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) {
+    if validated_aliases.is_empty() {
+        return;
+    }
+    let metadata = address_metadata(program);
+    remove_proven_alias_stores(
+        &mut program.eval_comb,
+        validated_aliases,
+        &metadata,
+        four_state,
+    );
+    for units in program.eval_comb_apply_ffs.values_mut() {
+        remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
+    }
+}
+
+fn retain_aliases_valid_for_units(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    four_state: bool,
+    valid: &mut HashSet<AbsoluteAddr>,
+) {
+    let facts = collect_global_facts(units, metadata, four_state);
+    valid.retain(|alias| {
+        aliases
+            .get(alias)
+            .is_some_and(|canonical| proven_alias_store(&facts, *alias, *canonical).is_some())
+    });
+}
+
+/// `Some(None)` means that this projection does not write the alias at all.
+/// `Some(Some(store))` names the one exact removable identity Store.
+/// `None` means the projection can make the two homes observably diverge.
+fn proven_alias_store(
+    facts: &GlobalIdentityFacts,
+    alias: AbsoluteAddr,
+    canonical: AbsoluteAddr,
+) -> Option<Option<StoreCandidate>> {
+    match facts.accesses.get(&alias).map_or(0, |access| access.writes) {
+        0 => return Some(None),
+        1 => {}
+        _ => return None,
+    }
+
+    let store = facts
+        .stores
+        .iter()
+        .copied()
+        .find(|store| store.address.absolute_addr() == alias)?;
+    if !store.shape_is_aliasable || !store.effects_are_removable {
+        return None;
+    }
+
+    let identity_copy = store.identity_source.is_some_and(|source| {
+        source.region == STABLE_REGION && source.absolute_addr() == canonical
+    });
+    let duplicate_store = facts.stores.iter().any(|other| {
+        other.address.absolute_addr() == canonical
+            && other.eu_index == store.eu_index
+            && other.block == store.block
+            && other.source == store.source
+            && other.width == store.width
+            && other.shape_is_aliasable
+            && other.effects_are_removable
+    });
+    (identity_copy || duplicate_store).then_some(Some(store))
+}
+
+fn remove_proven_alias_stores(
+    units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
+    aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
+    four_state: bool,
+) {
+    let facts = collect_global_facts(units, metadata, four_state);
+    let mut sites = aliases
+        .iter()
+        .filter_map(|(&alias, &canonical)| proven_alias_store(&facts, alias, canonical).flatten())
+        .collect::<Vec<_>>();
+    sites.sort_unstable_by_key(|store| {
+        (
+            store.eu_index,
+            store.block,
+            std::cmp::Reverse(store.instruction_index),
+        )
+    });
+
+    for store in sites {
+        let Some(block) = units
+            .get_mut(store.eu_index)
+            .and_then(|unit| unit.blocks.get_mut(&store.block))
+        else {
+            continue;
+        };
+        if block
+            .instructions
+            .get(store.instruction_index)
+            .is_some_and(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(
+                        address,
+                        SIROffset::Static(0),
+                        width,
+                        source,
+                        triggers,
+                        capture_sites,
+                    ) if *address == store.address
+                        && *width == store.width
+                        && *source == store.source
+                        && triggers.is_empty()
+                        && capture_sites.is_empty()
+                )
+            })
+        {
+            block.instructions.remove(store.instruction_index);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -637,18 +798,17 @@ fn increment_saturating(value: &mut usize) {
     *value = value.saturating_add(1);
 }
 
-fn ff_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
+fn ff_referenced_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
     let mut addresses = HashSet::default();
+    // Do not scan eval_comb_apply_ffs here.  Those units contain the complete
+    // combinational graph as well as FF actions, so treating every address in
+    // them as FF state disables identity aliasing for ordinary comb outputs.
+    // The split FF forms below are retained even when the native fused form is
+    // selected and therefore remain the authoritative FF-state inventory.
     let units = program
         .eval_apply_ffs
         .values()
         .flat_map(|units| units.iter())
-        .chain(
-            program
-                .eval_comb_apply_ffs
-                .values()
-                .flat_map(|units| units.iter()),
-        )
         .chain(
             program
                 .eval_only_ffs
@@ -2106,6 +2266,52 @@ mod tests {
                 ])
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn final_alias_removal_names_the_reproved_identity_store_site() {
+        let source = address(0);
+        let destination = address(1);
+        let mut units = vec![single_block_unit(
+            vec![load(0, source, 8), store(destination, 0, 8)],
+            &[(0, 8)],
+        )];
+        let aliases = [(destination.absolute_addr(), source.absolute_addr())]
+            .into_iter()
+            .collect();
+        let metadata = metadata(&[(source, 8), (destination, 8)]);
+
+        remove_proven_alias_stores(&mut units, &aliases, &metadata, false);
+
+        assert_eq!(
+            units[0].blocks[&BlockId(0)].instructions,
+            vec![load(0, source, 8)]
+        );
+    }
+
+    #[test]
+    fn final_alias_revalidation_rejects_an_additional_state_write() {
+        let source = address(0);
+        let destination = address(1);
+        let working_destination = RegionedAbsoluteAddr {
+            region: WORKING_REGION,
+            ..destination
+        };
+        let units = vec![single_block_unit(
+            vec![
+                load(0, source, 8),
+                store(destination, 0, 8),
+                store(working_destination, 0, 8),
+            ],
+            &[(0, 8)],
+        )];
+        let metadata = metadata(&[(source, 8), (destination, 8)]);
+        let facts = collect_global_facts(&units, &metadata, false);
+
+        assert!(
+            proven_alias_store(&facts, destination.absolute_addr(), source.absolute_addr())
+                .is_none()
         );
     }
 }

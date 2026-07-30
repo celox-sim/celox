@@ -374,19 +374,14 @@ fn find_sparse_zero_fills(
         .values()
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| match instruction {
-            SIRInstruction::Store(
-                address,
-                SIROffset::Static(_),
-                width,
-                source,
-                triggers,
-                capture_sites,
-            ) if is_sparse_origin_zero_fill_region(address.region)
-                && (address.region == crate::ir::STABLE_REGION
-                    || layout.sparse_layouts.contains_key(&address.absolute_addr()))
-                && *width != 0
-                && triggers.is_empty()
-                && capture_sites.is_empty() =>
+            SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
+                if is_sparse_origin_zero_fill_region(address.region)
+                    && offset.constant_bit_offset().is_some()
+                    && (address.region == crate::ir::STABLE_REGION
+                        || layout.sparse_layouts.contains_key(&address.absolute_addr()))
+                    && *width != 0
+                    && triggers.is_empty()
+                    && capture_sites.is_empty() =>
             {
                 Some(*source)
             }
@@ -401,28 +396,24 @@ fn find_sparse_zero_fills(
         let mut open = HashMap::<RegionedAbsoluteAddr, Vec<ZeroStoreCandidate>>::default();
         for (instruction, inst) in block.instructions.iter().enumerate() {
             match inst {
-                SIRInstruction::Store(
-                    address,
-                    SIROffset::Static(start),
-                    width,
-                    source,
-                    triggers,
-                    capture_sites,
-                ) if is_sparse_origin_zero_fill_region(address.region)
-                    && (address.region == crate::ir::STABLE_REGION
-                        || layout.sparse_layouts.contains_key(&address.absolute_addr()))
-                    && *width != 0
-                    && triggers.is_empty()
-                    && capture_sites.is_empty()
-                    && zeros.contains(source) =>
+                SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
+                    if is_sparse_origin_zero_fill_region(address.region)
+                        && offset.constant_bit_offset().is_some()
+                        && (address.region == crate::ir::STABLE_REGION
+                            || layout.sparse_layouts.contains_key(&address.absolute_addr()))
+                        && *width != 0
+                        && triggers.is_empty()
+                        && capture_sites.is_empty()
+                        && zeros.contains(source) =>
                 {
+                    let start = offset.constant_bit_offset().unwrap();
                     let Some(end) = start.checked_add(*width) else {
                         seal_zero_fill_group(block_id, *address, &mut open, layout, &mut plans);
                         continue;
                     };
                     open.entry(*address).or_default().push(ZeroStoreCandidate {
                         instruction,
-                        start: *start,
+                        start,
                         end,
                     });
                 }

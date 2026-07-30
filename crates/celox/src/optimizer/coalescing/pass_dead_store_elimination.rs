@@ -45,7 +45,9 @@ pub(crate) fn eliminate_dead_stores(
         for block in eu.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    SIRInstruction::Load(_, addr, SIROffset::Static(_), _) => {
+                    SIRInstruction::Load(_, addr, offset, _)
+                        if offset.constant_bit_offset().is_some() =>
+                    {
                         loaded_addrs.insert(addr.absolute_addr());
                     }
                     SIRInstruction::Load(
@@ -58,7 +60,9 @@ pub(crate) fn eliminate_dead_stores(
                         loaded_addrs.insert(key);
                         dynamic_addrs.insert(key);
                     }
-                    SIRInstruction::Commit(src, _, SIROffset::Static(_), _, _) => {
+                    SIRInstruction::Commit(src, _, offset, _, _)
+                        if offset.constant_bit_offset().is_some() =>
+                    {
                         loaded_addrs.insert(src.absolute_addr());
                     }
                     SIRInstruction::Commit(
@@ -83,14 +87,11 @@ pub(crate) fn eliminate_dead_stores(
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {
-                    SIRInstruction::Store(
-                        addr,
-                        SIROffset::Static(_),
-                        _,
-                        _,
-                        triggers,
-                        comb_capture_sites,
-                    ) if triggers.is_empty() && comb_capture_sites.is_empty() => {
+                    SIRInstruction::Store(addr, offset, _, _, triggers, comb_capture_sites)
+                        if offset.constant_bit_offset().is_some()
+                            && triggers.is_empty()
+                            && comb_capture_sites.is_empty() =>
+                    {
                         let abs = addr.absolute_addr();
                         externally_live.contains(&abs)
                             || loaded_addrs.contains(&abs)

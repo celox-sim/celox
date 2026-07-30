@@ -95,6 +95,22 @@ pub(crate) fn eliminate_shared_comb_state_stores(
     fused_comb_dse::eliminate_shared(eu)
 }
 
+pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
+    pass_identity_store_bypass::retain_final_identity_aliases(program, four_state);
+}
+
+pub(crate) fn remove_final_identity_alias_stores(
+    program: &mut Program,
+    validated_aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
+    four_state: bool,
+) {
+    pass_identity_store_bypass::remove_final_identity_alias_stores(
+        program,
+        validated_aliases,
+        four_state,
+    );
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn analyze_lane_aggregate_feasibility(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,

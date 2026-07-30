@@ -297,7 +297,7 @@ impl MemoryLayout {
         // - Both variables have the same 4-state mode
         // - Alias width fits within canonical width
         // - Neither address is used in FF execution units (FF timing requires separate storage)
-        let ff_addrs = collect_ff_addresses(program);
+        let ff_addrs = collect_ff_referenced_addresses(program);
         let mut address_aliases = program.address_aliases.iter().collect::<Vec<_>>();
         address_aliases
             .sort_unstable_by_key(|(alias_addr, canonical_addr)| (**alias_addr, **canonical_addr));
@@ -459,11 +459,13 @@ fn supports_strided_access(
             bit_offset,
             element_width,
         } => {
+            let whole = *bit_offset == 0 && width == layout.element_width * layout.element_count;
             *element_width == layout.element_width
-                && layout.element_stride * 8 == layout.element_width
-                && bit_offset
-                    .checked_add(width)
-                    .is_some_and(|end| end <= layout.element_width * layout.element_count)
+                && ((layout.element_stride * 8 == layout.element_width
+                    && bit_offset
+                        .checked_add(width)
+                        .is_some_and(|end| end <= layout.element_width * layout.element_count))
+                    || (whole_object_transfer && whole))
         }
         SIROffset::Dynamic(_) => false,
     }
@@ -493,11 +495,13 @@ pub(crate) fn collect_strided_array_layouts(
                 check(addr, offset, *width, false);
             }
             SIRInstruction::Store(addr, offset, width, source, triggers, capture_sites) => {
-                let sparse_bulk_zero = addr.region == crate::ir::SPARSE_WORKING_REGION
-                    && triggers.is_empty()
+                let state_bulk_zero = matches!(
+                    addr.region,
+                    STABLE_REGION | crate::ir::SPARSE_WORKING_REGION
+                ) && triggers.is_empty()
                     && capture_sites.is_empty()
                     && exact_zeros.contains(source);
-                check(addr, offset, *width, sparse_bulk_zero);
+                check(addr, offset, *width, state_bulk_zero);
             }
             SIRInstruction::Commit(src, dst, offset, width, _) => {
                 check(src, offset, *width, true);
@@ -519,8 +523,12 @@ pub(crate) fn collect_strided_array_layouts(
             .values()
             .flat_map(|block| &block.instructions)
             .filter_map(|instruction| match instruction {
-                SIRInstruction::Store(address, SIROffset::Static(0), width, source, ..)
-                    if address.region == crate::ir::SPARSE_WORKING_REGION && *width > 64 =>
+                SIRInstruction::Store(address, offset, width, source, ..)
+                    if matches!(
+                        address.region,
+                        STABLE_REGION | crate::ir::SPARSE_WORKING_REGION
+                    ) && offset.constant_bit_offset() == Some(0)
+                        && *width > 64 =>
                 {
                     Some(*source)
                 }
@@ -569,14 +577,20 @@ fn build_runtime_event_site_layouts(program: &Program) -> Vec<RuntimeEventSiteLa
         .collect()
 }
 
-/// Collect all absolute addresses referenced in FF execution units.
-fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+/// Collect whole objects referenced by FF.
+///
+/// FF reads cannot share a persistent home without a phase-correct StateSSA
+/// proof that the identity definition precedes the read on every event path.
+fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
     let mut addrs = crate::HashSet::default();
+    // eval_comb_apply_ffs contains the complete comb graph, not just FF
+    // state.  The split FF forms are retained as the authoritative inventory;
+    // scanning the fused form would conservatively reject every useful comb
+    // identity alias.
     let ff_eus = program
         .eval_apply_ffs
         .values()
         .flat_map(|v| v.iter())
-        .chain(program.eval_comb_apply_ffs.values().flat_map(|v| v.iter()))
         .chain(program.eval_only_ffs.values().flat_map(|v| v.iter()))
         .chain(program.apply_ffs.values().flat_map(|v| v.iter()));
     for eu in ff_eus {
@@ -710,6 +724,24 @@ mod tests {
             },
             32,
             false,
+        ));
+        assert!(supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            },
+            32,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 1,
+                element_width: 1,
+            },
+            31,
+            true,
         ));
     }
 }

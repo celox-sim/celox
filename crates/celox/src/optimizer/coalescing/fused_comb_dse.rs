@@ -130,24 +130,26 @@ fn eliminate_candidates(
     for block in eu.blocks.values() {
         for instruction in &block.instructions {
             match instruction {
-                SIRInstruction::Load(_, addr, SIROffset::Static(start), width)
-                    if addr.region == STABLE_REGION =>
+                SIRInstruction::Load(_, addr, offset, width)
+                    if addr.region == STABLE_REGION && offset.constant_bit_offset().is_some() =>
                 {
+                    let start = offset.constant_bit_offset().unwrap();
                     static_reads.entry(*addr).or_default().push(StaticRange {
                         addr: *addr,
-                        start: *start,
+                        start,
                         width: *width,
                     });
                 }
                 SIRInstruction::Load(_, addr, _, _) if addr.region == STABLE_REGION => {
                     dynamic_reads.insert(*addr);
                 }
-                SIRInstruction::Commit(source, _, SIROffset::Static(start), width, _)
-                    if source.region == STABLE_REGION =>
+                SIRInstruction::Commit(source, _, offset, width, _)
+                    if source.region == STABLE_REGION && offset.constant_bit_offset().is_some() =>
                 {
+                    let start = offset.constant_bit_offset().unwrap();
                     static_reads.entry(*source).or_default().push(StaticRange {
                         addr: *source,
-                        start: *start,
+                        start,
                         width: *width,
                     });
                 }
@@ -165,15 +167,11 @@ fn eliminate_candidates(
             continue;
         }
         for (instruction, operation) in block.instructions.iter().enumerate() {
-            let SIRInstruction::Store(
-                addr,
-                SIROffset::Static(start),
-                width,
-                _,
-                triggers,
-                capture_sites,
-            ) = operation
+            let SIRInstruction::Store(addr, offset, width, _, triggers, capture_sites) = operation
             else {
+                continue;
+            };
+            let Some(start) = offset.constant_bit_offset() else {
                 continue;
             };
             if addr.region != STABLE_REGION
@@ -193,7 +191,7 @@ fn eliminate_candidates(
 
             let range = StaticRange {
                 addr: *addr,
-                start: *start,
+                start,
                 width: *width,
             };
             let may_be_read = dynamic_reads.contains(addr)
@@ -273,6 +271,20 @@ mod tests {
         )
     }
 
+    fn packed_store(instance: usize, source: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            address(instance),
+            SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            },
+            8,
+            RegisterId(source),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
     #[test]
     fn keeps_only_comb_state_observed_by_the_ff_sink() {
         let comb = unit(vec![store(0, 0), store(1, 1)]);
@@ -311,5 +323,42 @@ mod tests {
                 SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
             ],
         );
+    }
+
+    #[test]
+    fn removes_unobserved_packed_element_publication() {
+        let mut fused = unit(vec![
+            packed_store(0, 0),
+            SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
+        ]);
+
+        assert_eq!(eliminate_shared(&mut fused).unwrap(), 1);
+        assert_eq!(
+            fused.blocks[&BlockId(0)].instructions,
+            vec![SIRInstruction::Load(
+                RegisterId(2),
+                address(1),
+                SIROffset::Static(0),
+                8,
+            )],
+        );
+    }
+
+    #[test]
+    fn keeps_packed_element_publication_reaching_a_packed_load() {
+        let packed = SIROffset::PackedElements {
+            bit_offset: 0,
+            element_width: 1,
+        };
+        let mut fused = unit(vec![
+            packed_store(0, 0),
+            SIRInstruction::Load(RegisterId(2), address(0), packed, 8),
+        ]);
+
+        assert_eq!(eliminate_shared(&mut fused).unwrap(), 0);
+        assert!(matches!(
+            fused.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Store(..), SIRInstruction::Load(..)]
+        ));
     }
 }

@@ -15606,7 +15606,10 @@ mod tests {
                         SIRInstruction::Concat(wide_zero, vec![zero; 4]),
                         SIRInstruction::Store(
                             sparse,
-                            SIROffset::Static(0),
+                            SIROffset::PackedElements {
+                                bit_offset: 0,
+                                element_width: 51,
+                            },
                             204,
                             wide_zero,
                             vec![],
