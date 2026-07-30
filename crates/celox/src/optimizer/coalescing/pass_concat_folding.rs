@@ -6,6 +6,7 @@ use super::shared::{collect_all_used_registers, def_reg};
 use crate::HashMap;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use std::sync::Arc;
 
 /// Tracks a bit-extraction source: either Slice(reg, off, w) or Load(addr, off, w).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -21,7 +22,18 @@ struct BitSource {
     width: usize,
 }
 
-pub(super) struct ConcatFoldingPass;
+#[derive(Default)]
+pub(super) struct ConcatFoldingPass {
+    unpacked_element_widths: Arc<crate::HashMap<AbsoluteAddr, usize>>,
+}
+
+impl ConcatFoldingPass {
+    pub(super) fn new(unpacked_element_widths: Arc<crate::HashMap<AbsoluteAddr, usize>>) -> Self {
+        Self {
+            unpacked_element_widths,
+        }
+    }
+}
 
 const MAX_FOLDED_LOAD_WIDTH: usize = 64;
 
@@ -111,7 +123,23 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                 if prev_info.base == run_base
                                     && prev_info.bit_offset == run_start + run_width
                                 {
-                                    run_width += prev_info.width;
+                                    let combined_width = run_width + prev_info.width;
+                                    if let BitSourceBase::Load(address) = run_base
+                                        && let Some(&element_width) = self
+                                            .unpacked_element_widths
+                                            .get(&address.absolute_addr())
+                                    {
+                                        let combined_end = run_start + combined_width;
+                                        let crosses_element = run_start / element_width
+                                            != combined_end.saturating_sub(1) / element_width;
+                                        if crosses_element
+                                            && (run_start % element_width != 0
+                                                || combined_width % element_width != 0)
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    run_width = combined_width;
                                     run_count += 1;
                                     i -= 1;
                                 } else {
@@ -137,12 +165,23 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                 BitSourceBase::Register(src) => {
                                     SIRInstruction::Slice(new_reg, src, run_start, run_width)
                                 }
-                                BitSourceBase::Load(addr) => SIRInstruction::Load(
-                                    new_reg,
-                                    addr,
-                                    SIROffset::Static(run_start),
-                                    run_width,
-                                ),
+                                BitSourceBase::Load(addr) => {
+                                    let offset = self
+                                        .unpacked_element_widths
+                                        .get(&addr.absolute_addr())
+                                        .copied()
+                                        .filter(|element_width| {
+                                            run_start / *element_width
+                                                != (run_start + run_width - 1) / *element_width
+                                        })
+                                        .map_or(SIROffset::Static(run_start), |element_width| {
+                                            SIROffset::PackedElements {
+                                                bit_offset: run_start,
+                                                element_width,
+                                            }
+                                        });
+                                    SIRInstruction::Load(new_reg, addr, offset, run_width)
+                                }
                             };
                             new_insts_to_insert.push((inst_idx, folded_inst));
                             new_args.push(new_reg);
@@ -333,7 +372,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        ConcatFoldingPass.run(&mut eu, &PassOptions::default());
+        ConcatFoldingPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         assert!(
@@ -378,7 +417,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        ConcatFoldingPass.run(&mut eu, &PassOptions::default());
+        ConcatFoldingPass::default().run(&mut eu, &PassOptions::default());
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
         assert!(instructions.iter().any(|instruction| matches!(
@@ -439,7 +478,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        ConcatFoldingPass.run(&mut eu, &PassOptions::default());
+        ConcatFoldingPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         assert!(block.instructions.iter().any(|inst| matches!(
@@ -450,5 +489,63 @@ mod tests {
             inst,
             SIRInstruction::Concat(RegisterId(4), args) if args.len() == 1
         )));
+    }
+
+    #[test]
+    fn folding_unpacked_bit_elements_emits_explicit_packed_elements_load() {
+        let addr = test_addr();
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        for lane in 0..64 {
+            let register = RegisterId(lane);
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Load(
+                register,
+                addr,
+                SIROffset::Static(lane),
+                1,
+            ));
+        }
+        let result = RegisterId(64);
+        register_map.insert(
+            result,
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(
+            result,
+            (0..64).rev().map(RegisterId).collect(),
+        ));
+        instructions.push(SIRInstruction::RuntimeEvent {
+            site_id: 0,
+            args: vec![result],
+        });
+
+        let mut eu = make_eu(instructions, register_map);
+        let element_widths = Arc::new(HashMap::from_iter([(addr.absolute_addr(), 1)]));
+        ConcatFoldingPass::new(element_widths).run(&mut eu, &PassOptions::default());
+
+        assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                SIRInstruction::Load(
+                    _,
+                    address,
+                    SIROffset::PackedElements {
+                        bit_offset: 0,
+                        element_width: 1,
+                    },
+                    64,
+                ) if *address == addr
+            )
+        }));
     }
 }

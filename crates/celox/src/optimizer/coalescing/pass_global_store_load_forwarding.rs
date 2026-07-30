@@ -866,9 +866,11 @@ fn instruction_blocks_writeback_motion(
             return false;
         }
         match other_offset {
-            SIROffset::Static(other_offset) => {
-                ranges_overlap(offset, width, *other_offset, other_width)
-            }
+            SIROffset::Static(other_offset)
+            | SIROffset::PackedElements {
+                bit_offset: other_offset,
+                ..
+            } => ranges_overlap(offset, width, *other_offset, other_width),
             SIROffset::Dynamic(_) | SIROffset::Element { .. } => true,
         }
     };

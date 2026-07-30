@@ -80,7 +80,7 @@ impl fmt::Display for StackColorError {
 
 impl std::error::Error for StackColorError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StackInstruction {
     uses: Uses,
     definition: Option<VReg>,
@@ -187,7 +187,7 @@ impl LivenessProgram for PlannedStackLivenessProgram {
     }
 
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
-        self.blocks[block].instructions[instruction].uses
+        self.blocks[block].instructions[instruction].uses.clone()
     }
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {

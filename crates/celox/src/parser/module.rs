@@ -1040,6 +1040,7 @@ impl<'a> ModuleParser<'a> {
         let mut eval_only_ff_blocks = HashMap::default();
         let mut apply_ff_blocks = HashMap::default();
         let mut eval_apply_ff_blocks = HashMap::default();
+        let mut ff_access_summaries = HashMap::default();
 
         for (trigger_set, decls) in &ff_groups {
             // --- eval_only and eval_apply ---
@@ -1049,7 +1050,23 @@ impl<'a> ModuleParser<'a> {
             let mut builder = SIRBuilder::new();
             let ff_group = self.ff_parser.parse_ff_group(decls, &mut builder)?;
             let targets = ff_group.targets;
+            let sources = ff_group.sources;
             let dynamic_write_vars = ff_group.dynamic_write_vars;
+            ff_access_summaries.insert(
+                trigger_set.clone(),
+                crate::ir::FfAccessSummary {
+                    reads: sources,
+                    writes: targets.clone(),
+                    dynamic_writes: dynamic_write_vars
+                        .iter()
+                        .copied()
+                        .map(|var_id| crate::ir::RegionedVarAddr {
+                            region: WORKING_REGION,
+                            var_id,
+                        })
+                        .collect(),
+                },
+            );
             let mut commits = build_ff_region_copies_skipping(
                 &targets,
                 WORKING_REGION,
@@ -1154,6 +1171,7 @@ impl<'a> ModuleParser<'a> {
             variables: self.module.variables.clone(),
             name: self.module.name,
             glue_blocks: self.glue_blocks,
+            ff_access_summaries,
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,

@@ -528,14 +528,15 @@ pub mod registry;
 mod scheduler;
 use crate::ir::{
     AbsoluteAddr, CombObserver, DomainKind, ExecutionUnit, GlueAddr, InstanceId, InstancePath,
-    LogicPathId, ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, STABLE_REGION,
-    SimModule, VarAtomBase, VariableInfo,
+    LogicPathId, ModuleId, Program, RegionedAbsoluteAddr, RuntimeErrorInfo, SIRBuilder,
+    SIRInstruction, SIROffset, SPARSE_WORKING_REGION, STABLE_REGION, SimModule, VarAtomBase,
+    VariableInfo, WORKING_REGION,
 };
 use crate::logic_tree::{LogicPath, LogicPathTarget, NodeId, SLTNodeArena, SLTNodeFacts};
 pub use scheduler::SchedulerError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
-use veryl_analyzer::ir::Declaration;
+use veryl_analyzer::ir::{Declaration, FfDeclaration};
 
 /// Source location information for rich error diagnostics.
 #[derive(Debug)]
@@ -951,12 +952,16 @@ fn parse_ir_with_loop_provenance<'a>(
         inst_sequences.insert(my_id, inst_ids);
     }
 
-    // Parse all discovered modules
-    for (mid, ir_module) in &module_ir {
-        let inst_ids = inst_sequences.get(mid).map(|v| v.as_slice()).unwrap_or(&[]);
+    // Parse all discovered modules. veryl-parser's resource table is
+    // process-global, so module parsing must remain serial.
+    for (module_id, ir_module) in &module_ir {
+        let inst_ids = inst_sequences
+            .get(module_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let sim_module =
             ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
-        modules.insert(*mid, sim_module);
+        modules.insert(*module_id, sim_module);
     }
 
     Ok(ParseIrResult {
@@ -1135,6 +1140,25 @@ pub(crate) fn flatten(
         "propagate_boundaries",
         propagate_boundaries(&expanded, &instance_modules, &modules)
     );
+    let unpacked_element_widths = instance_modules
+        .iter()
+        .flat_map(|(&instance_id, &module_id)| {
+            module_ir[&module_id]
+                .variables
+                .iter()
+                .filter_map(move |(&var_id, variable)| {
+                    let element_count = variable.r#type.total_array()?;
+                    let element_width = variable.total_width()?;
+                    (element_count > 1 && element_width > 0).then_some((
+                        AbsoluteAddr {
+                            instance_id,
+                            var_id,
+                        },
+                        element_width,
+                    ))
+                })
+        })
+        .collect::<HashMap<_, _>>();
 
     let clock_domains = timed_sub!(
         "unify_clock_domains",
@@ -1145,6 +1169,8 @@ pub(crate) fn flatten(
         mut eval_apply_ffs,
         mut eval_only_ffs,
         mut apply_ffs,
+        _ff_access_summaries,
+        ff_runtime_relocations,
         mut comb_blocks,
         mut comb_observers,
         mut runtime_errors,
@@ -1157,6 +1183,7 @@ pub(crate) fn flatten(
             &instance_modules,
             &modules,
             &global_boundaries,
+            &unpacked_element_widths,
             &clock_domains,
             trace_opts,
             &mut trace,
@@ -1289,14 +1316,76 @@ pub(crate) fn flatten(
         "after flattening symbolic logic",
     )?;
 
+    let ff_clock_recipes = build_ff_clock_recipes(
+        module_ir,
+        &modules,
+        &instance_modules,
+        &clock_domains,
+        &ff_runtime_relocations,
+        *config,
+    );
+    let mut clock_arena = SLTNodeArena::<RegionedAbsoluteAddr>::new();
+    let mut clock_node_cache = HashMap::default();
+    let clock_comb_blocks = comb_blocks
+        .iter()
+        .map(|path| {
+            path.map_addr(
+                &global_arena,
+                &mut clock_arena,
+                &mut clock_node_cache,
+                &|addr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, *addr),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let clock_var_widths = var_widths
+        .iter()
+        .map(|(&addr, &width)| {
+            (
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                width,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let clock_unpacked_element_widths = unpacked_element_widths
+        .iter()
+        .map(|(&addr, &element_width)| {
+            (
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                element_width,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let clock_ignored_loops = ignored_loops
+        .iter()
+        .map(|&(from, to)| {
+            (
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, from),
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, to),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let clock_true_loops = true_loops
+        .iter()
+        .map(|(&(from, to), &limit)| {
+            (
+                (
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, from),
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, to),
+                ),
+                limit,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
     let sched_start = flatten_timing.then(crate::timing::now);
-    let schedule = match scheduler::sort(
+    let schedule = match scheduler::sort_with_unpacked_element_widths(
         comb_blocks,
         &global_arena,
         &ignored_loops,
         &true_loops,
         four_state,
         &var_widths,
+        &unpacked_element_widths,
         next_runtime_error_code,
     ) {
         Ok(schedule) => schedule,
@@ -1304,6 +1393,7 @@ pub(crate) fn flatten(
             let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
             let program = Program {
                 eval_apply_ffs: HashMap::default(),
+                eval_comb_apply_ffs: HashMap::default(),
                 eval_only_ffs: HashMap::default(),
                 apply_ffs: HashMap::default(),
                 eval_comb: Vec::new(),
@@ -1383,6 +1473,44 @@ pub(crate) fn flatten(
         })
         .collect();
     let eval_comb = schduled.clone();
+    let mut eval_comb_apply_ffs = HashMap::default();
+    let mut fused_schedule_cache =
+        HashMap::<Vec<usize>, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>::default();
+    for (trigger, recipes) in ff_clock_recipes {
+        let recipe_ids = recipes.iter().map(|recipe| recipe.id).collect::<Vec<_>>();
+        if let Some(units) = fused_schedule_cache.get(&recipe_ids) {
+            eval_comb_apply_ffs.insert(trigger, units.clone());
+            continue;
+        }
+        let mut ff_lowering = SharedClockLowering::new(recipes, *config);
+        let fused_start = flatten_timing.then(crate::timing::now);
+        let fused = match scheduler::sort_clock(
+            clock_comb_blocks.clone(),
+            &clock_arena,
+            &clock_ignored_loops,
+            &clock_true_loops,
+            four_state,
+            &clock_var_widths,
+            &clock_unpacked_element_widths,
+            next_runtime_error_code,
+            &mut ff_lowering,
+        ) {
+            Ok(schedule) => schedule,
+            Err(scheduler::ClockSortError::Lowering(error)) => return Err(error),
+            Err(scheduler::ClockSortError::Scheduler(error)) => {
+                let mut error_arena = SLTNodeArena::new();
+                let error =
+                    error.map_addr(&clock_arena, &mut error_arena, &|addr| addr.to_string())?;
+                return Err(ParserError::Scheduler(error));
+            }
+        };
+        if let Some(start) = fused_start {
+            eprintln!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
+        }
+        let units = fused.execution_units;
+        fused_schedule_cache.insert(recipe_ids, units.clone());
+        eval_comb_apply_ffs.insert(trigger, units);
+    }
 
     if let Some(t) = trace
         && trace_opts.scheduled_units
@@ -1434,6 +1562,7 @@ pub(crate) fn flatten(
         .collect();
     let program = Program {
         eval_apply_ffs,
+        eval_comb_apply_ffs,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -1483,7 +1612,11 @@ pub(crate) fn flatten(
     }
 
     let mut program = program;
-    for units in program.eval_apply_ffs.values_mut() {
+    for units in program
+        .eval_apply_ffs
+        .values_mut()
+        .chain(program.eval_comb_apply_ffs.values_mut())
+    {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
@@ -1986,6 +2119,14 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
         )
         .chain(
             program
+                .eval_comb_apply_ffs
+                .values()
+                .flatten()
+                .enumerate()
+                .map(|(unit, eu)| ("eval_comb_apply_ffs", unit, eu)),
+        )
+        .chain(
+            program
                 .eval_only_ffs
                 .values()
                 .flatten()
@@ -2023,7 +2164,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
     Ok(())
 }
 
-fn verify_memory_offset_contract(
+pub(crate) fn verify_memory_offset_contract(
     program: &Program,
     eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
@@ -2031,23 +2172,38 @@ fn verify_memory_offset_contract(
 
     for block in eu.blocks.values() {
         for (index, inst) in block.instructions.iter().enumerate() {
-            let (addr, offset, operation) = match inst {
-                SIRInstruction::Load(_, addr, offset, _) => (addr, offset, "Load"),
-                SIRInstruction::Store(addr, offset, _, _, _, _) => (addr, offset, "Store"),
-                SIRInstruction::Commit(src, dst, offset, _, _) => {
+            let (addr, offset, width, operation, explicit_memory_copy) = match inst {
+                SIRInstruction::Load(_, addr, offset, width) => {
+                    (addr, offset, *width, "Load", false)
+                }
+                SIRInstruction::Store(addr, offset, width, _, _, _) => {
+                    (addr, offset, *width, "Store", false)
+                }
+                SIRInstruction::Commit(src, dst, offset, width, _) => {
                     verify_memory_offset_for_addr(
                         program,
                         block.id,
                         index,
                         dst,
                         offset,
+                        *width,
                         "Commit destination",
+                        true,
                     )?;
-                    (src, offset, "Commit source")
+                    (src, offset, *width, "Commit source", true)
                 }
                 _ => continue,
             };
-            verify_memory_offset_for_addr(program, block.id, index, addr, offset, operation)?;
+            verify_memory_offset_for_addr(
+                program,
+                block.id,
+                index,
+                addr,
+                offset,
+                width,
+                operation,
+                explicit_memory_copy,
+            )?;
         }
     }
     Ok(())
@@ -2059,7 +2215,9 @@ fn verify_memory_offset_for_addr(
     index: usize,
     addr: &RegionedAbsoluteAddr,
     offset: &crate::ir::SIROffset,
+    width: usize,
     operation: &'static str,
+    explicit_memory_copy: bool,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
     use crate::ir::SIROffset;
 
@@ -2075,7 +2233,9 @@ fn verify_memory_offset_for_addr(
         .array_dims
         .iter()
         .try_fold(1usize, |count, &dimension| count.checked_mul(dimension));
-    let declared_element_width = element_count
+    let declared_element_width = (!info.array_dims.is_empty())
+        .then_some(element_count)
+        .flatten()
         .filter(|&count| count != 0 && info.width % count == 0)
         .map(|count| info.width / count);
 
@@ -2120,6 +2280,77 @@ fn verify_memory_offset_for_addr(
                     index,
                     format!(
                         "SIR element width {element_width} does not match declared element width {declared_element_width}"
+                    ),
+                ));
+            }
+            let SIROffset::Element { bit_offset, .. } = offset else {
+                unreachable!()
+            };
+            if bit_offset
+                .checked_add(width)
+                .is_none_or(|end| end > declared_element_width)
+            {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ACCESS_STAYS_WITHIN_UNPACKED_ELEMENT",
+                    block,
+                    index,
+                    format!(
+                        "{operation} range [{bit_offset} +: {width}] exceeds unpacked element width {declared_element_width}"
+                    ),
+                ));
+            }
+        }
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => {
+            let Some(declared_element_width) = declared_element_width else {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_REQUIRE_UNPACKED_ARRAY",
+                    block,
+                    index,
+                    format!("{operation} uses packed-elements addressing on a non-array variable"),
+                ));
+            };
+            let valid_range = *element_width == declared_element_width
+                && *bit_offset % declared_element_width == 0
+                && width % declared_element_width == 0
+                && bit_offset
+                    .checked_add(width)
+                    .is_some_and(|end| end <= info.width);
+            if !valid_range {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_MATCH_DECLARATION",
+                    block,
+                    index,
+                    format!(
+                        "{operation} packed-elements range [{bit_offset} +: {width}] with element width {element_width} does not match declared element width {declared_element_width} and total width {}",
+                        info.width
+                    ),
+                ));
+            }
+        }
+        SIROffset::Static(start)
+            if !explicit_memory_copy
+                && let Some(element_width) = declared_element_width
+                && width != 0 =>
+        {
+            let Some(end) = start.checked_add(width) else {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ACCESS_STAYS_WITHIN_UNPACKED_ELEMENT",
+                    block,
+                    index,
+                    format!("{operation} range overflows usize"),
+                ));
+            };
+            if *start / element_width != end.saturating_sub(1) / element_width {
+                return Err(crate::ir::verify::SirVerifyError::instruction(
+                    "MEMORY.ACCESS_STAYS_WITHIN_UNPACKED_ELEMENT",
+                    block,
+                    index,
+                    format!(
+                        "{operation} at {addr:?} ({}) range [{start} +: {width}] crosses unpacked element width {element_width}; use an explicit array-copy operation for a multi-element transfer",
+                        program.get_path(&addr.absolute_addr()),
                     ),
                 ));
             }
@@ -2169,7 +2400,10 @@ fn verify_region_contract(
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region == SPARSE_WORKING_REGION
-                        && !matches!(group, "eval_only_ffs" | "eval_apply_ffs") =>
+                        && !matches!(
+                            group,
+                            "eval_only_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
+                        ) =>
                 {
                     return Err(crate::ir::verify::SirVerifyError::instruction(
                         "REGION.SPARSE_STORE_IN_EVALUATOR",
@@ -2182,7 +2416,10 @@ fn verify_region_contract(
                     if src.region == SPARSE_WORKING_REGION =>
                 {
                     if dst.region != STABLE_REGION
-                        || !matches!(group, "apply_ffs" | "eval_apply_ffs")
+                        || !matches!(
+                            group,
+                            "apply_ffs" | "eval_apply_ffs" | "eval_comb_apply_ffs"
+                        )
                         || !matches!(offset, SIROffset::Static(0))
                         || !triggers.is_empty()
                     {
@@ -2502,11 +2739,278 @@ fn unify_clock_domains(
     clock_domains
 }
 
+#[derive(Clone)]
+struct FfRuntimeRelocation {
+    error_codes: HashMap<i64, i64>,
+    event_site_base: u32,
+}
+
+#[derive(Clone)]
+struct FfClockRecipe<'a> {
+    id: usize,
+    instance_id: InstanceId,
+    module: &'a Module,
+    declarations: Vec<&'a FfDeclaration>,
+    summary: crate::ir::FfAccessSummary<RegionedAbsoluteAddr>,
+    runtime: FfRuntimeRelocation,
+}
+
+struct SharedClockLowering<'a> {
+    recipes: Vec<FfClockRecipe<'a>>,
+    summaries: Vec<crate::ir::FfAccessSummary<RegionedAbsoluteAddr>>,
+    config: BuildConfig,
+}
+
+impl<'a> SharedClockLowering<'a> {
+    fn new(recipes: Vec<FfClockRecipe<'a>>, config: BuildConfig) -> Self {
+        let summaries = recipes
+            .iter()
+            .map(|recipe| recipe.summary.clone())
+            .collect();
+        Self {
+            recipes,
+            summaries,
+            config,
+        }
+    }
+
+    fn emit_region_copies(
+        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+        summaries: &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>],
+        src_region: u32,
+        dst_region: u32,
+    ) {
+        let dynamic = summaries
+            .iter()
+            .flat_map(|summary| summary.dynamic_writes.iter())
+            .map(RegionedAbsoluteAddr::absolute_addr)
+            .collect::<HashSet<_>>();
+        let mut ranges = BTreeMap::<AbsoluteAddr, Vec<crate::ir::BitAccess>>::new();
+        for target in summaries.iter().flat_map(|summary| &summary.writes) {
+            let addr = target.id.absolute_addr();
+            if !dynamic.contains(&addr) {
+                ranges.entry(addr).or_default().push(target.access);
+            }
+        }
+        for (addr, mut ranges) in ranges {
+            ranges.sort_unstable_by_key(|range| (range.lsb, range.msb));
+            let mut merged = Vec::<crate::ir::BitAccess>::new();
+            for range in ranges {
+                if let Some(previous) = merged.last_mut()
+                    && range.lsb <= previous.msb.saturating_add(1)
+                {
+                    previous.msb = previous.msb.max(range.msb);
+                } else {
+                    merged.push(range);
+                }
+            }
+            for range in merged {
+                builder.emit(SIRInstruction::Commit(
+                    RegionedAbsoluteAddr::from_absolute_addr(src_region, addr),
+                    RegionedAbsoluteAddr::from_absolute_addr(dst_region, addr),
+                    SIROffset::Static(range.lsb),
+                    range.msb - range.lsb + 1,
+                    Vec::new(),
+                ));
+            }
+        }
+    }
+
+    fn emit_sparse_commits(
+        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+        summaries: &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>],
+    ) {
+        let dynamic = summaries
+            .iter()
+            .flat_map(|summary| summary.dynamic_writes.iter())
+            .map(RegionedAbsoluteAddr::absolute_addr)
+            .collect::<HashSet<_>>();
+        let mut widths = BTreeMap::<AbsoluteAddr, usize>::new();
+        for target in summaries.iter().flat_map(|summary| &summary.writes) {
+            let addr = target.id.absolute_addr();
+            if dynamic.contains(&addr) {
+                widths
+                    .entry(addr)
+                    .and_modify(|width| *width = (*width).max(target.access.msb.saturating_add(1)))
+                    .or_insert_with(|| target.access.msb.saturating_add(1));
+            }
+        }
+        for (addr, width) in widths {
+            builder.emit(SIRInstruction::Commit(
+                RegionedAbsoluteAddr::from_absolute_addr(SPARSE_WORKING_REGION, addr),
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                SIROffset::Static(0),
+                width,
+                Vec::new(),
+            ));
+        }
+    }
+}
+
+impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_> {
+    fn summaries(&self) -> &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>] {
+        &self.summaries
+    }
+
+    fn begin(&mut self, builder: &mut SIRBuilder<RegionedAbsoluteAddr>) -> Result<(), ParserError> {
+        // One invocation represents one active trigger event.  Every FF in
+        // that event must observe the same pre-event STABLE snapshot, so seed
+        // all staging ranges before lowering any FF action.
+        Self::emit_region_copies(builder, &self.summaries, STABLE_REGION, WORKING_REGION);
+        Ok(())
+    }
+
+    fn lower(
+        &mut self,
+        index: usize,
+        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+    ) -> Result<(), ParserError> {
+        let recipe = self.recipes.get(index).ok_or_else(|| {
+            ParserError::illegal_context(
+                "shared comb/FF scheduling",
+                format!("FF action {index} is outside the recipe table"),
+                None,
+            )
+        })?;
+        let sparse_write_vars = recipe
+            .summary
+            .dynamic_writes
+            .iter()
+            .map(|address| address.var_id)
+            .collect();
+        let mut parser = ff::FfParser::new(recipe.module, self.config)
+            .with_relocated_runtime_ids(
+                recipe.runtime.error_codes.clone(),
+                recipe.runtime.event_site_base,
+            )
+            .with_sparse_write_vars(sparse_write_vars);
+        parser.parse_ff_group_into(
+            &recipe.declarations,
+            &|var_id, region| RegionedAbsoluteAddr {
+                region,
+                instance_id: recipe.instance_id,
+                var_id,
+            },
+            builder,
+        )?;
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+    ) -> Result<(), ParserError> {
+        // Publish once, after every FF has evaluated from the common old-state
+        // snapshot.  Publishing per recipe would turn nonblocking FF updates
+        // into source-order-dependent blocking updates.
+        Self::emit_region_copies(builder, &self.summaries, WORKING_REGION, STABLE_REGION);
+        Self::emit_sparse_commits(builder, &self.summaries);
+        Ok(())
+    }
+}
+
+fn build_ff_clock_recipes<'a>(
+    module_ir: &'a HashMap<ModuleId, &'a Module>,
+    modules: &HashMap<ModuleId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    runtime_relocations: &HashMap<InstanceId, FfRuntimeRelocation>,
+    config: BuildConfig,
+) -> HashMap<AbsoluteAddr, Vec<FfClockRecipe<'a>>> {
+    let mut instances = instance_modules.iter().collect::<Vec<_>>();
+    instances.sort_unstable_by_key(|(instance, _)| instance.0);
+    let mut result = HashMap::<AbsoluteAddr, Vec<FfClockRecipe<'a>>>::default();
+    let mut next_recipe_id = 0usize;
+
+    for (&instance_id, &module_id) in instances {
+        let module = module_ir[&module_id];
+        let sim_module = &modules[&module_id];
+        let detector = ff::FfParser::new(module, config);
+        let mut groups = BTreeMap::<crate::ir::TriggerSet<VarId>, Vec<&FfDeclaration>>::new();
+        for declaration in &module.declarations {
+            if let Declaration::Ff(ff) = declaration {
+                groups
+                    .entry(detector.detect_trigger_set(ff))
+                    .or_default()
+                    .push(ff);
+            }
+        }
+        for (trigger, declarations) in groups {
+            let Some(summary) = sim_module.ff_access_summaries.get(&trigger) else {
+                continue;
+            };
+            let relocate_addr = |addr: crate::ir::RegionedVarAddr| RegionedAbsoluteAddr {
+                region: addr.region,
+                instance_id,
+                var_id: addr.var_id,
+            };
+            let summary = crate::ir::FfAccessSummary {
+                reads: summary
+                    .reads
+                    .iter()
+                    .map(|read| VarAtomBase {
+                        id: relocate_addr(read.id),
+                        access: read.access,
+                    })
+                    .collect(),
+                writes: summary
+                    .writes
+                    .iter()
+                    .map(|write| VarAtomBase {
+                        // Scheduler summaries describe the persistent state
+                        // object, not the temporary region chosen by FF
+                        // lowering.  Reads and comb definitions use STABLE;
+                        // normalize writes to the same identity so old-state
+                        // anti-dependencies are visible.
+                        id: RegionedAbsoluteAddr {
+                            region: STABLE_REGION,
+                            instance_id,
+                            var_id: write.id.var_id,
+                        },
+                        access: write.access,
+                    })
+                    .collect(),
+                dynamic_writes: summary
+                    .dynamic_writes
+                    .iter()
+                    .copied()
+                    .map(relocate_addr)
+                    .collect(),
+            };
+            let recipe = FfClockRecipe {
+                id: next_recipe_id,
+                instance_id,
+                module,
+                declarations,
+                summary,
+                runtime: runtime_relocations[&instance_id].clone(),
+            };
+            next_recipe_id += 1;
+            let clock = AbsoluteAddr {
+                instance_id,
+                var_id: trigger.clock,
+            };
+            let clock = clock_domains.get(&clock).copied().unwrap_or(clock);
+            result.entry(clock).or_default().push(recipe.clone());
+            for reset in trigger.resets {
+                let reset = AbsoluteAddr {
+                    instance_id,
+                    var_id: reset,
+                };
+                let reset = clock_domains.get(&reset).copied().unwrap_or(reset);
+                result.entry(reset).or_default().push(recipe.clone());
+            }
+        }
+    }
+    result
+}
+
 fn relocate_units(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     trace: &mut Option<&mut crate::debug::CompilationTrace>,
@@ -2516,6 +3020,8 @@ fn relocate_units(
         HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
         HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
         HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>>,
+        HashMap<AbsoluteAddr, Vec<crate::ir::FfAccessSummary<RegionedAbsoluteAddr>>>,
+        HashMap<InstanceId, FfRuntimeRelocation>,
         Vec<crate::logic_tree::LogicPath<AbsoluteAddr>>,
         Vec<crate::ir::CombObserver<AbsoluteAddr>>,
         HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
@@ -2535,6 +3041,11 @@ fn relocate_units(
     > = HashMap::default();
     let mut apply_ffs: HashMap<AbsoluteAddr, Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>>> =
         HashMap::default();
+    let mut ff_access_summaries: HashMap<
+        AbsoluteAddr,
+        Vec<crate::ir::FfAccessSummary<RegionedAbsoluteAddr>>,
+    > = HashMap::default();
+    let mut ff_runtime_relocations = HashMap::default();
     let mut comb_blocks = Vec::new();
     let mut comb_observers = Vec::new();
     let mut runtime_errors = HashMap::default();
@@ -2544,6 +3055,73 @@ fn relocate_units(
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
+        let runtime_event_site_base = u32::try_from(runtime_event_sites.len()).map_err(|_| {
+            ParserError::illegal_context(
+                "FF runtime-event relocation",
+                "runtime event site count exceeds u32",
+                None,
+            )
+        })?;
+        let relocate_ff_summary =
+            |summary: &crate::ir::FfAccessSummary<crate::ir::RegionedVarAddr>| {
+                let relocate_addr = |addr: crate::ir::RegionedVarAddr| RegionedAbsoluteAddr {
+                    region: addr.region,
+                    instance_id: *id,
+                    var_id: addr.var_id,
+                };
+                crate::ir::FfAccessSummary {
+                    reads: summary
+                        .reads
+                        .iter()
+                        .map(|read| VarAtomBase {
+                            id: relocate_addr(read.id),
+                            access: read.access,
+                        })
+                        .collect(),
+                    writes: summary
+                        .writes
+                        .iter()
+                        .map(|write| VarAtomBase {
+                            id: relocate_addr(write.id),
+                            access: write.access,
+                        })
+                        .collect(),
+                    dynamic_writes: summary
+                        .dynamic_writes
+                        .iter()
+                        .copied()
+                        .map(relocate_addr)
+                        .collect(),
+                }
+            };
+        for (trigger_set, summary) in &sim_module.ff_access_summaries {
+            let clock_addr = AbsoluteAddr {
+                instance_id: *id,
+                var_id: trigger_set.clock,
+            };
+            let canonical_clock = clock_domains
+                .get(&clock_addr)
+                .copied()
+                .unwrap_or(clock_addr);
+            ff_access_summaries
+                .entry(canonical_clock)
+                .or_default()
+                .push(relocate_ff_summary(summary));
+            for &reset in &trigger_set.resets {
+                let reset_addr = AbsoluteAddr {
+                    instance_id: *id,
+                    var_id: reset,
+                };
+                let canonical_reset = clock_domains
+                    .get(&reset_addr)
+                    .copied()
+                    .unwrap_or(reset_addr);
+                ff_access_summaries
+                    .entry(canonical_reset)
+                    .or_default()
+                    .push(relocate_ff_summary(summary));
+            }
+        }
         let mut runtime_error_codes = HashMap::default();
         for (&local_code, info) in &sim_module.runtime_errors {
             let global_code = next_runtime_error_code;
@@ -2565,6 +3143,13 @@ fn relocate_units(
                 },
             );
         }
+        ff_runtime_relocations.insert(
+            *id,
+            FfRuntimeRelocation {
+                error_codes: runtime_error_codes.clone(),
+                event_site_base: runtime_event_site_base,
+            },
+        );
         let mut runtime_event_site_map = HashMap::default();
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
             let global_site = runtime_event_sites.len() as u32;
@@ -2578,6 +3163,7 @@ fn relocate_units(
             path,
             expanded,
             global_boundaries,
+            unpacked_element_widths,
             &mut global_arena,
             trace_opts,
             trace.as_deref_mut(),
@@ -2762,6 +3348,8 @@ fn relocate_units(
         eval_apply_ffs,
         eval_only_ffs,
         apply_ffs,
+        ff_access_summaries,
+        ff_runtime_relocations,
         comb_blocks,
         comb_observers,
         runtime_errors,

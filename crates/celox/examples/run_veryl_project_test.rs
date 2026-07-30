@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
+use celox::testbench::{
+    compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_with_tick_limit,
+};
 use celox::{OptLevel, Simulator, SirPass, TestResult};
 use veryl_metadata::Metadata;
 
@@ -18,6 +20,7 @@ struct Options {
     backend: Backend,
     four_state: bool,
     compile_only: bool,
+    tick_limit: Option<u64>,
     dump_ir_dir: Option<PathBuf>,
     native_profile_blocks: Vec<celox::NativeProfileBlock>,
     pass_overrides: Vec<(bool, SirPass)>,
@@ -90,27 +93,32 @@ fn run() -> Result<(), Box<dyn Error>> {
             .trace_mir()
             .build_with_trace();
         let celox::CompilationTraceResult { res, trace } = trace_result;
-        let pre_optimized_sir = trace
-            .format_pre_optimized_sir()
-            .ok_or("pre-optimized SIR trace was not captured")?;
-        let sir = trace
-            .format_post_optimized_sir()
-            .ok_or("post-optimized SIR trace was not captured")?;
         let pre_sir_path = output_dir.join("pre_optimized.sir");
         let sir_path = output_dir.join("post_optimized.sir");
-        fs::write(&pre_sir_path, &pre_optimized_sir)?;
-        fs::write(&sir_path, &sir)?;
-        eprintln!(
-            "wrote pre-optimized SIR ({} bytes) to {}",
-            pre_optimized_sir.len(),
-            pre_sir_path.display()
-        );
-        eprintln!(
-            "wrote post-optimized SIR ({} bytes) to {}",
-            sir.len(),
-            sir_path.display()
-        );
-        res.map_err(|error| format!("Celox build failed: {error:?}"))?;
+        let pre_optimized_sir = trace.format_pre_optimized_sir();
+        let sir = trace.format_post_optimized_sir();
+        if let Some(pre_optimized_sir) = &pre_optimized_sir {
+            fs::write(&pre_sir_path, pre_optimized_sir)?;
+            eprintln!(
+                "wrote pre-optimized SIR ({} bytes) to {}",
+                pre_optimized_sir.len(),
+                pre_sir_path.display()
+            );
+        }
+        if let Some(sir) = &sir {
+            fs::write(&sir_path, sir)?;
+            eprintln!(
+                "wrote post-optimized SIR ({} bytes) to {}",
+                sir.len(),
+                sir_path.display()
+            );
+        }
+        if let Err(error) = res {
+            return Err(format!("Celox build failed: {error:?}").into());
+        }
+        let _pre_optimized_sir =
+            pre_optimized_sir.ok_or("pre-optimized SIR trace was not captured")?;
+        let _sir = sir.ok_or("post-optimized SIR trace was not captured")?;
         let native_sir = trace
             .format_native_optimized_sir()
             .ok_or("native optimized SIR trace was not captured")?;
@@ -182,42 +190,59 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let compile_start = Instant::now();
-    let (result, compile_elapsed, execute_elapsed, execute_cpu_elapsed) = match opts.backend {
-        Backend::Native => {
-            let mut sim = builder.build_native()?;
-            let testbench = compile_initial_testbench(&sim)
-                .ok_or("no initial block found — this module is not a native testbench")?;
-            let compile_elapsed = compile_start.elapsed();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let result = run_compiled_testbench(&mut sim, &testbench);
-            (
-                result,
-                compile_elapsed,
-                execute_start.elapsed(),
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-            )
-        }
-        Backend::Cranelift => {
-            let mut sim = builder.build_cranelift()?;
-            let testbench = compile_initial_testbench(&sim)
-                .ok_or("no initial block found — this module is not a native testbench")?;
-            let compile_elapsed = compile_start.elapsed();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let result = run_compiled_testbench(&mut sim, &testbench);
-            (
-                result,
-                compile_elapsed,
-                execute_start.elapsed(),
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-            )
-        }
-    };
+    let (result, ticks, tick_limit_reached, compile_elapsed, execute_elapsed, execute_cpu_elapsed) =
+        match opts.backend {
+            Backend::Native => {
+                let mut sim = builder.build_native()?;
+                let testbench = compile_initial_testbench(&sim)
+                    .ok_or("no initial block found — this module is not a native testbench")?;
+                let compile_elapsed = compile_start.elapsed();
+                let execute_cpu_start = process_cpu_time();
+                let execute_start = Instant::now();
+                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                    let limited =
+                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                    (limited.result, limited.ticks, limited.tick_limit_reached)
+                } else {
+                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
+                };
+                (
+                    result,
+                    ticks,
+                    tick_limit_reached,
+                    compile_elapsed,
+                    execute_start.elapsed(),
+                    process_cpu_time()
+                        .zip(execute_cpu_start)
+                        .map(|(end, start)| end.saturating_sub(start)),
+                )
+            }
+            Backend::Cranelift => {
+                let mut sim = builder.build_cranelift()?;
+                let testbench = compile_initial_testbench(&sim)
+                    .ok_or("no initial block found — this module is not a native testbench")?;
+                let compile_elapsed = compile_start.elapsed();
+                let execute_cpu_start = process_cpu_time();
+                let execute_start = Instant::now();
+                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                    let limited =
+                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                    (limited.result, limited.ticks, limited.tick_limit_reached)
+                } else {
+                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
+                };
+                (
+                    result,
+                    ticks,
+                    tick_limit_reached,
+                    compile_elapsed,
+                    execute_start.elapsed(),
+                    process_cpu_time()
+                        .zip(execute_cpu_start)
+                        .map(|(end, start)| end.saturating_sub(start)),
+                )
+            }
+        };
     let elapsed = total_start.elapsed();
     if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
         println!(
@@ -235,8 +260,22 @@ fn run() -> Result<(), Box<dyn Error>> {
             execute_elapsed.as_nanos()
         );
     }
+    if opts.tick_limit.is_some() {
+        println!(
+            "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
+            opts.test, ticks, tick_limit_reached
+        );
+    }
 
     match result {
+        TestResult::Pass if tick_limit_reached => {
+            println!(
+                "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
+                opts.test,
+                elapsed.as_nanos()
+            );
+            Ok(())
+        }
         TestResult::Pass => {
             println!(
                 "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
@@ -284,6 +323,7 @@ fn parse_args() -> Result<Options, String> {
     let mut backend = Backend::Native;
     let mut four_state = false;
     let mut compile_only = false;
+    let mut tick_limit = None;
     let mut dump_ir_dir = None;
     let mut native_profile_blocks = Vec::new();
     let mut pass_overrides = Vec::new();
@@ -330,6 +370,18 @@ fn parse_args() -> Result<Options, String> {
             }
             "--four-state" => four_state = true,
             "--compile-only" => compile_only = true,
+            "--tick-limit" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--tick-limit requires a positive integer".to_string())?;
+                let value = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid tick limit: {value}"))?;
+                if value == 0 {
+                    return Err("--tick-limit must be greater than zero".to_string());
+                }
+                tick_limit = Some(value);
+            }
             "--dump-ir-dir" => {
                 dump_ir_dir =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
@@ -356,6 +408,7 @@ fn parse_args() -> Result<Options, String> {
         backend,
         four_state,
         compile_only,
+        tick_limit,
         dump_ir_dir,
         native_profile_blocks,
         pass_overrides,
@@ -416,7 +469,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--dump-ir-dir <dir>] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--tick-limit N] [--dump-ir-dir <dir>] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
 }
 
 fn load_sources(

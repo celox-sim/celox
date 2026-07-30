@@ -370,7 +370,7 @@ fn collect_function_call_effects(
     Ok(())
 }
 
-fn statements_contain_runtime_effect(module: &Module, statements: &[Statement]) -> bool {
+pub(super) fn statements_contain_runtime_effect(module: &Module, statements: &[Statement]) -> bool {
     statements
         .iter()
         .any(|stmt| statement_contains_runtime_effect(module, stmt))

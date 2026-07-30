@@ -1123,7 +1123,10 @@ mod tests {
                             array_loads += 1;
                         }
                         let offset = match offset {
-                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Static(offset)
+                            | SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            } => *offset,
                             SIROffset::Dynamic(register) => registers[register] as usize,
                             SIROffset::Element {
                                 index,

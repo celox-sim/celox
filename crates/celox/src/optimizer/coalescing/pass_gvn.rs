@@ -833,7 +833,7 @@ fn apply_aliases_to_terminator(
 
 fn apply_alias_to_offset(offset: &mut SIROffset, aliases: &HashMap<RegisterId, RegisterId>) {
     match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => {
             *register = resolve_canonical(*register, aliases);
         }

@@ -36,6 +36,8 @@ pub(crate) fn eliminate_working_round_trip(
 
     let mut vars: HashMap<AbsoluteAddr, VarInfo> = HashMap::new();
     let mut sparse_vars: HashMap<AbsoluteAddr, SparseVarInfo> = HashMap::new();
+    let mut working_loads = std::collections::HashSet::new();
+    let mut working_stores = std::collections::HashSet::new();
 
     // Build block → EU index mapping (for cross-EU independence check)
     let block_to_eu: HashMap<BlockId, usize> = if eu_boundary_blocks.is_empty() {
@@ -117,10 +119,12 @@ pub(crate) fn eliminate_working_round_trip(
                 }
                 SIRInstruction::Load(_, addr, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
+                    working_loads.insert(abs);
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
+                    working_stores.insert(abs);
                     var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
@@ -145,8 +149,14 @@ pub(crate) fn eliminate_working_round_trip(
     let eligible: std::collections::HashSet<AbsoluteAddr> = vars
         .iter()
         .filter(|(abs, info)| {
-            // Must have at least one seed and one apply
-            if info.seed_locs.is_empty() || info.apply_locs.is_empty() {
+            // A seeded slot may retain its old value on paths without a
+            // Store. If StateSSA already proved the seed dead, direct
+            // publication is still valid when the slot is fully defined and
+            // no operation reads the private WORKING value.
+            if info.apply_locs.is_empty()
+                || (info.seed_locs.is_empty()
+                    && (!working_stores.contains(*abs) || working_loads.contains(*abs)))
+            {
                 return false;
             }
             // Removing a partial dynamically addressed seed/apply would change
@@ -399,6 +409,50 @@ mod tests {
             unit.blocks[&BlockId(0)].instructions.as_slice(),
             [SIRInstruction::Store(address, SIROffset::Element { .. }, ..)]
                 if address.region == STABLE_REGION
+        ));
+    }
+
+    #[test]
+    fn fully_defined_working_slot_does_not_require_a_seed() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                indexed_working_store(),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+
+        eliminate_working_round_trip(&mut unit, &[]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Store(address, SIROffset::Element { .. }, ..)]
+                if address.region == STABLE_REGION
+        ));
+    }
+
+    #[test]
+    fn unseeded_working_load_keeps_the_private_slot() {
+        let mut unit = eu(vec![block(
+            0,
+            vec![
+                SIRInstruction::Load(RegisterId(2), addr(WORKING_REGION), SIROffset::Static(0), 8),
+                indexed_working_store(),
+                working_apply(SIROffset::Static(0), 64),
+            ],
+            SIRTerminator::Return,
+        )]);
+
+        eliminate_working_round_trip(&mut unit, &[]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [
+                SIRInstruction::Load(_, address, ..),
+                SIRInstruction::Store(..),
+                SIRInstruction::Commit(..)
+            ] if address.region == WORKING_REGION
         ));
     }
 

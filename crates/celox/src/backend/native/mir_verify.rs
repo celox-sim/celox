@@ -399,11 +399,13 @@ fn verify_instruction_constraints(
                 ))
             }
         }
+        MInst::LaneAggregateInput { .. } => Ok(()),
         MInst::LaneAggregate {
             plan: plan_id,
             root,
             source_block,
             inputs,
+            captured_inputs,
             read_ranges,
             write_ranges,
             ..
@@ -440,28 +442,44 @@ fn verify_instruction_constraints(
                     "AGGREGATE.EXECUTABLE_INPUTS",
                     block,
                     index,
-                    "aggregate root has a non-executable frontier or more than 16 scalar inputs",
+                    "aggregate root has a non-executable frontier",
                 ));
             };
-            if inputs.len() != expected_inputs.len() {
+            let represented_inputs = if *captured_inputs == 0 {
+                inputs.len()
+            } else if inputs.is_empty() {
+                usize::from(*captured_inputs)
+            } else {
+                return Err(MirVerifyError::instruction(
+                    "AGGREGATE.INPUT_REPRESENTATION",
+                    block,
+                    index,
+                    "aggregate mixes simultaneous and captured scalar inputs",
+                ));
+            };
+            if represented_inputs != expected_inputs.len() {
                 return Err(MirVerifyError::instruction(
                     "AGGREGATE.INPUT_ARITY",
                     block,
                     index,
                     format!(
-                        "aggregate root requires {} scalar inputs but MIR carries {}",
+                        "aggregate root requires {} direct scalar inputs but MIR carries {}",
                         expected_inputs.len(),
-                        inputs.len()
+                        represented_inputs
                     ),
                 ));
             }
-            if read_ranges.len() > 16 || write_ranges.is_empty() || write_ranges.len() > 16 {
+            let writes_publication = !root_plan.publication_locations.is_empty();
+            if read_ranges.len() > 16
+                || write_ranges.len() > 16
+                || writes_publication != !write_ranges.is_empty()
+            {
                 return Err(MirVerifyError::instruction(
                     "AGGREGATE.EXACT_MEMORY_EFFECTS",
                     block,
                     index,
                     format!(
-                        "aggregate root has {} read and {} write ranges; each must be in 1..=16",
+                        "aggregate root has {} read and {} write ranges; writes must match its publication mode and both must fit 0..=16",
                         read_ranges.len(),
                         write_ranges.len()
                     ),

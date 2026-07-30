@@ -348,7 +348,10 @@ fn static_lane_load(
                 width: usize|
      -> Option<StaticLaneLoad> {
         let offset = match offset {
-            SIROffset::Static(offset) => *offset,
+            SIROffset::Static(offset)
+            | SIROffset::PackedElements {
+                bit_offset: offset, ..
+            } => *offset,
             SIROffset::Dynamic(offset) => {
                 let value = constant_offset(
                     block,
@@ -869,6 +872,8 @@ struct LaneAggregateRootLowering {
 }
 
 fn coalesce_aggregate_ranges(mut ranges: Vec<(i32, usize)>) -> Option<Vec<MemoryAliasRange>> {
+    const MAX_EFFECT_RANGES: usize = 16;
+
     ranges.sort_unstable();
     let mut merged = Vec::<(i32, usize)>::new();
     for (offset, byte_len) in ranges {
@@ -884,11 +889,31 @@ fn coalesce_aggregate_ranges(mut ranges: Vec<(i32, usize)>) -> Option<Vec<Memory
         }
         merged.push((offset, byte_len));
     }
-    let aliases = merged
+
+    // MIR keeps a bounded effect summary so scheduling remains sparse. More
+    // than sixteen disjoint lanes must not disable an otherwise executable
+    // SIMD operation: merge the closest neighboring ranges until the bound is
+    // met. The added gaps are conservative aliases, not omitted effects.
+    while merged.len() > MAX_EFFECT_RANGES {
+        let merge_index = merged
+            .windows(2)
+            .enumerate()
+            .min_by_key(|(_, pair)| {
+                let left_end = i64::from(pair[0].0) + pair[0].1 as i64;
+                i64::from(pair[1].0) - left_end
+            })
+            .map(|(index, _)| index)?;
+        let right = merged[merge_index + 1];
+        let right_end = i64::from(right.0).checked_add(i64::try_from(right.1).ok()?)?;
+        let left_offset = merged[merge_index].0;
+        merged[merge_index].1 = usize::try_from(right_end - i64::from(left_offset)).ok()?;
+        merged.remove(merge_index + 1);
+    }
+
+    merged
         .into_iter()
         .map(|(offset, byte_len)| MemoryAliasRange::new(offset, byte_len))
-        .collect::<Option<Vec<_>>>()?;
-    (aliases.len() <= 16).then_some(aliases)
+        .collect()
 }
 
 fn lane_aggregate_root_effects(
@@ -947,6 +972,7 @@ fn lane_aggregate_roots_for_block(
     plan_id: LaneAggregatePlanId,
     plan: &LaneAggregatePlan,
 ) -> LaneAggregateBlockRoots {
+    let diagnostics = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY").is_some();
     let mut result = LaneAggregateBlockRoots::default();
     for (root_index, root) in plan.roots.iter().enumerate() {
         if root.block != block.id {
@@ -958,45 +984,51 @@ fn lane_aggregate_roots_for_block(
             .enumerate()
             .find(|(_, instruction)| sir_def_reg(instruction) == Some(root.original_root))
         else {
-            eprintln!(
-                "[lane-aggregate-codegen-fallback] block={} root=r{} reason=root-definition-not-found",
-                block.id.0, root.original_root.0
-            );
+            if diagnostics {
+                eprintln!(
+                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=root-definition-not-found",
+                    block.id.0, root.original_root.0
+                );
+            }
             continue;
         };
         let Some((read_ranges, write_ranges)) = lane_aggregate_root_effects(plan, root_index)
         else {
-            let blockers = plan
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(index, node)| match &node.operation {
-                    LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(
-                        loads,
-                    )) if loads.iter().any(|load| load.physical_bit + load.width > 64) => {
-                        Some(format!("node{index}=cross-word-state-read"))
-                    }
-                    LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(
-                        _,
-                    )) => None,
-                    LaneAggregatePlanOp::StateRead(_) => {
-                        Some(format!("node{index}=non-sink-state-read"))
-                    }
-                    LaneAggregatePlanOp::BroadcastScalar(_) => {
-                        Some(format!("node{index}=scalar-broadcast"))
-                    }
-                    LaneAggregatePlanOp::SsaPack { .. } => Some(format!("node{index}=ssa-pack")),
-                    LaneAggregatePlanOp::ScalarInsert { .. } => {
-                        Some(format!("node{index}=scalar-insert"))
-                    }
-                    _ => None,
-                })
-                .take(8)
-                .collect::<Vec<_>>();
-            eprintln!(
-                "[lane-aggregate-codegen-fallback] block={} root=r{} reason=non-local-or-unencodable-recipe blockers={blockers:?}",
-                block.id.0, root.original_root.0
-            );
+            if diagnostics {
+                let blockers = plan
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, node)| match &node.operation {
+                        LaneAggregatePlanOp::StateRead(
+                            LaneAggregateMaterialization::ReloadAtSink(loads),
+                        ) if loads.iter().any(|load| load.physical_bit + load.width > 64) => {
+                            Some(format!("node{index}=cross-word-state-read"))
+                        }
+                        LaneAggregatePlanOp::StateRead(
+                            LaneAggregateMaterialization::ReloadAtSink(_),
+                        ) => None,
+                        LaneAggregatePlanOp::StateRead(_) => {
+                            Some(format!("node{index}=non-sink-state-read"))
+                        }
+                        LaneAggregatePlanOp::BroadcastScalar(_) => {
+                            Some(format!("node{index}=scalar-broadcast"))
+                        }
+                        LaneAggregatePlanOp::SsaPack { .. } => {
+                            Some(format!("node{index}=ssa-pack"))
+                        }
+                        LaneAggregatePlanOp::ScalarInsert { .. } => {
+                            Some(format!("node{index}=scalar-insert"))
+                        }
+                        _ => None,
+                    })
+                    .take(8)
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=non-local-or-unencodable-recipe blockers={blockers:?}",
+                    block.id.0, root.original_root.0
+                );
+            }
             continue;
         };
         let Some(input_registers) = plan.scalar_inputs_for_root(root_index) else {
@@ -1031,14 +1063,16 @@ fn lane_aggregate_roots_for_block(
                 write_ranges,
             },
         );
-        eprintln!(
-            "[lane-aggregate-codegen] block={} root=r{} plan_root={} read_ranges={} write_ranges={}",
-            block.id.0,
-            root.original_root.0,
-            root_index,
-            result.roots[&instruction_index].read_ranges.len(),
-            result.roots[&instruction_index].write_ranges.len(),
-        );
+        if diagnostics {
+            eprintln!(
+                "[lane-aggregate-codegen] block={} root=r{} plan_root={} read_ranges={} write_ranges={}",
+                block.id.0,
+                root.original_root.0,
+                root_index,
+                result.roots[&instruction_index].read_ranges.len(),
+                result.roots[&instruction_index].write_ranges.len(),
+            );
+        }
     }
     result
 }
@@ -1088,6 +1122,15 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
     let lane_aggregate_lowering_plan = lane_aggregate_plan.clone();
     let mut func = MFunction::new(vregs.clone(), spill_descs);
     let lane_aggregate_plan_id = if let Some(plan) = lane_aggregate_plan {
+        if std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY").is_some() {
+            eprintln!(
+                "[lane-aggregate-isel-plan] roots={:?}",
+                plan.roots
+                    .iter()
+                    .map(|root| (root.block.0, root.original_root.0))
+                    .collect::<Vec<_>>()
+            );
+        }
         let plan_id = func.add_lane_aggregate_plan(plan);
         debug_assert!(func.lane_aggregate_plan(plan_id).is_some());
         Some(plan_id)
@@ -1307,6 +1350,9 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
                     root: root.root,
                     source_block: root.source_block,
                     inputs: root.inputs.clone(),
+                    captured_inputs: 0,
+                    input_bytes: 0,
+                    input_base_offset: 0,
                     read_ranges: root.read_ranges.clone(),
                     write_ranges: root.write_ranges.clone(),
                 });
@@ -4448,7 +4494,10 @@ fn emit_state_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: Regi
 
 fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROffset) -> VReg {
     match offset {
-        SIROffset::Static(value) => {
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => {
             let result = ctx.alloc_vreg(SpillDesc::remat(*value as u64));
             block.push(MInst::LoadImm {
                 dst: result,
@@ -4521,7 +4570,10 @@ fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROf
 
 fn logical_offset_low_zero_bits(ctx: &ISelContext, offset: &SIROffset) -> u32 {
     match offset {
-        SIROffset::Static(value) => value.trailing_zeros(),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => value.trailing_zeros(),
         SIROffset::Dynamic(reg) => ctx.low_zero_bits.get(reg).copied().unwrap_or(0),
         SIROffset::Element {
             index,
@@ -4615,7 +4667,7 @@ fn memory_offset_vreg(
                 with_static
             }
         }
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let (byte_offset, intra) = ctx.layout.map_static_bit_offset(&abs, *bit_offset);
             let physical = byte_offset * 8 + intra;
             let result = ctx.alloc_vreg(SpillDesc::remat(physical as u64));
@@ -4878,7 +4930,7 @@ fn memory_offset_low_zero_bits(
                 static_zeros
             }
         }
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let (byte_offset, intra) = ctx.layout.map_static_bit_offset(&abs, *bit_offset);
             (byte_offset * 8 + intra).trailing_zeros()
         }
@@ -5079,7 +5131,7 @@ fn emit_single_chunk_sparse_insert(
     let result = ctx.alloc_vreg(SpillDesc::transient());
     let value_mask = mask_for_width(width);
     match offset {
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let (byte_offset, intra_byte) = ctx
                 .layout
                 .map_static_bit_offset(&addr.absolute_addr(), *bit_offset);
@@ -5656,7 +5708,10 @@ fn prepare_sparse_store(
     }
 
     let max_chunks = match offset {
-        SIROffset::Static(value) => ((value % 64) + width).div_ceil(64),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => ((value % 64) + width).div_ceil(64),
         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
             let zero_bits = memory_offset_low_zero_bits(ctx, addr, offset).min(6);
             let alignment = 1usize << zero_bits;
@@ -6521,7 +6576,7 @@ fn lower_instruction(
 
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
             match offset {
-                SIROffset::Static(bit_offset) => {
+                SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
                     ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -6531,7 +6586,11 @@ fn lower_instruction(
             let vreg = ctx.reg_map.get(*dst);
 
             match offset {
-                SIROffset::Static(bit_off) => {
+                SIROffset::Static(bit_off)
+                | SIROffset::PackedElements {
+                    bit_offset: bit_off,
+                    ..
+                } => {
                     let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
                     let crosses_native_word = intra_byte + *width_bits > 64;
                     if intra_byte != 0 && (*width_bits > 64 || crosses_native_word) {
@@ -6894,7 +6953,11 @@ fn lower_instruction(
             // 4-state: load mask from memory (narrow path; wide handled above in early-return)
             if ctx.is_4state_var(addr) {
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         if *width_bits <= 64 {
                             let mask_off = ctx.mask_byte_offset(addr, *bit_off);
                             let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
@@ -7163,7 +7226,11 @@ fn lower_instruction(
                     None
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
                             let containing_byte_off = ctx.byte_offset(addr, *bit_off);
                             let size = ISelContext::op_size_for_width(*width_bits + intra);
@@ -7200,7 +7267,11 @@ fn lower_instruction(
                     None
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
                             let containing_byte_off = ctx.mask_byte_offset(addr, *bit_off);
                             let size = ISelContext::op_size_for_width(*width_bits + intra);
@@ -7234,7 +7305,11 @@ fn lower_instruction(
                     Vec::new()
                 };
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         // Check for wide value from Concat
                         if *width_bits > 64 {
                             if let Some(chunks) = ctx.wide_regs.get(src_reg).cloned() {
@@ -7550,7 +7625,11 @@ fn lower_instruction(
                 if ctx.is_4state_var(addr) {
                     let mask_vreg = ctx.get_mask(*src_reg, block);
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             if *width_bits > 64 {
                                 // Wide mask store: chunk-by-chunk
                                 if let Some(mchunks) = ctx.wide_masks.get(src_reg).cloned() {
@@ -7980,7 +8059,11 @@ fn lower_instruction(
                 });
             } else {
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         let (src_byte_off, intra) = ctx.static_byte_and_intra(src_addr, *bit_off);
                         let (dst_byte_off, dst_intra) =
                             ctx.static_byte_and_intra(dst_addr, *bit_off);
@@ -8084,7 +8167,11 @@ fn lower_instruction(
                     });
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let (src_value_off, intra) =
                                 ctx.static_byte_and_intra(src_addr, *bit_off);
                             let (dst_value_off, dst_intra) =
@@ -14095,6 +14182,20 @@ mod tests {
     use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
     use num_bigint::BigUint;
     use veryl_analyzer::ir::VarId;
+
+    #[test]
+    fn lane_aggregate_effect_summary_bounds_disjoint_simd_lanes_conservatively() {
+        let original = (0..32).map(|lane| (lane * 64, 8usize)).collect::<Vec<_>>();
+        let summary = coalesce_aggregate_ranges(original.clone()).unwrap();
+
+        assert_eq!(summary.len(), 16);
+        for (offset, byte_len) in original {
+            let end = i64::from(offset) + i64::try_from(byte_len).unwrap();
+            assert!(summary.iter().any(|range| {
+                i64::from(range.offset()) <= i64::from(offset) && range.end() >= end
+            }));
+        }
+    }
 
     fn empty_layout() -> MemoryLayout {
         MemoryLayout {

@@ -933,6 +933,13 @@ fn remap_offset(offset: &SIROffset, mapping: &HashMap<RegisterId, RegisterId>) -
             bit_offset: *bit_offset,
             dynamic_bit_offset: dynamic_bit_offset.map(register),
         },
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => SIROffset::PackedElements {
+            bit_offset: *bit_offset,
+            element_width: *element_width,
+        },
     }
 }
 

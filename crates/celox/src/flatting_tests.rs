@@ -165,6 +165,7 @@ fn setup_to_flatting(
         &path,
         &instance_ids,
         &global_boundaries,
+        &HashMap::default(),
         &mut arena,
         &crate::debug::TraceOptions::default(),
         None,

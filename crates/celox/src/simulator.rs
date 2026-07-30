@@ -1049,6 +1049,28 @@ impl<B: SimBackend> Simulator<B> {
         Ok(())
     }
 
+    /// Advance a run of identical deferred-comb ticks. Native code may keep
+    /// the loop inside the generated function, but must return after publishing
+    /// a runtime event so host-side observation remains tick-accurate.
+    pub(crate) fn tick_deferred_comb_many(
+        &mut self,
+        event: B::Event,
+        count: u64,
+    ) -> (u64, Result<(), RuntimeErrorCode>) {
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        if !self.program.comb_observers.is_empty() || !self.dirty {
+            return (1, self.tick_deferred_comb(event));
+        }
+        let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
+        self.dirty = true;
+        (
+            completed,
+            result.map_err(|error| self.decorate_runtime_error(error)),
+        )
+    }
+
     /// Resolves a signal path into a performance-optimized [`SignalRef`].
     /// This handle allows for direct memory access without `HashMap` lookups.
     pub fn signal(&self, path: &str) -> SignalRef {

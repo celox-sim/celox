@@ -462,6 +462,65 @@ fn strong_connect(u: usize, adj: &Vec<Vec<usize>>, ctx: &mut TarjanContext) {
     }
 }
 
+fn component_map(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    let mut ctx = TarjanContext {
+        index: 0,
+        stack: Vec::new(),
+        on_stack: HashSet::default(),
+        indices: vec![None; adj.len()],
+        lowlink: vec![None; adj.len()],
+        sccs: Vec::new(),
+    };
+    for node in 0..adj.len() {
+        if ctx.indices[node].is_none() {
+            strong_connect(node, adj, &mut ctx);
+        }
+    }
+    let mut component_by_node = vec![usize::MAX; adj.len()];
+    for (component, nodes) in ctx.sccs.iter().enumerate() {
+        for &node in nodes {
+            component_by_node[node] = component;
+        }
+    }
+    component_by_node
+}
+
+/// Add old-state anti-dependencies which make a later FF write eligible for
+/// direct publication.  These edges are profitable ordering constraints, not
+/// RTL semantic requirements: WORKING staging is always a correct fallback.
+///
+/// Add all candidates once, identify the SCCs they create, then remove every
+/// newly-added edge internal to such an SCC.  Any remaining edge is acyclic in
+/// the resulting graph.  This keeps all old-state readers before a directly
+/// publishable writer without turning feedback pipelines into comb/FF loops.
+fn add_acyclic_ff_write_order_edges(
+    adj: &mut Vec<Vec<usize>>,
+    optional_edges: impl IntoIterator<Item = (usize, usize)>,
+) {
+    let mut added = vec![Vec::<usize>::new(); adj.len()];
+    for (source, target) in optional_edges {
+        if source == target || source >= adj.len() || target >= adj.len() {
+            continue;
+        }
+        if !adj[source].contains(&target) {
+            adj[source].push(target);
+            added[source].push(target);
+        }
+    }
+    if added.iter().all(Vec::is_empty) {
+        return;
+    }
+
+    let component_by_node = component_map(adj);
+    for (source, targets) in added.iter_mut().enumerate() {
+        targets.retain(|target| component_by_node[source] == component_by_node[*target]);
+        targets.sort_unstable();
+        if !targets.is_empty() {
+            adj[source].retain(|target| targets.binary_search(target).is_err());
+        }
+    }
+}
+
 /// Memory definitions and uses induced by one set of LogicPaths.
 ///
 /// A variable target is one bit-range MemoryDef. A current-value source is a
@@ -473,6 +532,14 @@ fn strong_connect(u: usize, adj: &Vec<Vec<usize>>, ctx: &mut TarjanContext) {
 struct LogicPathMemorySsa {
     successors: Vec<Vec<usize>>,
     value_users: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FfCombSchedulePlan {
+    pub required_comb: Vec<bool>,
+    pub comb_value_predecessors: Vec<Vec<usize>>,
+    pub comb_before_direct_write: Vec<Vec<usize>>,
+    pub ff_before_direct_write: Vec<Vec<usize>>,
 }
 
 fn bit_interval(access: BitAccess) -> Option<(usize, usize)> {
@@ -562,6 +629,130 @@ where
     Ok(LogicPathMemorySsa {
         successors,
         value_users,
+    })
+}
+
+pub(crate) fn plan_ff_comb_schedule<Addr>(
+    input: &[LogicPath<Addr>],
+    ff: &[crate::ir::FfAccessSummary<Addr>],
+) -> Result<FfCombSchedulePlan, SchedulerError<Addr>>
+where
+    Addr: Copy + Ord + Hash + Eq + Display + Debug,
+{
+    let memory = build_logic_path_memory_ssa(input)?;
+    let mut definition_intervals = Vec::new();
+    for (path, logic_path) in input.iter().enumerate() {
+        let Some(target) = logic_path.target.var() else {
+            continue;
+        };
+        let Some((start, length)) = bit_interval(target.access) else {
+            return Err(SchedulerError::InvalidDependencyGraph);
+        };
+        definition_intervals.push(ExactInterval {
+            object: target.id,
+            start,
+            length,
+            value: path,
+        });
+    }
+    let definitions = DisjointIntervalMap::try_new(definition_intervals)
+        .map_err(|_| SchedulerError::InvalidDependencyGraph)?;
+
+    let mut comb_value_predecessors = vec![Vec::new(); ff.len()];
+    let mut required_comb = vec![false; input.len()];
+    let mut work = Vec::new();
+    for (ff_index, summary) in ff.iter().enumerate() {
+        for read in &summary.reads {
+            let Some((start, length)) = bit_interval(read.access) else {
+                return Err(SchedulerError::InvalidDependencyGraph);
+            };
+            for definition in definitions
+                .overlapping(&read.id, start, length)
+                .map_err(|_| SchedulerError::InvalidDependencyGraph)?
+            {
+                comb_value_predecessors[ff_index].push(definition);
+                if !std::mem::replace(&mut required_comb[definition], true) {
+                    work.push(definition);
+                }
+            }
+        }
+    }
+    for (path, logic_path) in input.iter().enumerate() {
+        if logic_path_is_scheduling_barrier(logic_path)
+            && !std::mem::replace(&mut required_comb[path], true)
+        {
+            work.push(path);
+        }
+    }
+    for row in &mut comb_value_predecessors {
+        row.sort_unstable();
+        row.dedup();
+    }
+
+    let mut predecessors = vec![Vec::new(); input.len()];
+    for (definition, users) in memory.successors.iter().enumerate() {
+        for &user in users {
+            predecessors[user].push(definition);
+        }
+    }
+    while let Some(path) = work.pop() {
+        for &predecessor in &predecessors[path] {
+            if !std::mem::replace(&mut required_comb[predecessor], true) {
+                work.push(predecessor);
+            }
+        }
+    }
+
+    let mut comb_before_direct_write = vec![Vec::new(); ff.len()];
+    for (path_index, path) in input.iter().enumerate() {
+        if !required_comb[path_index] {
+            continue;
+        }
+        for (ff_index, summary) in ff.iter().enumerate() {
+            if path
+                .sources
+                .iter()
+                .chain(&path.previous_sources)
+                .any(|read| {
+                    summary
+                        .writes
+                        .iter()
+                        .any(|write| read.id == write.id && read.access.overlaps(&write.access))
+                })
+            {
+                comb_before_direct_write[ff_index].push(path_index);
+            }
+        }
+    }
+
+    let mut ff_before_direct_write = vec![Vec::new(); ff.len()];
+    for (writer, write_summary) in ff.iter().enumerate() {
+        for (reader, read_summary) in ff.iter().enumerate() {
+            if writer != reader
+                && read_summary.reads.iter().any(|read| {
+                    write_summary
+                        .writes
+                        .iter()
+                        .any(|write| read.id == write.id && read.access.overlaps(&write.access))
+                })
+            {
+                ff_before_direct_write[writer].push(reader);
+            }
+        }
+    }
+    for row in comb_before_direct_write
+        .iter_mut()
+        .chain(&mut ff_before_direct_write)
+    {
+        row.sort_unstable();
+        row.dedup();
+    }
+
+    Ok(FfCombSchedulePlan {
+        required_comb,
+        comb_value_predecessors,
+        comb_before_direct_write,
+        ff_before_direct_write,
     })
 }
 
@@ -1961,6 +2152,27 @@ pub struct ScheduleResult<Addr> {
     pub semantic_regions: HashMap<VarAtomBase<Addr>, u64>,
 }
 
+pub(crate) trait ClockFfLowering<Addr> {
+    fn summaries(&self) -> &[crate::ir::FfAccessSummary<Addr>];
+    fn begin(&mut self, builder: &mut SIRBuilder<Addr>) -> Result<(), super::ParserError>;
+    fn lower(
+        &mut self,
+        index: usize,
+        builder: &mut SIRBuilder<Addr>,
+    ) -> Result<(), super::ParserError>;
+    fn finish(&mut self, builder: &mut SIRBuilder<Addr>) -> Result<(), super::ParserError>;
+}
+
+pub(crate) enum ClockSortError<Addr: Display + Debug + Eq + Hash + Clone> {
+    Scheduler(SchedulerError<Addr>),
+    Lowering(super::ParserError),
+}
+
+enum ScheduledWork {
+    Comb(Vec<usize>),
+    Ff(usize),
+}
+
 /// Lower a consecutive set of exact grouped-fold paths.  The packed fold
 /// results are computed atomically, then each projection is created and stored
 /// in topological order.  Ordinary paths bypass this buffer entirely.
@@ -2226,10 +2438,10 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     value_dependencies: &[Vec<usize>],
     input: &[LogicPath<Addr>],
 ) -> Option<Vec<Vec<usize>>> {
-    if dependencies.len() != input.len() || value_dependencies.len() != input.len() {
+    if dependencies.len() != value_dependencies.len() || dependencies.len() < input.len() {
         return None;
     }
-    let mut local_by_path = vec![usize::MAX; input.len()];
+    let mut local_by_path = vec![usize::MAX; dependencies.len()];
     let mut result = Vec::with_capacity(topological_sccs.len());
     let mut pending = Vec::new();
     let flush = |pending: &mut Vec<usize>,
@@ -2252,7 +2464,7 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     for scc in topological_sccs {
         if let [path] = scc.as_slice()
             && !dependencies[*path].contains(path)
-            && !logic_path_is_scheduling_barrier(&input[*path])
+            && (*path >= input.len() || !logic_path_is_scheduling_barrier(&input[*path]))
         {
             pending.push(*path);
         } else {
@@ -2273,15 +2485,54 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
 ///    - **Strategy A (Static Unrolling)**: For DAG parts or loops with small, predictable convergence bounds.
 ///    - **Strategy B (Dynamic Convergence)**: For complex SCCs or potential "True Loops", implementing
 ///      runtime oscillation detection and convergence-based repetition.
-pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     input: Vec<LogicPath<Addr>>,
     arena: &SLTNodeArena<Addr>,
     ignored_loops: &HashSet<(Addr, Addr)>,
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
     _var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
-) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
+    mut ff: Option<&mut dyn ClockFfLowering<Addr>>,
+) -> Result<ScheduleResult<Addr>, ClockSortError<Addr>> {
+    let (input, ff_plan) = if let Some(ff_lowering) = ff.as_deref() {
+        let mut plan = plan_ff_comb_schedule(&input, ff_lowering.summaries())
+            .map_err(ClockSortError::Scheduler)?;
+        let mut old_to_new = vec![usize::MAX; input.len()];
+        let mut filtered = Vec::with_capacity(
+            plan.required_comb
+                .iter()
+                .filter(|required| **required)
+                .count(),
+        );
+        for (old, path) in input.into_iter().enumerate() {
+            if plan.required_comb[old] {
+                old_to_new[old] = filtered.len();
+                filtered.push(path);
+            }
+        }
+        let remap_paths = |paths: &mut Vec<usize>| {
+            for path in paths.iter_mut() {
+                *path = old_to_new[*path];
+            }
+            paths.retain(|path| *path != usize::MAX);
+            paths.sort_unstable();
+            paths.dedup();
+        };
+        for paths in plan
+            .comb_value_predecessors
+            .iter_mut()
+            .chain(&mut plan.comb_before_direct_write)
+        {
+            remap_paths(paths);
+        }
+        plan.required_comb = vec![true; filtered.len()];
+        (filtered, Some(plan))
+    } else {
+        (input, None)
+    };
+
     // 1. Build bit-range MemoryDefs/MemoryUses and their semantic graph.
     // This is the source dataflow adapter; interval indexing and DAG
     // scheduling remain IR-independent in celox-analysis.
@@ -2291,9 +2542,55 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         .filter_map(|path| Some((*path.target.var()?, path.semantic_region?)))
         .collect();
     let LogicPathMemorySsa {
-        successors: adj,
-        value_users,
-    } = build_logic_path_memory_ssa(&input)?;
+        successors: mut adj,
+        mut value_users,
+    } = build_logic_path_memory_ssa(&input).map_err(ClockSortError::Scheduler)?;
+
+    // FF actions are ordinary sinks in the existing comb dependency graph.
+    // The added nodes go through the same SCC, topological, and ready-queue
+    // scheduling as LogicPaths; there is no second clock-specific scheduler.
+    let ff_count = ff
+        .as_deref()
+        .map_or(0, |lowering| lowering.summaries().len());
+    if let Some(plan) = &ff_plan {
+        adj.resize_with(n + ff_count, Vec::new);
+        value_users.resize_with(n + ff_count, Vec::new);
+        for (ff_index, predecessors) in plan.comb_value_predecessors.iter().enumerate() {
+            let ff_node = n + ff_index;
+            for &definition in predecessors {
+                adj[definition].push(ff_node);
+                value_users[definition].push(ff_node);
+            }
+        }
+        let comb_write_order_edges =
+            plan.comb_before_direct_write
+                .iter()
+                .enumerate()
+                .flat_map(|(writer, readers)| {
+                    readers
+                        .iter()
+                        .copied()
+                        .map(move |reader| (reader, n + writer))
+                });
+        let ff_write_order_edges =
+            plan.ff_before_direct_write
+                .iter()
+                .enumerate()
+                .flat_map(|(writer, readers)| {
+                    readers
+                        .iter()
+                        .copied()
+                        .map(move |reader| (n + reader, n + writer))
+                });
+        add_acyclic_ff_write_order_edges(
+            &mut adj,
+            comb_write_order_edges.chain(ff_write_order_edges),
+        );
+        for edges in adj.iter_mut().chain(&mut value_users) {
+            edges.sort_unstable();
+            edges.dedup();
+        }
+    }
 
     // 2. SCC extraction identifies the synchronization boundaries at which
     // the dataflow equations must be iterated rather than freely reordered.
@@ -2301,29 +2598,49 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         index: 0,
         stack: Vec::new(),
         on_stack: HashSet::default(),
-        indices: vec![None; n],
-        lowlink: vec![None; n],
+        indices: vec![None; n + ff_count],
+        lowlink: vec![None; n + ff_count],
         sccs: Vec::new(),
     };
-    for i in 0..n {
+    for i in 0..(n + ff_count) {
         if ctx.indices[i].is_none() {
             strong_connect(i, &adj, &mut ctx);
         }
     }
     let fold_group_schedule_index = build_fold_group_schedule_index(&input, arena);
-    let path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
+    let mut path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
+    path_domains.resize(n + ff_count, None);
     let (topological_sccs, component_by_path) =
-        stable_topological_sccs(ctx.sccs, &adj, &path_domains)
-            .ok_or(SchedulerError::InvalidDependencyGraph)?;
-    // 3. Acyclic runs are scheduled from MemoryUse exits toward MemoryDefs.
-    // Hard ordering edges constrain the result without inventing liveness;
-    // only Def-to-Use edges influence adjacency. No source-width estimate is
-    // used as a proxy for eventual machine-register pressure.
-    let sccs = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input)
-        .ok_or(SchedulerError::InvalidDependencyGraph)?;
+        stable_topological_sccs(ctx.sccs, &adj, &path_domains).ok_or(ClockSortError::Scheduler(
+            SchedulerError::InvalidDependencyGraph,
+        ))?;
+    let scheduled_nodes = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input)
+        .ok_or(ClockSortError::Scheduler(
+            SchedulerError::InvalidDependencyGraph,
+        ))?;
+    let mut scheduled_work = Vec::with_capacity(scheduled_nodes.len());
+    for nodes in scheduled_nodes {
+        if nodes.iter().all(|node| *node < n) {
+            scheduled_work.push(ScheduledWork::Comb(nodes));
+        } else if let [node] = nodes.as_slice()
+            && *node >= n
+        {
+            scheduled_work.push(ScheduledWork::Ff(*node - n));
+        } else {
+            return Err(ClockSortError::Scheduler(
+                SchedulerError::InvalidDependencyGraph,
+            ));
+        }
+    }
 
     let mut builder = SIRBuilder::new();
-    let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state);
+    if let Some(ff_lowering) = ff.as_deref_mut() {
+        ff_lowering
+            .begin(&mut builder)
+            .map_err(ClockSortError::Lowering)?;
+    }
+    let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state)
+        .with_unpacked_input_types(arena, unpacked_element_widths);
 
     let mut lower_cache = HashMap::default();
     let mut dep_memo = HashMap::default();
@@ -2361,7 +2678,36 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 
     // 4. Lower each scheduled component, selecting static unrolling or
     // dynamic convergence for cyclic SCCs.
-    for scc in sccs {
+    for work in scheduled_work {
+        let scc = match work {
+            ScheduledWork::Comb(scc) => scc,
+            ScheduledWork::Ff(index) => {
+                flush_pending_fold_paths(
+                    &mut pending_fold_indices,
+                    &input,
+                    &fold_group_schedule_index,
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    four_state,
+                );
+                pending_fold_roots.clear();
+                ff.as_deref_mut()
+                    .ok_or(ClockSortError::Scheduler(
+                        SchedulerError::InvalidDependencyGraph,
+                    ))?
+                    .lower(index, &mut builder)
+                    .map_err(ClockSortError::Lowering)?;
+                // FF state is staged in WORKING/SPARSE_WORKING and is invisible
+                // to the STABLE-only comb graph until the final publish. Values
+                // computed before the FF CFG dominate its merge block, so the
+                // ordinary comb lowering cache remains valid.
+                continue;
+            }
+        };
         let component = component_by_path[scc[0]];
         let mut user_safety_limit = None;
         for &v_idx in &scc {
@@ -2414,9 +2760,11 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
 
             if !authorized {
-                return Err(SchedulerError::CombinationalLoop {
-                    blocks: scc.into_iter().map(|idx| input[idx].clone()).collect(),
-                });
+                return Err(ClockSortError::Scheduler(
+                    SchedulerError::CombinationalLoop {
+                        blocks: scc.into_iter().map(|idx| input[idx].clone()).collect(),
+                    },
+                ));
             }
 
             // FAS Sort
@@ -2619,7 +2967,7 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
         } else {
             // DAG Part — flush before emitting if the EU has grown too large
-            if builder.block_count() >= EU_BLOCK_LIMIT {
+            if ff.is_none() && builder.block_count() >= EU_BLOCK_LIMIT {
                 flush_pending_fold_paths(
                     &mut pending_fold_indices,
                     &input,
@@ -2698,6 +3046,11 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     );
     pending_fold_roots.clear();
 
+    if let Some(ff_lowering) = ff.as_deref_mut() {
+        ff_lowering
+            .finish(&mut builder)
+            .map_err(ClockSortError::Lowering)?;
+    }
     builder.seal_block(SIRTerminator::Return);
     let (blocks, reg_map, _) = builder.drain();
     result_eus.push(ExecutionUnit {
@@ -2713,14 +3066,93 @@ pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 }
 
 #[cfg(test)]
+pub fn sort<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
+    sort_with_unpacked_element_widths(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        &HashMap::default(),
+        first_runtime_error_code,
+    )
+}
+
+pub(crate) fn sort_with_unpacked_element_widths<
+    Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display,
+>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
+    match sort_impl(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        unpacked_element_widths,
+        first_runtime_error_code,
+        None,
+    ) {
+        Ok(result) => Ok(result),
+        Err(ClockSortError::Scheduler(error)) => Err(error),
+        Err(ClockSortError::Lowering(_)) => {
+            unreachable!("ordinary comb scheduling has no FF lowering callback")
+        }
+    }
+}
+
+pub(crate) fn sort_clock<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+    ff: &mut dyn ClockFfLowering<Addr>,
+) -> Result<ScheduleResult<Addr>, ClockSortError<Addr>> {
+    sort_impl(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        unpacked_element_widths,
+        first_runtime_error_code,
+        Some(ff),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use num_bigint::{BigInt, BigUint};
 
     use super::{
         ExactFoldGroup, ExactIndexedLoadKey, FoldGroupReadFacts, NormalizedIndexExpr,
-        best_weighted_fold_family, build_fold_group_schedule_index, build_logic_path_memory_ssa,
-        collect_node_input_deps, prepare_atomic_fold_group_results, sort, stable_topological_sccs,
+        add_acyclic_ff_write_order_edges, best_weighted_fold_family,
+        build_fold_group_schedule_index, build_logic_path_memory_ssa, collect_node_input_deps,
+        plan_ff_comb_schedule, prepare_atomic_fold_group_results, sort, stable_topological_sccs,
     };
+    use crate::HashSet;
     use crate::ir::{BinaryOp, BitAccess, SIRBuilder, SIRInstruction, SIRTerminator, VarAtomBase};
     use crate::logic_tree::{
         LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTNode, SLTNodeArena, SLTToSIRLowerer,
@@ -2803,6 +3235,41 @@ mod tests {
             pre_lower_nodes: Vec::new(),
             expr,
         }
+    }
+
+    #[test]
+    fn ff_plan_models_comb_and_ff_old_state_readers_before_writer() {
+        let mut arena = SLTNodeArena::new();
+        let comb_value = simple_path(&mut arena, 10, None);
+        let comb_old_state_reader = simple_path(&mut arena, 11, Some(20));
+        let ff = vec![
+            crate::ir::FfAccessSummary {
+                reads: vec![VarAtomBase::new(10, 0, 7), VarAtomBase::new(11, 0, 7)],
+                writes: vec![VarAtomBase::new(20, 0, 7)],
+                dynamic_writes: HashSet::default(),
+            },
+            crate::ir::FfAccessSummary {
+                reads: vec![VarAtomBase::new(20, 0, 7)],
+                writes: vec![VarAtomBase::new(30, 0, 7)],
+                dynamic_writes: HashSet::default(),
+            },
+        ];
+
+        let plan = plan_ff_comb_schedule(&[comb_value, comb_old_state_reader], &ff).unwrap();
+
+        assert_eq!(plan.required_comb, vec![true, true]);
+        assert_eq!(plan.comb_value_predecessors, vec![vec![0, 1], vec![]]);
+        assert_eq!(plan.comb_before_direct_write, vec![vec![1], vec![]]);
+        assert_eq!(plan.ff_before_direct_write, vec![vec![1], vec![]]);
+    }
+
+    #[test]
+    fn cyclic_direct_write_preference_falls_back_to_staging() {
+        let mut adj = vec![vec![1], Vec::new(), Vec::new()];
+
+        add_acyclic_ff_write_order_edges(&mut adj, [(1, 0), (1, 2)]);
+
+        assert_eq!(adj, vec![vec![1], vec![2], Vec::new()]);
     }
 
     #[test]

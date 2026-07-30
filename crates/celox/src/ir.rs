@@ -164,6 +164,9 @@ pub struct CombObserver<A = AbsoluteAddr> {
 #[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Native fast path in which the required comb LogicPaths and one FF
+    /// domain were scheduled and lowered through the same SIRBuilder.
+    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
@@ -411,6 +414,7 @@ impl Program {
             };
 
         scan_units(&self.eval_apply_ffs, &mut addrs);
+        scan_units(&self.eval_comb_apply_ffs, &mut addrs);
         scan_units(&self.eval_only_ffs, &mut addrs);
         scan_units(&self.apply_ffs, &mut addrs);
 
@@ -422,6 +426,7 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
         {
             for eu in units {
@@ -757,6 +762,7 @@ impl<A: Display> Display for ExecutionUnit<A> {
 pub struct SimModule {
     pub name: StrId,
     pub variables: HashMap<VarId, Variable>,
+    pub ff_access_summaries: HashMap<TriggerSet<VarId>, FfAccessSummary<RegionedVarAddr>>,
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
@@ -778,6 +784,7 @@ impl fmt::Debug for SimModule {
         f.debug_struct("SimModule")
             .field("name", &self.name)
             .field("variables", &"<omitted>")
+            .field("ff_access_summaries", &self.ff_access_summaries)
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
@@ -789,6 +796,19 @@ impl fmt::Debug for SimModule {
             .field("reset_clock_map", &self.reset_clock_map)
             .finish()
     }
+}
+
+/// Sparse scheduler-facing memory effects for one same-trigger FF group.
+///
+/// These ranges describe the event-entry/current-state values consumed while
+/// lowering the group and the next-state ranges it may update. They deliberately
+/// retain no lowered SIR so the comb scheduler can reason about FF placement
+/// before choosing one shared lowering order.
+#[derive(Debug, Clone, Default)]
+pub struct FfAccessSummary<A> {
+    pub reads: Vec<VarAtomBase<A>>,
+    pub writes: Vec<VarAtomBase<A>>,
+    pub dynamic_writes: HashSet<A>,
 }
 
 impl SimModule {
@@ -1110,7 +1130,7 @@ fn replace_sir_offset_uses(
     replacements: &crate::HashMap<RegisterId, RegisterId>,
 ) {
     match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => {
             if let Some(&replacement) = replacements.get(register) {
                 *register = replacement;
@@ -1250,6 +1270,13 @@ fn renumber_sir_inst<A: Clone>(
             bit_offset: *bit_offset,
             dynamic_bit_offset: dynamic_bit_offset.map(r),
         },
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => SIROffset::PackedElements {
+            bit_offset: *bit_offset,
+            element_width: *element_width,
+        },
     };
 
     match inst {
@@ -1345,7 +1372,7 @@ impl<A: Display> fmt::Display for BasicBlock<A> {
 }
 
 /// Terminator instruction: Determines control flow
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SIRTerminator {
     /// Unconditional transition to the next block
     Jump(BlockId, Vec<RegisterId>),
@@ -1367,7 +1394,7 @@ pub enum SIRTerminator {
     Error(i64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SIRSwitchCase {
     #[serde(with = "crate::serde_helpers::biguint")]
     pub value: BigUint,
@@ -1433,7 +1460,7 @@ impl fmt::Display for SIRTerminator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegisterType {
     Logic { width: usize },
     Bit { width: usize, signed: bool },
@@ -1604,7 +1631,7 @@ impl fmt::Display for UnaryOp {
         write!(f, "{}", op_str)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 
 pub struct SIRValue {
     #[serde(with = "crate::serde_helpers::biguint")]
@@ -1655,6 +1682,15 @@ pub enum SIROffset {
         bit_offset: usize,
         dynamic_bit_offset: Option<RegisterId>,
     },
+    /// A vectorized read or write of consecutive unpacked elements through
+    /// their packed logical representation.
+    ///
+    /// Unlike `Static`, this explicitly permits crossing element boundaries.
+    /// A backend may require the addressed object to use packed storage.
+    PackedElements {
+        bit_offset: usize,
+        element_width: usize,
+    },
 }
 
 impl fmt::Display for SIROffset {
@@ -1678,6 +1714,14 @@ impl fmt::Display for SIROffset {
                 }
                 write!(f, ")")
             }
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width,
+            } => write!(
+                f,
+                "packed_elements(bit={}, element_width={})",
+                bit_offset, element_width
+            ),
         }
     }
 }
@@ -1692,15 +1736,16 @@ impl SIROffset {
                 dynamic_bit_offset,
                 ..
             } => [Some(*index), *dynamic_bit_offset],
+            SIROffset::PackedElements { .. } => [None, None],
         }
     }
 
     pub fn is_dynamic(&self) -> bool {
-        !matches!(self, SIROffset::Static(_))
+        matches!(self, SIROffset::Dynamic(_) | SIROffset::Element { .. })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(serialize = "Addr: Serialize", deserialize = "Addr: Deserialize<'de>"))]
 pub enum SIRInstruction<Addr> {
     Imm(RegisterId, SIRValue),

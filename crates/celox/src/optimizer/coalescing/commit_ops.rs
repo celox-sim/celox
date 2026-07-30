@@ -194,7 +194,10 @@ fn instruction_range(
     bits: usize,
 ) -> (usize, usize) {
     match offset {
-        SIROffset::Static(start) => (*start, start.saturating_add(bits)),
+        SIROffset::Static(start)
+        | SIROffset::PackedElements {
+            bit_offset: start, ..
+        } => (*start, start.saturating_add(bits)),
         SIROffset::Dynamic(register) => {
             let Some(value_count) = register_value_count(register_map, *register) else {
                 return (0, usize::MAX);

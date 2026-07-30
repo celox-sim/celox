@@ -16,6 +16,10 @@ use iced_x86::code_asm::*;
 
 use celox_analysis::cfg::ForwardControlFlowGraph;
 
+use crate::backend::memory_layout::{
+    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
+    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+};
 use crate::backend::native::features::{StateBaseStrategy, VariableShiftEncoding};
 use crate::backend::native::mir::*;
 use crate::backend::native::regalloc::assignment::{
@@ -28,6 +32,7 @@ use crate::backend::native::ssa_destroy::{
 use crate::ir::{BinaryOp, RegisterId, UnaryOp};
 use crate::lane_aggregate_plan::{
     LaneAggregateMaterialization, LaneAggregatePlan, LaneAggregatePlanNode, LaneAggregatePlanOp,
+    LaneAggregateStateLoad,
 };
 
 pub use crate::backend::native::ssa_destroy::SsaDestructionError;
@@ -116,6 +121,21 @@ fn preg_to_reg8(preg: PhysReg) -> AsmRegister8 {
     }
 }
 
+fn ymm_to_xmm(register: AsmRegisterYmm) -> AsmRegisterXmm {
+    match register {
+        register if register == ymm0 => xmm0,
+        register if register == ymm1 => xmm1,
+        register if register == ymm2 => xmm2,
+        register if register == ymm3 => xmm3,
+        register if register == ymm4 => xmm4,
+        register if register == ymm5 => xmm5,
+        register if register == ymm6 => xmm6,
+        register if register == ymm7 => xmm7,
+        register if register == ymm8 => xmm8,
+        _ => unreachable!("lane aggregate only uses YMM0-8"),
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Helper: resolve VReg to physical register
 // ────────────────────────────────────────────────────────────────
@@ -135,6 +155,9 @@ struct NativeArenaLayout {
     spill_base: i32,
     scratch_base: i32,
     scratch_size: i32,
+    loop_rsp_save: Option<i32>,
+    loop_gpr_save_base: Option<i32>,
+    loop_segment_save: Option<i32>,
     total_size: u32,
     callee_saved: Vec<PhysReg>,
 }
@@ -146,6 +169,7 @@ impl NativeArenaLayout {
         state_size: usize,
         spill_frame_size: u32,
         state_base: StateBaseStrategy,
+        tick_loop: bool,
     ) -> Result<Self, EmitInputError> {
         fn align16(value: usize) -> Option<usize> {
             value.checked_add(15).map(|value| value & !15)
@@ -187,7 +211,24 @@ impl NativeArenaLayout {
             .iter()
             .flat_map(|block| &block.insts)
             .filter_map(|inst| match inst {
-                MInst::LaneAggregate { inputs, .. } => inputs.len().checked_mul(8),
+                MInst::LaneAggregate {
+                    input_bytes,
+                    input_base_offset,
+                    ..
+                } => usize::try_from(*input_base_offset)
+                    .ok()?
+                    .checked_add(usize::try_from(*input_bytes).ok()?),
+                MInst::LaneAggregateInput {
+                    base_offset,
+                    srcs,
+                    packed_word,
+                } => usize::try_from(*base_offset)
+                    .ok()?
+                    .checked_add(if *packed_word {
+                        16
+                    } else {
+                        srcs.len().checked_mul(8)?
+                    }),
                 _ => None,
             })
             .max()
@@ -195,18 +236,28 @@ impl NativeArenaLayout {
         // Four qwords cover the largest fixed-register save set used by one
         // inline memory pseudo. The same instruction-local area is reused by
         // div/shift and parallel-copy cycle breaking.
-        let scratch_size = align16(aggregate_scratch.max(4 * 8)).ok_or_else(|| {
-            EmitInputError::new(
-                "EMIT.NATIVE_ARENA_RANGE",
-                None,
-                None,
-                None,
-                "instruction scratch area overflows native arena layout",
-            )
-        })?;
+        let scratch_size =
+            align16((4usize * 8).checked_add(aggregate_scratch).ok_or_else(|| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "aggregate scratch size overflows native arena layout",
+                )
+            })?)
+            .ok_or_else(|| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "instruction scratch area overflows native arena layout",
+                )
+            })?;
         let callee_saved =
             used_callee_saved(func, assignment, state_base == StateBaseStrategy::R15);
-        let total_size = align16(scratch_base.checked_add(scratch_size).ok_or_else(|| {
+        let loop_rsp_save = scratch_base.checked_add(scratch_size).ok_or_else(|| {
             EmitInputError::new(
                 "EMIT.NATIVE_ARENA_RANGE",
                 None,
@@ -214,7 +265,60 @@ impl NativeArenaLayout {
                 None,
                 "native arena size overflows",
             )
-        })?)
+        })?;
+        let loop_gpr_save_base = loop_rsp_save.checked_add(8).ok_or_else(|| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "native loop GPR save area overflows",
+            )
+        })?;
+        let loop_segment_save = loop_gpr_save_base
+            .checked_add(callee_saved.len().checked_mul(8).ok_or_else(|| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "native loop GPR save area overflows",
+                )
+            })?)
+            .ok_or_else(|| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "native loop segment save area overflows",
+                )
+            })?;
+        let total_size = align16(
+            loop_rsp_save
+                .checked_add(
+                    usize::from(tick_loop)
+                        * (16
+                            + callee_saved.len().checked_mul(8).ok_or_else(|| {
+                                EmitInputError::new(
+                                    "EMIT.NATIVE_ARENA_RANGE",
+                                    None,
+                                    None,
+                                    None,
+                                    "native loop save area overflows",
+                                )
+                            })?),
+                )
+                .ok_or_else(|| {
+                    EmitInputError::new(
+                        "EMIT.NATIVE_ARENA_RANGE",
+                        None,
+                        None,
+                        None,
+                        "native loop save area overflows",
+                    )
+                })?,
+        )
         .ok_or_else(|| {
             EmitInputError::new(
                 "EMIT.NATIVE_ARENA_RANGE",
@@ -240,6 +344,15 @@ impl NativeArenaLayout {
             spill_base: to_i32(spill_base, "spill base")?,
             scratch_base: to_i32(scratch_base, "scratch base")?,
             scratch_size: to_i32(scratch_size, "scratch size")?,
+            loop_rsp_save: tick_loop
+                .then(|| to_i32(loop_rsp_save, "native loop RSP save"))
+                .transpose()?,
+            loop_gpr_save_base: tick_loop
+                .then(|| to_i32(loop_gpr_save_base, "native loop GPR save base"))
+                .transpose()?,
+            loop_segment_save: tick_loop
+                .then(|| to_i32(loop_segment_save, "native loop segment save"))
+                .transpose()?,
             total_size: u32::try_from(total_size).map_err(|_| {
                 EmitInputError::new(
                     "EMIT.NATIVE_ARENA_RANGE",
@@ -274,7 +387,8 @@ fn saved_gpr_xmm(index: usize) -> AsmRegisterXmm {
 /// extending any GPR live range.
 #[derive(Debug, Clone, Copy, Default)]
 struct SpillRegisterCache {
-    offsets: [Option<i32>; 3],
+    offsets: [Option<i32>; 7],
+    high_registers: bool,
 }
 
 impl SpillRegisterCache {
@@ -282,11 +396,18 @@ impl SpillRegisterCache {
         self.offsets
             .iter()
             .position(|candidate| *candidate == Some(offset))
-            .map(|index| match index {
-                0 => xmm6,
-                1 => xmm7,
-                2 => xmm8,
-                _ => unreachable!("spill register cache has exactly three registers"),
+            .map(|index| match (self.high_registers, index) {
+                (false, 0) => xmm6,
+                (false, 1) => xmm7,
+                (false, 2) => xmm8,
+                (true, 0) => xmm9,
+                (true, 1) => xmm10,
+                (true, 2) => xmm11,
+                (true, 3) => xmm12,
+                (true, 4) => xmm13,
+                (true, 5) => xmm14,
+                (true, 6) => xmm15,
+                _ => unreachable!("invalid spill register cache index"),
             })
     }
 }
@@ -299,7 +420,20 @@ fn ranges_overlap(left_offset: i32, left_size: u32, right_offset: i32, right_siz
     left_start < right_end && right_start < left_end
 }
 
-fn select_spill_register_cache(func: &MFunction, plan: &SsaDestructionPlan) -> SpillRegisterCache {
+fn select_spill_register_cache(
+    func: &MFunction,
+    plan: &SsaDestructionPlan,
+    tick_loop: bool,
+) -> SpillRegisterCache {
+    let has_aggregate = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .any(|inst| matches!(inst, MInst::LaneAggregate { .. }));
+    if has_aggregate && (!tick_loop || cfg!(target_os = "windows")) {
+        return SpillRegisterCache::default();
+    }
+
     let mut access_counts = HashMap::<i32, usize>::new();
     let mut incompatible_ranges = Vec::<(i32, u32)>::new();
     let mut indexed_stack_access = false;
@@ -404,8 +538,12 @@ fn select_spill_register_cache(func: &MFunction, plan: &SsaDestructionPlan) -> S
         .collect::<Vec<_>>();
     candidates.sort_unstable_by_key(|(offset, count)| (std::cmp::Reverse(*count), *offset));
 
-    let mut cache = SpillRegisterCache::default();
-    for (destination, (offset, _)) in cache.offsets.iter_mut().zip(candidates) {
+    let mut cache = SpillRegisterCache {
+        high_registers: has_aggregate,
+        ..SpillRegisterCache::default()
+    };
+    let capacity = if has_aggregate { 7 } else { 3 };
+    for (destination, (offset, _)) in cache.offsets[..capacity].iter_mut().zip(candidates) {
         *destination = Some(offset);
     }
     cache
@@ -463,8 +601,25 @@ fn scratch_operand(slot: usize) -> AsmMemoryOperand {
     }
 }
 
-fn scratch_stack_offset(slot: usize) -> i32 {
-    ACTIVE_SPILL_BASE.with(|spill| scratch_offset(slot) - spill.get())
+fn aggregate_input_offset(byte_offset: u32) -> i32 {
+    ACTIVE_SCRATCH_BASE.with(|base| {
+        base.get()
+            .checked_add(4 * 8 + i32::try_from(byte_offset).expect("aggregate scratch byte offset"))
+            .expect("aggregate scratch displacement")
+    })
+}
+
+fn aggregate_input_operand(byte_offset: u32) -> AsmMemoryOperand {
+    let offset = aggregate_input_offset(byte_offset);
+    match state_base_strategy() {
+        StateBaseStrategy::Fs => ptr(offset).fs(),
+        StateBaseStrategy::Gs => ptr(offset).gs(),
+        StateBaseStrategy::R15 => r15 + offset,
+    }
+}
+
+fn aggregate_input_stack_offset(byte_offset: u32) -> i32 {
+    ACTIVE_SPILL_BASE.with(|spill| aggregate_input_offset(byte_offset) - spill.get())
 }
 
 fn mem_operand_indexed(
@@ -1688,6 +1843,8 @@ pub fn emit(
         spill_frame_size,
         inferred_standalone_state_size(func),
         &plan,
+        false,
+        false,
     )
 }
 
@@ -1725,7 +1882,36 @@ pub(crate) fn emit_with_plan(
 ) -> Result<EmitResult, EmitError> {
     verify_emission_inputs(func, assignment, spill_frame_size)?;
     plan.verify(func, assignment, spill_frame_size)?;
-    emit_planned(func, assignment, spill_frame_size, state_size, plan)
+    emit_planned(
+        func,
+        assignment,
+        spill_frame_size,
+        state_size,
+        plan,
+        false,
+        false,
+    )
+}
+
+fn emit_with_plan_tick_loop(
+    func: &MFunction,
+    assignment: &AssignmentMap,
+    spill_frame_size: u32,
+    state_size: usize,
+    plan: &SsaDestructionPlan,
+    check_runtime_events: bool,
+) -> Result<EmitResult, EmitError> {
+    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    plan.verify(func, assignment, spill_frame_size)?;
+    emit_planned(
+        func,
+        assignment,
+        spill_frame_size,
+        state_size,
+        plan,
+        true,
+        check_runtime_events,
+    )
 }
 
 fn verify_emission_inputs(
@@ -1855,6 +2041,8 @@ fn emit_planned(
     spill_frame_size: u32,
     state_size: usize,
     plan: &SsaDestructionPlan,
+    tick_loop: bool,
+    check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
     let mut asm = CodeAssembler::new(64)?;
     let block_order = emission_block_order(func);
@@ -1879,40 +2067,115 @@ fn emit_planned(
     }
 
     let state_base = func.target_features.state_base();
-    let arena =
-        NativeArenaLayout::build(func, assignment, state_size, spill_frame_size, state_base)?;
+    let arena = NativeArenaLayout::build(
+        func,
+        assignment,
+        state_size,
+        spill_frame_size,
+        state_base,
+        tick_loop,
+    )?;
     debug_assert!(arena.scratch_size >= 4 * 8);
     ACTIVE_SPILL_BASE.with(|base| base.set(arena.spill_base));
     ACTIVE_SCRATCH_BASE.with(|base| base.set(arena.scratch_base));
     ACTIVE_STATE_BASE.with(|active| active.set(state_base));
 
     let mut epilogue_label = asm.create_label();
+    let mut tick_loop_success_label = tick_loop.then(|| asm.create_label());
     let use_counts = count_vreg_uses(func, plan);
-    let spill_register_cache = select_spill_register_cache(func, plan);
+    let spill_register_cache = select_spill_register_cache(func, plan, tick_loop);
+    let tick_loop_entry = tick_loop
+        .then(|| branch_label(&block_labels, func.blocks[0].id))
+        .transpose()?;
 
     // ── Prologue ──
     {
+        if let Some(save_offset) = arena.loop_rsp_save {
+            // Generated code never addresses the host stack. Borrow RSP as a
+            // loop-carried counter and restore the caller's exact stack
+            // pointer only at the ABI exit.
+            asm.mov(qword_ptr(rdi + save_offset), rsp)?;
+        }
         // The GPR allocator does not own vector registers. Preserve the used
         // callee-saved GPRs outside that file. GS mode additionally preserves
         // the caller's segment base; fallback mode borrows the saved R15.
-        match state_base {
-            StateBaseStrategy::Fs => {
+        match (tick_loop, state_base) {
+            (true, StateBaseStrategy::Fs) => {
+                asm.rdfsbase(rax)?;
+                asm.mov(
+                    qword_ptr(rdi + arena.loop_segment_save.expect("loop segment save")),
+                    rax,
+                )?;
+            }
+            (true, StateBaseStrategy::Gs) => {
+                asm.rdgsbase(rax)?;
+                asm.mov(
+                    qword_ptr(rdi + arena.loop_segment_save.expect("loop segment save")),
+                    rax,
+                )?;
+            }
+            (true, StateBaseStrategy::R15) => {}
+            (false, StateBaseStrategy::Fs) => {
                 asm.rdfsbase(rax)?;
                 asm.movq(xmm15, rax)?;
             }
-            StateBaseStrategy::Gs => {
+            (false, StateBaseStrategy::Gs) => {
                 asm.rdgsbase(rax)?;
                 asm.movq(xmm15, rax)?;
             }
-            StateBaseStrategy::R15 => {}
+            (false, StateBaseStrategy::R15) => {}
         }
-        for (index, &reg) in arena.callee_saved.iter().enumerate() {
-            asm.movq(saved_gpr_xmm(index), preg_to_reg64(reg))?;
+        if let Some(base) = arena.loop_gpr_save_base {
+            for (index, &reg) in arena.callee_saved.iter().enumerate() {
+                asm.mov(
+                    qword_ptr(rdi + base + i32::try_from(index * 8).unwrap()),
+                    preg_to_reg64(reg),
+                )?;
+            }
+        } else {
+            for (index, &reg) in arena.callee_saved.iter().enumerate() {
+                asm.movq(saved_gpr_xmm(index), preg_to_reg64(reg))?;
+            }
         }
         match state_base {
             StateBaseStrategy::Fs => asm.wrfsbase(rdi)?,
             StateBaseStrategy::Gs => asm.wrgsbase(rdi)?,
             StateBaseStrategy::R15 => asm.mov(r15, rdi)?,
+        }
+        if tick_loop {
+            let mut count_ready = asm.create_label();
+            asm.mov(
+                rsp,
+                qword_ptr(mem_operand(
+                    BaseReg::SimState,
+                    STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
+                )),
+            )?;
+            asm.cmp(rsp, 0)?;
+            asm.jne(count_ready)?;
+            asm.mov(rsp, 1i64)?;
+            asm.set_label(&mut count_ready)?;
+            // Keep the internal count-ready label distinct from the first MIR
+            // block label when runtime-event initialization is absent.
+            asm.nop()?;
+
+            if check_runtime_events {
+                asm.mov(
+                    rax,
+                    qword_ptr(mem_operand(
+                        BaseReg::SimState,
+                        STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                    )),
+                )?;
+                asm.mov(rax, qword_ptr(rax))?;
+                asm.mov(
+                    qword_ptr(mem_operand(
+                        BaseReg::SimState,
+                        STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET as i32,
+                    )),
+                    rax,
+                )?;
+            }
         }
     }
 
@@ -1947,10 +2210,44 @@ fn emit_planned(
             let inst = &block.insts[inst_idx];
             match inst {
                 MInst::Return => {
-                    asm.xor(eax, eax)?;
-                    asm.jmp(epilogue_label)?;
+                    if tick_loop {
+                        asm.dec(rsp)?;
+                        asm.jz(tick_loop_success_label.expect("tick-loop success label"))?;
+                        if check_runtime_events {
+                            asm.mov(
+                                rax,
+                                qword_ptr(mem_operand(
+                                    BaseReg::SimState,
+                                    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                                )),
+                            )?;
+                            asm.mov(rax, qword_ptr(rax))?;
+                            asm.cmp(
+                                rax,
+                                qword_ptr(mem_operand(
+                                    BaseReg::SimState,
+                                    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET as i32,
+                                )),
+                            )?;
+                            asm.jne(tick_loop_success_label.expect("tick-loop success label"))?;
+                        }
+                        asm.jmp(tick_loop_entry.expect("tick-loop entry label"))?;
+                    } else {
+                        asm.xor(eax, eax)?;
+                        asm.jmp(epilogue_label)?;
+                    }
                 }
                 MInst::ReturnError { code } => {
+                    if tick_loop {
+                        asm.dec(rsp)?;
+                        asm.mov(
+                            qword_ptr(mem_operand(
+                                BaseReg::SimState,
+                                STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
+                            )),
+                            rsp,
+                        )?;
+                    }
                     asm.mov(eax, *code as u32)?;
                     asm.jmp(epilogue_label)?;
                 }
@@ -2074,20 +2371,70 @@ fn emit_planned(
     }
 
     // ── Epilogue ──
-    asm.set_label(&mut epilogue_label)?;
-    for (index, &reg) in arena.callee_saved.iter().enumerate().rev() {
-        asm.movq(preg_to_reg64(reg), saved_gpr_xmm(index))?;
+    if let Some(label) = &mut tick_loop_success_label {
+        asm.set_label(label)?;
+        asm.mov(
+            qword_ptr(mem_operand(
+                BaseReg::SimState,
+                STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
+            )),
+            rsp,
+        )?;
+        asm.xor(eax, eax)?;
     }
-    match state_base {
-        StateBaseStrategy::Fs => {
+    asm.set_label(&mut epilogue_label)?;
+    if let Some(save_offset) = arena.loop_rsp_save {
+        asm.mov(r10, qword_ptr(mem_operand(BaseReg::SimState, save_offset)))?;
+    }
+    if let Some(base) = arena.loop_gpr_save_base {
+        for (index, &reg) in arena.callee_saved.iter().enumerate() {
+            asm.mov(
+                preg_to_reg64(reg),
+                qword_ptr(mem_operand(
+                    BaseReg::SimState,
+                    base + i32::try_from(index * 8).unwrap(),
+                )),
+            )?;
+        }
+    } else {
+        for (index, &reg) in arena.callee_saved.iter().enumerate().rev() {
+            asm.movq(preg_to_reg64(reg), saved_gpr_xmm(index))?;
+        }
+    }
+    match (tick_loop, state_base) {
+        (true, StateBaseStrategy::Fs) => {
+            asm.mov(
+                r11,
+                qword_ptr(mem_operand(
+                    BaseReg::SimState,
+                    arena.loop_segment_save.expect("loop segment save"),
+                )),
+            )?;
+            asm.wrfsbase(r11)?;
+        }
+        (true, StateBaseStrategy::Gs) => {
+            asm.mov(
+                r11,
+                qword_ptr(mem_operand(
+                    BaseReg::SimState,
+                    arena.loop_segment_save.expect("loop segment save"),
+                )),
+            )?;
+            asm.wrgsbase(r11)?;
+        }
+        (true, StateBaseStrategy::R15) => {}
+        (false, StateBaseStrategy::Fs) => {
             asm.movq(r11, xmm15)?;
             asm.wrfsbase(r11)?;
         }
-        StateBaseStrategy::Gs => {
+        (false, StateBaseStrategy::Gs) => {
             asm.movq(r11, xmm15)?;
             asm.wrgsbase(r11)?;
         }
-        StateBaseStrategy::R15 => {}
+        (false, StateBaseStrategy::R15) => {}
+    }
+    if arena.loop_rsp_save.is_some() {
+        asm.mov(rsp, r10)?;
     }
     asm.ret()?;
 
@@ -2933,27 +3280,1500 @@ fn emit_lane_aggregate_scalar(
         }
         let result = node_registers[root.recipe_root]
             .expect("aggregate root must have an internal register");
-        let location = root.publication_locations[lane];
-        if location.bit == 0 {
-            asm.mov(
-                byte_ptr(mem_operand(BaseReg::SimState, location.native_byte_offset)),
-                preg_to_reg8(result),
-            )?;
-        } else {
-            let temporary = free.pop().expect("aggregate publication scratch");
-            let memory = mem_operand(BaseReg::SimState, location.native_byte_offset);
-            asm.movzx(preg_to_reg32(temporary), byte_ptr(memory))?;
-            asm.and(preg_to_reg32(temporary), !(1u32 << u32::from(location.bit)))?;
-            if location.bit != 0 {
-                asm.shl(preg_to_reg64(result), u32::from(location.bit))?;
+        if let Some(location) = root.publication_locations.get(lane).copied() {
+            if location.bit == 0 {
+                asm.mov(
+                    byte_ptr(mem_operand(BaseReg::SimState, location.native_byte_offset)),
+                    preg_to_reg8(result),
+                )?;
+            } else {
+                let temporary = free.pop().expect("aggregate publication scratch");
+                let memory = mem_operand(BaseReg::SimState, location.native_byte_offset);
+                asm.movzx(preg_to_reg32(temporary), byte_ptr(memory))?;
+                asm.and(preg_to_reg32(temporary), !(1u32 << u32::from(location.bit)))?;
+                if location.bit != 0 {
+                    asm.shl(preg_to_reg64(result), u32::from(location.bit))?;
+                }
+                asm.or(preg_to_reg64(temporary), preg_to_reg64(result))?;
+                asm.mov(byte_ptr(memory), preg_to_reg8(temporary))?;
             }
-            asm.or(preg_to_reg64(temporary), preg_to_reg64(result))?;
-            asm.mov(byte_ptr(memory), preg_to_reg8(temporary))?;
         }
         if lane != 0 {
             asm.shl(preg_to_reg64(result), lane as u32)?;
         }
         asm.or(preg_to_reg64(output), preg_to_reg64(result))?;
+    }
+    Ok(())
+}
+
+fn lane_aggregate_xmm_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+    let Some(root) = plan.roots.get(root_index) else {
+        return false;
+    };
+    if root.lane_count < 2
+        || !root.lane_count.is_multiple_of(2)
+        || root.lane_count > 64
+        || !root.publication_locations.is_empty()
+        || plan
+            .nodes
+            .get(root.recipe_root)
+            .is_none_or(|node| node.lane_width != 1)
+    {
+        return false;
+    }
+    let mut visited = HashSet::<usize>::new();
+    let mut work = vec![root.recipe_root];
+    while let Some(index) = work.pop() {
+        if !visited.insert(index) {
+            continue;
+        }
+        let Some(node) = plan.nodes.get(index) else {
+            return false;
+        };
+        if node.lane_width == 0 || node.lane_width > 64 {
+            return false;
+        }
+        work.extend(node.children.iter().copied());
+        let supported = match &node.operation {
+            LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+                (loads.len() == 1 || loads.len() == node.lane_count)
+                    && loads
+                        .iter()
+                        .all(|load| load.physical_bit + load.width <= 64)
+            }
+            LaneAggregatePlanOp::Constant(values) => values.len() == node.lane_count,
+            LaneAggregatePlanOp::BroadcastScalar(_) => true,
+            LaneAggregatePlanOp::SsaPack { values, .. } => values.len() == node.lane_count,
+            LaneAggregatePlanOp::Unary(operation) => matches!(
+                operation,
+                UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
+            ),
+            LaneAggregatePlanOp::Binary(operation) => matches!(
+                operation,
+                BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Xor
+                    | BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr
+                    | BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+            ),
+            LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
+                matches!(operation, BinaryOp::Shl | BinaryOp::Shr) && *amount < 64
+            }
+            LaneAggregatePlanOp::Mux => node.children.len() == 3,
+            LaneAggregatePlanOp::StateRead(_)
+            | LaneAggregatePlanOp::Affine(_)
+            | LaneAggregatePlanOp::PackedExtract(_)
+            | LaneAggregatePlanOp::ScalarInsert { .. }
+            | LaneAggregatePlanOp::OneHotDecode { .. }
+            | LaneAggregatePlanOp::ControlMux
+            | LaneAggregatePlanOp::Slice { .. }
+            | LaneAggregatePlanOp::Concat { .. } => false,
+        };
+        if !supported {
+            return false;
+        }
+    }
+    true
+}
+
+fn lane_aggregate_xmm_word_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+    if !lane_aggregate_xmm_eligible(plan, root_index) {
+        return false;
+    }
+    let root = &plan.roots[root_index];
+    if root.lane_count < 8 || !root.lane_count.is_multiple_of(8) {
+        return false;
+    }
+    let mut visited = HashSet::<usize>::new();
+    let mut work = vec![root.recipe_root];
+    while let Some(index) = work.pop() {
+        if !visited.insert(index) {
+            continue;
+        }
+        let node = &plan.nodes[index];
+        if node.lane_width > 16 {
+            return false;
+        }
+        work.extend(node.children.iter().copied());
+    }
+    true
+}
+
+fn lane_aggregate_ymm_word_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+    lane_aggregate_xmm_word_eligible(plan, root_index)
+        && plan.roots[root_index].lane_count >= 16
+        && plan.roots[root_index].lane_count.is_multiple_of(16)
+}
+
+fn lane_aggregate_ymm_qword_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+    lane_aggregate_xmm_eligible(plan, root_index)
+        && plan.roots[root_index].lane_count >= 4
+        && plan.roots[root_index].lane_count.is_multiple_of(4)
+}
+
+fn emit_lane_xmm_mask(
+    asm: &mut CodeAssembler,
+    register: AsmRegisterXmm,
+    width: usize,
+) -> Result<(), IcedError> {
+    if width < 64 {
+        let shift = u32::try_from(64 - width).expect("lane width is bounded by 64");
+        asm.psllq(register, shift)?;
+        asm.psrlq(register, shift)?;
+    }
+    Ok(())
+}
+
+fn emit_lane_xmm_word_mask(
+    asm: &mut CodeAssembler,
+    register: AsmRegisterXmm,
+    width: usize,
+) -> Result<(), IcedError> {
+    if width < 16 {
+        let shift = u32::try_from(16 - width).expect("word lane width is bounded by 16");
+        asm.psllw(register, shift)?;
+        asm.psrlw(register, shift)?;
+    }
+    Ok(())
+}
+
+fn emit_lane_state_value_to_gpr(
+    asm: &mut CodeAssembler,
+    load: &LaneAggregateStateLoad,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    let covered_bits = load.physical_bit + load.width;
+    let bytes = match covered_bits.div_ceil(8) {
+        1 => 1,
+        2 => 2,
+        3..=4 => 4,
+        5..=8 => 8,
+        _ => unreachable!("aggregate load width was rejected by XMM eligibility"),
+    };
+    let memory = mem_operand(BaseReg::SimState, load.native_byte_offset);
+    match bytes {
+        1 => asm.movzx(preg_to_reg32(gpr), byte_ptr(memory))?,
+        2 => asm.movzx(preg_to_reg32(gpr), word_ptr(memory))?,
+        4 => asm.mov(preg_to_reg32(gpr), dword_ptr(memory))?,
+        8 => asm.mov(preg_to_reg64(gpr), qword_ptr(memory))?,
+        _ => unreachable!(),
+    }
+    if load.physical_bit != 0 {
+        asm.shr(preg_to_reg64(gpr), load.physical_bit as u32)?;
+    }
+    emit_aggregate_mask(asm, gpr, load.width)?;
+    Ok(())
+}
+
+fn emit_lane_xmm_pair(
+    asm: &mut CodeAssembler,
+    destination: AsmRegisterXmm,
+    temporary: AsmRegisterXmm,
+    low: u64,
+    high: u64,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    emit_aggregate_immediate(asm, gpr, low)?;
+    asm.movq(destination, preg_to_reg64(gpr))?;
+    emit_aggregate_immediate(asm, gpr, high)?;
+    asm.movq(temporary, preg_to_reg64(gpr))?;
+    asm.punpcklqdq(destination, temporary)?;
+    Ok(())
+}
+
+fn emit_lane_xmm_state_value(
+    asm: &mut CodeAssembler,
+    destination: AsmRegisterXmm,
+    load: &LaneAggregateStateLoad,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    emit_lane_state_value_to_gpr(asm, load, gpr)?;
+    asm.movq(destination, preg_to_reg64(gpr))?;
+    Ok(())
+}
+
+fn emit_lane_xmm_equality(
+    asm: &mut CodeAssembler,
+    destination: AsmRegisterXmm,
+    rhs: AsmRegisterXmm,
+    temporary: AsmRegisterXmm,
+    invert: bool,
+) -> Result<(), IcedError> {
+    asm.pcmpeqd(destination, rhs)?;
+    asm.pshufd(temporary, destination, 0xb1)?;
+    asm.pand(destination, temporary)?;
+    asm.psrlq(destination, 63)?;
+    if invert {
+        asm.pcmpeqd(temporary, temporary)?;
+        asm.psrlq(temporary, 63)?;
+        asm.pxor(destination, temporary)?;
+    }
+    Ok(())
+}
+
+fn emit_lane_aggregate_xmm_node(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    node_index: usize,
+    low_position: usize,
+    high_position: usize,
+    node_registers: &[Option<AsmRegisterXmm>],
+    destination: AsmRegisterXmm,
+    free: &mut Vec<AsmRegisterXmm>,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    let node = &plan.nodes[node_index];
+    let child = |slot: usize| {
+        node_registers[node.children[slot]].expect("verified XMM aggregate child must be live")
+    };
+    match &node.operation {
+        LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+            let low = &loads[if loads.len() == 1 { 0 } else { low_position }];
+            let high = &loads[if loads.len() == 1 { 0 } else { high_position }];
+            let temporary = free.pop().expect("XMM aggregate state-pair scratch");
+            emit_lane_xmm_state_value(asm, destination, low, gpr)?;
+            emit_lane_xmm_state_value(asm, temporary, high, gpr)?;
+            asm.punpcklqdq(destination, temporary)?;
+            free.push(temporary);
+        }
+        LaneAggregatePlanOp::Constant(values) => {
+            let temporary = free.pop().expect("XMM aggregate constant-pair scratch");
+            emit_lane_xmm_pair(
+                asm,
+                destination,
+                temporary,
+                values[low_position],
+                values[high_position],
+                gpr,
+            )?;
+            free.push(temporary);
+        }
+        LaneAggregatePlanOp::BroadcastScalar(register) => {
+            asm.movq(
+                destination,
+                qword_ptr(mem_operand(
+                    BaseReg::StackFrame,
+                    input_stack_offsets[register],
+                )),
+            )?;
+            asm.punpcklqdq(destination, destination)?;
+        }
+        LaneAggregatePlanOp::SsaPack { values, .. } => {
+            let temporary = free.pop().expect("XMM aggregate SSA-pair scratch");
+            asm.movq(
+                destination,
+                qword_ptr(mem_operand(
+                    BaseReg::StackFrame,
+                    input_stack_offsets[&values[low_position]],
+                )),
+            )?;
+            asm.movq(
+                temporary,
+                qword_ptr(mem_operand(
+                    BaseReg::StackFrame,
+                    input_stack_offsets[&values[high_position]],
+                )),
+            )?;
+            asm.punpcklqdq(destination, temporary)?;
+            free.push(temporary);
+        }
+        LaneAggregatePlanOp::Unary(operation) => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                UnaryOp::Ident => {}
+                UnaryOp::BitNot => {
+                    let temporary = free.pop().expect("XMM aggregate not scratch");
+                    asm.pcmpeqd(temporary, temporary)?;
+                    asm.pxor(destination, temporary)?;
+                    free.push(temporary);
+                }
+                UnaryOp::LogicNot => {
+                    let temporary = free.pop().expect("XMM aggregate logical-not scratch");
+                    asm.pxor(temporary, temporary)?;
+                    emit_lane_xmm_equality(asm, destination, temporary, temporary, false)?;
+                    free.push(temporary);
+                }
+                _ => unreachable!("operation was checked by XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::Binary(operation) => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                BinaryOp::And | BinaryOp::LogicAnd => asm.pand(destination, child(1))?,
+                BinaryOp::Or | BinaryOp::LogicOr => asm.por(destination, child(1))?,
+                BinaryOp::Xor => asm.pxor(destination, child(1))?,
+                BinaryOp::Add => asm.paddq(destination, child(1))?,
+                BinaryOp::Sub => asm.psubq(destination, child(1))?,
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    let temporary = free.pop().expect("XMM aggregate comparison scratch");
+                    emit_lane_xmm_equality(
+                        asm,
+                        destination,
+                        child(1),
+                        temporary,
+                        matches!(operation, BinaryOp::Ne),
+                    )?;
+                    free.push(temporary);
+                }
+                _ => unreachable!("operation was checked by XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                BinaryOp::Shl => asm.psllq(destination, *amount as u32)?,
+                BinaryOp::Shr => asm.psrlq(destination, *amount as u32)?,
+                _ => unreachable!("operation was checked by XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::Mux => {
+            let temporary = free.pop().expect("XMM aggregate mux scratch");
+            asm.pxor(temporary, temporary)?;
+            asm.psubq(temporary, child(0))?;
+            asm.movdqa(destination, child(1))?;
+            asm.pxor(destination, child(2))?;
+            asm.pand(destination, temporary)?;
+            asm.pxor(destination, child(2))?;
+            free.push(temporary);
+        }
+        _ => unreachable!("operation was checked by XMM eligibility"),
+    }
+    emit_lane_xmm_mask(asm, destination, node.lane_width)?;
+    Ok(())
+}
+
+fn emit_lane_aggregate_xmm_word_node(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    node_index: usize,
+    positions: [usize; 8],
+    node_registers: &[Option<AsmRegisterXmm>],
+    destination: AsmRegisterXmm,
+    free: &mut Vec<AsmRegisterXmm>,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    let node = &plan.nodes[node_index];
+    let child = |slot: usize| {
+        node_registers[node.children[slot]].expect("verified word aggregate child must be live")
+    };
+    match &node.operation {
+        LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+            let selected =
+                positions.map(|position| &loads[if loads.len() == 1 { 0 } else { position }]);
+            let byte_base = selected[0].native_byte_offset;
+            let contiguous_bytes = selected.iter().enumerate().all(|(lane, load)| {
+                load.physical_bit == 0
+                    && load.width <= 8
+                    && load.native_byte_offset == byte_base + lane as i32
+            });
+            let word_base = selected[0].native_byte_offset;
+            let contiguous_words = selected.iter().enumerate().all(|(lane, load)| {
+                load.physical_bit == 0
+                    && load.width <= 16
+                    && load.native_byte_offset == word_base + (lane * 2) as i32
+            });
+            if contiguous_bytes {
+                let zero = free.pop().expect("word aggregate byte-load scratch");
+                asm.movq(
+                    destination,
+                    qword_ptr(mem_operand(BaseReg::SimState, byte_base)),
+                )?;
+                asm.pxor(zero, zero)?;
+                asm.punpcklbw(destination, zero)?;
+                free.push(zero);
+            } else if contiguous_words {
+                asm.movdqu(
+                    destination,
+                    xmmword_ptr(mem_operand(BaseReg::SimState, word_base)),
+                )?;
+            } else {
+                asm.pxor(destination, destination)?;
+                for (lane, load) in selected.into_iter().enumerate() {
+                    emit_lane_state_value_to_gpr(asm, load, gpr)?;
+                    asm.pinsrw(destination, preg_to_reg32(gpr), lane as u32)?;
+                }
+            }
+        }
+        LaneAggregatePlanOp::Constant(values) => {
+            asm.pxor(destination, destination)?;
+            for (lane, position) in positions.into_iter().enumerate() {
+                emit_aggregate_immediate(asm, gpr, values[position])?;
+                asm.pinsrw(destination, preg_to_reg32(gpr), lane as u32)?;
+            }
+        }
+        LaneAggregatePlanOp::BroadcastScalar(register) => {
+            asm.movd(
+                destination,
+                dword_ptr(mem_operand(
+                    BaseReg::StackFrame,
+                    input_stack_offsets[register],
+                )),
+            )?;
+            asm.pshuflw(destination, destination, 0)?;
+            asm.pshufd(destination, destination, 0)?;
+        }
+        LaneAggregatePlanOp::SsaPack { values, .. } => {
+            let offsets = positions.map(|position| input_stack_offsets[&values[position]]);
+            let base = offsets[0];
+            if offsets
+                .iter()
+                .enumerate()
+                .all(|(lane, offset)| *offset == base + (lane * 2) as i32)
+            {
+                asm.movdqu(
+                    destination,
+                    xmmword_ptr(mem_operand(BaseReg::StackFrame, base)),
+                )?;
+            } else {
+                asm.pxor(destination, destination)?;
+                for (lane, offset) in offsets.into_iter().enumerate() {
+                    asm.pinsrw(
+                        destination,
+                        word_ptr(mem_operand(BaseReg::StackFrame, offset)),
+                        lane as u32,
+                    )?;
+                }
+            }
+        }
+        LaneAggregatePlanOp::Unary(operation) => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                UnaryOp::Ident => {}
+                UnaryOp::BitNot => {
+                    let temporary = free.pop().expect("word aggregate not scratch");
+                    asm.pcmpeqd(temporary, temporary)?;
+                    asm.pxor(destination, temporary)?;
+                    free.push(temporary);
+                }
+                UnaryOp::LogicNot => {
+                    let temporary = free.pop().expect("word aggregate logical-not scratch");
+                    asm.pxor(temporary, temporary)?;
+                    asm.pcmpeqw(destination, temporary)?;
+                    asm.psrlw(destination, 15)?;
+                    free.push(temporary);
+                }
+                _ => unreachable!("operation was checked by word XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::Binary(operation) => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                BinaryOp::And | BinaryOp::LogicAnd => asm.pand(destination, child(1))?,
+                BinaryOp::Or | BinaryOp::LogicOr => asm.por(destination, child(1))?,
+                BinaryOp::Xor => asm.pxor(destination, child(1))?,
+                BinaryOp::Add => asm.paddw(destination, child(1))?,
+                BinaryOp::Sub => asm.psubw(destination, child(1))?,
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    asm.pcmpeqw(destination, child(1))?;
+                    asm.psrlw(destination, 15)?;
+                    if matches!(operation, BinaryOp::Ne) {
+                        let temporary = free.pop().expect("word aggregate comparison scratch");
+                        asm.pcmpeqd(temporary, temporary)?;
+                        asm.psrlw(temporary, 15)?;
+                        asm.pxor(destination, temporary)?;
+                        free.push(temporary);
+                    }
+                }
+                _ => unreachable!("operation was checked by word XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
+            asm.movdqa(destination, child(0))?;
+            match operation {
+                BinaryOp::Shl => asm.psllw(destination, *amount as u32)?,
+                BinaryOp::Shr => asm.psrlw(destination, *amount as u32)?,
+                _ => unreachable!("operation was checked by word XMM eligibility"),
+            }
+        }
+        LaneAggregatePlanOp::Mux => {
+            let temporary = free.pop().expect("word aggregate mux scratch");
+            asm.pxor(temporary, temporary)?;
+            asm.psubw(temporary, child(0))?;
+            asm.movdqa(destination, child(1))?;
+            asm.pxor(destination, child(2))?;
+            asm.pand(destination, temporary)?;
+            asm.pxor(destination, child(2))?;
+            free.push(temporary);
+        }
+        _ => unreachable!("operation was checked by word XMM eligibility"),
+    }
+    emit_lane_xmm_word_mask(asm, destination, node.lane_width)?;
+    Ok(())
+}
+
+fn emit_lane_ymm_qword_gather(
+    asm: &mut CodeAssembler,
+    destination: AsmRegisterYmm,
+    values: [u64; 4],
+    gpr: PhysReg,
+    free: &mut Vec<AsmRegisterYmm>,
+) -> Result<(), IcedError> {
+    let high = free.pop().expect("YMM qword gather scratch");
+    let low_xmm = ymm_to_xmm(destination);
+    let high_xmm = ymm_to_xmm(high);
+    emit_aggregate_immediate(asm, gpr, values[0])?;
+    asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
+    emit_aggregate_immediate(asm, gpr, values[1])?;
+    asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
+    emit_aggregate_immediate(asm, gpr, values[2])?;
+    asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
+    emit_aggregate_immediate(asm, gpr, values[3])?;
+    asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
+    asm.vinserti128(destination, destination, high_xmm, 1)?;
+    free.push(high);
+    Ok(())
+}
+
+fn lane_aggregate_qword_result_is_canonical(plan: &LaneAggregatePlan, node_index: usize) -> bool {
+    let node = &plan.nodes[node_index];
+    let child_width = |slot: usize| {
+        node.children
+            .get(slot)
+            .and_then(|child| plan.nodes.get(*child))
+            .map(|child| child.lane_width)
+    };
+    match &node.operation {
+        LaneAggregatePlanOp::StateRead(_)
+        | LaneAggregatePlanOp::BroadcastScalar(_)
+        | LaneAggregatePlanOp::SsaPack { .. } => true,
+        LaneAggregatePlanOp::Constant(values) => {
+            node.lane_width == 64 || values.iter().all(|value| value >> node.lane_width == 0)
+        }
+        LaneAggregatePlanOp::Unary(UnaryOp::Ident) => {
+            child_width(0).is_some_and(|width| width <= node.lane_width)
+        }
+        LaneAggregatePlanOp::Unary(UnaryOp::LogicNot) => true,
+        LaneAggregatePlanOp::Unary(_) => false,
+        LaneAggregatePlanOp::Binary(
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::LtU
+            | BinaryOp::LeU
+            | BinaryOp::GtU
+            | BinaryOp::GeU
+            | BinaryOp::LtS
+            | BinaryOp::LeS
+            | BinaryOp::GtS
+            | BinaryOp::GeS,
+        ) => true,
+        LaneAggregatePlanOp::Binary(BinaryOp::And | BinaryOp::LogicAnd) => {
+            child_width(0).is_some_and(|width| width <= node.lane_width)
+                || child_width(1).is_some_and(|width| width <= node.lane_width)
+        }
+        LaneAggregatePlanOp::Binary(BinaryOp::Or | BinaryOp::LogicOr | BinaryOp::Xor) => {
+            child_width(0).is_some_and(|width| width <= node.lane_width)
+                && child_width(1).is_some_and(|width| width <= node.lane_width)
+        }
+        LaneAggregatePlanOp::ShiftConstant {
+            operation: BinaryOp::Shr,
+            ..
+        } => child_width(0).is_some_and(|width| width <= node.lane_width),
+        LaneAggregatePlanOp::Mux => {
+            child_width(1).is_some_and(|width| width <= node.lane_width)
+                && child_width(2).is_some_and(|width| width <= node.lane_width)
+        }
+        _ => false,
+    }
+}
+
+fn emit_lane_aggregate_ymm_qword_node(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    node_index: usize,
+    positions: [usize; 4],
+    node_registers: &[Option<AsmRegisterYmm>],
+    destination: AsmRegisterYmm,
+    free: &mut Vec<AsmRegisterYmm>,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    let node = &plan.nodes[node_index];
+    let child = |slot: usize| {
+        node_registers[node.children[slot]].expect("verified YMM qword child must be live")
+    };
+    match &node.operation {
+        LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+            let selected =
+                positions.map(|position| &loads[if loads.len() == 1 { 0 } else { position }]);
+            if loads.len() == 1 {
+                let load = selected[0];
+                if load.physical_bit == 0 && load.width == 64 {
+                    asm.vpbroadcastq(
+                        destination,
+                        qword_ptr(mem_operand(BaseReg::SimState, load.native_byte_offset)),
+                    )?;
+                } else {
+                    emit_lane_state_value_to_gpr(asm, load, gpr)?;
+                    asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
+                }
+            } else {
+                let base = selected[0].native_byte_offset;
+                let contiguous_qwords = selected.iter().enumerate().all(|(lane, load)| {
+                    load.physical_bit == 0
+                        && load.width == 64
+                        && load.native_byte_offset == base + (lane * 8) as i32
+                });
+                if contiguous_qwords {
+                    asm.vmovdqu(
+                        destination,
+                        ymmword_ptr(mem_operand(BaseReg::SimState, base)),
+                    )?;
+                } else {
+                    let high = free.pop().expect("YMM qword state gather scratch");
+                    let low_xmm = ymm_to_xmm(destination);
+                    let high_xmm = ymm_to_xmm(high);
+                    emit_lane_state_value_to_gpr(asm, selected[0], gpr)?;
+                    asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
+                    emit_lane_state_value_to_gpr(asm, selected[1], gpr)?;
+                    asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
+                    emit_lane_state_value_to_gpr(asm, selected[2], gpr)?;
+                    asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
+                    emit_lane_state_value_to_gpr(asm, selected[3], gpr)?;
+                    asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
+                    asm.vinserti128(destination, destination, high_xmm, 1)?;
+                    free.push(high);
+                }
+            }
+        }
+        LaneAggregatePlanOp::Constant(values) => {
+            let selected = positions.map(|position| values[position]);
+            if selected.iter().all(|value| *value == selected[0]) {
+                emit_aggregate_immediate(asm, gpr, selected[0])?;
+                asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
+            } else {
+                emit_lane_ymm_qword_gather(asm, destination, selected, gpr, free)?;
+            }
+        }
+        LaneAggregatePlanOp::BroadcastScalar(register) => {
+            let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[register]);
+            if node.lane_width <= 16 {
+                asm.vpbroadcastw(destination, word_ptr(memory))?;
+            } else {
+                asm.vpbroadcastq(destination, qword_ptr(memory))?;
+            }
+        }
+        LaneAggregatePlanOp::SsaPack { values, .. } => {
+            let offsets = positions.map(|position| input_stack_offsets[&values[position]]);
+            let base = offsets[0];
+            if node.lane_width <= 16
+                && offsets
+                    .iter()
+                    .enumerate()
+                    .all(|(lane, offset)| *offset == base + (lane * 2) as i32)
+            {
+                asm.vpmovzxwq(
+                    destination,
+                    qword_ptr(mem_operand(BaseReg::StackFrame, base)),
+                )?;
+            } else if offsets
+                .iter()
+                .enumerate()
+                .all(|(lane, offset)| *offset == base + (lane * 8) as i32)
+            {
+                asm.vmovdqu(
+                    destination,
+                    ymmword_ptr(mem_operand(BaseReg::StackFrame, base)),
+                )?;
+            } else {
+                let high = free.pop().expect("YMM qword SSA gather scratch");
+                let low_xmm = ymm_to_xmm(destination);
+                let high_xmm = ymm_to_xmm(high);
+                asm.vmovq(
+                    low_xmm,
+                    qword_ptr(mem_operand(BaseReg::StackFrame, offsets[0])),
+                )?;
+                asm.vpinsrq(
+                    low_xmm,
+                    low_xmm,
+                    qword_ptr(mem_operand(BaseReg::StackFrame, offsets[1])),
+                    1,
+                )?;
+                asm.vmovq(
+                    high_xmm,
+                    qword_ptr(mem_operand(BaseReg::StackFrame, offsets[2])),
+                )?;
+                asm.vpinsrq(
+                    high_xmm,
+                    high_xmm,
+                    qword_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
+                    1,
+                )?;
+                asm.vinserti128(destination, destination, high_xmm, 1)?;
+                free.push(high);
+            }
+        }
+        LaneAggregatePlanOp::Unary(operation) => match operation {
+            UnaryOp::Ident => asm.vmovdqa(destination, child(0))?,
+            UnaryOp::BitNot => {
+                let temporary = free.pop().expect("YMM qword not scratch");
+                asm.vpcmpeqd(temporary, temporary, temporary)?;
+                asm.vpxor(destination, child(0), temporary)?;
+                free.push(temporary);
+            }
+            UnaryOp::LogicNot => {
+                let temporary = free.pop().expect("YMM qword logical-not scratch");
+                asm.vpxor(temporary, temporary, temporary)?;
+                asm.vpcmpeqq(destination, child(0), temporary)?;
+                asm.vpsrlq(destination, destination, 63)?;
+                free.push(temporary);
+            }
+            _ => unreachable!("operation was checked by YMM qword eligibility"),
+        },
+        LaneAggregatePlanOp::Binary(operation) => match operation {
+            BinaryOp::And | BinaryOp::LogicAnd => asm.vpand(destination, child(0), child(1))?,
+            BinaryOp::Or | BinaryOp::LogicOr => asm.vpor(destination, child(0), child(1))?,
+            BinaryOp::Xor => asm.vpxor(destination, child(0), child(1))?,
+            BinaryOp::Add => asm.vpaddq(destination, child(0), child(1))?,
+            BinaryOp::Sub => asm.vpsubq(destination, child(0), child(1))?,
+            BinaryOp::Eq | BinaryOp::Ne => {
+                asm.vpcmpeqq(destination, child(0), child(1))?;
+                asm.vpsrlq(destination, destination, 63)?;
+                if matches!(operation, BinaryOp::Ne) {
+                    let temporary = free.pop().expect("YMM qword comparison scratch");
+                    asm.vpcmpeqd(temporary, temporary, temporary)?;
+                    asm.vpsrlq(temporary, temporary, 63)?;
+                    asm.vpxor(destination, destination, temporary)?;
+                    free.push(temporary);
+                }
+            }
+            _ => unreachable!("operation was checked by YMM qword eligibility"),
+        },
+        LaneAggregatePlanOp::ShiftConstant { operation, amount } => match operation {
+            BinaryOp::Shl => asm.vpsllq(destination, child(0), *amount as u32)?,
+            BinaryOp::Shr => asm.vpsrlq(destination, child(0), *amount as u32)?,
+            _ => unreachable!("operation was checked by YMM qword eligibility"),
+        },
+        LaneAggregatePlanOp::Mux => {
+            let temporary = free.pop().expect("YMM qword mux scratch");
+            asm.vpxor(temporary, temporary, temporary)?;
+            asm.vpsubq(temporary, temporary, child(0))?;
+            asm.vpxor(destination, child(1), child(2))?;
+            asm.vpand(destination, destination, temporary)?;
+            asm.vpxor(destination, destination, child(2))?;
+            free.push(temporary);
+        }
+        _ => unreachable!("operation was checked by YMM qword eligibility"),
+    }
+    if node.lane_width < 64 && !lane_aggregate_qword_result_is_canonical(plan, node_index) {
+        let shift = u32::try_from(64 - node.lane_width).expect("YMM qword lane width");
+        asm.vpsllq(destination, destination, shift)?;
+        asm.vpsrlq(destination, destination, shift)?;
+    }
+    Ok(())
+}
+
+fn emit_lane_ymm_word_gather(
+    asm: &mut CodeAssembler,
+    destination: AsmRegisterYmm,
+    values: [u64; 16],
+    gpr: PhysReg,
+    free: &mut Vec<AsmRegisterYmm>,
+) -> Result<(), IcedError> {
+    let high = free.pop().expect("YMM aggregate gather scratch");
+    let low_xmm = ymm_to_xmm(destination);
+    let high_xmm = ymm_to_xmm(high);
+    asm.vpxor(low_xmm, low_xmm, low_xmm)?;
+    for (lane, value) in values[..8].iter().copied().enumerate() {
+        emit_aggregate_immediate(asm, gpr, value)?;
+        asm.vpinsrw(low_xmm, low_xmm, preg_to_reg32(gpr), lane as u32)?;
+    }
+    asm.vpxor(high_xmm, high_xmm, high_xmm)?;
+    for (lane, value) in values[8..].iter().copied().enumerate() {
+        emit_aggregate_immediate(asm, gpr, value)?;
+        asm.vpinsrw(high_xmm, high_xmm, preg_to_reg32(gpr), lane as u32)?;
+    }
+    asm.vinserti128(destination, destination, high_xmm, 1)?;
+    free.push(high);
+    Ok(())
+}
+
+fn emit_lane_aggregate_ymm_word_node(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    node_index: usize,
+    positions: [usize; 16],
+    node_registers: &[Option<AsmRegisterYmm>],
+    destination: AsmRegisterYmm,
+    free: &mut Vec<AsmRegisterYmm>,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    gpr: PhysReg,
+) -> Result<(), IcedError> {
+    let node = &plan.nodes[node_index];
+    let child = |slot: usize| {
+        node_registers[node.children[slot]].expect("verified YMM aggregate child must be live")
+    };
+    match &node.operation {
+        LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
+            let selected =
+                positions.map(|position| &loads[if loads.len() == 1 { 0 } else { position }]);
+            if loads.len() == 1 {
+                let load = selected[0];
+                emit_lane_state_value_to_gpr(asm, load, gpr)?;
+                asm.vpbroadcastw(destination, preg_to_reg32(gpr))?;
+            } else {
+                let byte_base = selected[0].native_byte_offset;
+                let contiguous_bytes = selected.iter().enumerate().all(|(lane, load)| {
+                    load.physical_bit == 0
+                        && load.width <= 8
+                        && load.native_byte_offset == byte_base + lane as i32
+                });
+                let word_base = selected[0].native_byte_offset;
+                let contiguous_words = selected.iter().enumerate().all(|(lane, load)| {
+                    load.physical_bit == 0
+                        && load.width <= 16
+                        && load.native_byte_offset == word_base + (lane * 2) as i32
+                });
+                if contiguous_bytes {
+                    asm.vpmovzxbw(
+                        destination,
+                        xmmword_ptr(mem_operand(BaseReg::SimState, byte_base)),
+                    )?;
+                } else if contiguous_words {
+                    asm.vmovdqu(
+                        destination,
+                        ymmword_ptr(mem_operand(BaseReg::SimState, word_base)),
+                    )?;
+                } else {
+                    let high = free.pop().expect("YMM aggregate state gather scratch");
+                    let low_xmm = ymm_to_xmm(destination);
+                    let high_xmm = ymm_to_xmm(high);
+                    asm.vpxor(low_xmm, low_xmm, low_xmm)?;
+                    for (lane, load) in selected[..8].iter().enumerate() {
+                        emit_lane_state_value_to_gpr(asm, load, gpr)?;
+                        asm.vpinsrw(low_xmm, low_xmm, preg_to_reg32(gpr), lane as u32)?;
+                    }
+                    asm.vpxor(high_xmm, high_xmm, high_xmm)?;
+                    for (lane, load) in selected[8..].iter().enumerate() {
+                        emit_lane_state_value_to_gpr(asm, load, gpr)?;
+                        asm.vpinsrw(high_xmm, high_xmm, preg_to_reg32(gpr), lane as u32)?;
+                    }
+                    asm.vinserti128(destination, destination, high_xmm, 1)?;
+                    free.push(high);
+                }
+            }
+        }
+        LaneAggregatePlanOp::Constant(values) => {
+            let selected = positions.map(|position| values[position]);
+            if selected.iter().all(|value| *value == selected[0]) {
+                emit_aggregate_immediate(asm, gpr, selected[0])?;
+                asm.vpbroadcastw(destination, preg_to_reg32(gpr))?;
+            } else {
+                emit_lane_ymm_word_gather(asm, destination, selected, gpr, free)?;
+            }
+        }
+        LaneAggregatePlanOp::BroadcastScalar(register) => {
+            asm.vpbroadcastw(
+                destination,
+                word_ptr(mem_operand(
+                    BaseReg::StackFrame,
+                    input_stack_offsets[register],
+                )),
+            )?;
+        }
+        LaneAggregatePlanOp::SsaPack { values, .. } => {
+            let offsets = positions.map(|position| input_stack_offsets[&values[position]]);
+            let base = offsets[0];
+            if offsets
+                .iter()
+                .enumerate()
+                .all(|(lane, offset)| *offset == base + (lane * 2) as i32)
+            {
+                asm.vmovdqu(
+                    ymm_to_xmm(destination),
+                    xmmword_ptr(mem_operand(BaseReg::StackFrame, base)),
+                )?;
+                asm.vinserti128(
+                    destination,
+                    destination,
+                    xmmword_ptr(mem_operand(BaseReg::StackFrame, base + 16)),
+                    1,
+                )?;
+            } else {
+                let high = free.pop().expect("YMM aggregate SSA gather scratch");
+                let low_xmm = ymm_to_xmm(destination);
+                let high_xmm = ymm_to_xmm(high);
+                asm.vpxor(low_xmm, low_xmm, low_xmm)?;
+                for (lane, offset) in offsets[..8].iter().copied().enumerate() {
+                    asm.vpinsrw(
+                        low_xmm,
+                        low_xmm,
+                        word_ptr(mem_operand(BaseReg::StackFrame, offset)),
+                        lane as u32,
+                    )?;
+                }
+                asm.vpxor(high_xmm, high_xmm, high_xmm)?;
+                for (lane, offset) in offsets[8..].iter().copied().enumerate() {
+                    asm.vpinsrw(
+                        high_xmm,
+                        high_xmm,
+                        word_ptr(mem_operand(BaseReg::StackFrame, offset)),
+                        lane as u32,
+                    )?;
+                }
+                asm.vinserti128(destination, destination, high_xmm, 1)?;
+                free.push(high);
+            }
+        }
+        LaneAggregatePlanOp::Unary(operation) => match operation {
+            UnaryOp::Ident => asm.vmovdqa(destination, child(0))?,
+            UnaryOp::BitNot => {
+                let temporary = free.pop().expect("YMM aggregate not scratch");
+                asm.vpcmpeqd(temporary, temporary, temporary)?;
+                asm.vpxor(destination, child(0), temporary)?;
+                free.push(temporary);
+            }
+            UnaryOp::LogicNot => {
+                let temporary = free.pop().expect("YMM aggregate logical-not scratch");
+                asm.vpxor(temporary, temporary, temporary)?;
+                asm.vpcmpeqw(destination, child(0), temporary)?;
+                asm.vpsrlw(destination, destination, 15)?;
+                free.push(temporary);
+            }
+            _ => unreachable!("operation was checked by YMM eligibility"),
+        },
+        LaneAggregatePlanOp::Binary(operation) => match operation {
+            BinaryOp::And | BinaryOp::LogicAnd => asm.vpand(destination, child(0), child(1))?,
+            BinaryOp::Or | BinaryOp::LogicOr => asm.vpor(destination, child(0), child(1))?,
+            BinaryOp::Xor => asm.vpxor(destination, child(0), child(1))?,
+            BinaryOp::Add => asm.vpaddw(destination, child(0), child(1))?,
+            BinaryOp::Sub => asm.vpsubw(destination, child(0), child(1))?,
+            BinaryOp::Eq | BinaryOp::Ne => {
+                asm.vpcmpeqw(destination, child(0), child(1))?;
+                asm.vpsrlw(destination, destination, 15)?;
+                if matches!(operation, BinaryOp::Ne) {
+                    let temporary = free.pop().expect("YMM aggregate comparison scratch");
+                    asm.vpcmpeqd(temporary, temporary, temporary)?;
+                    asm.vpsrlw(temporary, temporary, 15)?;
+                    asm.vpxor(destination, destination, temporary)?;
+                    free.push(temporary);
+                }
+            }
+            _ => unreachable!("operation was checked by YMM eligibility"),
+        },
+        LaneAggregatePlanOp::ShiftConstant { operation, amount } => match operation {
+            BinaryOp::Shl => asm.vpsllw(destination, child(0), *amount as u32)?,
+            BinaryOp::Shr => asm.vpsrlw(destination, child(0), *amount as u32)?,
+            _ => unreachable!("operation was checked by YMM eligibility"),
+        },
+        LaneAggregatePlanOp::Mux => {
+            let temporary = free.pop().expect("YMM aggregate mux scratch");
+            asm.vpxor(temporary, temporary, temporary)?;
+            asm.vpsubw(temporary, temporary, child(0))?;
+            asm.vpxor(destination, child(1), child(2))?;
+            asm.vpand(destination, destination, temporary)?;
+            asm.vpxor(destination, destination, child(2))?;
+            free.push(temporary);
+        }
+        _ => unreachable!("operation was checked by YMM eligibility"),
+    }
+    if node.lane_width < 16 {
+        let shift = u32::try_from(16 - node.lane_width).expect("YMM word lane width");
+        asm.vpsllw(destination, destination, shift)?;
+        asm.vpsrlw(destination, destination, shift)?;
+    }
+    Ok(())
+}
+
+fn lane_aggregate_xmm_schedule(
+    plan: &LaneAggregatePlan,
+    active: &[bool],
+    root: usize,
+) -> Vec<usize> {
+    fn subtree_pressure(
+        plan: &LaneAggregatePlan,
+        active: &[bool],
+        node: usize,
+        memo: &mut [Option<usize>],
+    ) -> usize {
+        if let Some(pressure) = memo[node] {
+            return pressure;
+        }
+        let mut children = plan.nodes[node]
+            .children
+            .iter()
+            .copied()
+            .filter(|child| active[*child])
+            .map(|child| subtree_pressure(plan, active, child, memo))
+            .collect::<Vec<_>>();
+        children.sort_unstable_by(|left, right| right.cmp(left));
+        let pressure = children
+            .into_iter()
+            .enumerate()
+            .map(|(live_children, child_pressure)| live_children + child_pressure)
+            .max()
+            .unwrap_or(1);
+        memo[node] = Some(pressure);
+        pressure
+    }
+
+    fn visit(
+        plan: &LaneAggregatePlan,
+        active: &[bool],
+        node: usize,
+        pressure: &mut [Option<usize>],
+        visited: &mut [bool],
+        schedule: &mut Vec<usize>,
+    ) {
+        if visited[node] {
+            return;
+        }
+        visited[node] = true;
+        let mut children = plan.nodes[node]
+            .children
+            .iter()
+            .copied()
+            .filter(|child| active[*child])
+            .collect::<Vec<_>>();
+        children.sort_unstable_by_key(|child| {
+            std::cmp::Reverse(subtree_pressure(plan, active, *child, pressure))
+        });
+        for child in children {
+            visit(plan, active, child, pressure, visited, schedule);
+        }
+        schedule.push(node);
+    }
+
+    let mut pressure = vec![None; plan.nodes.len()];
+    let mut visited = vec![false; plan.nodes.len()];
+    let mut schedule = Vec::new();
+    visit(
+        plan,
+        active,
+        root,
+        &mut pressure,
+        &mut visited,
+        &mut schedule,
+    );
+    schedule
+}
+
+fn lane_aggregate_xmm_reusable_child(node: &LaneAggregatePlanNode) -> Option<usize> {
+    match node.operation {
+        LaneAggregatePlanOp::Unary(_) | LaneAggregatePlanOp::ShiftConstant { .. } => {
+            node.children.first().copied()
+        }
+        LaneAggregatePlanOp::Binary(_) => node.children.first().copied(),
+        LaneAggregatePlanOp::Mux => node.children.get(1).copied(),
+        _ => None,
+    }
+}
+
+fn emit_lane_aggregate_ymm_qword(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    output: PhysReg,
+) -> Result<(), IcedError> {
+    let root = &plan.roots[root_index];
+    let scratch_gpr = ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|register| *register != output && *register != PhysReg::RCX)
+        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
+    for lane_base in (0..root.lane_count).step_by(4) {
+        let lane_positions = (lane_base..lane_base + 4)
+            .map(|lane| {
+                aggregate_lane_positions(plan, root.recipe_root, lane).unwrap_or_else(|| {
+                    panic!("verified YMM qword mapping for root {root_index} lane {lane}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut positions = vec![None; plan.nodes.len()];
+        for node_index in 0..plan.nodes.len() {
+            let active_lanes = lane_positions
+                .iter()
+                .filter(|lane| lane[node_index].is_some())
+                .count();
+            positions[node_index] = match active_lanes {
+                0 => None,
+                4 => Some(std::array::from_fn(|lane| {
+                    lane_positions[lane][node_index]
+                        .expect("all YMM qword lanes have an active position")
+                })),
+                _ => panic!("YMM qword group crosses a partial control merge"),
+            };
+        }
+        let active = positions.iter().map(Option::is_some).collect::<Vec<_>>();
+        let schedule = lane_aggregate_xmm_schedule(plan, &active, root.recipe_root);
+        let mut remaining = vec![0usize; plan.nodes.len()];
+        for &node_index in &schedule {
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_some() {
+                    remaining[child] += 1;
+                }
+            }
+        }
+        remaining[root.recipe_root] += 1;
+        let mut free = vec![ymm8, ymm7, ymm6, ymm5, ymm4, ymm3, ymm2, ymm1, ymm0];
+        let mut node_registers = vec![None; plan.nodes.len()];
+        for &node_index in &schedule {
+            let node_positions =
+                positions[node_index].expect("scheduled YMM qword node has lane positions");
+            let reused_child = lane_aggregate_xmm_reusable_child(&plan.nodes[node_index])
+                .filter(|child| remaining[*child] == 1);
+            let destination = reused_child
+                .and_then(|child| node_registers[child])
+                .unwrap_or_else(|| free.pop().expect("YMM qword aggregate pressure"));
+            emit_lane_aggregate_ymm_qword_node(
+                asm,
+                plan,
+                node_index,
+                node_positions,
+                &node_registers,
+                destination,
+                &mut free,
+                input_stack_offsets,
+                scratch_gpr,
+            )?;
+            node_registers[node_index] = Some(destination);
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_none() {
+                    continue;
+                }
+                remaining[child] -= 1;
+                if remaining[child] == 0 {
+                    let register = node_registers[child]
+                        .take()
+                        .expect("YMM qword child must be live");
+                    if Some(child) != reused_child {
+                        free.push(register);
+                    } else {
+                        debug_assert_eq!(register, destination);
+                    }
+                }
+            }
+        }
+        let result = node_registers[root.recipe_root]
+            .expect("YMM qword root must have an internal register");
+        asm.vpsllq(result, result, 63)?;
+        asm.vmovmskpd(preg_to_reg32(scratch_gpr), result)?;
+        if lane_base != 0 {
+            asm.shl(preg_to_reg64(scratch_gpr), lane_base as u32)?;
+        }
+        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
+    }
+    asm.vzeroupper()?;
+    Ok(())
+}
+
+fn emit_lane_aggregate_ymm_word(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    output: PhysReg,
+) -> Result<(), IcedError> {
+    let root = &plan.roots[root_index];
+    let scratch_gpr = ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|register| *register != output && *register != PhysReg::RCX)
+        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
+    for lane_base in (0..root.lane_count).step_by(16) {
+        let lane_positions = (lane_base..lane_base + 16)
+            .map(|lane| {
+                aggregate_lane_positions(plan, root.recipe_root, lane).unwrap_or_else(|| {
+                    panic!("verified YMM lane mapping for root {root_index} lane {lane}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut positions = vec![None; plan.nodes.len()];
+        for node_index in 0..plan.nodes.len() {
+            let active_lanes = lane_positions
+                .iter()
+                .filter(|lane| lane[node_index].is_some())
+                .count();
+            positions[node_index] = match active_lanes {
+                0 => None,
+                16 => Some(std::array::from_fn(|lane| {
+                    lane_positions[lane][node_index]
+                        .expect("all YMM lanes have a position for an active node")
+                })),
+                _ => panic!("YMM aggregate group crosses a partial control merge"),
+            };
+        }
+        let active = positions.iter().map(Option::is_some).collect::<Vec<_>>();
+        let schedule = lane_aggregate_xmm_schedule(plan, &active, root.recipe_root);
+        let mut remaining = vec![0usize; plan.nodes.len()];
+        for &node_index in &schedule {
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_some() {
+                    remaining[child] += 1;
+                }
+            }
+        }
+        remaining[root.recipe_root] += 1;
+        let mut free = vec![ymm8, ymm7, ymm6, ymm5, ymm4, ymm3, ymm2, ymm1, ymm0];
+        let mut node_registers = vec![None; plan.nodes.len()];
+        for &node_index in &schedule {
+            let node_positions =
+                positions[node_index].expect("scheduled YMM aggregate node has lane positions");
+            let reused_child = lane_aggregate_xmm_reusable_child(&plan.nodes[node_index])
+                .filter(|child| remaining[*child] == 1);
+            let destination = reused_child
+                .and_then(|child| node_registers[child])
+                .unwrap_or_else(|| free.pop().expect("YMM aggregate internal pressure"));
+            emit_lane_aggregate_ymm_word_node(
+                asm,
+                plan,
+                node_index,
+                node_positions,
+                &node_registers,
+                destination,
+                &mut free,
+                input_stack_offsets,
+                scratch_gpr,
+            )?;
+            node_registers[node_index] = Some(destination);
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_none() {
+                    continue;
+                }
+                remaining[child] -= 1;
+                if remaining[child] == 0 {
+                    let register = node_registers[child]
+                        .take()
+                        .expect("YMM aggregate child must be live");
+                    if Some(child) != reused_child {
+                        free.push(register);
+                    } else {
+                        debug_assert_eq!(register, destination);
+                    }
+                }
+            }
+        }
+        let result = node_registers[root.recipe_root]
+            .expect("YMM aggregate root must have an internal register");
+        let zero = free.pop().expect("YMM aggregate predicate-pack scratch");
+        asm.vpxor(zero, zero, zero)?;
+        asm.vpsllw(result, result, 7)?;
+        asm.vpackuswb(result, result, zero)?;
+
+        asm.pmovmskb(preg_to_reg32(scratch_gpr), ymm_to_xmm(result))?;
+        asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
+        if lane_base != 0 {
+            asm.shl(preg_to_reg64(scratch_gpr), lane_base as u32)?;
+        }
+        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
+
+        asm.vextracti128(ymm_to_xmm(zero), result, 1)?;
+        asm.pmovmskb(preg_to_reg32(scratch_gpr), ymm_to_xmm(zero))?;
+        asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
+        asm.shl(
+            preg_to_reg64(scratch_gpr),
+            u32::try_from(lane_base + 8).expect("aggregate lane shift"),
+        )?;
+        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
+    }
+    asm.vzeroupper()?;
+    Ok(())
+}
+
+fn emit_lane_aggregate_xmm_word(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    output: PhysReg,
+) -> Result<(), IcedError> {
+    let root = &plan.roots[root_index];
+    let scratch_gpr = ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|register| *register != output && *register != PhysReg::RCX)
+        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
+    for lane_base in (0..root.lane_count).step_by(8) {
+        let lane_positions = (lane_base..lane_base + 8)
+            .map(|lane| {
+                aggregate_lane_positions(plan, root.recipe_root, lane).unwrap_or_else(|| {
+                    panic!("verified word lane mapping for root {root_index} lane {lane}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut positions = vec![None; plan.nodes.len()];
+        for node_index in 0..plan.nodes.len() {
+            let active_lanes = lane_positions
+                .iter()
+                .filter(|lane| lane[node_index].is_some())
+                .count();
+            positions[node_index] = match active_lanes {
+                0 => None,
+                8 => Some(std::array::from_fn(|lane| {
+                    lane_positions[lane][node_index]
+                        .expect("all word lanes have a position for an active node")
+                })),
+                _ => panic!("word aggregate group crosses a partial control merge"),
+            };
+        }
+        let active = positions.iter().map(Option::is_some).collect::<Vec<_>>();
+        let schedule = lane_aggregate_xmm_schedule(plan, &active, root.recipe_root);
+        let mut remaining = vec![0usize; plan.nodes.len()];
+        for &node_index in &schedule {
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_some() {
+                    remaining[child] += 1;
+                }
+            }
+        }
+        remaining[root.recipe_root] += 1;
+        let mut free = vec![xmm8, xmm7, xmm6, xmm5, xmm4, xmm3, xmm2, xmm1, xmm0];
+        let mut node_registers = vec![None; plan.nodes.len()];
+        for &node_index in &schedule {
+            let node_positions =
+                positions[node_index].expect("scheduled word aggregate node has lane positions");
+            let reused_child = lane_aggregate_xmm_reusable_child(&plan.nodes[node_index])
+                .filter(|child| remaining[*child] == 1);
+            let destination = reused_child
+                .and_then(|child| node_registers[child])
+                .unwrap_or_else(|| free.pop().expect("word aggregate internal XMM pressure"));
+            emit_lane_aggregate_xmm_word_node(
+                asm,
+                plan,
+                node_index,
+                node_positions,
+                &node_registers,
+                destination,
+                &mut free,
+                input_stack_offsets,
+                scratch_gpr,
+            )?;
+            node_registers[node_index] = Some(destination);
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_none() {
+                    continue;
+                }
+                remaining[child] -= 1;
+                if remaining[child] == 0 {
+                    let register = node_registers[child]
+                        .take()
+                        .expect("word aggregate child must be live");
+                    if Some(child) != reused_child {
+                        free.push(register);
+                    } else {
+                        debug_assert_eq!(register, destination);
+                    }
+                }
+            }
+        }
+        let result = node_registers[root.recipe_root]
+            .expect("word aggregate root must have an internal register");
+        let zero = free.pop().expect("word aggregate predicate-pack scratch");
+        asm.pxor(zero, zero)?;
+        asm.psllw(result, 7)?;
+        asm.packuswb(result, zero)?;
+        asm.pmovmskb(preg_to_reg32(scratch_gpr), result)?;
+        asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
+        if lane_base != 0 {
+            asm.shl(preg_to_reg64(scratch_gpr), lane_base as u32)?;
+        }
+        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
+    }
+    Ok(())
+}
+
+fn emit_lane_aggregate_xmm(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    output: PhysReg,
+) -> Result<(), IcedError> {
+    let root = &plan.roots[root_index];
+    let scratch_gpr = ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|register| *register != output && *register != PhysReg::RCX)
+        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
+    for lane_base in (0..root.lane_count).step_by(2) {
+        let low_positions = aggregate_lane_positions(plan, root.recipe_root, lane_base)
+            .unwrap_or_else(|| {
+                panic!("verified XMM lane mapping for root {root_index} lane {lane_base}")
+            });
+        let high_positions = aggregate_lane_positions(plan, root.recipe_root, lane_base + 1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "verified XMM lane mapping for root {root_index} lane {}",
+                    lane_base + 1
+                )
+            });
+        let mut positions = vec![None; plan.nodes.len()];
+        for index in 0..plan.nodes.len() {
+            positions[index] = match (low_positions[index], high_positions[index]) {
+                (Some(low), Some(high)) => Some((low, high)),
+                (None, None) => None,
+                _ => panic!("XMM aggregate pair crosses a partial control merge"),
+            };
+        }
+        let active = positions.iter().map(Option::is_some).collect::<Vec<_>>();
+        let schedule = lane_aggregate_xmm_schedule(plan, &active, root.recipe_root);
+        let mut remaining = vec![0usize; plan.nodes.len()];
+        for &node_index in &schedule {
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_some() {
+                    remaining[child] += 1;
+                }
+            }
+        }
+        remaining[root.recipe_root] += 1;
+        let mut free = vec![xmm8, xmm7, xmm6, xmm5, xmm4, xmm3, xmm2, xmm1, xmm0];
+        let mut node_registers = vec![None; plan.nodes.len()];
+        for &node_index in &schedule {
+            let (low, high) =
+                positions[node_index].expect("scheduled XMM aggregate node has lane positions");
+            let reused_child = lane_aggregate_xmm_reusable_child(&plan.nodes[node_index])
+                .filter(|child| remaining[*child] == 1);
+            let destination = reused_child
+                .and_then(|child| node_registers[child])
+                .unwrap_or_else(|| free.pop().expect("aggregate internal XMM pressure"));
+            emit_lane_aggregate_xmm_node(
+                asm,
+                plan,
+                node_index,
+                low,
+                high,
+                &node_registers,
+                destination,
+                &mut free,
+                input_stack_offsets,
+                scratch_gpr,
+            )?;
+            node_registers[node_index] = Some(destination);
+            for &child in &plan.nodes[node_index].children {
+                if positions[child].is_none() {
+                    continue;
+                }
+                remaining[child] -= 1;
+                if remaining[child] == 0 {
+                    let register = node_registers[child]
+                        .take()
+                        .expect("XMM aggregate child must be live");
+                    if Some(child) != reused_child {
+                        free.push(register);
+                    } else {
+                        debug_assert_eq!(register, destination);
+                    }
+                }
+            }
+        }
+        let result = node_registers[root.recipe_root]
+            .expect("XMM aggregate root must have an internal register");
+        asm.psllq(result, 63)?;
+        asm.movmskpd(preg_to_reg32(scratch_gpr), result)?;
+        if lane_base != 0 {
+            asm.shl(preg_to_reg64(scratch_gpr), lane_base as u32)?;
+        }
+        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
     }
     Ok(())
 }
@@ -3793,38 +5613,151 @@ fn emit_inst(
             }
         }
 
+        MInst::LaneAggregateInput {
+            base_offset,
+            srcs,
+            packed_word,
+        } => {
+            if *packed_word {
+                debug_assert!(srcs.len() <= 8);
+                asm.pxor(xmm0, xmm0)?;
+                for (lane, src) in srcs.iter().enumerate() {
+                    asm.pinsrw(xmm0, preg_to_reg32(resolve(assignment, *src)), lane as u32)?;
+                }
+                asm.movdqu(xmmword_ptr(aggregate_input_operand(*base_offset)), xmm0)?;
+            } else {
+                debug_assert!(srcs.len() <= 4);
+                if func.target_features.avx2() {
+                    asm.vpxor(ymm0, ymm0, ymm0)?;
+                    for (lane, src) in srcs.iter().take(2).enumerate() {
+                        asm.vpinsrq(
+                            xmm0,
+                            xmm0,
+                            preg_to_reg64(resolve(assignment, *src)),
+                            lane as u32,
+                        )?;
+                    }
+                    if srcs.len() > 2 {
+                        asm.vpxor(xmm1, xmm1, xmm1)?;
+                        for (lane, src) in srcs.iter().skip(2).enumerate() {
+                            asm.vpinsrq(
+                                xmm1,
+                                xmm1,
+                                preg_to_reg64(resolve(assignment, *src)),
+                                lane as u32,
+                            )?;
+                        }
+                        asm.vinserti128(ymm0, ymm0, xmm1, 1)?;
+                    }
+                    asm.vmovdqu(ymmword_ptr(aggregate_input_operand(*base_offset)), ymm0)?;
+                } else {
+                    for (lane, src) in srcs.iter().enumerate() {
+                        asm.mov(
+                            qword_ptr(aggregate_input_operand(
+                                base_offset
+                                    .checked_add(u32::try_from(lane * 8).unwrap())
+                                    .unwrap(),
+                            )),
+                            preg_to_reg64(resolve(assignment, *src)),
+                        )?;
+                    }
+                }
+            }
+        }
         MInst::LaneAggregate {
             dst,
             plan,
             root,
             inputs,
+            captured_inputs,
+            input_bytes: _,
+            input_base_offset,
             ..
         } => {
             let plan = func
                 .lane_aggregate_plan(*plan)
                 .expect("verified aggregate plan identity");
             let input_registers = plan
-                .scalar_inputs_for_root(usize::from(*root))
+                .scalar_input_layout_for_root(usize::from(*root))
                 .expect("verified sink-local aggregate inputs");
-            debug_assert_eq!(input_registers.len(), inputs.len());
+            let (input_layout, _) = input_registers;
+            debug_assert_eq!(
+                input_layout.len(),
+                inputs.len().max(usize::from(*captured_inputs))
+            );
+            let root_index = usize::from(*root);
+            let ymm_word_eligible =
+                func.target_features.avx2() && lane_aggregate_ymm_word_eligible(plan, root_index);
+            let ymm_qword_eligible =
+                func.target_features.avx2() && lane_aggregate_ymm_qword_eligible(plan, root_index);
+            let xmm_word_eligible = lane_aggregate_xmm_word_eligible(plan, root_index);
+            let xmm_eligible = lane_aggregate_xmm_eligible(plan, root_index);
             for (index, input) in inputs.iter().enumerate() {
-                asm.mov(
-                    qword_ptr(scratch_operand(index)),
-                    preg_to_reg64(resolve(assignment, *input)),
+                let byte_offset = input_base_offset
+                    .checked_add(input_layout[index].2)
+                    .expect("aggregate input offset");
+                if input_layout[index].1 <= 16 {
+                    asm.mov(
+                        word_ptr(aggregate_input_operand(byte_offset)),
+                        preg_to_reg16(resolve(assignment, *input)),
+                    )?;
+                } else {
+                    asm.mov(
+                        qword_ptr(aggregate_input_operand(byte_offset)),
+                        preg_to_reg64(resolve(assignment, *input)),
+                    )?;
+                }
+            }
+            let input_stack_offsets = input_layout
+                .into_iter()
+                .map(|(register, _, local_offset)| {
+                    let byte_offset = input_base_offset
+                        .checked_add(local_offset)
+                        .expect("aggregate input offset");
+                    (register, aggregate_input_stack_offset(byte_offset))
+                })
+                .collect::<HashMap<_, _>>();
+            if ymm_word_eligible {
+                emit_lane_aggregate_ymm_word(
+                    asm,
+                    plan,
+                    root_index,
+                    &input_stack_offsets,
+                    resolve(assignment, *dst),
+                )?;
+            } else if ymm_qword_eligible {
+                emit_lane_aggregate_ymm_qword(
+                    asm,
+                    plan,
+                    root_index,
+                    &input_stack_offsets,
+                    resolve(assignment, *dst),
+                )?;
+            } else if xmm_word_eligible {
+                emit_lane_aggregate_xmm_word(
+                    asm,
+                    plan,
+                    root_index,
+                    &input_stack_offsets,
+                    resolve(assignment, *dst),
+                )?;
+            } else if xmm_eligible {
+                emit_lane_aggregate_xmm(
+                    asm,
+                    plan,
+                    root_index,
+                    &input_stack_offsets,
+                    resolve(assignment, *dst),
+                )?;
+            } else {
+                emit_lane_aggregate_scalar(
+                    asm,
+                    plan,
+                    root_index,
+                    &input_stack_offsets,
+                    resolve(assignment, *dst),
                 )?;
             }
-            let input_stack_offsets = input_registers
-                .into_iter()
-                .enumerate()
-                .map(|(index, register)| (register, scratch_stack_offset(index)))
-                .collect::<HashMap<_, _>>();
-            emit_lane_aggregate_scalar(
-                asm,
-                plan,
-                usize::from(*root),
-                &input_stack_offsets,
-                resolve(assignment, *dst),
-            )?;
         }
 
         MInst::LoadPtrIndexed {
@@ -5129,6 +7062,24 @@ pub(crate) fn emit_chained_eu_refs(
                 start.elapsed()
             );
         }
+    } else if label == "eval_comb_apply_ff" {
+        let dse_start = timing.then(crate::timing::now);
+        let removed = crate::optimizer::coalescing::eliminate_shared_comb_state_stores(&mut sir_eu)
+            .map_err(|message| ChainedEmitError::Analysis {
+                phase: "shared comb/FF state-publication DSE",
+                message,
+            })?;
+        if removed != 0 {
+            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            verify_sir(&sir_eu, "after shared comb/FF state-publication DSE")?;
+        }
+        if let Some(start) = dse_start {
+            eprintln!(
+                "[native-timing] shared comb/FF state-publication DSE removed={} elapsed={:?}",
+                removed,
+                start.elapsed()
+            );
+        }
     }
     if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
         verify_sir(&sir_eu, "after native working StateSSA")?;
@@ -5146,8 +7097,7 @@ pub(crate) fn emit_chained_eu_refs(
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     let mut lane_aggregate_coverage = None;
     let mut lane_aggregate_codegen_plan = None;
-    let lane_aggregate_codegen =
-        std::env::var_os("CELOX_LANE_AGGREGATE_CODEGEN").is_some_and(|value| value != "0");
+    let lane_aggregate_codegen = super::lane_aggregate_codegen_enabled();
     let lane_aggregate_mode = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY");
     if lane_aggregate_mode.is_some() || lane_aggregate_codegen {
         let start = crate::timing::now();
@@ -5158,25 +7108,43 @@ pub(crate) fn emit_chained_eu_refs(
             phase: "lane aggregate feasibility",
             message,
         })?;
-        eprintln!(
-            "[lane-aggregate-feasibility] label={label} {report} elapsed={:?}",
-            start.elapsed()
-        );
-        if let Some(plan) = report.plan() {
+        if lane_aggregate_mode.is_some() {
             eprintln!(
-                "[lane-aggregate-plan] label={label} nodes={} roots={} dead_scalar_defs={}",
-                plan.nodes.len(),
-                plan.roots.len(),
-                plan.dead_scalar_registers.len(),
+                "[lane-aggregate-feasibility] label={label} {report} elapsed={:?}",
+                start.elapsed()
             );
+            if let Some(plan) = report.plan() {
+                eprintln!(
+                    "[lane-aggregate-plan] label={label} nodes={} roots={} dead_scalar_defs={}",
+                    plan.nodes.len(),
+                    plan.roots.len(),
+                    plan.dead_scalar_registers.len(),
+                );
+            }
         }
         if lane_aggregate_codegen {
-            lane_aggregate_codegen_plan = report.plan().cloned();
+            lane_aggregate_codegen_plan = report.codegen_plan().cloned();
+            if lane_aggregate_mode.is_some()
+                && let Some(plan) = lane_aggregate_codegen_plan.as_ref()
+            {
+                eprintln!(
+                    "[lane-aggregate-codegen-plan] label={label} nodes={} roots={} dead_scalar_defs={} sites={:?}",
+                    plan.nodes.len(),
+                    plan.roots.len(),
+                    plan.dead_scalar_registers.len(),
+                    plan.roots
+                        .iter()
+                        .map(|root| (root.block.0, root.original_root.0))
+                        .collect::<Vec<_>>(),
+                );
+            }
         }
-        lane_aggregate_coverage = Some((
-            report.dead_scalar_registers().len(),
-            report.replaced_scalar_registers().clone(),
-        ));
+        if lane_aggregate_mode.is_some() {
+            lane_aggregate_coverage = Some((
+                report.dead_scalar_registers().len(),
+                report.replaced_scalar_registers().clone(),
+            ));
+        }
         if lane_aggregate_mode
             .as_deref()
             .is_some_and(|mode| mode != "summary")
@@ -5185,6 +7153,13 @@ pub(crate) fn emit_chained_eu_refs(
                 eprintln!("[lane-aggregate-feasibility-detail] label={label} {detail}");
             }
         }
+    }
+    if let Some(plan) = lane_aggregate_codegen_plan.as_ref() {
+        crate::optimizer::coalescing::vectorize_around_lane_aggregate_plan(&mut sir_eu, plan)
+            .map_err(|error| ChainedEmitError::Sir {
+                phase: "after lane-aggregate selective vectorization",
+                error,
+            })?;
     }
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
@@ -5304,6 +7279,13 @@ pub(crate) fn emit_chained_eu_refs(
             phase: "after MIR optimization",
             error,
         })?;
+    super::mir_legalize::legalize_lane_aggregate_inputs(&mut mfunc, ALLOCATABLE_REGS.len());
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after lane aggregate operand legalization",
+            error,
+        })?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_before_regalloc = mfunc.to_string();
     }
@@ -5397,16 +7379,37 @@ pub(crate) fn emit_chained_eu_refs(
         );
     }
     let emit_start = timing.then(crate::timing::now);
-    let result = emit_with_plan(
-        &mfunc,
-        &ra.assignment,
-        ra.spill_frame_size,
-        layout
-            .merged_total_size
-            .checked_add(layout.triggered_bits_total_size)
-            .expect("native simulation-state size overflow"),
-        &ssa_destruction,
-    )?;
+    let state_size = layout
+        .merged_total_size
+        .checked_add(layout.triggered_bits_total_size)
+        .expect("native simulation-state size overflow");
+    let result = if label == "eval_comb_apply_ff" && super::native_tick_loop_enabled() {
+        let check_runtime_events = sir_eu.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    crate::ir::SIRInstruction::RuntimeEvent { .. }
+                        | crate::ir::SIRInstruction::CombCaptureEvent { .. }
+                )
+            })
+        });
+        emit_with_plan_tick_loop(
+            &mfunc,
+            &ra.assignment,
+            ra.spill_frame_size,
+            state_size,
+            &ssa_destruction,
+            check_runtime_events,
+        )?
+    } else {
+        emit_with_plan(
+            &mfunc,
+            &ra.assignment,
+            ra.spill_frame_size,
+            state_size,
+            &ssa_destruction,
+        )?
+    };
     if let Some(trace) = trace {
         trace.disassembly = disassemble_with_block_offsets(
             &result.code[..result.text_size],
@@ -5660,7 +7663,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     }
                 }
                 MInst::JumpTable { .. } => jump += 1,
-                MInst::LaneAggregate { .. } => memcopy += 1,
+                MInst::LaneAggregateInput { .. } | MInst::LaneAggregate { .. } => memcopy += 1,
                 MInst::Jump { .. } => jump += 1,
                 MInst::Return | MInst::ReturnError { .. } => ret += 1,
             }
@@ -6082,6 +8085,60 @@ mod shift_encoding_tests {
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
 
     #[test]
+    fn native_tick_loop_reenters_the_allocated_body_without_reentering_the_abi_boundary() {
+        let mut vregs = VRegAllocator::new();
+        let current = vregs.alloc();
+        let one = vregs.alloc();
+        let next = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: current,
+            base: BaseReg::SimState,
+            offset: 64,
+            size: OpSize::S64,
+        });
+        block.push(MInst::LoadImm { dst: one, value: 1 });
+        block.push(MInst::Add {
+            dst: next,
+            lhs: current,
+            rhs: one,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 64,
+            src: next,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        function.push_block(block);
+
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        let plan = SsaDestructionPlan::build(&function, &allocation.assignment).unwrap();
+        let emitted = emit_planned(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+            4096,
+            &plan,
+            true,
+            false,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut memory = vec![0u64; emitted.required_state_size as usize / 8 + 1];
+        let event_sequence = 0u64;
+        memory[STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET / 8] = (&event_sequence as *const u64) as u64;
+        memory[STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET / 8] = 5;
+
+        let result = unsafe { (jit.fn_ptr)(memory.as_mut_ptr().cast()) };
+
+        assert_eq!(result, 0);
+        assert_eq!(memory[64 / 8], 5);
+        assert_eq!(memory[STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET / 8], 0);
+    }
+
+    #[test]
     fn lane_aggregate_executes_a_verified_sink_local_recipe() {
         use crate::ir::{
             AbsoluteAddr, InstanceId, RegionedAbsoluteAddr, RegisterId, STABLE_REGION,
@@ -6163,6 +8220,9 @@ mod shift_encoding_tests {
             root: 0,
             source_block: crate::ir::BlockId(0),
             inputs: Vec::new(),
+            captured_inputs: 0,
+            input_bytes: 0,
+            input_base_offset: 0,
             read_ranges: vec![MemoryAliasRange::new(0, 8).unwrap()],
             write_ranges: vec![MemoryAliasRange::new(8, 8).unwrap()],
         });
@@ -6180,6 +8240,108 @@ mod shift_encoding_tests {
         }
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         assert_eq!(&state[8..], &[1, 0, 0, 1, 0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn lane_aggregate_xmm_returns_a_packed_predicate_mask() {
+        use crate::ir::{
+            AbsoluteAddr, InstanceId, RegionedAbsoluteAddr, RegisterId, STABLE_REGION,
+        };
+        use crate::lane_aggregate_plan::{
+            LaneAggregateMaterialization, LaneAggregatePlan, LaneAggregatePlanNode,
+            LaneAggregatePlanOp, LaneAggregatePlanRoot, LaneAggregateStateLoad,
+        };
+        use veryl_analyzer::ir::VarId;
+
+        let address = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: VarId::default(),
+            },
+        );
+        let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
+        let loads = (0..8)
+            .map(|lane| LaneAggregateStateLoad {
+                register: RegisterId(lane),
+                address,
+                bit_offset: lane,
+                width: 1,
+                physical_byte: lane,
+                physical_bit: 0,
+                native_byte_offset: lane as i32,
+                state_slot: lane,
+                state_version: 0,
+            })
+            .collect();
+        let plan = LaneAggregatePlan {
+            nodes: vec![
+                LaneAggregatePlanNode {
+                    operation: LaneAggregatePlanOp::StateRead(
+                        LaneAggregateMaterialization::ReloadAtSink(loads),
+                    ),
+                    children: Vec::new(),
+                    lanes: lanes.clone(),
+                    lane_width: 1,
+                    lane_count: 8,
+                },
+                LaneAggregatePlanNode {
+                    operation: LaneAggregatePlanOp::Unary(UnaryOp::BitNot),
+                    children: vec![0],
+                    lanes,
+                    lane_width: 1,
+                    lane_count: 8,
+                },
+            ],
+            roots: vec![LaneAggregatePlanRoot {
+                block: crate::ir::BlockId(0),
+                original_root: RegisterId(8),
+                recipe_root: 1,
+                publication_instruction_indices: Vec::new(),
+                publication_address: address,
+                publication_bit_offset: 0,
+                publication_locations: Vec::new(),
+                lane_count: 8,
+            }],
+            dead_scalar_registers: crate::HashSet::default(),
+        };
+        let mut vregs = VRegAllocator::new();
+        let destination = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let plan = function.add_lane_aggregate_plan(plan);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LaneAggregate {
+            dst: destination,
+            plan,
+            root: 0,
+            source_block: crate::ir::BlockId(0),
+            inputs: Vec::new(),
+            captured_inputs: 0,
+            input_bytes: 0,
+            input_base_offset: 0,
+            read_ranges: vec![MemoryAliasRange::new(0, 8).unwrap()],
+            write_ranges: Vec::new(),
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: destination,
+            size: OpSize::S8,
+        });
+        block.push(MInst::Return);
+        function.blocks.push(block);
+        function.verify();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(destination, PhysReg::RAX);
+        let emitted = emit(&function, &assignment, 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 9];
+        for (lane, value) in [0u8, 1, 1, 0, 1, 0, 0, 1].into_iter().enumerate() {
+            state[lane] = value;
+        }
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[8], 0b0110_1001);
     }
 
     #[test]
@@ -6260,6 +8422,9 @@ mod shift_encoding_tests {
             root: 0,
             source_block: crate::ir::BlockId(0),
             inputs: Vec::new(),
+            captured_inputs: 0,
+            input_bytes: 0,
+            input_base_offset: 0,
             read_ranges: vec![MemoryAliasRange::new(0, 1).unwrap()],
             write_ranges: vec![MemoryAliasRange::new(1, 1).unwrap()],
         });

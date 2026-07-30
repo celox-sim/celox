@@ -27,7 +27,9 @@ fn scalar_access_type(op_width: usize, max_bit_shift: usize) -> Type {
 
 fn max_bit_shift(offset: &SIROffset) -> usize {
     match offset {
-        SIROffset::Static(bit_offset) => bit_offset & 7,
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+            bit_offset & 7
+        }
         SIROffset::Dynamic(_) => 7,
         SIROffset::Element {
             element_width,
@@ -45,7 +47,10 @@ fn max_bit_shift(offset: &SIROffset) -> usize {
 
 fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value {
     match offset {
-        SIROffset::Static(value) => state.builder.ins().iconst(types::I64, *value as i64),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => state.builder.ins().iconst(types::I64, *value as i64),
         SIROffset::Dynamic(reg) => {
             let value = state.regs[reg].first_value(state.builder);
             cast_type(state.builder, value, types::I64)
@@ -1580,7 +1585,7 @@ impl SIRTranslator {
         };
 
         let old_val = match offset {
-            SIROffset::Static(v) => {
+            SIROffset::Static(v) | SIROffset::PackedElements { bit_offset: v, .. } => {
                 if *v == 0 {
                     state.builder.ins().band_imm(pre_loaded, mask as i64)
                 } else {

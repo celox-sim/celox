@@ -19,8 +19,35 @@ use crate::ir::*;
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
+use std::sync::Arc;
 
-pub(super) struct VectorizeConcatPass;
+#[derive(Default)]
+pub(super) struct VectorizeConcatPass {
+    unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>,
+    excluded_definitions: Arc<HashSet<RegisterId>>,
+    resume_after_lane_planning: bool,
+}
+
+impl VectorizeConcatPass {
+    pub(super) fn new(unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>) -> Self {
+        Self {
+            unpacked_element_widths,
+            excluded_definitions: Arc::default(),
+            resume_after_lane_planning: false,
+        }
+    }
+
+    pub(super) fn after_lane_planning(
+        unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>,
+        excluded_definitions: HashSet<RegisterId>,
+    ) -> Self {
+        Self {
+            unpacked_element_widths,
+            excluded_definitions: Arc::new(excluded_definitions),
+            resume_after_lane_planning: true,
+        }
+    }
+}
 
 impl ExecutionUnitPass for VectorizeConcatPass {
     fn name(&self) -> &'static str {
@@ -36,7 +63,25 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         }
 
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-        let mut any_changed = expose_packed_bit_store_sinks_with_counter(eu, &mut max_reg);
+        let mut any_changed = if self.resume_after_lane_planning {
+            false
+        } else {
+            expose_packed_bit_store_sinks_with_counter(eu, &mut max_reg)
+        };
+
+        // The lane-vector pipeline consumes the synchronous product before it
+        // is collapsed into ordinary packed bitvector operations.  Preserve
+        // that explicit publication shape until lane analysis has replaced it
+        // with typed lane operations.
+        let preserve_lane_publications = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY")
+            .is_some()
+            || crate::backend::native::lane_aggregate_codegen_enabled();
+        if preserve_lane_publications && !self.resume_after_lane_planning {
+            if any_changed {
+                remove_dead_definitions(eu);
+            }
+            return;
+        }
 
         // A load-based pack is materialized at the Concat, after the scalar
         // loads it replaces.  That is only the same memory version when this
@@ -66,7 +111,6 @@ impl ExecutionUnitPass for VectorizeConcatPass {
             .filter_map(def_reg)
             .collect::<HashSet<_>>();
         let mut claimed_lane_definitions = HashSet::default();
-
         // A recursive lane DAG is emitted bottom-up in one iteration, with one
         // Concat per distinct leaf key. The following iteration lowers those
         // leaves using the ordinary bit-extract rules. Thus iteration count is
@@ -99,6 +143,8 @@ impl ExecutionUnitPass for VectorizeConcatPass {
                     &register_use_counts,
                     &lane_definition_credits,
                     &mut claimed_lane_definitions,
+                    &self.unpacked_element_widths,
+                    &self.excluded_definitions,
                 ) {
                     any_changed = true;
                     iteration_changed = true;
@@ -560,6 +606,7 @@ enum Replacement {
         inst_idx: usize,
         dst: RegisterId,
         addr: RegionedAbsoluteAddr,
+        offset: SIROffset,
         mask: u64,
         width: usize,
     },
@@ -1671,6 +1718,8 @@ fn vectorize_concats(
     register_use_counts: &HashMap<RegisterId, usize>,
     lane_definition_credits: &HashSet<RegisterId>,
     claimed_lane_definitions: &mut HashSet<RegisterId>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
+    excluded_definitions: &HashSet<RegisterId>,
 ) -> bool {
     let defs = global_defs;
 
@@ -1686,6 +1735,10 @@ fn vectorize_concats(
             continue;
         };
         let key = args.clone();
+        if excluded_definitions.contains(dst) {
+            packed_vectors.insert(key, *dst);
+            continue;
+        }
 
         if let Some(&packed) = packed_vectors.get(&key) {
             replacements.push(Replacement::LaneDag {
@@ -1894,10 +1947,24 @@ fn vectorize_concats(
                     width: concat_width,
                 });
             } else if let Some(addr) = load_addr {
+                let offset = match unpacked_element_widths.get(&addr.absolute_addr()).copied() {
+                    Some(element_width) if concat_width > element_width => {
+                        if concat_width % element_width != 0 {
+                            packed_vectors.insert(key, *dst);
+                            continue;
+                        }
+                        SIROffset::PackedElements {
+                            bit_offset: 0,
+                            element_width,
+                        }
+                    }
+                    _ => SIROffset::Static(0),
+                };
                 replacements.push(Replacement::LoadAnd {
                     inst_idx: idx,
                     dst: *dst,
                     addr,
+                    offset,
                     mask,
                     width: concat_width,
                 });
@@ -1962,13 +2029,13 @@ fn vectorize_concats(
                 inst_idx,
                 dst,
                 addr,
+                offset,
                 mask,
                 width,
             } => {
                 if is_full_mask(mask, width) {
                     // All bits extracted → just a wide Load
-                    instructions[inst_idx] =
-                        SIRInstruction::Load(dst, addr, SIROffset::Static(0), width);
+                    instructions[inst_idx] = SIRInstruction::Load(dst, addr, offset, width);
                 } else {
                     let load_reg = alloc_unsigned_reg(next_reg, register_map, width);
                     let mask_reg = alloc_unsigned_reg(next_reg, register_map, width);
@@ -1978,7 +2045,7 @@ fn vectorize_concats(
                     };
                     instructions.insert(
                         inst_idx,
-                        SIRInstruction::Load(load_reg, addr, SIROffset::Static(0), width),
+                        SIRInstruction::Load(load_reg, addr, offset, width),
                     );
                     instructions.insert(inst_idx + 1, SIRInstruction::Imm(mask_reg, mask_value));
                     instructions[inst_idx + 2] =
@@ -2265,7 +2332,7 @@ mod tests {
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params =
             vec![RegisterId(0), RegisterId(1), RegisterId(2)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -2338,7 +2405,7 @@ mod tests {
         );
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
 
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
 
         eu.verify();
         assert_eq!(
@@ -2405,7 +2472,7 @@ mod tests {
         );
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
 
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
 
         eu.verify();
         assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
@@ -2469,7 +2536,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         assert!(block.instructions.iter().any(|inst| matches!(
@@ -2523,7 +2590,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         assert!(block.instructions.iter().any(|inst| matches!(
@@ -2588,7 +2655,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         assert!(block.instructions.iter().any(|inst| matches!(
@@ -2625,7 +2692,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -2695,7 +2762,7 @@ mod tests {
         ];
 
         let mut eu = make_eu(instructions, register_map);
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         let block = eu.blocks.get(&BlockId(0)).unwrap();
 
         let Some(SIRInstruction::Binary(RegisterId(11), lhs_vec, BinaryOp::And, rhs_vec)) =
@@ -2793,7 +2860,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = (0..SOURCES).map(RegisterId).collect();
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -2884,7 +2951,7 @@ mod tests {
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params =
             (0..1 + LANES * 2).map(RegisterId).collect();
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -2960,7 +3027,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -3017,7 +3084,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -3078,7 +3145,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -3150,7 +3217,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = vec![RegisterId(0)];
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -3205,7 +3272,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         eu.blocks.get_mut(&BlockId(0)).unwrap().params = (0..ROOTS).map(RegisterId).collect();
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
 
         let instructions = &eu.blocks[&BlockId(0)].instructions;
@@ -3303,13 +3370,79 @@ mod tests {
             register_map,
         );
 
-        VectorizeConcatPass.run(&mut eu, &PassOptions::default());
+        VectorizeConcatPass::default().run(&mut eu, &PassOptions::default());
         eu.verify();
         assert!(
             eu.blocks[&BlockId(0)]
                 .instructions
                 .iter()
                 .any(|inst| matches!(inst, SIRInstruction::Concat(RegisterId(3), _)))
+        );
+    }
+
+    #[test]
+    fn load_based_pack_marks_cross_element_access_explicitly() {
+        let addr = test_addr();
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        let mut args = Vec::new();
+        for bit in 0..8 {
+            let register = RegisterId(bit);
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Load(
+                register,
+                addr,
+                SIROffset::Static(bit),
+                1,
+            ));
+            args.push(register);
+        }
+        args.reverse();
+        register_map.insert(
+            RegisterId(8),
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(RegisterId(8), args));
+        instructions.push(SIRInstruction::RuntimeEvent {
+            site_id: 0,
+            args: vec![RegisterId(8)],
+        });
+        let mut eu = make_eu(instructions, register_map);
+        let element_widths = Arc::new(
+            [(addr.absolute_addr(), 1)]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        );
+
+        VectorizeConcatPass::new(element_widths).run(&mut eu, &PassOptions::default());
+
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Load(
+                            RegisterId(8),
+                            address,
+                            SIROffset::PackedElements {
+                                bit_offset: 0,
+                                element_width: 1,
+                            },
+                            8,
+                        ) if *address == addr
+                    )
+                })
         );
     }
 
@@ -3477,7 +3610,7 @@ mod tests {
         )];
 
         let mut eu = make_eu(instructions, register_map);
-        VectorizeConcatPass.run(
+        VectorizeConcatPass::default().run(
             &mut eu,
             &PassOptions {
                 four_state: true,

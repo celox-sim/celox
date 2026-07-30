@@ -411,7 +411,7 @@ fn replace_instruction_use(
 
 fn replace_offset_use(offset: &mut SIROffset, old: RegisterId, new: RegisterId) {
     match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => replace(register, old, new),
         SIROffset::Element {
             index,

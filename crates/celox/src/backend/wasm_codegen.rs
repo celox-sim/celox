@@ -3648,7 +3648,10 @@ fn compile_logical_bit_offset(
 ) -> u32 {
     let result = locals.alloc(1);
     match offset {
-        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => instrs.push(Instruction::I64Const(*value as i64)),
         SIROffset::Dynamic(reg) => {
             instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
         }
@@ -3694,7 +3697,11 @@ fn compile_load(
     let var_byte_size = get_byte_size(var_width);
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let load_offset = base_offset + byte_off;
@@ -4168,7 +4175,11 @@ fn compile_store(
     };
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let store_offset = base_offset + byte_off;
@@ -4300,7 +4311,11 @@ fn emit_load_store_value(
     instrs: &mut Vec<Instruction<'static>>,
 ) -> Option<()> {
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             if bit_shift != 0 && op_width > 64 {
@@ -4852,7 +4867,11 @@ fn compile_commit(
     let dst_base = compute_byte_offset(layout, &dst_abs, dst_addr.region);
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let copy_bytes = get_byte_size(op_width);

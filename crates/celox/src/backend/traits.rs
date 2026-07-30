@@ -123,6 +123,21 @@ pub trait SimBackend {
         self.eval_apply_ff_at(event)
     }
 
+    /// Execute up to `count` identical fused ticks. The returned count is the
+    /// number of iterations completed before a runtime event or error forced a
+    /// return to the host. Backends without an in-function loop execute one
+    /// iteration so the caller can preserve per-tick observation semantics.
+    fn eval_comb_apply_ff_many_at(
+        &mut self,
+        event: Self::Event,
+        count: u64,
+    ) -> (u64, Result<(), super::SimulatorErrorCode>) {
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        (1, self.eval_comb_apply_ff_at(event))
+    }
+
     /// Evaluate FF domain without applying (for cascaded clocks).
     fn eval_only_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
 

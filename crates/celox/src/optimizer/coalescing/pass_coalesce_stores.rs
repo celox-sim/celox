@@ -4,6 +4,7 @@ use crate::ir::*;
 use crate::optimizer::PassOptions;
 use std::sync::Arc;
 
+use super::block_opt::aggregate_static_offset;
 use super::pass_manager::ExecutionUnitPass;
 
 #[derive(Default)]
@@ -79,7 +80,9 @@ fn coalesce_block(
             // A Store with Dynamic offset could alias any static offset
             SIRInstruction::Store(
                 addr,
-                SIROffset::Dynamic(_) | SIROffset::Element { .. },
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::PackedElements { .. },
                 _,
                 _,
                 _,
@@ -117,25 +120,32 @@ fn coalesce_block(
         let mut run_start = 0;
         while run_start < group.len() {
             let mut run_end = run_start;
-            while run_end + 1 < group.len() {
-                let next = &group[run_end + 1];
-                let contiguous = next.offset == group[run_end].offset + group[run_end].width;
-                let stays_in_element =
-                    element_widths
-                        .get(&group[run_start].addr)
-                        .is_none_or(|element_width| {
-                            *element_width != 0
-                                && group[run_start].offset / element_width
-                                    == next
-                                        .offset
-                                        .checked_add(next.width.saturating_sub(1))
-                                        .map(|end| end / element_width)
-                                        .unwrap_or(usize::MAX)
-                        });
-                if !contiguous || !stays_in_element {
+            let mut scan_end = run_start;
+            let mut expected = group[run_start].offset + group[run_start].width;
+            while scan_end + 1 < group.len() {
+                let next = &group[scan_end + 1];
+                if next.offset != expected {
                     break;
                 }
-                run_end += 1;
+                scan_end += 1;
+                expected += next.width;
+                let aggregate_width = expected - group[run_start].offset;
+                if aggregate_static_offset(
+                    group[run_start].offset,
+                    aggregate_width,
+                    element_widths.get(&group[run_start].addr).copied(),
+                )
+                .is_some()
+                {
+                    run_end = scan_end;
+                } else if element_widths
+                    .get(&group[run_start].addr)
+                    .is_some_and(|element_width| {
+                        !group[run_start].offset.is_multiple_of(*element_width)
+                    })
+                {
+                    break;
+                }
             }
 
             let run_len = run_end - run_start + 1;
@@ -186,11 +196,19 @@ fn coalesce_block(
                     unreachable!()
                 };
 
+                let Some(offset) = aggregate_static_offset(
+                    merged_lsb,
+                    total_width,
+                    element_widths.get(&addr).copied(),
+                ) else {
+                    run_start = run_end + 1;
+                    continue;
+                };
                 let new_instructions = vec![
                     SIRInstruction::Concat(concat_reg, concat_args),
                     SIRInstruction::Store(
                         addr,
-                        SIROffset::Static(merged_lsb),
+                        offset,
                         total_width,
                         concat_reg,
                         Vec::new(),
@@ -621,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpacked_element_boundary_splits_contiguous_run() {
+    fn test_unpacked_cross_element_run_uses_packed_elements() {
         let addr = make_addr(0);
         let register_map = (0..4)
             .map(|index| {
@@ -657,12 +675,18 @@ mod tests {
             .instructions
             .iter()
             .filter_map(|instruction| match instruction {
-                SIRInstruction::Store(_, SIROffset::Static(offset), width, ..) => {
-                    Some((*offset, *width))
-                }
+                SIRInstruction::Store(
+                    _,
+                    SIROffset::PackedElements {
+                        bit_offset,
+                        element_width,
+                    },
+                    width,
+                    ..,
+                ) => Some((*bit_offset, *element_width, *width)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(stores, vec![(0, 12), (12, 12)]);
+        assert_eq!(stores, vec![(0, 12, 24)]);
     }
 }

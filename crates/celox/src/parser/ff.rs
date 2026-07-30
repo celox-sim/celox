@@ -216,10 +216,20 @@ impl Domain {
     }
 }
 
-#[derive(Default)]
-pub struct FfGroupParseResult {
-    pub targets: Vec<VarAtomBase<crate::ir::RegionedVarAddr>>,
+pub struct FfGroupParseResult<A = crate::ir::RegionedVarAddr> {
+    pub targets: Vec<VarAtomBase<A>>,
+    pub sources: Vec<VarAtomBase<A>>,
     pub dynamic_write_vars: HashSet<VarId>,
+}
+
+impl<A> Default for FfGroupParseResult<A> {
+    fn default() -> Self {
+        Self {
+            targets: Vec::new(),
+            sources: Vec::new(),
+            dynamic_write_vars: HashSet::default(),
+        }
+    }
 }
 
 pub struct FfParser<'a> {
@@ -228,6 +238,7 @@ pub struct FfParser<'a> {
     defined_ranges: HashMap<VarId, BitSet>,
     dynamic_defined_vars: HashSet<VarId>,
     dynamic_write_vars: HashSet<VarId>,
+    sparse_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
     local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<crate::ir::BlockId>,
@@ -236,6 +247,8 @@ pub struct FfParser<'a> {
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
+    runtime_error_code_map: Option<HashMap<i64, i64>>,
+    runtime_event_site_base: u32,
     config: BuildConfig,
 }
 
@@ -262,6 +275,7 @@ impl<'a> FfParser<'a> {
             defined_ranges: HashMap::default(),
             dynamic_defined_vars: HashSet::default(),
             dynamic_write_vars: HashSet::default(),
+            sparse_write_vars: HashSet::default(),
             local_working_vars,
             local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
@@ -270,8 +284,25 @@ impl<'a> FfParser<'a> {
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
+            runtime_error_code_map: None,
+            runtime_event_site_base: 0,
             config,
         }
+    }
+
+    pub(crate) fn with_relocated_runtime_ids(
+        mut self,
+        runtime_error_code_map: HashMap<i64, i64>,
+        runtime_event_site_base: u32,
+    ) -> Self {
+        self.runtime_error_code_map = Some(runtime_error_code_map);
+        self.runtime_event_site_base = runtime_event_site_base;
+        self
+    }
+
+    pub(crate) fn with_sparse_write_vars(mut self, sparse_write_vars: HashSet<VarId>) -> Self {
+        self.sparse_write_vars = sparse_write_vars;
+        self
     }
 
     pub fn runtime_errors(&self) -> &HashMap<i64, RuntimeErrorInfo<VarId>> {
@@ -283,8 +314,13 @@ impl<'a> FfParser<'a> {
     }
 
     fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
-        let code = self.next_runtime_error_code;
+        let local_code = self.next_runtime_error_code;
         self.next_runtime_error_code += 1;
+        let code = self
+            .runtime_error_code_map
+            .as_ref()
+            .and_then(|mapping| mapping.get(&local_code).copied())
+            .unwrap_or(local_code);
         self.runtime_errors.insert(
             code,
             RuntimeErrorInfo {
@@ -337,7 +373,10 @@ impl<'a> FfParser<'a> {
                 .map(|arg| arg.0.comptime().r#type.is_string())
                 .collect(),
         };
-        let id = self.runtime_event_sites.len() as u32;
+        let id = self
+            .runtime_event_site_base
+            .checked_add(self.runtime_event_sites.len() as u32)
+            .expect("runtime event site identifier overflow");
         self.runtime_event_sites.push(site);
         id
     }
@@ -2090,6 +2129,19 @@ impl<'a> FfParser<'a> {
         decls: &[&FfDeclaration],
         ir_builder: &mut SIRBuilder<crate::ir::RegionedVarAddr>,
     ) -> Result<FfGroupParseResult, ParserError> {
+        self.parse_ff_group_into(
+            decls,
+            &|var_id, region| crate::ir::RegionedVarAddr { var_id, region },
+            ir_builder,
+        )
+    }
+
+    pub(crate) fn parse_ff_group_into<A>(
+        &mut self,
+        decls: &[&FfDeclaration],
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<FfGroupParseResult<A>, ParserError> {
         if decls.is_empty() {
             return Ok(FfGroupParseResult::default());
         }
@@ -2123,7 +2175,7 @@ impl<'a> FfParser<'a> {
                 stmt,
                 &mut targets,
                 &Domain::Ff,
-                &|x, region| crate::ir::RegionedVarAddr { var_id: x, region },
+                convert,
                 &mut sources,
                 ir_builder,
             )?;
@@ -2135,7 +2187,7 @@ impl<'a> FfParser<'a> {
                 &all_false_sides,
                 &mut targets,
                 &Domain::Ff,
-                &|x, region| crate::ir::RegionedVarAddr { var_id: x, region },
+                convert,
                 &mut sources,
                 ir_builder,
             )?;
@@ -2143,6 +2195,7 @@ impl<'a> FfParser<'a> {
 
         Ok(FfGroupParseResult {
             targets,
+            sources,
             dynamic_write_vars: self.dynamic_write_vars.clone(),
         })
     }

@@ -22,8 +22,12 @@ pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const STATE_HEADER_SIZE: usize = 32;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
+/// Remaining iterations for an in-function native tick loop.
+pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
+pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
+/// Runtime-event write sequence observed when a native tick batch starts.
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
@@ -451,6 +455,16 @@ fn supports_strided_access(
                 .is_some_and(|end| *start / layout.element_width == end / layout.element_width);
             physically_contiguous || single_element || (whole_object_transfer && whole)
         }
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => {
+            *element_width == layout.element_width
+                && layout.element_stride * 8 == layout.element_width
+                && bit_offset
+                    .checked_add(width)
+                    .is_some_and(|end| end <= layout.element_width * layout.element_count)
+        }
         SIROffset::Dynamic(_) => false,
     }
 }
@@ -496,6 +510,7 @@ pub(crate) fn collect_strided_array_layouts(
         .eval_comb
         .iter()
         .chain(program.eval_apply_ffs.values().flatten())
+        .chain(program.eval_comb_apply_ffs.values().flatten())
         .chain(program.eval_only_ffs.values().flatten())
         .chain(program.apply_ffs.values().flatten())
     {
@@ -561,6 +576,7 @@ fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
         .eval_apply_ffs
         .values()
         .flat_map(|v| v.iter())
+        .chain(program.eval_comb_apply_ffs.values().flat_map(|v| v.iter()))
         .chain(program.eval_only_ffs.values().flat_map(|v| v.iter()))
         .chain(program.apply_ffs.values().flat_map(|v| v.iter()));
     for eu in ff_eus {
@@ -659,6 +675,41 @@ mod tests {
             &SIROffset::Static(51),
             whole_width - 51,
             true,
+        ));
+    }
+
+    #[test]
+    fn packed_elements_access_requires_physically_packed_storage() {
+        let padded = UnpackedArrayLayout {
+            element_width: 1,
+            element_count: 32,
+            element_stride: 1,
+            plane_size: 32,
+        };
+        let packed = UnpackedArrayLayout {
+            element_width: 8,
+            element_count: 4,
+            element_stride: 1,
+            plane_size: 4,
+        };
+
+        assert!(!supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            },
+            32,
+            false,
+        ));
+        assert!(supports_strided_access(
+            packed,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 8,
+            },
+            32,
+            false,
         ));
     }
 }

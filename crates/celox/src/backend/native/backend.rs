@@ -4,6 +4,7 @@
 //! ISel → MIR → regalloc → x86-64 emit instead of Cranelift.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bit_set::BitSet;
 use num_bigint::BigUint;
@@ -277,10 +278,16 @@ fn collect_comb_apply_compile_tasks<'a>(
 ) {
     const LABEL: &str = "eval_comb_apply_ff";
     for (addr, ff_units) in &sir.eval_apply_ffs {
-        let mut unit_refs = sir.eval_comb.iter().collect::<Vec<_>>();
-        let first_ff_unit =
-            (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
-        unit_refs.extend(ff_units);
+        let fused_units = sir.eval_comb_apply_ffs.get(addr);
+        let (unit_refs, first_ff_unit) = if let Some(fused_units) = fused_units {
+            (fused_units.iter().collect::<Vec<_>>(), None)
+        } else {
+            let mut unit_refs = sir.eval_comb.iter().collect::<Vec<_>>();
+            let first_ff_unit =
+                (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
+            unit_refs.extend(ff_units);
+            (unit_refs, first_ff_unit)
+        };
         let binding = format!("{LABEL} trigger={}", sir.get_path(addr));
         let index = if let Some(index) = tasks.iter().position(|task| {
             task.label == LABEL && task.first_ff_unit == first_ff_unit && task.units == unit_refs
@@ -488,33 +495,66 @@ fn compile_program(
     options: &SimulatorOptions,
     capture_trace: bool,
 ) -> Result<(SharedNativeCode, Option<NativeCodegenTrace>), SimulatorError> {
+    const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
+
     let layout = sir
         .layout
         .as_ref()
         .expect("layout must be built before backend");
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
-    // Large event projections have allocator working sets in the multi-GiB
-    // range. Compile one function at a time so peak memory is bounded by one
-    // projection rather than by the number of clocks/resets.
-    let comb_jit = compile_units(
-        &sir.eval_comb,
-        layout,
-        options.four_state,
-        "eval_comb",
-        capture_trace,
-    )?;
-    let mut compiled_ff_codes = HashMap::default();
-    for (task_id, task) in compile_tasks.iter().enumerate() {
-        let code = compile_unit_refs(
-            &task.units,
-            layout,
-            options.four_state,
-            task.label,
-            task.first_ff_unit,
-            capture_trace,
-        )?;
-        compiled_ff_codes.insert(task_id, code);
-    }
+    let next_task = AtomicUsize::new(0);
+    let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
+        let four_state = options.four_state;
+        let comb_handle = scope.spawn(move || {
+            compile_units(
+                &sir.eval_comb,
+                layout,
+                four_state,
+                "eval_comb",
+                capture_trace,
+            )
+        });
+        let task_worker_count = compile_tasks
+            .len()
+            .min(MAX_PARALLEL_NATIVE_FUNCTIONS.saturating_sub(1));
+        let task_handles = (0..task_worker_count)
+            .map(|_| {
+                let next_task = &next_task;
+                let compile_tasks = &compile_tasks;
+                scope.spawn(move || {
+                    let mut compiled = Vec::new();
+                    loop {
+                        let task_id = next_task.fetch_add(1, Ordering::Relaxed);
+                        let Some(task) = compile_tasks.get(task_id) else {
+                            break;
+                        };
+                        let code = compile_unit_refs(
+                            &task.units,
+                            layout,
+                            four_state,
+                            task.label,
+                            task.first_ff_unit,
+                            capture_trace,
+                        )?;
+                        compiled.push((task_id, code));
+                    }
+                    Ok::<_, SimulatorError>(compiled)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let comb_jit = comb_handle
+            .join()
+            .map_err(|_| codegen_err("native eval_comb compile thread panicked".into()))??;
+        let mut compiled_ff_codes = HashMap::default();
+        for handle in task_handles {
+            let compiled = handle
+                .join()
+                .map_err(|_| codegen_err("native FF compile thread panicked".into()))??;
+            compiled_ff_codes.extend(compiled);
+        }
+        Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
+    })?;
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
     let semantic_memory_size = layout
@@ -853,6 +893,29 @@ impl NativeBackend {
             _ => Err(SimulatorErrorCode::InternalError),
         }
     }
+
+    fn call_func_many(
+        memory: &mut [u64],
+        func: NativeSimFunc,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        use crate::backend::memory_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
+
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        let remaining_word = STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET / 8;
+        memory[remaining_word] = count;
+        let ptr = memory.as_mut_ptr() as *mut u8;
+        let ret = unsafe { func(ptr) };
+        let completed = count.saturating_sub(memory[remaining_word]);
+        let result = match ret {
+            0 => Ok(()),
+            code if code > 0 => Err(SimulatorErrorCode::DetectedTrueLoopCode(code)),
+            _ => Err(SimulatorErrorCode::InternalError),
+        };
+        (completed, result)
+    }
 }
 
 impl super::super::SimBackend for NativeBackend {
@@ -868,6 +931,20 @@ impl super::super::SimBackend for NativeBackend {
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         Self::call_func(&mut self.memory, event.comb_apply_func)
+    }
+
+    fn eval_comb_apply_ff_many_at(
+        &mut self,
+        event: NativeEventRef,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        if super::native_tick_loop_enabled() {
+            Self::call_func_many(&mut self.memory, event.comb_apply_func, count)
+        } else if count == 0 {
+            (0, Ok(()))
+        } else {
+            (1, Self::call_func(&mut self.memory, event.comb_apply_func))
+        }
     }
 
     fn eval_only_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {

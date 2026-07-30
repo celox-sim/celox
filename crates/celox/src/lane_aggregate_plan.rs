@@ -4,7 +4,7 @@
 //! operation contains enough information to emit code without inspecting the
 //! original SIR instruction shape.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::HashSet;
 use crate::ir::{BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, UnaryOp};
@@ -140,6 +140,81 @@ impl LaneAggregatePlan {
                 _ => {}
             }
         }
-        (inputs.len() <= 16).then(|| inputs.into_iter().collect())
+        Some(inputs.into_iter().collect())
+    }
+
+    pub(crate) fn scalar_input_widths_for_root(
+        &self,
+        root_index: usize,
+    ) -> Option<Vec<(RegisterId, usize)>> {
+        let root = self.roots.get(root_index)?;
+        let mut inputs = BTreeMap::<RegisterId, usize>::new();
+        let mut visited = HashSet::default();
+        let mut work = vec![root.recipe_root];
+        while let Some(index) = work.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            let node = self.nodes.get(index)?;
+            work.extend(node.children.iter().copied());
+            let mut record = |register: RegisterId| {
+                inputs
+                    .entry(register)
+                    .and_modify(|width| *width = (*width).max(node.lane_width))
+                    .or_insert(node.lane_width);
+            };
+            match &node.operation {
+                LaneAggregatePlanOp::BroadcastScalar(register) => record(*register),
+                LaneAggregatePlanOp::SsaPack { values, .. }
+                | LaneAggregatePlanOp::ScalarInsert { values, .. }
+                | LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::DominatingSsa {
+                    values,
+                    ..
+                }) => {
+                    for &register in values {
+                        record(register);
+                    }
+                }
+                LaneAggregatePlanOp::StateRead(
+                    LaneAggregateMaterialization::ReloadAtFrontier { .. },
+                ) => return None,
+                _ => {}
+            }
+        }
+        Some(inputs.into_iter().collect())
+    }
+
+    pub(crate) fn scalar_input_layout_for_root(
+        &self,
+        root_index: usize,
+    ) -> Option<(Vec<(RegisterId, usize, u32)>, u32)> {
+        let widths = self.scalar_input_widths_for_root(root_index)?;
+        let mut layout = Vec::with_capacity(widths.len());
+        let mut cursor = 0usize;
+        let mut input = 0usize;
+        while input < widths.len() {
+            let packed_word = widths[input].1 <= 16;
+            let capacity = if packed_word { 8 } else { 4 };
+            let stride = if packed_word { 2 } else { 8 };
+            let alignment = capacity * stride;
+            let mut end = input;
+            while end < widths.len()
+                && end - input < capacity
+                && (widths[end].1 <= 16) == packed_word
+            {
+                end += 1;
+            }
+            cursor = cursor.checked_add(alignment - 1)? & !(alignment - 1);
+            for (lane, &(register, width)) in widths[input..end].iter().enumerate() {
+                layout.push((
+                    register,
+                    width,
+                    u32::try_from(cursor.checked_add(lane.checked_mul(stride)?)?).ok()?,
+                ));
+            }
+            cursor = cursor.checked_add(alignment)?;
+            input = end;
+        }
+        Some((layout, u32::try_from(cursor).ok()?))
     }
 }

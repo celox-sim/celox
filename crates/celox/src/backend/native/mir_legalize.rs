@@ -7,6 +7,149 @@ pub fn legalize(func: &mut MFunction) {
     legalize_variable_shift_counts(func);
 }
 
+/// Expand an aggregate whose scalar frontier exceeds the target's simultaneous
+/// GPR operand capacity into ordered one-use captures.
+///
+/// The high-level aggregate keeps its complete variable-arity dependency list
+/// through MIR optimization. Only this final machine boundary turns those
+/// dependencies into their actual sequential uses, allowing ordinary
+/// liveness and spilling to expire each scalar after it is captured.
+pub(crate) fn legalize_lane_aggregate_inputs(
+    func: &mut MFunction,
+    simultaneous_gpr_capacity: usize,
+) {
+    let aggregate_roots = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match inst {
+            MInst::LaneAggregate { plan, root, .. } => Some((*plan, *root)),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let input_layouts = aggregate_roots
+        .into_iter()
+        .filter_map(|identity @ (plan_id, root)| {
+            func.lane_aggregate_plan(plan_id)?
+                .scalar_input_layout_for_root(usize::from(root))
+                .map(|layout| (identity, layout))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut next_input_byte = 0usize;
+    for block in &mut func.blocks {
+        let original = std::mem::take(&mut block.insts);
+        let definition_positions = original
+            .iter()
+            .enumerate()
+            .filter_map(|(index, inst)| inst.def().map(|vreg| (vreg, index)))
+            .collect::<HashMap<_, _>>();
+        let mut captures_before = vec![Vec::<MInst>::new(); original.len() + 1];
+        let mut transformed = Vec::with_capacity(original.len());
+        for (instruction_index, mut inst) in original.into_iter().enumerate() {
+            if let MInst::LaneAggregate {
+                plan,
+                root,
+                inputs,
+                captured_inputs,
+                input_bytes,
+                input_base_offset,
+                ..
+            } = &mut inst
+            {
+                let (layout, layout_bytes) = input_layouts
+                    .get(&(*plan, *root))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        (
+                            inputs
+                                .iter()
+                                .enumerate()
+                                .map(|(index, _)| {
+                                    (
+                                        crate::ir::RegisterId(index),
+                                        64,
+                                        u32::try_from(index * 8).expect("test input offset"),
+                                    )
+                                })
+                                .collect(),
+                            u32::try_from(inputs.len() * 8).expect("test input bytes"),
+                        )
+                    });
+                assert_eq!(
+                    inputs.len(),
+                    layout.len(),
+                    "aggregate input layout mismatch"
+                );
+                *input_bytes = layout_bytes;
+                next_input_byte = next_input_byte
+                    .checked_add(31)
+                    .expect("lane aggregate scratch offset overflow")
+                    & !31;
+                *input_base_offset = u32::try_from(next_input_byte)
+                    .expect("lane aggregate scratch offset exceeds u32");
+                let input_count = inputs.len();
+                next_input_byte = next_input_byte
+                    .checked_add(usize::try_from(layout_bytes).expect("aggregate input bytes"))
+                    .expect("lane aggregate scratch size overflow");
+
+                if input_count > simultaneous_gpr_capacity {
+                    let count = u16::try_from(input_count)
+                        .expect("lane aggregate scalar frontier exceeds u16 slots");
+                    let captured = std::mem::take(inputs);
+                    let mut group_start = 0usize;
+                    while group_start < captured.len() {
+                        let packed_word = layout[group_start].1 <= 16;
+                        let capacity = if packed_word { 8 } else { 4 };
+                        let stride = if packed_word { 2 } else { 8 };
+                        let base = layout[group_start].2;
+                        let mut group_end = group_start + 1;
+                        while group_end < captured.len()
+                            && group_end - group_start < capacity
+                            && (layout[group_end].1 <= 16) == packed_word
+                            && layout[group_end].2
+                                == base
+                                    + u32::try_from((group_end - group_start) * stride)
+                                        .expect("aggregate input offset")
+                        {
+                            group_end += 1;
+                        }
+                        let srcs = &captured[group_start..group_end];
+                        let placement = srcs
+                            .iter()
+                            .filter_map(|src| definition_positions.get(src).copied())
+                            .map(|definition| definition + 1)
+                            .max()
+                            .unwrap_or(0);
+                        assert!(
+                            placement <= instruction_index,
+                            "aggregate input is defined after its use"
+                        );
+                        captures_before[placement].push(MInst::LaneAggregateInput {
+                            base_offset: input_base_offset
+                                .checked_add(base)
+                                .expect("lane aggregate input offset"),
+                            srcs: Uses::from_slice(srcs),
+                            packed_word,
+                        });
+                        group_start = group_end;
+                    }
+                    *captured_inputs = count;
+                }
+            }
+            transformed.push(inst);
+        }
+        let capture_count = captures_before.iter().map(Vec::len).sum::<usize>();
+        let mut rewritten = Vec::with_capacity(transformed.len() + capture_count);
+        for (instruction_index, inst) in transformed.into_iter().enumerate() {
+            rewritten.append(&mut captures_before[instruction_index]);
+            rewritten.push(inst);
+        }
+        rewritten.append(captures_before.last_mut().unwrap());
+        block.insts = rewritten;
+    }
+}
+
 /// Make the MIR's non-wrapping shift-count semantics explicit before x86
 /// emission. x86 masks variable counts (modulo 64 for a 64-bit operand), while
 /// MIR defines logical shifts by counts >= 64 as zero and arithmetic shifts as
@@ -188,6 +331,59 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_lane_aggregate_frontier_becomes_bounded_vector_captures() {
+        let mut vregs = VRegAllocator::new();
+        let inputs = (0..17).map(|_| vregs.alloc()).collect::<Vec<_>>();
+        let dst = vregs.alloc();
+        let mut func = MFunction::new(
+            vregs,
+            vec![SpillDesc::transient(); inputs.len().checked_add(1).unwrap()],
+        );
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LaneAggregate {
+            dst,
+            plan: LaneAggregatePlanId(0),
+            root: 0,
+            source_block: crate::ir::BlockId(0),
+            inputs: inputs.clone(),
+            captured_inputs: 0,
+            input_bytes: 0,
+            input_base_offset: 0,
+            read_ranges: Vec::new(),
+            write_ranges: Vec::new(),
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        legalize_lane_aggregate_inputs(&mut func, 15);
+
+        assert_eq!(func.blocks[0].insts.len(), 7);
+        for (group, inst) in func.blocks[0].insts[..5].iter().enumerate() {
+            let start = group * 4;
+            let end = (start + 4).min(inputs.len());
+            assert!(matches!(
+                inst,
+                MInst::LaneAggregateInput {
+                    base_offset,
+                    srcs,
+                    packed_word: false,
+                } if usize::try_from(*base_offset).unwrap() == start * 8
+                    && srcs.as_slice() == &inputs[start..end]
+            ));
+            assert_eq!(inst.uses().as_slice(), &inputs[start..end]);
+        }
+        assert!(matches!(
+            &func.blocks[0].insts[5],
+            MInst::LaneAggregate {
+                inputs: actual,
+                captured_inputs: 17,
+                input_bytes: 136,
+                ..
+            } if actual.is_empty()
+        ));
+    }
 
     #[test]
     fn eliminates_single_source_phi() {

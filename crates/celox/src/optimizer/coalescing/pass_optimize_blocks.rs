@@ -11,9 +11,9 @@ pub(super) struct OptimizeBlocksPass {
     /// When true, skip the final `schedule_instructions` inside `optimize_block`
     /// because a `ReschedulePass` will run afterward in the same pipeline.
     pub skip_final_schedule: bool,
-    /// Element widths for arrays whose element boundaries must survive until
-    /// backend layout selection. Coalescing within one element remains legal;
-    /// only cross-element packed accesses are forbidden.
+    /// Semantic unpacked-array element widths. Coalescing within one element
+    /// remains legal; a cross-element transfer requires an explicit aggregate
+    /// memory operation rather than an ordinary Static access.
     pub element_widths: Arc<HashMap<RegionedAbsoluteAddr, usize>>,
 }
 

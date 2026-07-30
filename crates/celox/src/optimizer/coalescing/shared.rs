@@ -401,7 +401,7 @@ pub(super) fn replace_offset_registers(
     map: &HashMap<RegisterId, RegisterId>,
 ) {
     match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => {
             if let Some(&replacement) = map.get(register) {
                 *register = replacement;

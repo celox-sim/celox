@@ -182,6 +182,7 @@ struct Publication {
     first_bit_offset: usize,
     lane_count: usize,
     instruction_indices: Vec<usize>,
+    preserve_packed_store: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -244,6 +245,7 @@ pub(crate) struct LaneAggregateFeasibilityReport {
     kind_counts: HashMap<RecipeKind, usize>,
     reject_counts: HashMap<RejectReason, usize>,
     plan: Option<LaneAggregatePlan>,
+    codegen_plan: Option<LaneAggregatePlan>,
 }
 
 impl LaneAggregateFeasibilityReport {
@@ -257,6 +259,10 @@ impl LaneAggregateFeasibilityReport {
 
     pub(crate) fn plan(&self) -> Option<&LaneAggregatePlan> {
         self.plan.as_ref()
+    }
+
+    pub(crate) fn codegen_plan(&self) -> Option<&LaneAggregatePlan> {
+        self.codegen_plan.as_ref()
     }
 
     pub(crate) fn detail_lines(&self) -> Vec<String> {
@@ -1435,6 +1441,32 @@ fn complete_publication_root(
     lane_count: usize,
 ) -> Option<Publication> {
     let instructions = &eu.blocks[&block].instructions;
+    if let Some(SIRInstruction::Store(address, offset, width, stored, triggers, captures)) =
+        instructions.get(index + 1)
+        && *stored == root
+        && *width == lane_count
+        && triggers.is_empty()
+        && captures.is_empty()
+    {
+        let first_bit_offset = match offset {
+            SIROffset::Static(bit_offset) => *bit_offset,
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width: 1,
+            } => *bit_offset,
+            _ => return None,
+        };
+        return Some(Publication {
+            address: *address,
+            first_bit_offset,
+            lane_count,
+            // The packed Store remains in SIR and consumes the aggregate
+            // result.  Unlike the legacy Slice/Store scatter, it must not be
+            // skipped or re-emitted one lane at a time.
+            instruction_indices: Vec::new(),
+            preserve_packed_store: true,
+        });
+    }
     if index + lane_count * 2 >= instructions.len() {
         return None;
     }
@@ -1478,6 +1510,7 @@ fn complete_publication_root(
         first_bit_offset: first_offset?,
         lane_count,
         instruction_indices,
+        preserve_packed_store: false,
     })
 }
 
@@ -1743,23 +1776,27 @@ fn executable_plan(
         .iter()
         .map(
             |(block, original_root, recipe_root, publication)| -> Result<_, String> {
-                let publication_locations = (0..publication.lane_count)
-                    .map(|lane| {
-                        let bit_offset = publication.first_bit_offset.checked_add(lane)?;
-                        let (native_byte_offset, bit) = layout
-                            .regioned_static_byte_and_intra(&publication.address, bit_offset)?;
-                        Some(LaneAggregateBitLocation {
-                            native_byte_offset,
-                            bit: u8::try_from(bit).ok()?,
+                let publication_locations = if publication.preserve_packed_store {
+                    Vec::new()
+                } else {
+                    (0..publication.lane_count)
+                        .map(|lane| {
+                            let bit_offset = publication.first_bit_offset.checked_add(lane)?;
+                            let (native_byte_offset, bit) = layout
+                                .regioned_static_byte_and_intra(&publication.address, bit_offset)?;
+                            Some(LaneAggregateBitLocation {
+                                native_byte_offset,
+                                bit: u8::try_from(bit).ok()?,
+                            })
                         })
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| {
-                        format!(
-                            "publication for r{} does not fit the native memory layout",
-                            original_root.0
-                        )
-                    })?;
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| {
+                            format!(
+                                "publication for r{} does not fit the native memory layout",
+                                original_root.0
+                            )
+                        })?
+                };
                 Ok(LaneAggregatePlanRoot {
                     block: *block,
                     original_root: *original_root,
@@ -1968,9 +2005,12 @@ fn verify_executable_plan(plan: &LaneAggregatePlan) -> Result<(), String> {
             root.publication_address,
             root.publication_bit_offset,
         );
+        let scattered_publication = root.publication_locations.len() == root.lane_count
+            && root.publication_instruction_indices.len() == root.lane_count * 2;
+        let preserved_packed_publication = root.publication_locations.is_empty()
+            && root.publication_instruction_indices.is_empty();
         if root.lane_count == 0
-            || root.publication_locations.len() != root.lane_count
-            || root.publication_instruction_indices.len() != root.lane_count * 2
+            || !(scattered_publication || preserved_packed_publication)
             || !root
                 .publication_instruction_indices
                 .windows(2)
@@ -2125,6 +2165,86 @@ fn shared_recipe_pressure(
     Some((common.len(), boundary.len(), prefix_peak, suffix_peak))
 }
 
+fn candidate_has_xmm_recipe(candidate: &Candidate) -> bool {
+    candidate.lane_count >= 2
+        && candidate.lane_count.is_multiple_of(2)
+        && candidate.publication.preserve_packed_store
+        && candidate.covered_registers.len() > candidate.estimated_instructions
+        && candidate.nodes.iter().all(|node| {
+            node.lane_width != 0
+                && node.lane_width <= 64
+                && match &node.operation {
+                    RecipeOp::StateRead(StateReadSource::ReloadAtSink { loads }) => loads
+                        .iter()
+                        .all(|load| load.physical_bit + load.width <= 64),
+                    RecipeOp::Constant { values } => values.len() == node.lanes.len(),
+                    RecipeOp::BroadcastScalar { .. } | RecipeOp::SsaPack { .. } => true,
+                    RecipeOp::Unary(operation) => matches!(
+                        operation,
+                        UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
+                    ),
+                    RecipeOp::Binary(operation) => matches!(
+                        operation,
+                        BinaryOp::And
+                            | BinaryOp::Or
+                            | BinaryOp::Xor
+                            | BinaryOp::LogicAnd
+                            | BinaryOp::LogicOr
+                            | BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Eq
+                            | BinaryOp::Ne
+                    ),
+                    RecipeOp::ShiftConstant { operation, amount } => {
+                        matches!(operation, BinaryOp::Shl | BinaryOp::Shr) && *amount < 64
+                    }
+                    RecipeOp::Mux => node.children.len() == 3,
+                    RecipeOp::StateRead(_)
+                    | RecipeOp::Affine { .. }
+                    | RecipeOp::PackedExtract { .. }
+                    | RecipeOp::ScalarInsert { .. }
+                    | RecipeOp::OneHotDecode { .. }
+                    | RecipeOp::ControlMux
+                    | RecipeOp::Slice { .. }
+                    | RecipeOp::Concat { .. } => false,
+                }
+        })
+}
+
+fn candidate_coverage(candidates: &[Candidate]) -> (HashSet<RegisterId>, HashSet<RegisterId>) {
+    let covered = candidates
+        .iter()
+        .flat_map(|candidate| candidate.covered_registers.iter().copied())
+        .collect::<HashSet<_>>();
+    let consumers = candidates
+        .iter()
+        .flat_map(|candidate| candidate.covered_consumers.iter().copied())
+        .collect::<HashSet<_>>();
+    (covered, consumers)
+}
+
+fn dead_candidate_registers(
+    candidates: &[Candidate],
+    placement: &PlacementAnalysis,
+    instruction_definitions: &HashMap<(BlockId, usize), RegisterId>,
+) -> HashSet<RegisterId> {
+    let (covered, consumers) = candidate_coverage(candidates);
+    covered
+        .iter()
+        .filter(|register| {
+            placement
+                .value_for_register(**register)
+                .and_then(|value| placement.value(value))
+                .is_some_and(|value| {
+                    value.uses.iter().all(|use_site| {
+                        use_is_covered(*use_site, &consumers, instruction_definitions)
+                    })
+                })
+        })
+        .copied()
+        .collect()
+}
+
 pub(crate) fn analyze(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -2187,11 +2307,13 @@ pub(crate) fn analyze(
                         .collect::<HashSet<_>>();
                     let mut covered_consumers = covered_registers.clone();
                     covered_consumers.insert(*root);
-                    for lane in 0..lane_count {
-                        if let SIRInstruction::Slice(slice, ..) =
-                            block.instructions[index + 1 + lane * 2]
-                        {
-                            covered_consumers.insert(slice);
+                    if publication.instruction_indices.len() == lane_count * 2 {
+                        for lane in 0..lane_count {
+                            if let SIRInstruction::Slice(slice, ..) =
+                                block.instructions[index + 1 + lane * 2]
+                            {
+                                covered_consumers.insert(slice);
+                            }
                         }
                     }
                     let estimated_instructions = analyzer
@@ -2397,6 +2519,21 @@ pub(crate) fn analyze(
         let plan = executable_plan(&shared_plan, report.dead_scalar_registers.clone(), layout)?;
         verify_executable_plan(&plan)?;
         report.plan = Some(plan);
+    }
+    let codegen_candidates = report
+        .accepted
+        .iter()
+        .filter(|candidate| candidate_has_xmm_recipe(candidate))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !codegen_candidates.is_empty() {
+        let dead_scalar_registers =
+            dead_candidate_registers(&codegen_candidates, &placement, &instruction_definitions);
+        let shared_codegen_plan = build_shared_recipe_plan(&codegen_candidates)
+            .ok_or("invalid XMM codegen recipe plan")?;
+        let plan = executable_plan(&shared_codegen_plan, dead_scalar_registers, layout)?;
+        verify_executable_plan(&plan)?;
+        report.codegen_plan = Some(plan);
     }
     Ok(report)
 }
@@ -2885,6 +3022,7 @@ mod tests {
                 first_bit_offset: 0,
                 lane_count: 8,
                 instruction_indices: (1..=16).collect(),
+                preserve_packed_store: false,
             },
         };
         let mut distinct = nodes.clone();

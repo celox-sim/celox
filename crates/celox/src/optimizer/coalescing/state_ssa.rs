@@ -262,7 +262,7 @@ fn overlapping_slots(
         return Vec::new();
     };
     match offset {
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let access = StateLocation {
                 addr,
                 bit_offset: *bit_offset,
@@ -554,7 +554,8 @@ impl StateSsa {
                         if addr.region == region =>
                     {
                         let exact = match offset {
-                            SIROffset::Static(bit_offset) => raw_index
+                            SIROffset::Static(bit_offset)
+                            | SIROffset::PackedElements { bit_offset, .. } => raw_index
                                 .get(&StateLocation {
                                     addr: *addr,
                                     bit_offset: *bit_offset,
@@ -595,7 +596,8 @@ impl StateSsa {
                         if addr.region == region =>
                     {
                         let exact = match offset {
-                            SIROffset::Static(bit_offset) => raw_index
+                            SIROffset::Static(bit_offset)
+                            | SIROffset::PackedElements { bit_offset, .. } => raw_index
                                 .get(&StateLocation {
                                     addr: *addr,
                                     bit_offset: *bit_offset,
@@ -635,7 +637,8 @@ impl StateSsa {
                     SIRInstruction::Commit(source, destination, offset, width, _) => {
                         if source.region == region {
                             let exact = match offset {
-                                SIROffset::Static(bit_offset) => raw_index
+                                SIROffset::Static(bit_offset)
+                                | SIROffset::PackedElements { bit_offset, .. } => raw_index
                                     .get(&StateLocation {
                                         addr: *source,
                                         bit_offset: *bit_offset,

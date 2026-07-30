@@ -56,7 +56,28 @@ pub(super) fn eliminate(
             provenance.unit_entries.len()
         ));
     }
+    eliminate_candidates(eu, |block| {
+        provenance
+            .block_units
+            .get(&block)
+            .is_some_and(|unit| *unit < first_ff_unit)
+    })
+}
 
+/// Shared comb/FF lowering emits FF updates only to WORKING or
+/// SPARSE_WORKING. Therefore every ordinary STABLE Store in this EU is a comb
+/// publication and can use the same StateSSA liveness test without an
+/// artificial source-EU boundary.
+pub(super) fn eliminate_shared(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<usize, String> {
+    eliminate_candidates(eu, |_| true)
+}
+
+fn eliminate_candidates(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    is_comb_block: impl Fn(BlockId) -> bool,
+) -> Result<usize, String> {
     let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
     let state =
         StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| error.to_string())?;
@@ -140,10 +161,7 @@ pub(super) fn eliminate(
 
     let mut remove = HashSet::default();
     for (&block_id, block) in &eu.blocks {
-        let Some(&unit) = provenance.block_units.get(&block_id) else {
-            continue;
-        };
-        if unit >= first_ff_unit {
+        if !is_comb_block(block_id) {
             continue;
         }
         for (instruction, operation) in block.instructions.iter().enumerate() {
@@ -275,5 +293,23 @@ mod tests {
             fused.blocks[&ff_entry].instructions.as_slice(),
             [SIRInstruction::Load(_, _, _, 8)]
         ));
+    }
+
+    #[test]
+    fn shared_eu_needs_no_artificial_comb_ff_boundary() {
+        let mut fused = unit(vec![
+            store(0, 0),
+            store(1, 1),
+            SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
+        ]);
+
+        assert_eq!(eliminate_shared(&mut fused).unwrap(), 1);
+        assert_eq!(
+            fused.blocks[&BlockId(0)].instructions,
+            vec![
+                store(1, 1),
+                SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
+            ],
+        );
     }
 }

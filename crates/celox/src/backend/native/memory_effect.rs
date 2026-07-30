@@ -470,6 +470,9 @@ mod tests {
             root: 0,
             source_block: crate::ir::BlockId(0),
             inputs: Vec::new(),
+            captured_inputs: 0,
+            input_bytes: 0,
+            input_base_offset: 0,
             read_ranges: read_ranges.clone(),
             write_ranges,
         };

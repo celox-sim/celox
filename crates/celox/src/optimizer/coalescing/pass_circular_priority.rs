@@ -33,7 +33,10 @@ impl Definition {
 enum PackedNode {
     Zero,
     Ones,
-    Load(RegionedAbsoluteAddr),
+    Load {
+        address: RegionedAbsoluteAddr,
+        unpacked_element_width: Option<usize>,
+    },
     Broadcast(RegisterId),
     /// Lanes whose zero-based index is smaller than the scalar bound.
     Prefix(RegisterId),
@@ -2336,7 +2339,16 @@ fn build_packed_expression(
                 {
                     values.insert(
                         register,
-                        intern_node(&mut nodes, &mut interned, PackedNode::Load(*address)),
+                        intern_node(
+                            &mut nodes,
+                            &mut interned,
+                            PackedNode::Load {
+                                address: *address,
+                                unpacked_element_width: array_shapes
+                                    .get(&address.absolute_addr())
+                                    .map(|shape| shape.element_width),
+                            },
+                        ),
                     );
                 }
                 SIRInstruction::Unary(
@@ -2460,7 +2472,7 @@ fn build_packed_expression(
     let root = *values.get(&root)?;
     let dynamic_loads = nodes
         .iter()
-        .filter(|node| matches!(node, PackedNode::Load(_) | PackedNode::LaneEq { .. }))
+        .filter(|node| matches!(node, PackedNode::Load { .. } | PackedNode::LaneEq { .. }))
         .count();
     let value_ops = nodes
         .iter()
@@ -2946,13 +2958,21 @@ impl ExpressionEmitter<'_> {
             let value = match *node {
                 PackedNode::Zero => EmittedValue::Constant(false),
                 PackedNode::Ones => EmittedValue::Constant(true),
-                PackedNode::Load(address) => {
+                PackedNode::Load {
+                    address,
+                    unpacked_element_width,
+                } => {
                     let register =
                         fresh_register(self.eu, self.next_register, unsigned_type(self.width));
                     self.instructions.push(SIRInstruction::Load(
                         register,
                         address,
-                        SIROffset::Static(0),
+                        unpacked_element_width.map_or(SIROffset::Static(0), |element_width| {
+                            SIROffset::PackedElements {
+                                bit_offset: 0,
+                                element_width,
+                            }
+                        }),
                         self.width,
                     ));
                     EmittedValue::Register(register)
@@ -3248,7 +3268,7 @@ fn replace_sparse_loop_use(
         }
     };
     let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(value) => replace(value),
         SIROffset::Element {
             index,
@@ -4202,7 +4222,10 @@ mod tests {
                     }
                     SIRInstruction::Load(destination, address, offset, width) => {
                         let offset = match offset {
-                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Static(offset)
+                            | SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            } => *offset,
                             SIROffset::Dynamic(index) => registers[index] as usize,
                             SIROffset::Element {
                                 index,

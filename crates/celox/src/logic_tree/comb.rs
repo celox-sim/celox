@@ -34,7 +34,10 @@ use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
-use effect::{CombEffectCollector, collect_comb_effects_statements, subtract_written_sensitivity};
+use effect::{
+    CombEffectCollector, collect_comb_effects_statements, statements_contain_runtime_effect,
+    subtract_written_sensitivity,
+};
 pub(crate) use expr::coerce_node_width;
 use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
@@ -110,7 +113,8 @@ pub(crate) fn parse_comb_with_loop_recovery(
         .collect();
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
-    let effect_initial_store = current_store.clone();
+    let effect_initial_store =
+        statements_contain_runtime_effect(module, &decl.statements).then(|| current_store.clone());
     let (final_store, boundaries) = recover_unrolled::eval_statements(
         module,
         current_store,
@@ -121,13 +125,15 @@ pub(crate) fn parse_comb_with_loop_recovery(
         None,
     )?;
     let mut effects = CombEffectCollector::default();
-    collect_comb_effects_statements(
-        module,
-        effect_initial_store,
-        &decl.statements,
-        arena,
-        &mut effects,
-    )?;
+    if let Some(effect_initial_store) = effect_initial_store {
+        collect_comb_effects_statements(
+            module,
+            effect_initial_store,
+            &decl.statements,
+            arena,
+            &mut effects,
+        )?;
+    }
 
     // 3. Path Extraction: Convert the final symbolic store into a list of LogicPaths.
     // Each LogicPath represents a modified bit-range and the logic required to compute it.

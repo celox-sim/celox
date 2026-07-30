@@ -645,6 +645,12 @@ fn ff_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
         .flat_map(|units| units.iter())
         .chain(
             program
+                .eval_comb_apply_ffs
+                .values()
+                .flat_map(|units| units.iter()),
+        )
+        .chain(
+            program
                 .eval_only_ffs
                 .values()
                 .flat_map(|units| units.iter()),

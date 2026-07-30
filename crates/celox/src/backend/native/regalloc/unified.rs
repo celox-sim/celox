@@ -373,6 +373,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::Mov32 { .. } => "mov.w32",
         MInst::LoadImm { .. } => "imm",
         MInst::Scratch { .. } => "scratch",
+        MInst::LaneAggregateInput { .. } => "lane_aggregate_input",
         MInst::LaneAggregate { .. } => "lane_aggregate",
         MInst::LoadConstantTableAddr { .. } => "constant_table_addr",
         MInst::Load { .. } => "load",

@@ -29,6 +29,12 @@ pub(crate) fn eliminate_dead_stores(
         )
         .chain(
             program
+                .eval_comb_apply_ffs
+                .values()
+                .flat_map(|units| units.iter()),
+        )
+        .chain(
+            program
                 .eval_only_ffs
                 .values()
                 .flat_map(|units| units.iter()),

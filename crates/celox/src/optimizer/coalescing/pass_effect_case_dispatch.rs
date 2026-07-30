@@ -287,6 +287,13 @@ fn remap_instruction(
                     None => None,
                 },
             },
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width,
+            } => SIROffset::PackedElements {
+                bit_offset: *bit_offset,
+                element_width: *element_width,
+            },
         })
     };
     Some(match instruction {

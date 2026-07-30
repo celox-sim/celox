@@ -4,7 +4,8 @@ use crate::context_width::{
 };
 use crate::ir::{
     BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
+    SIRTerminator, SIRValue, SPARSE_WORKING_REGION, STABLE_REGION, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use crate::parser::{
     LoweringPhase, ParserError,
@@ -793,7 +794,10 @@ impl<'a> FfParser<'a> {
                 match self
                     .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
                 {
-                    SIROffset::Static(lsb) => self.emit_register_slice(
+                    SIROffset::Static(lsb)
+                    | SIROffset::PackedElements {
+                        bit_offset: lsb, ..
+                    } => self.emit_register_slice(
                         value,
                         BitAccess::new(lsb, lsb + width - 1),
                         ir_builder,
@@ -918,8 +922,16 @@ impl<'a> FfParser<'a> {
             sources,
             ir_builder,
         )?;
+        let is_static = is_static_access(&dst.index, &dst.select);
+        let store_region = if matches!(domain, Domain::Ff)
+            && (!is_static || self.sparse_write_vars.contains(&dst.id))
+        {
+            SPARSE_WORKING_REGION
+        } else {
+            domain.region()
+        };
         ir_builder.emit(SIRInstruction::Store(
-            convert(dst.id, domain.region()),
+            convert(dst.id, store_region),
             offset,
             target_width,
             src_reg,
@@ -929,7 +941,6 @@ impl<'a> FfParser<'a> {
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
         let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-        let is_static = is_static_access(&dst.index, &dst.select);
         if is_static {
             let bits = self.defined_ranges.entry(dst.id).or_default();
             for i in access.lsb..=access.msb {

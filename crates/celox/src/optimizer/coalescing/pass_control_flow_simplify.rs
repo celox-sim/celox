@@ -1469,7 +1469,7 @@ fn replace_register_uses_in_instruction(
         }
     };
     let replace_offset = |offset: &mut SIROffset| match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => replace(register),
         SIROffset::Element {
             index,

@@ -1171,6 +1171,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::AndStoreImm { .. }
         | MInst::OrStoreImm { .. }
         | MInst::MemCopy { .. }
+        | MInst::LaneAggregateInput { .. }
         | MInst::LaneAggregate { .. }
         | MInst::SparseCommit { .. }
         | MInst::SparseCommitWorklist { .. }

@@ -1717,7 +1717,10 @@ mod tests {
                     SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
                         assert!(triggers.is_empty() && captures.is_empty());
                         let offset = match offset {
-                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Static(offset)
+                            | SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            } => *offset,
                             SIROffset::Dynamic(offset) => registers[offset].to_usize().unwrap(),
                             SIROffset::Element {
                                 index,

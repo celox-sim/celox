@@ -600,6 +600,37 @@ fn verify_offset<A>(
 ) -> Result<(), SirVerifyError> {
     match offset {
         SIROffset::Static(_) => {}
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => {
+            if *element_width == 0 {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_WIDTH_NON_ZERO",
+                    block,
+                    index,
+                    "packed-elements element width is zero",
+                ));
+            }
+            let Some(access_end) = bit_offset.checked_add(access_width) else {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_ACCESS_IN_BOUNDS",
+                    block,
+                    index,
+                    "packed-elements access range overflows usize",
+                ));
+            };
+            if *bit_offset % *element_width != 0 || access_end % *element_width != 0 {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_ACCESS_ALIGNED",
+                    block,
+                    index,
+                    format!(
+                        "packed-elements access [{bit_offset}..{access_end}) is not aligned to element width {element_width}"
+                    ),
+                ));
+            }
+        }
         SIROffset::Dynamic(reg) => {
             register_type(eu, block, Some(index), *reg)?;
         }

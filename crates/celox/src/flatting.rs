@@ -17,6 +17,7 @@ pub fn flatting(
     path: &InstancePath,
     instance_ids: &HashMap<InstancePath, InstanceId>,
     global_boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
@@ -68,7 +69,12 @@ pub fn flatting(
     }
 
     // Atomize logic paths
-    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena)?;
+    let atomized_comb_blocks = atomize_logic_paths(
+        &comb_blocks,
+        global_boundaries,
+        unpacked_element_widths,
+        arena,
+    )?;
 
     if let Some(t) = trace
         && trace_opts.atomized_comb_blocks
@@ -95,6 +101,7 @@ pub fn flatting(
 fn atomize_logic_paths(
     paths: &Vec<LogicPath<AbsoluteAddr>>,
     boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
 ) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let mut atomized_paths = Vec::new();
@@ -104,9 +111,22 @@ fn atomize_logic_paths(
             atomized_paths.push(path.clone());
             continue;
         };
-        if let Some(bounds) = boundaries.get(&target_var.id) {
+        let element_width = unpacked_element_widths.get(&target_var.id).copied();
+        let mut effective_boundaries = boundaries.get(&target_var.id).cloned().unwrap_or_default();
+        if let Some(element_width) = element_width {
+            let mut boundary =
+                (target_var.access.lsb / element_width + 1).saturating_mul(element_width);
+            while boundary <= target_var.access.msb {
+                effective_boundaries.insert(boundary);
+                let Some(next) = boundary.checked_add(element_width) else {
+                    break;
+                };
+                boundary = next;
+            }
+        }
+        if !effective_boundaries.is_empty() {
             // This variable has defined boundaries, so we need to split it.
-            let atoms = target_var.access.calculate_atoms(bounds);
+            let atoms = target_var.access.calculate_atoms(&effective_boundaries);
 
             // Extract the set of variable IDs that were originally declared as sources.
             // This acts as a "source mask" to filter out unintended dependencies.
@@ -123,10 +143,7 @@ fn atomize_logic_paths(
                     atom_access.lsb - target_var.access.lsb,
                     atom_access.msb - target_var.access.lsb,
                 );
-                let new_expr = arena.alloc(SLTNode::Slice {
-                    expr: path.expr,
-                    access: relative_atom_access,
-                })?;
+                let new_expr = project_logic_path_expr(path.expr, relative_atom_access, arena)?;
                 let mut expr_inputs = crate::HashSet::default();
                 collect_inputs(new_expr, arena, &mut expr_inputs);
                 let filtered_sources: crate::HashSet<_> = expr_inputs
@@ -141,7 +158,10 @@ fn atomize_logic_paths(
             while i < atom_infos.len() {
                 let group_start = i;
                 let group_source_ids = &atom_infos[i].1;
-                while i + 1 < atom_infos.len() && atom_infos[i + 1].1 == *group_source_ids {
+                while i + 1 < atom_infos.len()
+                    && atom_infos[i + 1].1 == *group_source_ids
+                    && element_width.is_none_or(|width| atom_infos[i + 1].0.lsb % width != 0)
+                {
                     i += 1;
                 }
                 let group_end = i;
@@ -162,10 +182,7 @@ fn atomize_logic_paths(
                     // Covers the full original range — use the expression directly.
                     path.expr
                 } else {
-                    arena.alloc(SLTNode::Slice {
-                        expr: path.expr,
-                        access: relative_access,
-                    })?
+                    project_logic_path_expr(path.expr, relative_access, arena)?
                 };
 
                 // Collect the actual bit-level sources for the merged range.
@@ -216,6 +233,38 @@ fn atomize_logic_paths(
         }
     }
     Ok(atomized_paths)
+}
+
+fn project_logic_path_expr(
+    expression: NodeId,
+    access: BitAccess,
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<NodeId, SLTNodeFactsError> {
+    match arena.get(expression).clone() {
+        SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access: input_access,
+        } if access.msb <= input_access.msb - input_access.lsb => arena.alloc(SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access: BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb),
+        }),
+        SLTNode::Slice {
+            expr: inner,
+            access: inner_access,
+        } if access.msb <= inner_access.msb - inner_access.lsb => project_logic_path_expr(
+            inner,
+            BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb),
+            arena,
+        ),
+        _ => arena.alloc(SLTNode::Slice {
+            expr: expression,
+            access,
+        }),
+    }
 }
 
 pub fn collect_inputs<A: Hash + Eq + Clone + Debug>(
@@ -647,6 +696,75 @@ mod tests {
     }
 
     #[test]
+    fn atomization_does_not_remerge_unpacked_elements() {
+        let address = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let source = AbsoluteAddr {
+            instance_id: InstanceId(1),
+            var_id: VarId::from_raw(1),
+        };
+        let mut arena = SLTNodeArena::new();
+        let expression = arena
+            .alloc(SLTNode::Input {
+                variable: source,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 23),
+            })
+            .unwrap();
+        let mut sources = crate::HashSet::default();
+        sources.insert(VarAtomBase::new(source, 0, 23));
+        let path = LogicPath {
+            semantic_region: None,
+            target: LogicPathTarget::Var(VarAtomBase::new(address, 0, 23)),
+            sources,
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let mut element_widths = HashMap::default();
+        element_widths.insert(address, 6);
+
+        let atomized = atomize_logic_paths(
+            &vec![path],
+            &HashMap::default(),
+            &element_widths,
+            &mut arena,
+        )
+        .unwrap();
+        let accesses = atomized
+            .iter()
+            .map(|path| path.target.var().unwrap().access)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            accesses,
+            vec![
+                BitAccess::new(0, 5),
+                BitAccess::new(6, 11),
+                BitAccess::new(12, 17),
+                BitAccess::new(18, 23),
+            ]
+        );
+        for (path, expected) in atomized.iter().zip(accesses) {
+            assert!(matches!(
+                arena.get(path.expr),
+                SLTNode::Input {
+                    variable,
+                    access,
+                    ..
+                } if *variable == source && *access == expected
+            ));
+        }
+    }
+
+    #[test]
     fn test_flatting_simple_hierarchy() {
         let code = r#"
             module child(
@@ -740,6 +858,7 @@ mod tests {
             top_module_sim,
             &top_path,
             &instance_ids,
+            &HashMap::default(),
             &HashMap::default(),
             &mut arena,
             &crate::debug::TraceOptions::default(),

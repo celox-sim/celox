@@ -135,7 +135,7 @@ struct PendingInstructionInsert {
     instruction: AllocationInstruction,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct InstructionLivenessSnapshot {
     block: BlockId,
     identity: usize,
@@ -721,7 +721,7 @@ impl AllocationIr {
             block: block_row.id,
             identity,
             slots,
-            uses: instruction.uses,
+            uses: instruction.uses.clone(),
             definition: instruction.definition,
         })
     }
@@ -947,7 +947,7 @@ impl AllocationIr {
                         rewrite_original_instruction(
                             source_instruction,
                             original_snapshot.uses(),
-                            instruction.uses,
+                            instruction.uses.clone(),
                             self.original_value_count,
                             allocation_block.id,
                             original_instruction,
@@ -970,7 +970,7 @@ impl AllocationIr {
                             allocation_block.id,
                             position,
                             operation,
-                            instruction.uses,
+                            instruction.uses.clone(),
                             instruction.definition,
                         )?
                     }
@@ -2760,7 +2760,7 @@ impl AllocationIr {
                             )
                         })?;
                         if synthetic_definitions[definition.0 as usize]
-                            .replace((id, instruction.uses))
+                            .replace((id, instruction.uses.clone()))
                             .is_some()
                         {
                             return Err(AllocationIrError::new(
@@ -2793,7 +2793,7 @@ impl AllocationIr {
             *needed = true;
             let (instruction, uses) = synthetic_definitions
                 .get(value.0 as usize)
-                .copied()
+                .cloned()
                 .flatten()
                 .ok_or_else(|| {
                     AllocationIrError::new(
@@ -2976,7 +2976,7 @@ impl AllocationIr {
         uses: Uses,
         defines_value: bool,
     ) -> Result<InsertedSynthetic, AllocationIrError> {
-        self.verify_operation(anchor, operation, uses, defines_value)?;
+        self.verify_operation(anchor, operation, &uses, defines_value)?;
         let block = self.block(anchor.block())?;
         let (zone, sequence) = self.instruction_order_at_anchor(block, anchor)?;
         let Some(next_instruction) = self.next_synthetic_instruction.checked_add(1) else {
@@ -3075,7 +3075,7 @@ impl AllocationIr {
         &self,
         anchor: SyntheticAnchor,
         operation: SyntheticOperation,
-        uses: Uses,
+        uses: &Uses,
         defines_value: bool,
     ) -> Result<(), AllocationIrError> {
         let valid = match operation {
@@ -3099,7 +3099,7 @@ impl AllocationIr {
                 format!("invalid def/use signature for {operation:?}"),
             ));
         }
-        for value in uses {
+        for &value in uses {
             if value.0 >= self.next_value {
                 return Err(AllocationIrError::new(
                     "ALLOCATION_IR.VALUE_RANGE",
@@ -3756,12 +3756,12 @@ impl AllocationIr {
                         self.verify_operation(
                             anchor,
                             operation,
-                            instruction.uses,
+                            &instruction.uses,
                             instruction.definition.is_some(),
                         )?;
                     }
                 }
-                for value in instruction.uses {
+                for &value in &instruction.uses {
                     if value.0 >= self.next_value {
                         return Err(AllocationIrError::new(
                             "ALLOCATION_IR.VALUE_RANGE",
@@ -3912,7 +3912,8 @@ fn machine_block_facts(
                 }
                 let fixed = instruction
                     .uses
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .zip(constraints)
                     .filter_map(|(value, constraint)| match constraint {
                         RegConstraint::Any => None,
@@ -4688,7 +4689,7 @@ impl LivenessProgram for AllocationIr {
     }
 
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
-        self.blocks[block].instructions[instruction].uses
+        self.blocks[block].instructions[instruction].uses.clone()
     }
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {

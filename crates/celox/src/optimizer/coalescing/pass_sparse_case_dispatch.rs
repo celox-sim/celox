@@ -128,15 +128,21 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         let mut changed = false;
         let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
         let mut applied = 0usize;
-        while let Some(plan) = find_best_sparse_case_plan(eu, &self.stable_alias_class) {
-            apply_sparse_case_plan(eu, plan);
-            changed = true;
-            applied += 1;
-            if stats && applied.is_multiple_of(100) {
-                eprintln!("[branchify-stats] sparse_case applied={applied}");
+        loop {
+            let plans = find_sparse_case_plans(eu, &self.stable_alias_class);
+            if plans.is_empty() {
+                break;
+            }
+            for plan in plans {
+                apply_sparse_case_plan(eu, plan);
+                changed = true;
+                applied += 1;
+                if stats && applied.is_multiple_of(100) {
+                    eprintln!("[branchify-stats] sparse_case applied={applied}");
+                }
             }
         }
-        if stats {
+        if stats || std::env::var_os("CELOX_PASS_TIMING").is_some() {
             eprintln!("[branchify-stats] sparse_case done applied={applied}");
         }
         if changed {
@@ -149,14 +155,16 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
     }
 }
 
-fn find_best_sparse_case_plan(
+fn find_sparse_case_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-) -> Option<SparseCasePlan> {
+) -> Vec<SparseCasePlan> {
     let use_counts = count_uses(eu);
     let def_sites = definition_sites(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable();
+    let mut planned_blocks = HashSet::default();
+    let mut plans = Vec::new();
 
     // The first sweep plans only maximal same-selector spines.  This avoids
     // repeating global-use cloning, local DCE, and arm-DAG collection for all
@@ -165,14 +173,17 @@ fn find_best_sparse_case_plan(
     // deferred prefixes, so the optimization does not depend on monotonicity
     // of the profitability model.
     for maximal_only in [true, false] {
-        let mut best: Option<SparseCasePlan> = None;
         for &block_id in &block_ids {
+            if planned_blocks.contains(&block_id) {
+                continue;
+            }
             let block = &eu.blocks[&block_id];
             let local_defs = local_definition_positions(block);
-            let dense_lookup_indices =
-                dense_constant_lookup_mux_indices(eu, block, &local_defs, &def_sites);
             let deferred =
                 nonmaximal_same_selector_muxes(eu, block, &local_defs, &def_sites, &use_counts);
+            let dense_lookup_indices =
+                dense_constant_lookup_mux_indices(eu, block, &local_defs, &def_sites, &deferred);
+            let mut best: Option<SparseCasePlan> = None;
             for (root_index, inst) in block.instructions.iter().enumerate() {
                 if !matches!(inst, SIRInstruction::Mux(..))
                     || dense_lookup_indices.contains(&root_index)
@@ -205,12 +216,13 @@ fn find_best_sparse_case_plan(
                     best = Some(plan);
                 }
             }
-        }
-        if best.is_some() {
-            return best;
+            if let Some(best) = best {
+                planned_blocks.insert(block_id);
+                plans.push(best);
+            }
         }
     }
-    None
+    plans
 }
 
 fn nonmaximal_same_selector_muxes(
@@ -271,13 +283,20 @@ fn dense_constant_lookup_mux_indices(
     block: &BasicBlock<RegionedAbsoluteAddr>,
     local_defs: &HashMap<RegisterId, usize>,
     def_sites: &HashMap<RegisterId, DefSite>,
+    nonmaximal_same_selector: &HashSet<usize>,
 ) -> HashSet<usize> {
     let mut protected = HashSet::default();
 
-    for inst in &block.instructions {
+    for (root_index, inst) in block.instructions.iter().enumerate() {
         let SIRInstruction::Mux(result, _, _, _) = inst else {
             continue;
         };
+        // Every stage in a same-selector spine was previously used as a root,
+        // making dense-lookup recognition quadratic in chain length. The
+        // maximal root reaches and protects the complete spine.
+        if nonmaximal_same_selector.contains(&root_index) {
+            continue;
+        }
         let Some(result_width) = eu.register_map.get(result).map(RegisterType::width) else {
             continue;
         };
@@ -1054,7 +1073,9 @@ fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess
 fn static_offset(offset: &SIROffset) -> Option<usize> {
     match offset {
         SIROffset::Static(value) => Some(*value),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::PackedElements { .. } => {
+            None
+        }
     }
 }
 

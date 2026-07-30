@@ -10,34 +10,42 @@ use std::{collections::HashMap, fmt};
 use crate::ir::RegionedAbsoluteAddr;
 
 // ────────────────────────────────────────────────────────────────
-// Uses: stack-allocated list of VReg operands (no heap allocation)
+// Uses: inline operand list with a rare heap-backed large representation
 // ────────────────────────────────────────────────────────────────
 
-const MAX_USES: usize = 16;
+const INLINE_USES: usize = 15;
 
-/// Stack-allocated list of up to 16 VReg uses. Avoids Vec heap allocation
-/// in the regalloc inner loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Uses {
-    buf: [VReg; MAX_USES],
-    len: u8,
+/// VReg operands for one MIR instruction.
+///
+/// Ordinary instructions stay allocation-free and inline. Rare aggregate
+/// instructions may carry an arbitrary number of operands without inflating
+/// every instruction and regalloc record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Uses {
+    Inline { buf: [VReg; INLINE_USES], len: u8 },
+    Large(Box<[VReg]>),
 }
 
 impl Uses {
     #[inline]
     pub fn none() -> Self {
-        Self {
-            buf: [VReg(0); MAX_USES],
+        Self::Inline {
+            buf: [VReg(0); INLINE_USES],
             len: 0,
         }
     }
     #[inline]
     pub fn from_slice(values: &[VReg]) -> Self {
-        assert!(values.len() <= MAX_USES, "MIR operand capacity exceeded");
-        let mut result = Self::none();
-        result.buf[..values.len()].copy_from_slice(values);
-        result.len = values.len() as u8;
-        result
+        if values.len() <= INLINE_USES {
+            let mut buf = [VReg(0); INLINE_USES];
+            buf[..values.len()].copy_from_slice(values);
+            Self::Inline {
+                buf,
+                len: values.len() as u8,
+            }
+        } else {
+            Self::Large(values.into())
+        }
     }
     #[inline]
     pub fn one(a: VReg) -> Self {
@@ -61,24 +69,35 @@ impl Uses {
     }
     #[inline]
     pub fn len(&self) -> usize {
-        self.len as usize
+        self.as_slice().len()
     }
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.as_slice().is_empty()
     }
     #[inline]
     pub fn contains(&self, v: &VReg) -> bool {
-        self.iter().any(|u| u == v)
+        self.as_slice().contains(v)
     }
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &VReg> {
-        self.buf[..self.len as usize].iter()
+    pub fn iter(&self) -> std::slice::Iter<'_, VReg> {
+        self.as_slice().iter()
+    }
+    #[inline]
+    pub fn as_slice(&self) -> &[VReg] {
+        match self {
+            Self::Inline { buf, len } => &buf[..usize::from(*len)],
+            Self::Large(values) => values,
+        }
     }
 
     pub(crate) fn replace(&mut self, old: VReg, new: VReg) -> bool {
         let mut changed = false;
-        for value in &mut self.buf[..self.len as usize] {
+        let values: &mut [VReg] = match self {
+            Self::Inline { buf, len } => &mut buf[..usize::from(*len)],
+            Self::Large(values) => values,
+        };
+        for value in values {
             if *value == old {
                 *value = new;
                 changed = true;
@@ -91,7 +110,7 @@ impl Uses {
 impl std::ops::Deref for Uses {
     type Target = [VReg];
     fn deref(&self) -> &[VReg] {
-        &self.buf[..self.len as usize]
+        self.as_slice()
     }
 }
 
@@ -99,15 +118,46 @@ impl<'a> IntoIterator for &'a Uses {
     type Item = &'a VReg;
     type IntoIter = std::slice::Iter<'a, VReg>;
     fn into_iter(self) -> Self::IntoIter {
-        self.buf[..self.len as usize].iter()
+        self.as_slice().iter()
     }
 }
 
+pub enum UsesIntoIter {
+    Inline(std::iter::Take<std::array::IntoIter<VReg, INLINE_USES>>),
+    Large(std::vec::IntoIter<VReg>),
+}
+
+impl Iterator for UsesIntoIter {
+    type Item = VReg;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline(values) => values.next(),
+            Self::Large(values) => values.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Inline(values) => values.size_hint(),
+            Self::Large(values) => values.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for UsesIntoIter {}
+
 impl IntoIterator for Uses {
     type Item = VReg;
-    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, MAX_USES>>;
+    type IntoIter = UsesIntoIter;
+
     fn into_iter(self) -> Self::IntoIter {
-        self.buf.into_iter().take(self.len as usize)
+        match self {
+            Self::Inline { buf, len } => {
+                UsesIntoIter::Inline(buf.into_iter().take(usize::from(len)))
+            }
+            Self::Large(values) => UsesIntoIter::Large(values.into_vec().into_iter()),
+        }
     }
 }
 
@@ -728,6 +778,16 @@ pub enum MInst {
         rhs: VReg,
         kind: CmpKind,
     },
+    /// Materialize one scalar frontier value for a following lane aggregate.
+    ///
+    /// This is introduced only at the final machine-operand legalization
+    /// boundary. Each capture has one real GPR use instead of pretending that
+    /// every scalar frontier value is simultaneously live at the aggregate.
+    LaneAggregateInput {
+        base_offset: u32,
+        srcs: Uses,
+        packed_word: bool,
+    },
     /// Execute one sink-local root of a verified lane-aggregate plan.
     ///
     /// The operation owns all allocatable GPRs while it emits its internal
@@ -739,6 +799,9 @@ pub enum MInst {
         root: u16,
         source_block: crate::ir::BlockId,
         inputs: Vec<VReg>,
+        captured_inputs: u16,
+        input_bytes: u32,
+        input_base_offset: u32,
         read_ranges: Vec<MemoryAliasRange>,
         write_ranges: Vec<MemoryAliasRange>,
     },
@@ -1307,21 +1370,38 @@ impl fmt::Display for MInst {
                 }
                 write!(f, "]")
             }
+            MInst::LaneAggregateInput {
+                base_offset,
+                srcs,
+                packed_word,
+            } => {
+                write!(
+                    f,
+                    "lane_aggregate_input base_offset={base_offset}, packed_word={packed_word}, inputs={}",
+                    srcs.len()
+                )
+            }
             MInst::LaneAggregate {
                 dst,
                 plan,
                 root,
                 source_block,
                 inputs,
+                captured_inputs,
+                input_bytes,
+                input_base_offset,
                 read_ranges,
                 write_ranges,
             } => write!(
                 f,
-                "{dst} = lane_aggregate plan{} root{} source=b{} inputs={} reads={} writes={}",
+                "{dst} = lane_aggregate plan{} root{} source=b{} inputs={} captured={} input_bytes={} input_base={} reads={} writes={}",
                 plan.0,
                 root,
                 source_block.0,
                 inputs.len(),
+                captured_inputs,
+                input_bytes,
+                input_base_offset,
                 read_ranges.len(),
                 write_ranges.len(),
             ),
@@ -1448,6 +1528,7 @@ impl MInst {
             MInst::Store { .. }
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::LaneAggregateInput { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
@@ -1533,6 +1614,7 @@ impl MInst {
             MInst::Store { .. }
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::LaneAggregateInput { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
@@ -1569,6 +1651,7 @@ impl MInst {
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. } => Uses::none(),
+            MInst::LaneAggregateInput { srcs, .. } => srcs.clone(),
             MInst::LaneAggregate { inputs, .. } => Uses::from_slice(inputs),
             MInst::Store { src, .. } => Uses::one(*src),
             MInst::LoadPtr { ptr, .. } => Uses::one(*ptr),
@@ -1968,6 +2051,9 @@ impl MInst {
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => {}
+            MInst::LaneAggregateInput { srcs, .. } => {
+                srcs.replace(old, new);
+            }
             MInst::LaneAggregate { inputs, .. } => {
                 for input in inputs {
                     if *input == old {
@@ -2185,6 +2271,37 @@ impl MFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_keeps_common_operands_inline_and_supports_large_aggregate_arity() {
+        let inline_values = (0..INLINE_USES as u32).map(VReg).collect::<Vec<_>>();
+        let inline = Uses::from_slice(&inline_values);
+        assert!(matches!(inline, Uses::Inline { .. }));
+        assert_eq!(inline.as_slice(), inline_values);
+
+        let large_values = (0..48).map(VReg).collect::<Vec<_>>();
+        let mut large = Uses::from_slice(&large_values);
+        assert!(matches!(large, Uses::Large(_)));
+        assert_eq!(large.as_slice(), large_values);
+        assert!(large.replace(VReg(47), VReg(99)));
+        assert_eq!(large.into_iter().last(), Some(VReg(99)));
+    }
+
+    #[test]
+    fn uses_enum_does_not_inflate_the_previous_inline_representation() {
+        #[allow(dead_code)]
+        struct PreviousUses {
+            buf: [VReg; 16],
+            len: u8,
+        }
+
+        assert!(
+            std::mem::size_of::<Uses>() <= std::mem::size_of::<PreviousUses>(),
+            "Uses grew from {} to {} bytes",
+            std::mem::size_of::<PreviousUses>(),
+            std::mem::size_of::<Uses>(),
+        );
+    }
 
     #[test]
     fn memory_alias_range_must_be_nonempty() {
