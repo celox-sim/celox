@@ -922,7 +922,7 @@ impl<'a> Analyzer<'a> {
             return self.insert_node(key, RecipeOp::StateRead(source), Vec::new(), lane_width, 1);
         }
 
-        if let Some((source, offsets)) = self.regular_shift_source(&key, lane_width) {
+        if let Some((source, offsets)) = self.packed_extract_source(&key, lane_width) {
             let child = self.analyze(vec![source; key.len()])?;
             return self.insert_node(
                 key,
@@ -1181,7 +1181,7 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn regular_shift_source(
+    fn packed_extract_source(
         &self,
         key: &[RegisterId],
         width: usize,
@@ -1189,13 +1189,8 @@ impl<'a> Analyzer<'a> {
         let mut source = None;
         let mut offsets = Vec::with_capacity(key.len());
         for &register in key {
-            let (current_source, offset) = match self.instruction(register) {
-                Some(SIRInstruction::Binary(_, lhs, BinaryOp::Shr, rhs)) => {
-                    (*lhs, usize::try_from(self.immediate(*rhs)?).ok()?)
-                }
-                _ => (register, 0),
-            };
-            if offset >= width || source.is_some_and(|known| known != current_source) {
+            let (current_source, offset) = self.resolve_packed_extract(register, width)?;
+            if source.is_some_and(|known| known != current_source) {
                 return None;
             }
             source.get_or_insert(current_source);
@@ -1213,6 +1208,56 @@ impl<'a> Analyzer<'a> {
             return None;
         }
         Some((source?, offsets))
+    }
+
+    /// Normalize the scalar forms used to extract one lane from a packed
+    /// value. SIR can express the same extraction as Slice, a narrowed
+    /// logical shift, or a shift followed by an exact low mask. Keeping these
+    /// forms in one recipe avoids materializing every extracted lane as an
+    /// independent SSA frontier.
+    fn resolve_packed_extract(
+        &self,
+        register: RegisterId,
+        width: usize,
+    ) -> Option<(RegisterId, usize)> {
+        let low_mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let mut current = register;
+        let mut offset = 0usize;
+        for _ in 0..16 {
+            match self.instruction(current) {
+                Some(SIRInstruction::Slice(_, source, slice_offset, slice_width))
+                    if *slice_width == width =>
+                {
+                    offset = offset.checked_add(*slice_offset)?;
+                    current = *source;
+                }
+                Some(SIRInstruction::Unary(_, UnaryOp::Ident, source)) => {
+                    current = *source;
+                }
+                Some(SIRInstruction::Binary(_, source, BinaryOp::Shr, amount)) => {
+                    offset = offset.checked_add(usize::try_from(self.immediate(*amount)?).ok()?)?;
+                    current = *source;
+                }
+                Some(SIRInstruction::Binary(_, source, BinaryOp::And, immediate))
+                    if self.immediate(*immediate) == Some(low_mask) =>
+                {
+                    current = *source;
+                }
+                Some(SIRInstruction::Binary(_, immediate, BinaryOp::And, source))
+                    if self.immediate(*immediate) == Some(low_mask) =>
+                {
+                    current = *source;
+                }
+                _ => break,
+            }
+        }
+        let source_width = self.value_width(current)?;
+        (source_width <= 64 && offset.checked_add(width)? <= source_width)
+            .then_some((current, offset))
     }
 
     fn affine_base(&self, key: &[RegisterId], width: usize) -> Option<(RegisterId, Vec<u64>)> {
@@ -2495,10 +2540,14 @@ fn xmm_recipe_node_supported(node: &RecipeNode) -> bool {
                 node.children.len() == operand_widths.len()
                     && operand_widths.iter().sum::<usize>() == node.lane_width
             }
+            RecipeOp::PackedExtract { offsets } => {
+                node.children.len() == 1
+                    && offsets.len() == node.lanes.len()
+                    && offsets.iter().all(|offset| *offset < 64)
+            }
             RecipeOp::Mux => node.children.len() == 3,
             RecipeOp::StateRead(_)
             | RecipeOp::Affine { .. }
-            | RecipeOp::PackedExtract { .. }
             | RecipeOp::ScalarInsert { .. }
             | RecipeOp::ControlMux
             | RecipeOp::Slice { .. } => false,
@@ -3053,6 +3102,115 @@ mod tests {
         )
     }
 
+    fn packed_slice_fixture() -> (ExecutionUnit<RegionedAbsoluteAddr>, MemoryLayout) {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let destination = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                var_id: VarId::from_raw(1),
+                ..absolute
+            },
+        );
+        let mut register_map = HashMap::default();
+        let mut instructions = Vec::new();
+        let packed = RegisterId(0);
+        register_map.insert(
+            packed,
+            RegisterType::Bit {
+                width: 24,
+                signed: false,
+            },
+        );
+        let packed_value = (0u64..8).fold(0u64, |value, lane| value | (lane << (lane * 3)));
+        instructions.push(SIRInstruction::Imm(packed, SIRValue::new(packed_value)));
+
+        let mut predicates = Vec::new();
+        for lane in 0..8usize {
+            let slice = RegisterId(1 + lane * 3);
+            let expected = RegisterId(2 + lane * 3);
+            let predicate = RegisterId(3 + lane * 3);
+            register_map.insert(
+                slice,
+                RegisterType::Bit {
+                    width: 3,
+                    signed: false,
+                },
+            );
+            register_map.insert(
+                expected,
+                RegisterType::Bit {
+                    width: 3,
+                    signed: false,
+                },
+            );
+            register_map.insert(
+                predicate,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Slice(slice, packed, lane * 3, 3));
+            instructions.push(SIRInstruction::Imm(expected, SIRValue::new(lane)));
+            instructions.push(SIRInstruction::Binary(
+                predicate,
+                slice,
+                BinaryOp::Eq,
+                expected,
+            ));
+            predicates.push(predicate);
+        }
+
+        let root = RegisterId(25);
+        register_map.insert(
+            root,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(
+            root,
+            predicates.iter().rev().copied().collect(),
+        ));
+        for lane in 0..8 {
+            let slice = RegisterId(26 + lane);
+            register_map.insert(
+                slice,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Slice(slice, root, lane, 1));
+            instructions.push(SIRInstruction::Store(
+                destination,
+                SIROffset::Static(lane),
+                1,
+                slice,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        (
+            ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [(BlockId(0), block)].into_iter().collect(),
+                register_map,
+            },
+            layout(absolute),
+        )
+    }
+
     #[test]
     fn accepts_exact_state_leaves_and_uniform_shift() {
         let (eu, layout) = fixture(false);
@@ -3112,6 +3270,32 @@ mod tests {
                 .all(|load| load.width == 1 && load.physical_bit == 0)
         );
         assert!(candidate_has_simd_publication(&report.accepted[0], &layout));
+    }
+
+    #[test]
+    fn extracts_regular_slices_from_one_packed_source_before_comparison() {
+        let (eu, layout) = packed_slice_fixture();
+        eu.verify();
+        let report = analyze(&eu, &layout, false).unwrap();
+        assert_eq!(report.accepted.len(), 1);
+        let extract = report.accepted[0]
+            .nodes
+            .iter()
+            .find_map(|node| match &node.operation {
+                RecipeOp::PackedExtract { offsets } => Some((offsets, &node.lanes)),
+                _ => None,
+            })
+            .expect("regular Slice lanes must remain one packed extraction");
+        assert_eq!(extract.0, &(0..8).map(|lane| lane * 3).collect::<Vec<_>>());
+        assert_eq!(extract.1.len(), 8);
+        assert_eq!(
+            report
+                .kind_counts
+                .get(&RecipeKind::SsaPack)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
     }
 
     #[test]

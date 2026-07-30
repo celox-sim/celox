@@ -3394,9 +3394,14 @@ fn lane_aggregate_vector_graph_eligible(
                     && node.children.len() == operand_widths.len()
                     && operand_widths.iter().sum::<usize>() == node.lane_width
             }
+            LaneAggregatePlanOp::PackedExtract(offsets) => {
+                allow_qword_variable_ops
+                    && node.children.len() == 1
+                    && offsets.len() == node.lane_count
+                    && offsets.iter().all(|offset| *offset < 64)
+            }
             LaneAggregatePlanOp::StateRead(_)
             | LaneAggregatePlanOp::Affine(_)
-            | LaneAggregatePlanOp::PackedExtract(_)
             | LaneAggregatePlanOp::ScalarInsert { .. }
             | LaneAggregatePlanOp::ControlMux
             | LaneAggregatePlanOp::Slice { .. } => false,
@@ -4101,6 +4106,7 @@ fn emit_lane_aggregate_ymm_qword_node(
     free: &mut Vec<AsmRegisterYmm>,
     input_stack_offsets: &HashMap<RegisterId, i32>,
     gpr: PhysReg,
+    packed_extract_shifts: Option<AsmRegisterYmm>,
 ) -> Result<(), IcedError> {
     let node = &plan.nodes[node_index];
     let child = |slot: usize| {
@@ -4292,6 +4298,11 @@ fn emit_lane_aggregate_ymm_qword_node(
             BinaryOp::Shr => asm.vpsrlq(destination, child(0), *amount as u32)?,
             _ => unreachable!("operation was checked by YMM qword eligibility"),
         },
+        LaneAggregatePlanOp::PackedExtract(_) => {
+            let shifts =
+                packed_extract_shifts.expect("YMM packed-extract shift vector must be prepared");
+            asm.vpsrlvq(destination, child(0), shifts)?;
+        }
         LaneAggregatePlanOp::OneHotDecode { .. } => {
             asm.vpcmpeqd(destination, destination, destination)?;
             asm.vpsrlq(destination, destination, 63)?;
@@ -4675,6 +4686,18 @@ fn emit_lane_aggregate_ymm_qword(
         }
         let active = positions.iter().map(Option::is_some).collect::<Vec<_>>();
         let schedule = lane_aggregate_xmm_schedule(plan, &active, root.recipe_root);
+        let mut packed_extract_uses = HashMap::<[u64; 4], usize>::new();
+        for &node_index in &schedule {
+            let LaneAggregatePlanOp::PackedExtract(offsets) = &plan.nodes[node_index].operation
+            else {
+                continue;
+            };
+            let node_positions =
+                positions[node_index].expect("scheduled packed extraction has lane positions");
+            let shifts = node_positions.map(|position| offsets[position] as u64);
+            *packed_extract_uses.entry(shifts).or_default() += 1;
+        }
+        let mut packed_extract_vectors = HashMap::<[u64; 4], AsmRegisterYmm>::new();
         let mut remaining = vec![0usize; plan.nodes.len()];
         for &node_index in &schedule {
             for &child in &plan.nodes[node_index].children {
@@ -4692,6 +4715,25 @@ fn emit_lane_aggregate_ymm_qword(
         for &node_index in &schedule {
             let node_positions =
                 positions[node_index].expect("scheduled YMM qword node has lane positions");
+            let packed_extract = match &plan.nodes[node_index].operation {
+                LaneAggregatePlanOp::PackedExtract(offsets) => {
+                    let shifts = node_positions.map(|position| offsets[position] as u64);
+                    let register = if let Some(&register) = packed_extract_vectors.get(&shifts) {
+                        register
+                    } else {
+                        let register = free
+                            .pop()
+                            .expect("YMM packed-extract shift vector register");
+                        emit_lane_ymm_qword_gather(asm, register, shifts, scratch_gpr, &mut free)?;
+                        if packed_extract_uses[&shifts] > 1 {
+                            packed_extract_vectors.insert(shifts, register);
+                        }
+                        register
+                    };
+                    Some((shifts, register))
+                }
+                _ => None,
+            };
             let reused_child = lane_aggregate_xmm_reusable_child(&plan.nodes[node_index])
                 .filter(|child| remaining[*child] == 1);
             let destination = reused_child
@@ -4707,7 +4749,20 @@ fn emit_lane_aggregate_ymm_qword(
                 &mut free,
                 input_stack_offsets,
                 scratch_gpr,
+                packed_extract.map(|(_, register)| register),
             )?;
+            if let Some((shifts, register)) = packed_extract {
+                let uses = packed_extract_uses
+                    .get_mut(&shifts)
+                    .expect("packed-extract use count");
+                *uses -= 1;
+                if *uses == 0 {
+                    packed_extract_vectors.remove(&shifts);
+                    free.push(register);
+                } else if !packed_extract_vectors.contains_key(&shifts) {
+                    free.push(register);
+                }
+            }
             node_registers[node_index] = Some(destination);
             for &child in &plan.nodes[node_index].children {
                 if positions[child].is_none() {
@@ -8824,6 +8879,105 @@ mod shift_encoding_tests {
         let mut state = [0u64; 1];
         assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr().cast()) }, 0);
         state[0]
+    }
+
+    #[test]
+    fn lane_aggregate_ymm_qword_extracts_regular_fields_from_one_scalar() {
+        use crate::ir::RegisterId;
+        use crate::lane_aggregate_plan::{LaneAggregatePlanNode, LaneAggregatePlanOp};
+
+        let source = RegisterId(100);
+        let packed = (0u64..8).fold(0u64, |value, lane| value | (lane << (lane * 3)));
+        let mut expected = (0u64..8).collect::<Vec<_>>();
+        expected[2] = 7;
+        let nodes = vec![
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(source),
+                children: Vec::new(),
+                lanes: vec![source; 8],
+                lane_width: 24,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::PackedExtract(
+                    (0..8).map(|lane| lane * 3).collect(),
+                ),
+                children: vec![0],
+                lanes: (0..8).map(RegisterId).collect(),
+                lane_width: 3,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Constant(expected),
+                children: Vec::new(),
+                lanes: (8..16).map(RegisterId).collect(),
+                lane_width: 3,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Binary(BinaryOp::Eq),
+                children: vec![1, 2],
+                lanes: (16..24).map(RegisterId).collect(),
+                lane_width: 1,
+                lane_count: 8,
+            },
+        ];
+        assert_eq!(
+            execute_predicate_recipe(nodes, 3, 8, &[(source, packed)]),
+            0b1111_1011
+        );
+    }
+
+    #[test]
+    fn lane_aggregate_ymm_qword_reuses_equal_packed_extract_shifts() {
+        use crate::ir::RegisterId;
+        use crate::lane_aggregate_plan::{LaneAggregatePlanNode, LaneAggregatePlanOp};
+
+        let lhs = RegisterId(100);
+        let rhs = RegisterId(101);
+        let offsets = (0..8).map(|lane| lane * 3).collect::<Vec<_>>();
+        let packed = (0u64..8).fold(0u64, |value, lane| value | (lane << (lane * 3)));
+        let nodes = vec![
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(lhs),
+                children: Vec::new(),
+                lanes: vec![lhs; 8],
+                lane_width: 24,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::PackedExtract(offsets.clone()),
+                children: vec![0],
+                lanes: (0..8).map(RegisterId).collect(),
+                lane_width: 3,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(rhs),
+                children: Vec::new(),
+                lanes: vec![rhs; 8],
+                lane_width: 24,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::PackedExtract(offsets),
+                children: vec![2],
+                lanes: (8..16).map(RegisterId).collect(),
+                lane_width: 3,
+                lane_count: 8,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Binary(BinaryOp::Eq),
+                children: vec![1, 3],
+                lanes: (16..24).map(RegisterId).collect(),
+                lane_width: 1,
+                lane_count: 8,
+            },
+        ];
+        assert_eq!(
+            execute_predicate_recipe(nodes, 4, 8, &[(lhs, packed), (rhs, packed)]),
+            0xff
+        );
     }
 
     #[test]
