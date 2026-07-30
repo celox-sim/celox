@@ -23,7 +23,7 @@ impl ExecutionUnitPass for GvnPass {
         "gvn"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let candidates = structural_load_candidates(eu);
         let load_versions = if candidates.is_empty() {
             HashMap::default()
@@ -45,6 +45,7 @@ impl ExecutionUnitPass for GvnPass {
                 &cfg,
                 &register_types,
                 &load_versions,
+                options.four_state,
                 &mut state,
             );
         }
@@ -414,6 +415,7 @@ struct GvnCheckpoint {
     constant_changes: usize,
     load_inserts: usize,
     structural_load_inserts: usize,
+    concat_inserts: usize,
     memory_epoch: u64,
     observable_epoch: u64,
 }
@@ -430,6 +432,8 @@ struct GvnState {
     load_inserts: Vec<EpochLoadKey>,
     structural_loads: HashMap<StructuralLoadKey, RegisterId>,
     structural_load_inserts: Vec<StructuralLoadKey>,
+    two_state_concats: HashMap<Vec<RegisterId>, RegisterId>,
+    concat_inserts: Vec<Vec<RegisterId>>,
     memory_epoch: u64,
     next_memory_epoch: u64,
     observable_epoch: u64,
@@ -444,6 +448,7 @@ impl GvnState {
             constant_changes: self.constant_changes.len(),
             load_inserts: self.load_inserts.len(),
             structural_load_inserts: self.structural_load_inserts.len(),
+            concat_inserts: self.concat_inserts.len(),
             memory_epoch: self.memory_epoch,
             observable_epoch: self.observable_epoch,
         }
@@ -477,6 +482,10 @@ impl GvnState {
         while self.structural_load_inserts.len() > checkpoint.structural_load_inserts {
             let key = self.structural_load_inserts.pop().unwrap();
             self.structural_loads.remove(&key);
+        }
+        while self.concat_inserts.len() > checkpoint.concat_inserts {
+            let key = self.concat_inserts.pop().unwrap();
+            self.two_state_concats.remove(&key);
         }
         self.memory_epoch = checkpoint.memory_epoch;
         self.observable_epoch = checkpoint.observable_epoch;
@@ -568,6 +577,14 @@ impl GvnState {
             .expect("a compilation cannot contain u64::MAX observable barriers");
         self.observable_epoch = self.next_observable_epoch;
     }
+
+    fn insert_two_state_concat(&mut self, arguments: Vec<RegisterId>, register: RegisterId) {
+        if self.two_state_concats.contains_key(&arguments) {
+            return;
+        }
+        self.two_state_concats.insert(arguments.clone(), register);
+        self.concat_inserts.push(arguments);
+    }
 }
 
 fn is_observable_barrier(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
@@ -619,6 +636,7 @@ fn pure_expression_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Pu
             Some(PureExprKey::Mux(*cond, *then_value, *else_value))
         }
         SIRInstruction::Load(..)
+        | SIRInstruction::LaneAggregate { .. }
         | SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
@@ -634,6 +652,7 @@ fn gvn_dom_dfs(
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
     load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
+    four_state: bool,
     state: &mut GvnState,
 ) {
     enum Work {
@@ -653,7 +672,15 @@ fn gvn_dom_dfs(
                 if reset_loads {
                     state.bump_memory_epoch();
                 }
-                process_gvn_block(node, eu, cfg, register_types, load_versions, state);
+                process_gvn_block(
+                    node,
+                    eu,
+                    cfg,
+                    register_types,
+                    load_versions,
+                    four_state,
+                    state,
+                );
 
                 work.push(Work::Exit(checkpoint));
                 for &child in cfg.dom_children[node].iter().rev() {
@@ -679,6 +706,7 @@ fn process_gvn_block(
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
     load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
+    four_state: bool,
     state: &mut GvnState,
 ) {
     let block_id = cfg.block_ids[node];
@@ -773,7 +801,25 @@ fn process_gvn_block(
             if let Some(&existing) = state.values.get(&key) {
                 state.set_canonical(dst, existing);
                 redundant.insert(dst);
+            } else if !four_state
+                && let PureExprKey::Concat(arguments) = &key.expression
+                && let Some(&existing) = state.two_state_concats.get(arguments)
+                && register_types
+                    .get(&existing)
+                    .is_some_and(|ty| ty.width() == register_types[&dst].width())
+            {
+                // A Bit and a Logic Concat with the same operands have the
+                // same raw value in two-state mode. Keep the destination
+                // definition and type, but avoid rebuilding the lanes.
+                *inst = SIRInstruction::Unary(dst, UnaryOp::Ident, existing);
+                state.insert_value(key, dst);
+                state.set_canonical(dst, dst);
             } else {
+                if let PureExprKey::Concat(arguments) = &key.expression
+                    && !four_state
+                {
+                    state.insert_two_state_concat(arguments.clone(), dst);
+                }
                 state.insert_value(key, dst);
                 state.set_canonical(dst, dst);
                 if let SIRInstruction::Imm(_, value) = inst
@@ -874,6 +920,11 @@ fn apply_aliases(
         SIRInstruction::Concat(_, args) => {
             for arg in args {
                 *arg = resolve_canonical(*arg, aliases);
+            }
+        }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            for input in inputs {
+                *input = resolve_canonical(*input, aliases);
             }
         }
         SIRInstruction::Slice(_, src, _, _) => {
@@ -1027,6 +1078,81 @@ mod tests {
         );
         assert!(!unit.register_map.contains_key(&r1));
         unit.verify_result().unwrap();
+    }
+
+    #[test]
+    fn reuses_cross_type_concat_bits_only_in_two_state_mode() {
+        let r0 = RegisterId(0);
+        let r1 = RegisterId(1);
+        let packed_bit = RegisterId(2);
+        let packed_logic = RegisterId(3);
+        let block_id = BlockId(0);
+        let fixture = ExecutionUnit {
+            entry_block_id: block_id,
+            blocks: std::iter::once((
+                block_id,
+                BasicBlock {
+                    id: block_id,
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(r0, SIRValue::new(0u8)),
+                        SIRInstruction::Imm(r1, SIRValue::new(1u8)),
+                        SIRInstruction::Concat(packed_bit, vec![r1, r0]),
+                        SIRInstruction::Store(
+                            address(0),
+                            SIROffset::Static(0),
+                            2,
+                            packed_bit,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Concat(packed_logic, vec![r1, r0]),
+                        SIRInstruction::Store(
+                            address(1),
+                            SIROffset::Static(0),
+                            2,
+                            packed_logic,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ))
+            .collect(),
+            register_map: [
+                (r0, bit(1)),
+                (r1, bit(1)),
+                (packed_bit, bit(2)),
+                (packed_logic, RegisterType::Logic { width: 2 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let mut two_state = fixture.clone();
+        GvnPass.run(&mut two_state, &PassOptions::default());
+        assert!(matches!(
+            two_state.blocks[&block_id].instructions[4],
+            SIRInstruction::Unary(dst, UnaryOp::Ident, source)
+                if dst == packed_logic && source == packed_bit
+        ));
+        two_state.verify_result().unwrap();
+
+        let mut four_state = fixture;
+        GvnPass.run(
+            &mut four_state,
+            &PassOptions {
+                four_state: true,
+                ..PassOptions::default()
+            },
+        );
+        assert!(matches!(
+            four_state.blocks[&block_id].instructions[4],
+            SIRInstruction::Concat(dst, _)
+                if dst == packed_logic
+        ));
+        four_state.verify_result().unwrap();
     }
 
     #[test]

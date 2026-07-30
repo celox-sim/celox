@@ -250,6 +250,11 @@ fn visit_instruction_uses<A>(instruction: &SIRInstruction<A>, mut visit: impl Fn
                 visit(source);
             }
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            for &input in inputs {
+                visit(input);
+            }
+        }
         SIRInstruction::Mux(_, condition, then_value, else_value) => {
             visit(*condition);
             visit(*then_value);

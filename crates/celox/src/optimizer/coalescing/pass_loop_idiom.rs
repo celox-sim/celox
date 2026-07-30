@@ -693,6 +693,7 @@ fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>, out: &mut Vec<R
         SIRInstruction::Concat(_, args)
         | SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => out.extend(args.iter().copied()),
+        SIRInstruction::LaneAggregate { inputs, .. } => out.extend(inputs.iter().copied()),
         SIRInstruction::Mux(_, cond, then_value, else_value) => {
             out.extend([*cond, *then_value, *else_value]);
         }

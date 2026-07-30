@@ -578,6 +578,11 @@ fn register_use_counts(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
                         add(part);
                     }
                 }
+                SIRInstruction::LaneAggregate { inputs, .. } => {
+                    for &input in inputs {
+                        add(input);
+                    }
+                }
                 SIRInstruction::Mux(_, condition, true_value, false_value) => {
                     add(*condition);
                     add(*true_value);

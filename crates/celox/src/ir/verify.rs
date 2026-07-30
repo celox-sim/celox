@@ -578,6 +578,12 @@ fn verify_instruction_types<A>(
             same_width(*dst, *then_value, "TYPE.MUX_THEN_WIDTH")?;
             same_width(*dst, *else_value, "TYPE.MUX_ELSE_WIDTH")?;
         }
+        SIRInstruction::LaneAggregate { dst, inputs, .. } => {
+            let _ = ty(*dst)?;
+            for &input in inputs {
+                let _ = ty(input)?;
+            }
+        }
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => {
             for &arg in args {
@@ -794,7 +800,8 @@ fn instruction_def<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        | SIRInstruction::Mux(dst, _, _, _)
+        | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
@@ -828,6 +835,7 @@ fn instruction_uses<A>(inst: &SIRInstruction<A>) -> Vec<RegisterId> {
         SIRInstruction::Mux(_, cond, then_value, else_value) => {
             uses.extend([*cond, *then_value, *else_value]);
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => uses.extend(inputs.iter().copied()),
         SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
             uses.extend([*old, *new]);
         }

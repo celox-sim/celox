@@ -1591,6 +1591,11 @@ fn replace_register_uses_in_instruction(
                 replace(argument);
             }
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            for input in inputs {
+                replace(input);
+            }
+        }
         SIRInstruction::Mux(_, condition, then_value, else_value) => {
             replace(condition);
             replace(then_value);
@@ -1853,6 +1858,7 @@ fn evaluate_instruction(
     };
 
     match instruction {
+        SIRInstruction::LaneAggregate { .. } => LatticeValue::Overdefined,
         SIRInstruction::Imm(_, value) => LatticeValue::Constant(value.clone()),
         SIRInstruction::Unary(dst, op, source) => match op {
             UnaryOp::Ident => state(*source),
@@ -2189,6 +2195,7 @@ fn instruction_uses(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<R
         | SIRInstruction::CombCaptureEvent {
             args: arguments, ..
         } => arguments.clone(),
+        SIRInstruction::LaneAggregate { inputs, .. } => inputs.clone(),
         SIRInstruction::Mux(_, condition, then_value, else_value) => {
             vec![*condition, *then_value, *else_value]
         }

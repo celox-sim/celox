@@ -1554,6 +1554,7 @@ fn runtime_instruction_cost(
             .saturating_mul(chunks(*width))
             .saturating_add(3 * u128::from(offset.is_dynamic())),
         SIRInstruction::Concat(dst, args) => chunks(width(*dst)) + args.len() as u128,
+        SIRInstruction::LaneAggregate { inputs, .. } => inputs.len().max(1) as u128,
         SIRInstruction::Slice(dst, _, _, _) => 2 * chunks(width(*dst)),
         SIRInstruction::Mux(dst, _, true_value, false_value) => {
             chunks(width(*dst).max(width(*true_value)).max(width(*false_value)))
@@ -1858,6 +1859,7 @@ fn instruction_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<Register
             offset.dynamic_registers().into_iter().flatten().collect()
         }
         SIRInstruction::Concat(_, args) => args.clone(),
+        SIRInstruction::LaneAggregate { inputs, .. } => inputs.clone(),
         SIRInstruction::Slice(_, src, _, _) => vec![*src],
         SIRInstruction::Mux(_, cond, true_value, false_value) => {
             vec![*cond, *true_value, *false_value]

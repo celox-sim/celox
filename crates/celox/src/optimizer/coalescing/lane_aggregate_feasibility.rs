@@ -334,6 +334,20 @@ impl LaneAggregateFeasibilityReport {
                     )),
                 }
             }
+            let mut unsupported = candidate
+                .nodes
+                .iter()
+                .filter(|node| !xmm_recipe_node_supported(node))
+                .map(|node| node.operation.kind())
+                .collect::<Vec<_>>();
+            unsupported.sort_unstable_by_key(|kind| format!("{kind:?}"));
+            unsupported.dedup();
+            if !unsupported.is_empty() {
+                lines.push(format!(
+                    "status=accepted-x86-unsupported block={} root=r{} kinds={unsupported:?}",
+                    candidate.block.0, candidate.root.0,
+                ));
+            }
         }
         for candidate in &self.rejected {
             lines.push(format!(
@@ -481,6 +495,7 @@ struct Analyzer<'a> {
     failure_path: Vec<(Vec<usize>, Vec<(&'static str, usize)>, String)>,
     snapshot_frontiers: HashSet<BlockId>,
     ssa_frontiers: HashSet<BlockId>,
+    x86_recipe_only: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -506,17 +521,20 @@ impl<'a> Analyzer<'a> {
         value: &super::placement_analysis::ValueOccurrence,
         token: StateToken,
     ) -> Result<StateLoadLeaf, RejectReason> {
-        let Some(SIRInstruction::Load(_, address, SIROffset::Static(bit_offset), width)) =
+        let Some(SIRInstruction::Load(_, address, offset, width)) =
             self.instruction(value.register)
         else {
             return Err(RejectReason::NonStridedStateLeaf);
         };
+        let bit_offset = offset
+            .constant_bit_offset()
+            .ok_or(RejectReason::NonStridedStateLeaf)?;
         let (physical_byte, physical_bit) = self
             .layout
-            .map_static_bit_offset(&address.absolute_addr(), *bit_offset);
+            .map_static_bit_offset(&address.absolute_addr(), bit_offset);
         let (native_byte_offset, native_bit) = self
             .layout
-            .regioned_static_byte_and_intra(address, *bit_offset)
+            .regioned_static_byte_and_intra(address, bit_offset)
             .ok_or(RejectReason::NonStridedStateLeaf)?;
         if native_bit != physical_bit {
             return Err(RejectReason::InvalidRecipe);
@@ -527,7 +545,7 @@ impl<'a> Analyzer<'a> {
             origin: value.origin,
             token,
             address: *address,
-            bit_offset: *bit_offset,
+            bit_offset,
             width: *width,
             physical_byte,
             physical_bit,
@@ -567,14 +585,25 @@ impl<'a> Analyzer<'a> {
         }
         let mut result = self.analyze_uncached(key.clone());
         if result.is_err()
-            && let Some(frontier) = self.ssa_pack_frontier(&key)
+            && let Some((source, lane_width)) = self.normalized_state_range_frontier(&key)
+        {
+            result = self.insert_node(
+                key.clone(),
+                RecipeOp::StateRead(source),
+                Vec::new(),
+                lane_width,
+                5,
+            );
+        }
+        if result.is_err()
+            && let Some((frontier, lane_width)) = self.ssa_pack_frontier(&key)
         {
             self.ssa_frontiers.insert(frontier);
             result = self.insert_node(
                 key.clone(),
                 RecipeOp::SsaPack { block: frontier },
                 Vec::new(),
-                1,
+                lane_width,
                 key.len().saturating_mul(2).saturating_sub(1),
             );
         }
@@ -608,11 +637,124 @@ impl<'a> Analyzer<'a> {
         result
     }
 
-    fn ssa_pack_frontier(&self, key: &[RegisterId]) -> Option<BlockId> {
-        if key.len() < 8
+    /// Resolve scalar normalization around a state read back to the exact
+    /// state range it denotes.
+    ///
+    /// Scalar load coalescing is free to represent adjacent narrow reads as a
+    /// mixture of direct Loads, Slices, low masks and constant shifts.  Those
+    /// are not heterogeneous SLP operations: they are equivalent executable
+    /// materialization leaves.  Keeping this normalization at the frontier
+    /// prevents target recipe discovery from depending on the chunk boundary
+    /// selected by the scalar pass.
+    fn normalized_state_range_frontier(
+        &self,
+        key: &[RegisterId],
+    ) -> Option<(StateReadSource, usize)> {
+        let lane_width = self.value_width(*key.first()?)?;
+        if lane_width == 0
+            || lane_width > 64
             || key
                 .iter()
-                .any(|register| self.value_width(*register) != Some(1))
+                .any(|register| self.value_width(*register) != Some(lane_width))
+        {
+            return None;
+        }
+        let loads = key
+            .iter()
+            .map(|register| self.normalized_state_range_leaf(*register, lane_width))
+            .collect::<Option<Vec<_>>>()?;
+        Some((StateReadSource::ReloadAtSink { loads }, lane_width))
+    }
+
+    fn normalized_state_range_leaf(
+        &self,
+        result_register: RegisterId,
+        width: usize,
+    ) -> Option<StateLoadLeaf> {
+        let mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let mut current = result_register;
+        let mut relative_offset = 0usize;
+        for _ in 0..16 {
+            match self.instruction(current)? {
+                SIRInstruction::Load(_, address, offset, load_width)
+                    if offset.constant_bit_offset().is_some() =>
+                {
+                    if relative_offset.checked_add(width)? > *load_width {
+                        return None;
+                    }
+                    let value_id = self.placement.value_for_register(current)?;
+                    let value = self.placement.value(value_id)?;
+                    let ValueSafety::StateRead(token) = value.safety else {
+                        return None;
+                    };
+                    if !self
+                        .placement
+                        .can_materialize_state_read_at_block(value.id, self.target)
+                    {
+                        return None;
+                    }
+                    let exact_bit_offset =
+                        offset.constant_bit_offset()?.checked_add(relative_offset)?;
+                    let (physical_byte, physical_bit) = self
+                        .layout
+                        .map_static_bit_offset(&address.absolute_addr(), exact_bit_offset);
+                    let (native_byte_offset, native_bit) = self
+                        .layout
+                        .regioned_static_byte_and_intra(address, exact_bit_offset)?;
+                    if native_bit != physical_bit {
+                        return None;
+                    }
+                    return Some(StateLoadLeaf {
+                        value: value.id,
+                        register: result_register,
+                        origin: value.origin,
+                        token,
+                        address: *address,
+                        bit_offset: exact_bit_offset,
+                        width,
+                        physical_byte,
+                        physical_bit,
+                        native_byte_offset,
+                    });
+                }
+                SIRInstruction::Slice(_, source, offset, slice_width) if *slice_width == width => {
+                    relative_offset = relative_offset.checked_add(*offset)?;
+                    current = *source;
+                }
+                SIRInstruction::Unary(_, UnaryOp::Ident, source) => current = *source,
+                SIRInstruction::Binary(_, source, BinaryOp::And, immediate)
+                    if self.immediate(*immediate) == Some(mask) =>
+                {
+                    current = *source;
+                }
+                SIRInstruction::Binary(_, immediate, BinaryOp::And, source)
+                    if self.immediate(*immediate) == Some(mask) =>
+                {
+                    current = *source;
+                }
+                SIRInstruction::Binary(_, source, BinaryOp::Shr, amount) => {
+                    relative_offset = relative_offset
+                        .checked_add(usize::try_from(self.immediate(*amount)?).ok()?)?;
+                    current = *source;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn ssa_pack_frontier(&self, key: &[RegisterId]) -> Option<(BlockId, usize)> {
+        let lane_width = self.value_width(*key.first()?)?;
+        if key.len() < 8
+            || lane_width == 0
+            || lane_width > 64
+            || key
+                .iter()
+                .any(|register| self.value_width(*register) != Some(lane_width))
         {
             return None;
         }
@@ -623,7 +765,7 @@ impl<'a> Analyzer<'a> {
         let frontier = self
             .placement
             .earliest_common_dominating_value_block(&values, self.target)?;
-        (frontier != self.target).then_some(frontier)
+        (frontier != self.target).then_some((frontier, lane_width))
     }
 
     fn analyze_uncached(&mut self, key: Vec<RegisterId>) -> Result<usize, RejectReason> {
@@ -696,14 +838,41 @@ impl<'a> Analyzer<'a> {
                         .placement
                         .can_materialize_state_read_at_block(value.id, self.target) =>
                 {
-                    let load = self.state_load_leaf(value, token)?;
-                    self.insert_node(
-                        key,
-                        RecipeOp::StateRead(StateReadSource::ReloadAtSink { loads: vec![load] }),
-                        Vec::new(),
-                        lane_width,
-                        5,
-                    )
+                    match self.state_load_leaf(value, token) {
+                        Ok(load) => self.insert_node(
+                            key,
+                            RecipeOp::StateRead(StateReadSource::ReloadAtSink {
+                                loads: vec![load],
+                            }),
+                            Vec::new(),
+                            lane_width,
+                            5,
+                        ),
+                        // A dynamic state address cannot be reconstructed by
+                        // the sink-local static reload recipe.  When the exact
+                        // loaded SSA value already dominates the pack sink,
+                        // keep that value as the materialization frontier and
+                        // broadcast it instead.  Requiring a reload here
+                        // discards a legal frontier and makes SLP depend on
+                        // whether an earlier scalar pass happened to turn the
+                        // load into a static wide access.
+                        Err(RejectReason::NonStridedStateLeaf)
+                            if self
+                                .placement
+                                .cfg
+                                .dominates(value.origin.block(), self.target) =>
+                        {
+                            self.ssa_frontiers.insert(value.origin.block());
+                            self.insert_node(
+                                key,
+                                RecipeOp::BroadcastScalar { register: first },
+                                Vec::new(),
+                                lane_width,
+                                4,
+                            )
+                        }
+                        Err(reason) => Err(reason),
+                    }
                 }
                 ValueSafety::StateRead(_) => {
                     let source = if let Some(frontier) = self
@@ -850,6 +1019,13 @@ impl<'a> Analyzer<'a> {
                     rhs_lanes.push(*current_rhs);
                 }
                 if matches!(operation, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                    if self.x86_recipe_only && operation == BinaryOp::Sar {
+                        // The x86 lane recipe has no arithmetic variable-width
+                        // lane shift.  Cut the recipe at this result and use a
+                        // dominating SSA pack instead of accepting a plan
+                        // which the final eligibility filter must discard.
+                        return Err(RejectReason::UnsupportedOperation);
+                    }
                     if let Some(shift) = exact_uniform_immediate(self, &rhs_lanes) {
                         if shift >= lane_width {
                             return Err(RejectReason::UnsupportedOperation);
@@ -895,6 +1071,29 @@ impl<'a> Analyzer<'a> {
                     return Err(RejectReason::UnsupportedOperation);
                 }
                 if !supported_binary(operation) {
+                    return Err(RejectReason::UnsupportedOperation);
+                }
+                if self.x86_recipe_only
+                    && !matches!(
+                        operation,
+                        BinaryOp::And
+                            | BinaryOp::Or
+                            | BinaryOp::Xor
+                            | BinaryOp::LogicAnd
+                            | BinaryOp::LogicOr
+                            | BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Eq
+                            | BinaryOp::Ne
+                            | BinaryOp::LtU
+                            | BinaryOp::GtU
+                    )
+                {
+                    // Keep unsupported target operations scalar at a concrete
+                    // materialization frontier.  The caller's monotonic
+                    // fallback creates SsaPack for the result when legal, so
+                    // supported users above it can still form one executable
+                    // x86 recipe.
                     return Err(RejectReason::UnsupportedOperation);
                 }
                 let lhs = self.analyze(lhs_lanes)?;
@@ -1421,6 +1620,7 @@ fn instruction_name(instruction: Option<&SIRInstruction<RegionedAbsoluteAddr>>) 
         Some(SIRInstruction::Binary(..)) => "binary",
         Some(SIRInstruction::Unary(..)) => "unary",
         Some(SIRInstruction::Concat(..)) => "concat",
+        Some(SIRInstruction::LaneAggregate { .. }) => "lane-aggregate",
         Some(SIRInstruction::Slice(..)) => "slice",
         Some(SIRInstruction::Mux(..)) => "mux",
         Some(SIRInstruction::Load(..)) => "load",
@@ -1435,15 +1635,42 @@ fn instruction_name(instruction: Option<&SIRInstruction<RegionedAbsoluteAddr>>) 
 
 fn complete_publication_root(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, (BlockId, usize)>,
     block: BlockId,
     index: usize,
     root: RegisterId,
     lane_count: usize,
 ) -> Option<Publication> {
     let instructions = &eu.blocks[&block].instructions;
+    let resolves_to_root = |mut register: RegisterId, use_index: usize| {
+        let mut remaining = 8usize;
+        while register != root && remaining != 0 {
+            let Some(&(definition_block, definition_index)) = definitions.get(&register) else {
+                return false;
+            };
+            if definition_block != block
+                || definition_index <= index
+                || definition_index >= use_index
+            {
+                return false;
+            }
+            let SIRInstruction::Unary(_, UnaryOp::Ident, source) = instructions[definition_index]
+            else {
+                return false;
+            };
+            if eu.register_map.get(&register).map(|ty| ty.width())
+                != eu.register_map.get(&source).map(|ty| ty.width())
+            {
+                return false;
+            }
+            register = source;
+            remaining -= 1;
+        }
+        register == root
+    };
     if let Some(SIRInstruction::Store(address, offset, width, stored, triggers, captures)) =
         instructions.get(index + 1)
-        && *stored == root
+        && resolves_to_root(*stored, index + 1)
         && *width == lane_count
         && triggers.is_empty()
         && captures.is_empty()
@@ -1463,6 +1690,39 @@ fn complete_publication_root(
             // The packed Store remains in SIR and consumes the aggregate
             // result.  Unlike the legacy Slice/Store scatter, it must not be
             // skipped or re-emitted one lane at a time.
+            instruction_indices: Vec::new(),
+            preserve_packed_store: true,
+        });
+    }
+    // Pure CSE can make one packed value serve a reduction/summary use and a
+    // later packed publication. The Store need not remain adjacent to the
+    // defining Concat: SSA dominance is sufficient, and keeping the existing
+    // Store in place preserves all intervening effect order.
+    for (relative_index, instruction) in instructions[index + 1..].iter().enumerate() {
+        let use_index = index + 1 + relative_index;
+        let SIRInstruction::Store(address, offset, width, stored, triggers, captures) = instruction
+        else {
+            continue;
+        };
+        if !resolves_to_root(*stored, use_index)
+            || *width != lane_count
+            || !triggers.is_empty()
+            || !captures.is_empty()
+        {
+            continue;
+        }
+        let first_bit_offset = match offset {
+            SIROffset::Static(bit_offset) => *bit_offset,
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width: 1,
+            } => *bit_offset,
+            _ => continue,
+        };
+        return Some(Publication {
+            address: *address,
+            first_bit_offset,
+            lane_count,
             instruction_indices: Vec::new(),
             preserve_packed_store: true,
         });
@@ -1538,9 +1798,10 @@ fn collect_definitions(
     definitions
 }
 
-fn use_is_covered(
+fn use_is_removed_with_aggregate(
     use_site: ValueUse,
-    covered_consumers: &HashSet<RegisterId>,
+    dead_definitions: &HashSet<RegisterId>,
+    replacement_boundaries: &HashSet<RegisterId>,
     instruction_definitions: &HashMap<(BlockId, usize), RegisterId>,
 ) -> bool {
     let (block, index) = match use_site {
@@ -1549,7 +1810,9 @@ fn use_is_covered(
     };
     instruction_definitions
         .get(&(block, index))
-        .is_some_and(|register| covered_consumers.contains(register))
+        .is_some_and(|register| {
+            dead_definitions.contains(register) || replacement_boundaries.contains(register)
+        })
 }
 
 fn verify_recipe(nodes: &[RecipeNode], root: usize, lane_count: usize) -> bool {
@@ -2197,50 +2460,57 @@ fn candidate_has_simd_publication(candidate: &Candidate, layout: &MemoryLayout) 
     })
 }
 
+fn xmm_recipe_node_supported(node: &RecipeNode) -> bool {
+    node.lane_width != 0
+        && node.lane_width <= 64
+        && match &node.operation {
+            RecipeOp::StateRead(StateReadSource::ReloadAtSink { loads }) => loads
+                .iter()
+                .all(|load| load.physical_bit + load.width <= 64),
+            RecipeOp::Constant { values } => values.len() == node.lanes.len(),
+            RecipeOp::BroadcastScalar { .. } | RecipeOp::SsaPack { .. } => true,
+            RecipeOp::Unary(operation) => matches!(
+                operation,
+                UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
+            ),
+            RecipeOp::Binary(operation) => matches!(
+                operation,
+                BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Xor
+                    | BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr
+                    | BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::LtU
+                    | BinaryOp::GtU
+            ),
+            RecipeOp::ShiftConstant { operation, amount } => {
+                matches!(operation, BinaryOp::Shl | BinaryOp::Shr) && *amount < 64
+            }
+            RecipeOp::OneHotDecode { .. } => node.children.len() == 1,
+            RecipeOp::Concat { operand_widths } => {
+                node.children.len() == operand_widths.len()
+                    && operand_widths.iter().sum::<usize>() == node.lane_width
+            }
+            RecipeOp::Mux => node.children.len() == 3,
+            RecipeOp::StateRead(_)
+            | RecipeOp::Affine { .. }
+            | RecipeOp::PackedExtract { .. }
+            | RecipeOp::ScalarInsert { .. }
+            | RecipeOp::ControlMux
+            | RecipeOp::Slice { .. } => false,
+        }
+}
+
 fn candidate_has_xmm_recipe(candidate: &Candidate, layout: &MemoryLayout) -> bool {
     candidate.lane_count >= 2
         && candidate.lane_count.is_multiple_of(2)
         && candidate_has_simd_publication(candidate, layout)
         && candidate.covered_registers.len() > candidate.estimated_instructions
-        && candidate.nodes.iter().all(|node| {
-            node.lane_width != 0
-                && node.lane_width <= 64
-                && match &node.operation {
-                    RecipeOp::StateRead(StateReadSource::ReloadAtSink { loads }) => loads
-                        .iter()
-                        .all(|load| load.physical_bit + load.width <= 64),
-                    RecipeOp::Constant { values } => values.len() == node.lanes.len(),
-                    RecipeOp::BroadcastScalar { .. } | RecipeOp::SsaPack { .. } => true,
-                    RecipeOp::Unary(operation) => matches!(
-                        operation,
-                        UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
-                    ),
-                    RecipeOp::Binary(operation) => matches!(
-                        operation,
-                        BinaryOp::And
-                            | BinaryOp::Or
-                            | BinaryOp::Xor
-                            | BinaryOp::LogicAnd
-                            | BinaryOp::LogicOr
-                            | BinaryOp::Add
-                            | BinaryOp::Sub
-                            | BinaryOp::Eq
-                            | BinaryOp::Ne
-                    ),
-                    RecipeOp::ShiftConstant { operation, amount } => {
-                        matches!(operation, BinaryOp::Shl | BinaryOp::Shr) && *amount < 64
-                    }
-                    RecipeOp::Mux => node.children.len() == 3,
-                    RecipeOp::StateRead(_)
-                    | RecipeOp::Affine { .. }
-                    | RecipeOp::PackedExtract { .. }
-                    | RecipeOp::ScalarInsert { .. }
-                    | RecipeOp::OneHotDecode { .. }
-                    | RecipeOp::ControlMux
-                    | RecipeOp::Slice { .. }
-                    | RecipeOp::Concat { .. } => false,
-                }
-        })
+        && candidate.nodes.iter().all(xmm_recipe_node_supported)
 }
 
 fn candidate_coverage(candidates: &[Candidate]) -> (HashSet<RegisterId>, HashSet<RegisterId>) {
@@ -2261,20 +2531,57 @@ fn dead_candidate_registers(
     instruction_definitions: &HashMap<(BlockId, usize), RegisterId>,
 ) -> HashSet<RegisterId> {
     let (covered, consumers) = candidate_coverage(candidates);
-    covered
+    let scalar_frontier = candidates
         .iter()
-        .filter(|register| {
-            placement
-                .value_for_register(**register)
-                .and_then(|value| placement.value(value))
-                .is_some_and(|value| {
-                    value.uses.iter().all(|use_site| {
-                        use_is_covered(*use_site, &consumers, instruction_definitions)
-                    })
-                })
+        .flat_map(|candidate| &candidate.nodes)
+        .flat_map(|node| match &node.operation {
+            RecipeOp::BroadcastScalar { register } => vec![*register],
+            RecipeOp::SsaPack { .. } | RecipeOp::ScalarInsert { .. } => node.lanes.clone(),
+            RecipeOp::StateRead(StateReadSource::DominatingSsa { values, .. }) => {
+                values.iter().map(|leaf| leaf.register).collect()
+            }
+            _ => Vec::new(),
         })
+        .collect::<HashSet<_>>();
+    let replacement_boundaries = consumers
+        .difference(&covered)
         .copied()
-        .collect()
+        .collect::<HashSet<_>>();
+
+    // This is a greatest fixed point, not a one-hop test. A covered producer
+    // is removable only when every path through covered consumers eventually
+    // reaches an instruction replaced by the aggregate. If one covered value
+    // has an external use, it remains live and that liveness must propagate
+    // backwards through all of its producers.
+    let mut dead = covered
+        .difference(&scalar_frontier)
+        .copied()
+        .collect::<HashSet<_>>();
+    loop {
+        let retained = dead
+            .iter()
+            .filter(|register| {
+                placement
+                    .value_for_register(**register)
+                    .and_then(|value| placement.value(value))
+                    .is_some_and(|value| {
+                        value.uses.iter().all(|use_site| {
+                            use_is_removed_with_aggregate(
+                                *use_site,
+                                &dead,
+                                &replacement_boundaries,
+                                instruction_definitions,
+                            )
+                        })
+                    })
+            })
+            .copied()
+            .collect::<HashSet<_>>();
+        if retained.len() == dead.len() {
+            return dead;
+        }
+        dead = retained;
+    }
 }
 
 pub(crate) fn analyze(
@@ -2305,7 +2612,7 @@ pub(crate) fn analyze(
                 continue;
             }
             let Some(publication) =
-                complete_publication_root(eu, block_id, index, *root, lane_count)
+                complete_publication_root(eu, &definitions, block_id, index, *root, lane_count)
             else {
                 continue;
             };
@@ -2323,6 +2630,7 @@ pub(crate) fn analyze(
                 failure_path: Vec::new(),
                 snapshot_frontiers: HashSet::default(),
                 ssa_frontiers: HashSet::default(),
+                x86_recipe_only: crate::backend::native::lane_aggregate_codegen_enabled(),
             };
             let lanes = arguments.iter().rev().copied().collect::<Vec<_>>();
             let recipe = analyzer.analyze(lanes).and_then(|root| {
@@ -2471,28 +2779,12 @@ pub(crate) fn analyze(
         .iter()
         .flat_map(|candidate| candidate.covered_registers.iter().copied())
         .collect::<HashSet<_>>();
-    let covered_consumers = report
-        .accepted
-        .iter()
-        .flat_map(|candidate| candidate.covered_consumers.iter().copied())
-        .collect::<HashSet<_>>();
     report.covered_scalar_definitions = covered.len();
-    report.dead_scalar_registers = covered
-        .iter()
-        .filter(|register| {
-            placement
-                .value_for_register(**register)
-                .and_then(|value| placement.value(value))
-                .is_some_and(|value| {
-                    value.uses.iter().all(|use_site| {
-                        use_is_covered(*use_site, &covered_consumers, &instruction_definitions)
-                    })
-                })
-        })
-        .copied()
-        .collect();
+    report.dead_scalar_registers =
+        dead_candidate_registers(&report.accepted, &placement, &instruction_definitions);
     report.dead_scalar_definitions = report.dead_scalar_registers.len();
     report.replaced_scalar_registers = report.dead_scalar_registers.clone();
+    let (_, covered_consumers) = candidate_coverage(&report.accepted);
     report
         .replaced_scalar_registers
         .extend(covered_consumers.difference(&covered).copied());
@@ -2824,14 +3116,15 @@ mod tests {
 
     #[test]
     fn executable_plan_lowers_atomically_without_scalar_publication() {
-        let (eu, layout) = fixture(false);
+        let (mut eu, layout) = fixture(false);
         let report = analyze(&eu, &layout, false).unwrap();
         let plan = report.plan().cloned().expect("fixture must produce a plan");
+        crate::optimizer::coalescing::materialize_lane_aggregate_plan(&mut eu, &plan).unwrap();
         let function = crate::backend::native::isel::lower_execution_unit_with_lane_aggregate(
             &eu,
             &layout,
             false,
-            Some(plan),
+            Some(plan.clone()),
         );
 
         let aggregates = function
@@ -2848,16 +3141,87 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(aggregates, vec![(1, 1)]);
-        assert!(function.blocks.iter().flat_map(|block| &block.insts).all(
-            |instruction| !matches!(
-                instruction,
-                crate::backend::native::mir::MInst::Store {
-                    base: crate::backend::native::mir::BaseReg::SimState,
-                    ..
-                }
-            )
-        ));
+        let lowered = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                lowered.as_slice(),
+                [
+                    crate::backend::native::mir::MInst::LaneAggregate { .. },
+                    crate::backend::native::mir::MInst::Return
+                ]
+            ),
+            "the scalar cone replaced by the aggregate must not also be lowered: {lowered:?}"
+        );
         function.verify();
+    }
+
+    #[test]
+    fn packed_publication_may_follow_a_summary_use_and_typed_identity() {
+        let (mut eu, layout) = fixture(false);
+        let block = eu.blocks.get_mut(&BlockId(0)).unwrap();
+        let root_index = block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, SIRInstruction::Concat(..)))
+            .unwrap();
+        let root = match block.instructions[root_index] {
+            SIRInstruction::Concat(root, _) => root,
+            _ => unreachable!(),
+        };
+        let publication_address = match block.instructions[root_index + 2] {
+            SIRInstruction::Store(address, ..) => address,
+            _ => unreachable!(),
+        };
+        block.instructions.truncate(root_index + 1);
+        let summary = RegisterId(100);
+        let typed_root = RegisterId(101);
+        eu.register_map.insert(
+            summary,
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        eu.register_map
+            .insert(typed_root, RegisterType::Logic { width: 8 });
+        block.instructions.extend([
+            SIRInstruction::Unary(summary, UnaryOp::Or, root),
+            SIRInstruction::Store(
+                publication_address,
+                SIROffset::Static(8),
+                1,
+                summary,
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Unary(typed_root, UnaryOp::Ident, root),
+            SIRInstruction::Store(
+                publication_address,
+                SIROffset::PackedElements {
+                    bit_offset: 0,
+                    element_width: 1,
+                },
+                8,
+                typed_root,
+                Vec::new(),
+                Vec::new(),
+            ),
+        ]);
+        eu.verify_result().unwrap();
+
+        let report = analyze(&eu, &layout, false).unwrap();
+
+        assert_eq!(report.accepted.len(), 1);
+        assert!(!report.dead_scalar_registers.is_empty());
+        let plan = report
+            .codegen_plan()
+            .expect("fixture must remain SIMD-lowerable");
+        assert_eq!(plan.roots[0].original_root, root);
+        assert!(plan.roots[0].publication_instruction_indices.is_empty());
     }
 
     #[test]
@@ -3123,6 +3487,15 @@ mod tests {
         assert_eq!(report.accepted.len(), 1);
         assert_eq!(report.kind_counts[&RecipeKind::SsaPack], 1);
         assert_eq!(report.accepted[0].ssa_frontiers, vec![BlockId(0)]);
+        let plan = report.plan().unwrap();
+        let scalar_inputs = plan.scalar_inputs_for_root(0).unwrap();
+        assert!(!scalar_inputs.is_empty());
+        assert!(
+            scalar_inputs
+                .iter()
+                .all(|register| !plan.dead_scalar_registers.contains(register)),
+            "materialization frontier inputs must remain defined"
+        );
     }
 
     #[test]

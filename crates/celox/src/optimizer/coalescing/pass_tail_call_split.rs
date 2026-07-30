@@ -461,7 +461,8 @@ fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        | SIRInstruction::Mux(dst, _, _, _)
+        | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
@@ -491,6 +492,7 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
+        SIRInstruction::LaneAggregate { inputs, .. } => out.extend(inputs.iter().copied()),
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);
         }

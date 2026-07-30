@@ -304,6 +304,19 @@ fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Pro
                 .join(", ");
             format!("r{} = Concat({})", rd.0, rs_str)
         }
+        SIRInstruction::LaneAggregate {
+            dst, root, inputs, ..
+        } => {
+            let inputs = inputs
+                .iter()
+                .map(|register| format!("r{}", register.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "r{} = LaneAggregate(root={}, inputs=[{}])",
+                dst.0, root, inputs
+            )
+        }
         SIRInstruction::Slice(dst, src, offset, width) => {
             format!(
                 "r{} = Slice(r{}, offset={}, width={})",

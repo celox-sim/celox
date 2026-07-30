@@ -974,24 +974,40 @@ fn lane_aggregate_roots_for_block(
 ) -> LaneAggregateBlockRoots {
     let diagnostics = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY").is_some();
     let mut result = LaneAggregateBlockRoots::default();
-    for (root_index, root) in plan.roots.iter().enumerate() {
-        if root.block != block.id {
-            continue;
-        }
-        let Some((instruction_index, _)) = block
-            .instructions
-            .iter()
-            .enumerate()
-            .find(|(_, instruction)| sir_def_reg(instruction) == Some(root.original_root))
+    for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+        let SIRInstruction::LaneAggregate {
+            dst,
+            root: root_id,
+            inputs: input_registers,
+            writes_state,
+        } = instruction
         else {
+            continue;
+        };
+        let root_index = usize::from(*root_id);
+        let Some(root) = plan.roots.get(root_index) else {
             if diagnostics {
                 eprintln!(
-                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=root-definition-not-found",
-                    block.id.0, root.original_root.0
+                    "[lane-aggregate-codegen-fallback] block={} root={} reason=plan-root-not-found",
+                    block.id.0, root_index
                 );
             }
             continue;
         };
+        let expected_inputs = plan.scalar_inputs_for_root(root_index);
+        if root.block != block.id
+            || root.original_root != *dst
+            || expected_inputs.as_deref() != Some(input_registers.as_slice())
+            || *writes_state != !root.publication_locations.is_empty()
+        {
+            if diagnostics {
+                eprintln!(
+                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=explicit-sir-plan-mismatch",
+                    block.id.0, dst.0
+                );
+            }
+            continue;
+        }
         let Some((read_ranges, write_ranges)) = lane_aggregate_root_effects(plan, root_index)
         else {
             if diagnostics {
@@ -1031,32 +1047,16 @@ fn lane_aggregate_roots_for_block(
             }
             continue;
         };
-        let Some(input_registers) = plan.scalar_inputs_for_root(root_index) else {
-            continue;
-        };
         let inputs = input_registers
             .iter()
             .map(|register| ctx.reg_map.get(*register))
             .collect::<Vec<_>>();
-        let Ok(root_id) = u16::try_from(root_index) else {
-            continue;
-        };
-        if root
-            .publication_instruction_indices
-            .iter()
-            .any(|index| *index >= block.instructions.len() || *index <= instruction_index)
-        {
-            continue;
-        }
-        result
-            .skip_indices
-            .extend(root.publication_instruction_indices.iter().copied());
         result.roots.insert(
             instruction_index,
             LaneAggregateRootLowering {
                 dst: ctx.reg_map.get(root.original_root),
                 plan: plan_id,
-                root: root_id,
+                root: *root_id,
                 source_block: block.id,
                 inputs,
                 read_ranges,
@@ -1570,7 +1570,8 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
                 | SIRInstruction::Load(d, _, _, _)
                 | SIRInstruction::Concat(d, _)
                 | SIRInstruction::Slice(d, _, _, _)
-                | SIRInstruction::Mux(d, _, _, _) => Some(*d),
+                | SIRInstruction::Mux(d, _, _, _)
+                | SIRInstruction::LaneAggregate { dst: d, .. } => Some(*d),
                 SIRInstruction::Store(..)
                 | SIRInstruction::Commit(..)
                 | SIRInstruction::RuntimeEvent { .. }
@@ -3628,6 +3629,11 @@ fn collect_sir_inst_uses(
                 add(arg);
             }
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            for &input in inputs {
+                add(input);
+            }
+        }
         SIRInstruction::Mux(_, cond, then_val, else_val) => {
             add(*cond);
             add(*then_val);
@@ -3985,7 +3991,8 @@ fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+        | SIRInstruction::Mux(dst, _, _, _)
+        | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
         SIRInstruction::Store(_, _, _, _, _, _)
         | SIRInstruction::Commit(_, _, _, _, _)
         | SIRInstruction::RuntimeEvent { .. }
@@ -6337,6 +6344,9 @@ fn lower_instruction(
         return;
     }
     match inst {
+        SIRInstruction::LaneAggregate { .. } => {
+            unreachable!("lane aggregate roots are lowered before scalar instruction selection")
+        }
         SIRInstruction::RuntimeEvent { site_id, args } => {
             let event_ptr = load_runtime_event_ptr(ctx, block);
             lower_runtime_event_write(ctx, block, event_ptr, *site_id, args);

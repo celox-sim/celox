@@ -1060,6 +1060,7 @@ fn instruction_uses(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<R
         SIRInstruction::Concat(_, sources)
         | SIRInstruction::RuntimeEvent { args: sources, .. }
         | SIRInstruction::CombCaptureEvent { args: sources, .. } => sources.clone(),
+        SIRInstruction::LaneAggregate { inputs, .. } => inputs.clone(),
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             vec![*condition, *true_value, *false_value]
         }

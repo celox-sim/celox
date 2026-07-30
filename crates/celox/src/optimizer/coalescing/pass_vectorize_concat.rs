@@ -410,6 +410,9 @@ fn push_instruction_uses(
             worklist.push(*then_value);
             worklist.push(*else_value);
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            worklist.extend(inputs.iter().copied());
+        }
         SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
             worklist.push(*old);
             worklist.push(*new);
@@ -464,11 +467,21 @@ fn collect_register_use_counts(
 pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let mut definitions = HashMap::<RegisterId, (BlockId, usize)>::default();
     let mut worklist = Vec::new();
+    let mut observable_definitions = Vec::new();
 
     for (&block_id, block) in &eu.blocks {
         for (instruction_index, inst) in block.instructions.iter().enumerate() {
             if let Some(definition) = def_reg(inst) {
                 definitions.insert(definition, (block_id, instruction_index));
+                if matches!(
+                    inst,
+                    SIRInstruction::LaneAggregate {
+                        writes_state: true,
+                        ..
+                    }
+                ) {
+                    observable_definitions.push(definition);
+                }
             } else {
                 push_instruction_uses(inst, &mut worklist);
             }
@@ -477,6 +490,7 @@ pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
         // existing SIR convention and also keeps live block parameters sound.
         push_terminator_uses(&block.terminator, &mut worklist);
     }
+    worklist.extend(observable_definitions);
 
     let mut live = HashSet::default();
     while let Some(register) = worklist.pop() {

@@ -803,6 +803,11 @@ fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
                         add_register_use(&mut counts, source);
                     }
                 }
+                SIRInstruction::LaneAggregate { inputs, .. } => {
+                    for &input in inputs {
+                        add_register_use(&mut counts, input);
+                    }
+                }
                 SIRInstruction::Mux(_, condition, then_value, else_value) => {
                     add_register_use(&mut counts, *condition);
                     add_register_use(&mut counts, *then_value);

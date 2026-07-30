@@ -466,6 +466,13 @@ fn apply_aliases_to_inst(
                 }
             }
         }
+        SIRInstruction::LaneAggregate { inputs, .. } => {
+            for input in inputs {
+                if let Some(&to) = aliases.get(input) {
+                    *input = to;
+                }
+            }
+        }
         SIRInstruction::Mux(_, cond, then_val, else_val) => {
             if let Some(&to) = aliases.get(cond) {
                 *cond = to;

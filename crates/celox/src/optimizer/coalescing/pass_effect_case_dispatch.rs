@@ -317,6 +317,7 @@ fn remap_instruction(
                 .map(|&argument| resolve(argument))
                 .collect::<Option<Vec<_>>>()?,
         ),
+        SIRInstruction::LaneAggregate { .. } => return None,
         SIRInstruction::Slice(_, source, source_offset, width) => {
             SIRInstruction::Slice(destination, resolve(*source)?, *source_offset, *width)
         }

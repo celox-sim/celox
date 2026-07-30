@@ -487,6 +487,9 @@ fn compile_instruction(
         SIRInstruction::Concat(dst, args) => {
             compile_concat(dst, args, unit, four_state, locals, instrs);
         }
+        SIRInstruction::LaneAggregate { .. } => {
+            unreachable!("lane aggregates are native-backend-only final SIR")
+        }
         SIRInstruction::Slice(dst, src, bit_offset, width) => {
             compile_slice(dst, src, *bit_offset, *width, four_state, locals, instrs);
         }
