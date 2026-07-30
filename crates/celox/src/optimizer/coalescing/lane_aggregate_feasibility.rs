@@ -2165,10 +2165,42 @@ fn shared_recipe_pressure(
     Some((common.len(), boundary.len(), prefix_peak, suffix_peak))
 }
 
-fn candidate_has_xmm_recipe(candidate: &Candidate) -> bool {
+fn candidate_has_simd_publication(candidate: &Candidate, layout: &MemoryLayout) -> bool {
+    if candidate.publication.preserve_packed_store {
+        return true;
+    }
+    let Some((base_byte, base_bit)) = layout.regioned_static_byte_and_intra(
+        &candidate.publication.address,
+        candidate.publication.first_bit_offset,
+    ) else {
+        return false;
+    };
+    if base_bit != 0 {
+        return false;
+    }
+    (0..candidate.lane_count).all(|lane| {
+        let Some(bit_offset) = candidate.publication.first_bit_offset.checked_add(lane) else {
+            return false;
+        };
+        let Some((native_byte, intra_byte)) =
+            layout.regioned_static_byte_and_intra(&candidate.publication.address, bit_offset)
+        else {
+            return false;
+        };
+        let Some(expected_byte) = i32::try_from(lane)
+            .ok()
+            .and_then(|lane| base_byte.checked_add(lane))
+        else {
+            return false;
+        };
+        intra_byte == 0 && native_byte == expected_byte
+    })
+}
+
+fn candidate_has_xmm_recipe(candidate: &Candidate, layout: &MemoryLayout) -> bool {
     candidate.lane_count >= 2
         && candidate.lane_count.is_multiple_of(2)
-        && candidate.publication.preserve_packed_store
+        && candidate_has_simd_publication(candidate, layout)
         && candidate.covered_registers.len() > candidate.estimated_instructions
         && candidate.nodes.iter().all(|node| {
             node.lane_width != 0
@@ -2523,7 +2555,7 @@ pub(crate) fn analyze(
     let codegen_candidates = report
         .accepted
         .iter()
-        .filter(|candidate| candidate_has_xmm_recipe(candidate))
+        .filter(|candidate| candidate_has_xmm_recipe(candidate, layout))
         .cloned()
         .collect::<Vec<_>>();
     if !codegen_candidates.is_empty() {
@@ -2585,6 +2617,24 @@ mod tests {
                 plane_size: 8,
             },
         );
+        let destination = AbsoluteAddr {
+            var_id: VarId::from_raw(1),
+            ..absolute
+        };
+        layout.offsets.insert(destination, 8);
+        layout.widths.insert(destination, 8);
+        layout.is_4states.insert(destination, false);
+        layout.unpacked_arrays.insert(
+            destination,
+            UnpackedArrayLayout {
+                element_width: 1,
+                element_count: 8,
+                element_stride: 1,
+                plane_size: 8,
+            },
+        );
+        layout.total_size = 16;
+        layout.merged_total_size = 16;
         layout
     }
 
@@ -2769,6 +2819,7 @@ mod tests {
                 .iter()
                 .all(|load| load.width == 1 && load.physical_bit == 0)
         );
+        assert!(candidate_has_simd_publication(&report.accepted[0], &layout));
     }
 
     #[test]

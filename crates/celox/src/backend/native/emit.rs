@@ -3306,14 +3306,13 @@ fn emit_lane_aggregate_scalar(
     Ok(())
 }
 
-fn lane_aggregate_xmm_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+fn lane_aggregate_xmm_graph_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
     let Some(root) = plan.roots.get(root_index) else {
         return false;
     };
     if root.lane_count < 2
         || !root.lane_count.is_multiple_of(2)
         || root.lane_count > 64
-        || !root.publication_locations.is_empty()
         || plan
             .nodes
             .get(root.recipe_root)
@@ -3380,12 +3379,46 @@ fn lane_aggregate_xmm_eligible(plan: &LaneAggregatePlan, root_index: usize) -> b
     true
 }
 
+fn lane_aggregate_xmm_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
+    lane_aggregate_xmm_graph_eligible(plan, root_index)
+        && plan.roots[root_index].publication_locations.is_empty()
+}
+
+/// Return the native byte base for a publication whose logical lanes occupy
+/// consecutive unpacked bytes.
+///
+/// This is the layout for which the lane vector can be packed to bytes and
+/// stored directly. Packed-bit and irregular publications retain the scalar
+/// path: widening either one to a vector store would overwrite neighboring
+/// RTL state.
+fn lane_aggregate_byte_publication(
+    root: &crate::lane_aggregate_plan::LaneAggregatePlanRoot,
+) -> Option<i32> {
+    let first = *root.publication_locations.first()?;
+    if first.bit != 0 || root.publication_locations.len() != root.lane_count {
+        return None;
+    }
+    for (lane, location) in root.publication_locations.iter().enumerate() {
+        let lane = i32::try_from(lane).ok()?;
+        if location.bit != 0
+            || location.native_byte_offset != first.native_byte_offset.checked_add(lane)?
+        {
+            return None;
+        }
+    }
+    Some(first.native_byte_offset)
+}
+
 fn lane_aggregate_xmm_word_eligible(plan: &LaneAggregatePlan, root_index: usize) -> bool {
-    if !lane_aggregate_xmm_eligible(plan, root_index) {
+    if !lane_aggregate_xmm_graph_eligible(plan, root_index) {
         return false;
     }
     let root = &plan.roots[root_index];
-    if root.lane_count < 8 || !root.lane_count.is_multiple_of(8) {
+    if root.lane_count < 8
+        || !root.lane_count.is_multiple_of(8)
+        || (!root.publication_locations.is_empty()
+            && lane_aggregate_byte_publication(root).is_none())
+    {
         return false;
     }
     let mut visited = HashSet::<usize>::new();
@@ -4553,25 +4586,29 @@ fn emit_lane_aggregate_ymm_word(
         }
         let result = node_registers[root.recipe_root]
             .expect("YMM aggregate root must have an internal register");
-        let zero = free.pop().expect("YMM aggregate predicate-pack scratch");
-        asm.vpxor(zero, zero, zero)?;
-        asm.vpsllw(result, result, 7)?;
-        asm.vpackuswb(result, result, zero)?;
-
-        asm.pmovmskb(preg_to_reg32(scratch_gpr), ymm_to_xmm(result))?;
-        asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
+        let high = free.pop().expect("YMM aggregate predicate-pack scratch");
+        let result_xmm = ymm_to_xmm(result);
+        let high_xmm = ymm_to_xmm(high);
+        // Collapse the low byte of all sixteen word lanes into one XMM value.
+        // Keeping this byte-vector form until after publication lets one AVX
+        // store replace sixteen scalar one-bit Stores.
+        asm.vextracti128(high_xmm, result, 1)?;
+        asm.vpackuswb(result_xmm, result_xmm, high_xmm)?;
+        if let Some(base) = lane_aggregate_byte_publication(root) {
+            let offset = base
+                .checked_add(i32::try_from(lane_base).expect("aggregate lane offset"))
+                .expect("aggregate publication offset");
+            asm.vmovdqu(
+                xmmword_ptr(mem_operand(BaseReg::SimState, offset)),
+                result_xmm,
+            )?;
+        }
+        asm.vpsllw(result_xmm, result_xmm, 7)?;
+        asm.vpmovmskb(preg_to_reg32(scratch_gpr), result_xmm)?;
+        asm.and(preg_to_reg32(scratch_gpr), 0xffff)?;
         if lane_base != 0 {
             asm.shl(preg_to_reg64(scratch_gpr), lane_base as u32)?;
         }
-        asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
-
-        asm.vextracti128(ymm_to_xmm(zero), result, 1)?;
-        asm.pmovmskb(preg_to_reg32(scratch_gpr), ymm_to_xmm(zero))?;
-        asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
-        asm.shl(
-            preg_to_reg64(scratch_gpr),
-            u32::try_from(lane_base + 8).expect("aggregate lane shift"),
-        )?;
         asm.or(preg_to_reg64(output), preg_to_reg64(scratch_gpr))?;
     }
     asm.vzeroupper()?;
@@ -4669,8 +4706,14 @@ fn emit_lane_aggregate_xmm_word(
             .expect("word aggregate root must have an internal register");
         let zero = free.pop().expect("word aggregate predicate-pack scratch");
         asm.pxor(zero, zero)?;
-        asm.psllw(result, 7)?;
         asm.packuswb(result, zero)?;
+        if let Some(base) = lane_aggregate_byte_publication(root) {
+            let offset = base
+                .checked_add(i32::try_from(lane_base).expect("aggregate lane offset"))
+                .expect("aggregate publication offset");
+            asm.movq(qword_ptr(mem_operand(BaseReg::SimState, offset)), result)?;
+        }
+        asm.psllw(result, 7)?;
         asm.pmovmskb(preg_to_reg32(scratch_gpr), result)?;
         asm.and(preg_to_reg32(scratch_gpr), 0xff)?;
         if lane_base != 0 {
@@ -8157,8 +8200,8 @@ mod shift_encoding_tests {
                 var_id: VarId::default(),
             },
         );
-        let lanes = (0..8).map(RegisterId).collect::<Vec<_>>();
-        let loads = (0..8)
+        let lanes = (0..16).map(RegisterId).collect::<Vec<_>>();
+        let loads = (0..16)
             .map(|lane| LaneAggregateStateLoad {
                 register: RegisterId(lane),
                 address,
@@ -8180,35 +8223,34 @@ mod shift_encoding_tests {
                     children: Vec::new(),
                     lanes: lanes.clone(),
                     lane_width: 1,
-                    lane_count: 8,
+                    lane_count: 16,
                 },
                 LaneAggregatePlanNode {
                     operation: LaneAggregatePlanOp::Unary(UnaryOp::BitNot),
                     children: vec![0],
                     lanes: lanes.clone(),
                     lane_width: 1,
-                    lane_count: 8,
+                    lane_count: 16,
                 },
             ],
             roots: vec![LaneAggregatePlanRoot {
                 block: crate::ir::BlockId(0),
-                original_root: RegisterId(8),
+                original_root: RegisterId(16),
                 recipe_root: 1,
-                publication_instruction_indices: vec![
-                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                ],
+                publication_instruction_indices: (1..=32).collect(),
                 publication_address: address,
                 publication_bit_offset: 0,
-                publication_locations: (8..16)
+                publication_locations: (16..32)
                     .map(|offset| LaneAggregateBitLocation {
                         native_byte_offset: offset,
                         bit: 0,
                     })
                     .collect(),
-                lane_count: 8,
+                lane_count: 16,
             }],
             dead_scalar_registers: crate::HashSet::default(),
         };
+        assert!(lane_aggregate_xmm_word_eligible(&plan, 0));
         let mut vregs = VRegAllocator::new();
         let destination = vregs.alloc();
         let mut function = MFunction::new(vregs, vec![SpillDesc::transient()]);
@@ -8223,8 +8265,8 @@ mod shift_encoding_tests {
             captured_inputs: 0,
             input_bytes: 0,
             input_base_offset: 0,
-            read_ranges: vec![MemoryAliasRange::new(0, 8).unwrap()],
-            write_ranges: vec![MemoryAliasRange::new(8, 8).unwrap()],
+            read_ranges: vec![MemoryAliasRange::new(0, 16).unwrap()],
+            write_ranges: vec![MemoryAliasRange::new(16, 16).unwrap()],
         });
         block.push(MInst::Return);
         function.blocks.push(block);
@@ -8233,13 +8275,26 @@ mod shift_encoding_tests {
         let mut assignment = AssignmentMap::default();
         assignment.set(destination, PhysReg::RAX);
         let emitted = emit(&function, &assignment, 0).unwrap();
+        if function.target_features.avx2() {
+            let assembly = disassemble(&emitted.code, 0);
+            assert!(
+                assembly.contains("vpackuswb") && assembly.contains("vmovdqu"),
+                "sixteen-lane publication should remain in AVX registers:\n{assembly}"
+            );
+        }
         let jit = JitCode::new(&emitted.code).unwrap();
-        let mut state = [0u8; 16];
-        for (lane, value) in [0u8, 1, 1, 0, 1, 0, 0, 1].into_iter().enumerate() {
+        let mut state = [0u8; 32];
+        for (lane, value) in [0u8, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0]
+            .into_iter()
+            .enumerate()
+        {
             state[lane] = value;
         }
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
-        assert_eq!(&state[8..], &[1, 0, 0, 1, 0, 1, 1, 0]);
+        assert_eq!(
+            &state[16..],
+            &[1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1]
+        );
     }
 
     #[test]
