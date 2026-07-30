@@ -3,6 +3,8 @@ use crate::ir::*;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 
+const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
+
 fn union_u32<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
     let mut out = Vec::new();
     for item in items {
@@ -446,6 +448,9 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                 }
                 expected_next_offset += detail.width;
                 let aggregate_width = expected_next_offset - details[segment_start].offset;
+                if aggregate_width > MAX_SCALAR_COALESCED_STORE_BITS {
+                    break;
+                }
                 if aggregate_static_offset(
                     details[segment_start].offset,
                     aggregate_width,
@@ -1271,7 +1276,8 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_static_offset, coalesce_static_loads as coalesce_static_loads_with_types,
+        MAX_SCALAR_COALESCED_STORE_BITS, aggregate_static_offset,
+        coalesce_static_loads as coalesce_static_loads_with_types,
         coalesce_static_stores as coalesce_static_stores_with_types, optimize_block,
         subsume_static_loads as subsume_static_loads_with_types,
     };
@@ -1474,6 +1480,47 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(stores, vec![(0, 12, 24)]);
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn scalar_store_coalescing_stops_at_64_bits() {
+        let mut instructions = (0..8)
+            .map(|index| SIRInstruction::Imm(RegisterId(index), SIRValue::new(index as u8)))
+            .chain((0..8).map(|index| {
+                SIRInstruction::Store(
+                    7u32,
+                    SIROffset::Static(index * 10),
+                    10,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            }))
+            .collect::<Vec<_>>();
+        let mut register_map = (0..8).map(|index| (RegisterId(index), logic(10))).collect();
+        let mut reg_counter = 7;
+
+        assert!(coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &[(7u32, 10usize)].into_iter().collect(),
+        ));
+
+        let stores = instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, width, ..) => Some(*width),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![60, 20]);
+        assert!(
+            stores
+                .iter()
+                .all(|width| *width <= MAX_SCALAR_COALESCED_STORE_BITS)
+        );
         verify(instructions, register_map);
     }
 
