@@ -56,12 +56,12 @@ impl ExecutionUnitPass for ControlFlowSimplifyPass {
 
         let mut changed = false;
         loop {
-            let analysis = analyze(eu);
+            let analysis = analyze(eu, options.four_state);
 
             // Rewrite only from the final SCCP lattice.  In particular, an
             // overdefined condition never gets treated as a boolean just
             // because one predecessor happened to carry a constant value.
-            let sccp_changed = apply_sccp_rewrites(eu, &analysis);
+            let sccp_changed = apply_sccp_rewrites(eu, &analysis, options.four_state);
 
             // Constant propagation handles values known independently of
             // control flow.  The second proof is deliberately different: a
@@ -179,7 +179,11 @@ fn remove_unreachable_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bo
     changed
 }
 
-fn apply_sccp_rewrites(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, analysis: &Analysis) -> bool {
+fn apply_sccp_rewrites(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    analysis: &Analysis,
+    four_state: bool,
+) -> bool {
     let mut changed = false;
     let mut executable = analysis.executable.iter().copied().collect::<Vec<_>>();
     executable.sort_unstable_by_key(|id| id.0);
@@ -189,19 +193,39 @@ fn apply_sccp_rewrites(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, analysis: &
         };
 
         for instruction in &mut block.instructions {
-            let replacement = match instruction {
-                SIRInstruction::Mux(dst, condition, then_value, else_value) => {
-                    if then_value == else_value {
-                        Some((*dst, *then_value))
-                    } else {
-                        exact_truth(analysis.values.get(condition))
-                            .map(|truth| (*dst, if truth { *then_value } else { *else_value }))
+            let replacement = def_reg(instruction)
+                .and_then(|dst| match analysis.values.get(&dst) {
+                    Some(LatticeValue::Constant(value))
+                        if !matches!(
+                            instruction,
+                            SIRInstruction::Imm(_, current) if current == value
+                        ) =>
+                    {
+                        Some(SIRInstruction::Imm(dst, value.clone()))
                     }
-                }
-                _ => None,
-            };
-            if let Some((dst, selected)) = replacement {
-                *instruction = SIRInstruction::Unary(dst, UnaryOp::Ident, selected);
+                    _ => None,
+                })
+                .or_else(|| {
+                    algebraic_replacement(instruction, analysis, &eu.register_map, four_state)
+                })
+                .or_else(|| match instruction {
+                    SIRInstruction::Mux(dst, condition, then_value, else_value) => {
+                        if then_value == else_value {
+                            Some(SIRInstruction::Unary(*dst, UnaryOp::Ident, *then_value))
+                        } else {
+                            exact_truth(analysis.values.get(condition)).map(|truth| {
+                                SIRInstruction::Unary(
+                                    *dst,
+                                    UnaryOp::Ident,
+                                    if truth { *then_value } else { *else_value },
+                                )
+                            })
+                        }
+                    }
+                    _ => None,
+                });
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
                 changed = true;
             }
         }
@@ -243,6 +267,65 @@ fn apply_sccp_rewrites(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, analysis: &
         }
     }
     changed
+}
+
+fn algebraic_replacement(
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    analysis: &Analysis,
+    types: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
+) -> Option<SIRInstruction<RegionedAbsoluteAddr>> {
+    let SIRInstruction::Binary(dst, lhs, op, rhs) = instruction else {
+        return None;
+    };
+    let exact = |register: RegisterId| match analysis.values.get(&register) {
+        Some(LatticeValue::Constant(value)) if value.mask.is_zero() => Some(value),
+        _ => None,
+    };
+    let is_zero = |register| exact(register).is_some_and(|value| value.payload.is_zero());
+    let is_one = |register| exact(register).is_some_and(|value| value.payload.is_one());
+    let same_type = |a, b| {
+        types
+            .get(&a)
+            .zip(types.get(&b))
+            .is_some_and(|(a, b)| a == b)
+    };
+    let identity = |source| {
+        same_type(*dst, source).then_some(SIRInstruction::Unary(*dst, UnaryOp::Ident, source))
+    };
+
+    if lhs == rhs {
+        match op {
+            BinaryOp::And | BinaryOp::Or => return identity(*lhs),
+            BinaryOp::Sub | BinaryOp::Xor if !four_state => {
+                return Some(SIRInstruction::Imm(*dst, SIRValue::new(0u8)));
+            }
+            _ => {}
+        }
+    }
+
+    match op {
+        BinaryOp::LogicAnd if is_one(*lhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *rhs)),
+        BinaryOp::LogicAnd if is_one(*rhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *lhs)),
+        BinaryOp::LogicOr if is_zero(*lhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *rhs)),
+        BinaryOp::LogicOr if is_zero(*rhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *lhs)),
+        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*lhs) => identity(*rhs),
+        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*rhs) => identity(*lhs),
+        BinaryOp::Mul if is_one(*lhs) => identity(*rhs),
+        BinaryOp::Mul if is_one(*rhs) => identity(*lhs),
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar if is_zero(*rhs) => identity(*lhs),
+        BinaryOp::And => {
+            let all_ones = |constant: RegisterId, value: RegisterId| {
+                let width = types.get(dst)?.width();
+                (same_type(*dst, constant)
+                    && same_type(*dst, value)
+                    && exact(constant)?.payload == width_mask(width))
+                .then_some(SIRInstruction::Unary(*dst, UnaryOp::Ident, value))
+            };
+            all_ones(*lhs, *rhs).or_else(|| all_ones(*rhs, *lhs))
+        }
+        _ => None,
+    }
 }
 
 fn simplify_dominated_muxes(
@@ -1557,7 +1640,7 @@ fn replace_register_uses_in_block(
     }
 }
 
-fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Analysis {
+fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Analysis {
     let mut edges = HashMap::<BlockId, Vec<Edge>>::default();
     let mut users = HashMap::<RegisterId, HashSet<BlockId>>::default();
 
@@ -1634,7 +1717,7 @@ fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Analysis {
             let Some(dst) = def_reg(instruction) else {
                 continue;
             };
-            let result = evaluate_instruction(instruction, &values, &eu.register_map);
+            let result = evaluate_instruction(instruction, &values, &eu.register_map, four_state);
             if merge_value(&mut values, dst, result) {
                 if let Some(blocks) = users.get(&dst) {
                     for &user in blocks {
@@ -1732,6 +1815,7 @@ fn evaluate_instruction(
     instruction: &SIRInstruction<RegionedAbsoluteAddr>,
     values: &HashMap<RegisterId, LatticeValue>,
     types: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
 ) -> LatticeValue {
     let state = |register: RegisterId| {
         values
@@ -1834,98 +1918,169 @@ fn evaluate_instruction(
                 LatticeValue::Overdefined
             }
         },
-        SIRInstruction::Binary(dst, lhs, op, rhs) => match op {
-            BinaryOp::LogicAnd => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, _| {
-                    if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                        Some(SIRValue::new(
-                            if !lhs.payload.is_zero() && !rhs.payload.is_zero() {
-                                1u8
-                            } else {
-                                0u8
-                            },
-                        ))
+        SIRInstruction::Binary(dst, lhs, op, rhs) => {
+            if !four_state && lhs == rhs {
+                match op {
+                    BinaryOp::Eq => return LatticeValue::Constant(SIRValue::new(1u8)),
+                    BinaryOp::Ne | BinaryOp::Sub | BinaryOp::Xor => {
+                        return LatticeValue::Constant(SIRValue::new(0u8));
+                    }
+                    _ => {}
+                }
+            }
+            match op {
+                BinaryOp::LogicAnd => {
+                    let lhs_state = state(*lhs);
+                    let rhs_state = state(*rhs);
+                    if [&lhs_state, &rhs_state]
+                        .into_iter()
+                        .any(|value| exact_truth(Some(value)) == Some(false))
+                    {
+                        LatticeValue::Constant(SIRValue::new(0u8))
                     } else {
-                        None
-                    }
-                },
-                *dst,
-            ),
-            BinaryOp::LogicOr => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, _| {
-                    if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                        Some(SIRValue::new(
-                            if !lhs.payload.is_zero() || !rhs.payload.is_zero() {
-                                1u8
-                            } else {
-                                0u8
+                        binary(
+                            *lhs,
+                            *rhs,
+                            &|lhs, rhs, _| {
+                                if lhs.mask.is_zero() && rhs.mask.is_zero() {
+                                    Some(SIRValue::new(
+                                        if !lhs.payload.is_zero() && !rhs.payload.is_zero() {
+                                            1u8
+                                        } else {
+                                            0u8
+                                        },
+                                    ))
+                                } else {
+                                    None
+                                }
                             },
-                        ))
+                            *dst,
+                        )
+                    }
+                }
+                BinaryOp::LogicOr => {
+                    let lhs_state = state(*lhs);
+                    let rhs_state = state(*rhs);
+                    if [&lhs_state, &rhs_state]
+                        .into_iter()
+                        .any(|value| exact_truth(Some(value)) == Some(true))
+                    {
+                        LatticeValue::Constant(SIRValue::new(1u8))
                     } else {
-                        None
+                        binary(
+                            *lhs,
+                            *rhs,
+                            &|lhs, rhs, _| {
+                                if lhs.mask.is_zero() && rhs.mask.is_zero() {
+                                    Some(SIRValue::new(
+                                        if !lhs.payload.is_zero() || !rhs.payload.is_zero() {
+                                            1u8
+                                        } else {
+                                            0u8
+                                        },
+                                    ))
+                                } else {
+                                    None
+                                }
+                            },
+                            *dst,
+                        )
                     }
-                },
-                *dst,
-            ),
-            BinaryOp::Eq | BinaryOp::EqWildcard => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, _| {
-                    (lhs.mask.is_zero() && rhs.mask.is_zero())
-                        .then(|| SIRValue::new((lhs.payload == rhs.payload) as u8))
-                },
-                *dst,
-            ),
-            BinaryOp::Ne | BinaryOp::NeWildcard => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, _| {
-                    (lhs.mask.is_zero() && rhs.mask.is_zero())
-                        .then(|| SIRValue::new((lhs.payload != rhs.payload) as u8))
-                },
-                *dst,
-            ),
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, ty| {
-                    if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
-                        return None;
+                }
+                BinaryOp::Eq | BinaryOp::EqWildcard => binary(
+                    *lhs,
+                    *rhs,
+                    &|lhs, rhs, _| {
+                        (lhs.mask.is_zero() && rhs.mask.is_zero())
+                            .then(|| SIRValue::new((lhs.payload == rhs.payload) as u8))
+                    },
+                    *dst,
+                ),
+                BinaryOp::Ne | BinaryOp::NeWildcard => binary(
+                    *lhs,
+                    *rhs,
+                    &|lhs, rhs, _| {
+                        (lhs.mask.is_zero() && rhs.mask.is_zero())
+                            .then(|| SIRValue::new((lhs.payload != rhs.payload) as u8))
+                    },
+                    *dst,
+                ),
+                BinaryOp::And => {
+                    let lhs_state = state(*lhs);
+                    let rhs_state = state(*rhs);
+                    if [&lhs_state, &rhs_state].into_iter().any(|value| {
+                        matches!(
+                            value,
+                            LatticeValue::Constant(value)
+                                if value.mask.is_zero() && value.payload.is_zero()
+                        )
+                    }) {
+                        LatticeValue::Constant(SIRValue::new(0u8))
+                    } else {
+                        binary(
+                            *lhs,
+                            *rhs,
+                            &|lhs, rhs, ty| {
+                                if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                                    return None;
+                                }
+                                Some(SIRValue::new(
+                                    (&lhs.payload & &rhs.payload) & width_mask(ty.width()),
+                                ))
+                            },
+                            *dst,
+                        )
                     }
-                    let payload = match op {
-                        BinaryOp::And => &lhs.payload & &rhs.payload,
-                        BinaryOp::Or => &lhs.payload | &rhs.payload,
-                        BinaryOp::Xor => &lhs.payload ^ &rhs.payload,
-                        _ => unreachable!(),
-                    };
-                    Some(SIRValue::new(payload & width_mask(ty.width())))
-                },
-                *dst,
-            ),
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => binary(
-                *lhs,
-                *rhs,
-                &|lhs, rhs, ty| {
-                    if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
-                        return None;
-                    }
-                    let mask = width_mask(ty.width());
-                    let payload = match op {
-                        BinaryOp::Add => &lhs.payload + &rhs.payload,
-                        BinaryOp::Sub => (&lhs.payload + &mask + BigUint::one()) - &rhs.payload,
-                        BinaryOp::Mul => &lhs.payload * &rhs.payload,
-                        _ => unreachable!(),
-                    } & &mask;
-                    Some(SIRValue::new(payload))
-                },
-                *dst,
-            ),
-            _ => LatticeValue::Overdefined,
-        },
+                }
+                BinaryOp::Or | BinaryOp::Xor => binary(
+                    *lhs,
+                    *rhs,
+                    &|lhs, rhs, ty| {
+                        if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                            return None;
+                        }
+                        let payload = match op {
+                            BinaryOp::Or => &lhs.payload | &rhs.payload,
+                            BinaryOp::Xor => &lhs.payload ^ &rhs.payload,
+                            _ => unreachable!(),
+                        };
+                        Some(SIRValue::new(payload & width_mask(ty.width())))
+                    },
+                    *dst,
+                ),
+                BinaryOp::Mul
+                    if !four_state
+                        && [state(*lhs), state(*rhs)].into_iter().any(|value| {
+                            matches!(
+                                value,
+                                LatticeValue::Constant(value)
+                                    if value.mask.is_zero() && value.payload.is_zero()
+                            )
+                        }) =>
+                {
+                    LatticeValue::Constant(SIRValue::new(0u8))
+                }
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => binary(
+                    *lhs,
+                    *rhs,
+                    &|lhs, rhs, ty| {
+                        if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                            return None;
+                        }
+                        let mask = width_mask(ty.width());
+                        let payload = match op {
+                            BinaryOp::Add => &lhs.payload + &rhs.payload,
+                            BinaryOp::Sub => (&lhs.payload + &mask + BigUint::one()) - &rhs.payload,
+                            BinaryOp::Mul => &lhs.payload * &rhs.payload,
+                            _ => unreachable!(),
+                        } & &mask;
+                        Some(SIRValue::new(payload))
+                    },
+                    *dst,
+                ),
+                _ => LatticeValue::Overdefined,
+            }
+        }
         SIRInstruction::Load(..) => LatticeValue::Overdefined,
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
@@ -2314,6 +2469,161 @@ mod tests {
                 .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
         );
         assert!(!eu.register_map.contains_key(&RegisterId(2)));
+    }
+
+    #[test]
+    fn folds_two_state_self_comparison_through_logical_annihilator() {
+        let mut eu = constant_branch_unit();
+        eu.register_map.insert(RegisterId(5), bit(1));
+        eu.register_map.insert(RegisterId(6), bit(1));
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Load(RegisterId(0), address_instance(1), SIROffset::Static(0), 1),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(0), BinaryOp::Ne, RegisterId(0)),
+            SIRInstruction::Binary(
+                RegisterId(6),
+                RegisterId(0),
+                BinaryOp::LogicAnd,
+                RegisterId(5),
+            ),
+            SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+            SIRInstruction::Imm(RegisterId(2), SIRValue::new(0u8)),
+        ];
+        eu.blocks.get_mut(&BlockId(0)).unwrap().terminator = SIRTerminator::Branch {
+            cond: RegisterId(6),
+            true_block: (BlockId(1), Vec::new()),
+            false_block: (BlockId(2), Vec::new()),
+        };
+        eu.verify_result().unwrap();
+
+        ControlFlowSimplifyPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        assert!(!eu.blocks.contains_key(&BlockId(1)));
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(BlockId(2), _)
+        ));
+    }
+
+    #[test]
+    fn keeps_four_state_self_comparison_dynamic() {
+        let mut eu = constant_branch_unit();
+        eu.register_map.insert(RegisterId(5), bit(1));
+        eu.register_map.insert(RegisterId(6), bit(1));
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Load(RegisterId(0), address_instance(1), SIROffset::Static(0), 1),
+            SIRInstruction::Binary(RegisterId(5), RegisterId(0), BinaryOp::Ne, RegisterId(0)),
+            SIRInstruction::Unary(RegisterId(6), UnaryOp::ToTwoState, RegisterId(5)),
+            SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8)),
+            SIRInstruction::Imm(RegisterId(2), SIRValue::new(0u8)),
+        ];
+        eu.blocks.get_mut(&BlockId(0)).unwrap().terminator = SIRTerminator::Branch {
+            cond: RegisterId(6),
+            true_block: (BlockId(1), Vec::new()),
+            false_block: (BlockId(2), Vec::new()),
+        };
+        eu.verify_result().unwrap();
+        let options = PassOptions {
+            four_state: true,
+            ..PassOptions::default()
+        };
+
+        ControlFlowSimplifyPass.run(&mut eu, &options);
+
+        eu.verify_result().unwrap();
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Branch { .. }
+        ));
+        assert!(eu.blocks.contains_key(&BlockId(1)));
+        assert!(eu.blocks.contains_key(&BlockId(2)));
+    }
+
+    #[test]
+    fn materializes_proven_sccp_constants_in_sir() {
+        for zero_on_left in [false, true] {
+            let mut eu = constant_branch_unit();
+            eu.register_map
+                .insert(RegisterId(0), RegisterType::Logic { width: 1 });
+            let (lhs, rhs) = if zero_on_left {
+                (RegisterId(1), RegisterId(0))
+            } else {
+                (RegisterId(0), RegisterId(1))
+            };
+            eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+                SIRInstruction::Load(RegisterId(0), address_instance(1), SIROffset::Static(0), 1),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                SIRInstruction::Binary(RegisterId(3), lhs, BinaryOp::LogicAnd, rhs),
+                SIRInstruction::Store(
+                    address_instance(2),
+                    SIROffset::Static(0),
+                    1,
+                    RegisterId(3),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ];
+            eu.blocks.get_mut(&BlockId(0)).unwrap().terminator = SIRTerminator::Return;
+            eu.blocks.retain(|id, _| *id == BlockId(0));
+            eu.verify_result().unwrap();
+            let options = PassOptions {
+                four_state: true,
+                ..PassOptions::default()
+            };
+
+            ControlFlowSimplifyPass.run(&mut eu, &options);
+
+            eu.verify_result().unwrap();
+            assert!(matches!(
+                eu.blocks[&BlockId(0)].instructions.as_slice(),
+                [
+                    SIRInstruction::Imm(RegisterId(3), value),
+                    SIRInstruction::Store(_, _, 1, RegisterId(3), ..)
+                ] if value == &SIRValue::new(0u8)
+            ));
+        }
+    }
+
+    #[test]
+    fn rewrites_logical_identity_to_boolean_reduction() {
+        let mut eu = constant_branch_unit();
+        eu.register_map
+            .insert(RegisterId(0), RegisterType::Logic { width: 8 });
+        eu.register_map
+            .insert(RegisterId(1), RegisterType::Logic { width: 8 });
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions = vec![
+            SIRInstruction::Load(RegisterId(0), address_instance(1), SIROffset::Static(0), 8),
+            SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+            SIRInstruction::Binary(
+                RegisterId(3),
+                RegisterId(0),
+                BinaryOp::LogicOr,
+                RegisterId(1),
+            ),
+            SIRInstruction::Store(
+                address_instance(2),
+                SIROffset::Static(0),
+                1,
+                RegisterId(3),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+        eu.blocks.get_mut(&BlockId(0)).unwrap().terminator = SIRTerminator::Return;
+        eu.blocks.retain(|id, _| *id == BlockId(0));
+        eu.verify_result().unwrap();
+
+        ControlFlowSimplifyPass.run(&mut eu, &PassOptions::default());
+
+        eu.verify_result().unwrap();
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.as_slice(),
+            [
+                SIRInstruction::Load(RegisterId(0), ..),
+                SIRInstruction::Unary(RegisterId(3), UnaryOp::Or, RegisterId(0)),
+                SIRInstruction::Store(_, _, 1, RegisterId(3), ..)
+            ]
+        ));
     }
 
     #[test]

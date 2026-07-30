@@ -183,6 +183,21 @@ pub(crate) fn optimize_native_merged_chain(
     .run(eu, &PassOptions::default());
     eu.verify_result()
         .map_err(|error| ("after native block optimization", error))?;
+    // The native function is assembled after the ordinary per-EU pipeline.
+    // Merging exposes constants and control-flow facts across the old EU
+    // boundaries, and OptimizeBlocks can expose more of them while rewriting
+    // the merged blocks.  Run full SCCP here before preserving packed sinks:
+    // otherwise constant branches and their entire dead scalar arms survive
+    // into lane planning and native lowering.
+    ControlFlowSimplifyPass.run(
+        eu,
+        &PassOptions {
+            four_state,
+            ..PassOptions::default()
+        },
+    );
+    eu.verify_result()
+        .map_err(|error| ("after native merged-chain CFG simplification", error))?;
     if !four_state && pass_vectorize_concat::expose_packed_bit_store_sinks(eu) {
         changed = true;
         // Lane-aggregate analysis consumes the exact packed publication shape
