@@ -8,6 +8,7 @@ description           = "Veryl frontend artifacts and source lookup for Celox"
 edition.workspace     = true
 
 [dependencies]
+bit-set        = { workspace = true }
 celox-design   = { path = "../celox-design" }
 celox-sir      = { path = "../celox-sir" }
 celox-slt      = { path = "../celox-slt" }
@@ -22,3 +23,6 @@ veryl-parser   = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

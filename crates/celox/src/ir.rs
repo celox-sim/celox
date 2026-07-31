@@ -1,7 +1,4 @@
-use crate::{
-    HashMap,
-    logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
-};
+use crate::{HashMap, logic_tree::LogicPath};
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
@@ -19,9 +16,10 @@ pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
 use celox_testbench::TestbenchProgram;
-use serde::{Deserialize, Serialize};
 use std::fmt;
-use veryl_analyzer::ir::{VarId, VarPath, Variable};
+#[cfg(test)]
+use veryl_analyzer::ir::Variable;
+use veryl_analyzer::ir::{VarId, VarPath};
 
 /// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
 pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
@@ -45,7 +43,6 @@ pub enum AddrLookupError {
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
 pub type InitialMemoryData = InitialStateData;
 pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
-pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
 pub(crate) use celox_slt::LogicPathId;
@@ -439,18 +436,7 @@ pub(crate) mod cfg {
 pub(crate) mod verify {
     pub(crate) use celox_sir::verify::*;
 }
-use veryl_parser::resource_table::StrId;
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "V: Serialize",
-    deserialize = "V: Deserialize<'de> + std::hash::Hash + Eq + Clone"
-))]
-pub struct GlueBlockBase<V: std::hash::Hash + Eq + Clone> {
-    pub module_id: ModuleId,
-    pub input_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
-    pub output_ports: Vec<(Vec<V>, LogicPath<GlueAddrBase<V>>)>,
-    pub arena: SLTNodeArena<GlueAddrBase<V>>,
-}
+pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 /// Concrete glue block using the Veryl analyzer's `VarId`.
 pub type GlueBlock = GlueBlockBase<VarId>;
@@ -493,83 +479,11 @@ impl fmt::Debug for RelocationModule {
             .finish()
     }
 }
-#[derive(Clone)]
-pub struct SimModule {
-    pub name: StrId,
-    pub variables: HashMap<VarId, Variable>,
-    pub ff_access_summaries: HashMap<TriggerSet<VarId>, FfAccessSummary<RegionedVarAddr>>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
-    pub comb_blocks: Vec<LogicPath<VarId>>,
-    pub comb_observers: Vec<CombObserver<VarId>>,
-    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
-    pub runtime_event_sites: Vec<RuntimeEventSite>,
-    pub initial_memory_values: Vec<ModuleInitialMemoryValue>,
-    pub comb_boundaries: HashMap<VarId, std::collections::BTreeSet<usize>>,
-    pub arena: SLTNodeArena<VarId>,
-    pub store: SymbolicStore<VarId>,
-    /// Maps reset VarId → clock VarId, derived from FfDeclarations.
-    pub reset_clock_map: HashMap<VarId, VarId>,
-}
-
-impl fmt::Debug for SimModule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SimModule")
-            .field("name", &self.name)
-            .field("variables", &"<omitted>")
-            .field("ff_access_summaries", &self.ff_access_summaries)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("glue_blocks", &self.glue_blocks)
-            .field("comb_blocks", &self.comb_blocks)
-            .field("comb_boundaries", &self.comb_boundaries)
-            .field("arena", &self.arena)
-            .field("store", &self.store)
-            .field("reset_clock_map", &self.reset_clock_map)
-            .finish()
-    }
-}
-
+pub use celox_frontend_veryl::SimModule;
 pub use celox_slt::FfAccessSummary;
-
-impl SimModule {
-    pub fn find_var_id(&self, path: &VarPath) -> VarId {
-        self.variables
-            .iter()
-            .find(|(_, var)| &var.path == path)
-            .map(|(id, _)| *id)
-            .unwrap_or_else(|| panic!("Variable '{}' not found in module", path))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum GlueAddrBase<V> {
-    Parent(V),
-    Child(V),
-}
 
 /// Concrete glue address type using the Veryl analyzer's `VarId`.
 pub type GlueAddr = GlueAddrBase<VarId>;
-
-impl<V: Copy> GlueAddrBase<V> {
-    pub fn var_id(&self) -> V {
-        match self {
-            GlueAddrBase::Parent(v) | GlueAddrBase::Child(v) => *v,
-        }
-    }
-}
-
-impl<V: fmt::Display> fmt::Display for GlueAddrBase<V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GlueAddrBase::Parent(v) => write!(f, "GlueAddr::Parent({})", v),
-            GlueAddrBase::Child(v) => write!(f, "GlueAddr::Child({})", v),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
