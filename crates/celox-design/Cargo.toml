@@ -1,0 +1,14 @@
+[package]
+name                  = "celox-design"
+version.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "Source-independent elaborated design model for Celox"
+edition.workspace     = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true

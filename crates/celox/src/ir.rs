@@ -2,10 +2,16 @@ use crate::{
     HashMap, HashSet,
     logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
 };
+pub use celox_design::PortTypeKind;
+pub(crate) use celox_design::{
+    AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InstanceId, ModuleId,
+    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
+    SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
+};
 pub(crate) use celox_sir::{
-    BasicBlock, BinaryOp, BlockId, DomainKind, ExecutionUnit, RegisterId, RegisterType, SIRBuilder,
-    SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
-    collect_exact_zero_registers, merge_sir_eus,
+    BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
+    SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
 };
 #[cfg(any(target_arch = "x86_64", test))]
 pub(crate) use celox_sir::{
@@ -17,6 +23,13 @@ use std::collections::BTreeSet;
 use std::fmt;
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 
+/// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
+pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
+/// Concrete regioned variable address using the Veryl analyzer's `VarId`.
+pub type RegionedVarAddr = RegionedVarAddrBase<VarId>;
+/// Concrete regioned address using the Veryl analyzer's `VarId`.
+pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
+
 /// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
@@ -26,18 +39,6 @@ pub enum AddrLookupError {
     VariableNotFound { path: String },
     #[error("Ambiguous variable path: {path} — multiple variables share this path")]
     AmbiguousPath { path: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PortTypeKind {
-    Clock,
-    ResetAsyncHigh,
-    ResetAsyncLow,
-    ResetSyncHigh,
-    ResetSyncLow,
-    Logic,
-    Bit,
-    Other,
 }
 
 #[derive(Clone)]
@@ -96,11 +97,6 @@ impl fmt::Debug for VariableInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TriggerSet<A> {
-    pub clock: A,
-    pub resets: Vec<A>,
-}
 /// Compilation plan for eval_comb when the CLIF instruction count exceeds
 /// Cranelift's limit. Mutually exclusive strategies.
 #[derive(Debug, Clone)]
@@ -115,22 +111,6 @@ pub enum EvalCombPlan {
 pub struct RuntimeErrorInfo<Addr = AbsoluteAddr> {
     pub message: String,
     pub signals: Vec<Addr>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum RuntimeEventKind {
-    Display,
-    AssertContinue,
-    AssertFatal,
-}
-
-#[derive(Clone, Debug)]
-pub struct RuntimeEventSite {
-    pub kind: RuntimeEventKind,
-    pub template: Option<String>,
-    pub arg_widths: Vec<usize>,
-    pub arg_signed: Vec<bool>,
-    pub arg_is_string: Vec<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -449,72 +429,6 @@ fn comb_capture_enable_needs_unaliased_old_value(
     false
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
-pub struct BitAccess {
-    pub lsb: usize,
-    pub msb: usize,
-}
-impl BitAccess {
-    pub fn new(lsb: usize, msb: usize) -> Self {
-        debug_assert!(lsb <= msb, "lsb must be less than or equal to msb");
-        Self { lsb, msb }
-    }
-    pub fn overlaps(&self, other: &Self) -> bool {
-        !(self.msb < other.lsb || other.msb < self.lsb)
-    }
-
-    /// Calculates the atomic bit ranges for a given access range and a set of boundaries.
-    pub fn calculate_atoms(&self, bounds: &BTreeSet<usize>) -> Vec<crate::ir::BitAccess> {
-        use std::ops::Bound::*;
-        let mut atoms = Vec::new();
-        let mut current_lsb = self.lsb;
-
-        // Iterate through the boundaries that are within the access range
-        // Excluded(lsb) to Included(msb) handles lsb == msb case naturally (returns empty iterator)
-        for &bound in bounds.range((Excluded(self.lsb), Included(self.msb))) {
-            atoms.push(crate::ir::BitAccess::new(current_lsb, bound - 1));
-            current_lsb = bound;
-        }
-
-        // Add the last atom
-        if current_lsb <= self.msb {
-            atoms.push(crate::ir::BitAccess::new(current_lsb, self.msb));
-        }
-
-        atoms
-    }
-}
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
-pub struct VarAtomBase<A> {
-    pub id: A,
-    pub access: BitAccess,
-}
-impl<A> VarAtomBase<A> {
-    pub fn new(id: A, lsb: usize, msb: usize) -> Self {
-        Self {
-            id,
-            access: BitAccess { lsb, msb },
-        }
-    }
-}
-impl fmt::Display for BitAccess {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.lsb == self.msb {
-            write!(f, "[{}]", self.lsb)
-        } else {
-            write!(f, "[{}:{}]", self.msb, self.lsb)
-        }
-    }
-}
-
-impl<A> fmt::Display for VarAtomBase<A>
-where
-    A: fmt::Display + std::hash::Hash + Eq,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.id, self.access)
-    }
-}
 pub type VarAtom = VarAtomBase<VarId>;
 pub(crate) mod cfg {
     pub(crate) use celox_sir::cfg::*;
@@ -537,44 +451,6 @@ pub struct GlueBlockBase<V: std::hash::Hash + Eq + Clone> {
 
 /// Concrete glue block using the Veryl analyzer's `VarId`.
 pub type GlueBlock = GlueBlockBase<VarId>;
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ModuleId(pub usize);
-
-impl fmt::Display for ModuleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "mod{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct InstanceId(pub usize);
-
-impl fmt::Display for InstanceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "inst{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct AbsoluteAddrBase<V> {
-    pub instance_id: InstanceId,
-    pub var_id: V,
-}
-
-/// Concrete address type using the Veryl analyzer's `VarId`.
-pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
-
-impl<V: fmt::Display> fmt::Display for AbsoluteAddrBase<V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AbsoluteAddr({}, {})", self.instance_id, self.var_id)
-    }
-}
-
-/// A high-performance handle to a signal's physical memory.
-///
-/// Unlike [`AbsoluteAddr`], which requires a [`HashMap`] lookup for every access,
-/// a [`SignalRef`] stores the pre-resolved memory offset and metadata, allowing
-/// for essentially zero-cost reads and writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SignalArrayLayout {
     pub element_width: usize,
@@ -593,65 +469,6 @@ pub struct SignalRef {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct InstancePath(pub Vec<(StrId, usize)>);
 
-pub const STABLE_REGION: u32 = 0;
-pub const WORKING_REGION: u32 = 1;
-pub const SPARSE_WORKING_REGION: u32 = 2;
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RegionedVarAddrBase<V> {
-    pub region: u32,
-    pub var_id: V,
-}
-
-/// Concrete regioned variable address using the Veryl analyzer's `VarId`.
-pub type RegionedVarAddr = RegionedVarAddrBase<VarId>;
-
-impl<V: fmt::Display> fmt::Display for RegionedVarAddrBase<V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "RegionedVarAddr(region={}, {})",
-            self.region, self.var_id
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RegionedAbsoluteAddrBase<V> {
-    pub region: u32,
-    pub instance_id: InstanceId,
-    pub var_id: V,
-}
-
-/// Concrete regioned address type using the Veryl analyzer's `VarId`.
-pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
-
-impl<V: Copy> RegionedAbsoluteAddrBase<V> {
-    pub fn from_absolute_addr(region: u32, addr: AbsoluteAddrBase<V>) -> Self {
-        Self {
-            region,
-            instance_id: addr.instance_id,
-            var_id: addr.var_id,
-        }
-    }
-
-    pub fn absolute_addr(&self) -> AbsoluteAddrBase<V> {
-        AbsoluteAddrBase {
-            instance_id: self.instance_id,
-            var_id: self.var_id,
-        }
-    }
-}
-
-impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "RegionedAbsoluteAddr(region={}, {}, {})",
-            self.region, self.instance_id, self.var_id
-        )
-    }
-}
 #[derive(Clone)]
 pub struct RelocationModule {
     #[cfg(test)]
