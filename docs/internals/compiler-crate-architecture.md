@@ -8,9 +8,17 @@ crates already exist.
 
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
 uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
-the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram`.
-Dissolving the remaining design, symbolic, optimizer, and testbench payload into the phase-specific
-target types below remains part of Milestone 3.
+the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram` and whose
+flattened state metadata, event topology, and initial state are held by
+`celox-design::ElaboratedDesign`. Runtime diagnostics are held by
+`celox-design::RuntimeSchema`; its combinational observation recipes retain only persistent-state
+ranges, so the final `Program` no longer owns an SLT arena or observer `NodeId`s. Cranelift
+oversized-function planning is constructed from final SIR
+at the backend boundary; backend scratch extends only the backend's private layout copy.
+Veryl source identities retained for diagnostics and public path lookup are grouped in
+`celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
+artifact. Moving the remaining parser implementation, symbolic, optimizer, and testbench payload
+into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
@@ -21,7 +29,7 @@ phase ownership explicit.
 The problem is not merely that several source files are large. The current ownership graph has
 cycles hidden by Rust modules inside one crate.
 
-`ir::Program` currently owns all of the following at once:
+At the start of this migration, `ir::Program` owned all of the following at once:
 
 - scheduled and lowered SIR execution units;
 - the SLT arena and combinational observers that still refer to `NodeId`;
@@ -34,14 +42,14 @@ cycles hidden by Rust modules inside one crate.
 This creates concrete reverse dependencies:
 
 - `ir` refers to `logic_tree`, `optimizer`, and `backend::MemoryLayout`;
-- `optimizer` accepts `Program`, calls parser verification, and writes optimizer-specific plans
+- `optimizer` accepted `Program`, called parser verification, and wrote optimizer-specific plans
   back into `Program`;
-- `backend::memory_layout` accepts `Program` and inspects optimizer plans;
+- `backend::memory_layout` accepted `Program` and inspected optimizer plans;
 - SLT construction imports parser and Veryl expression helpers, while SLT lowering emits SIR;
 - the facade, compiler driver, backend selection, runtime, and testbench VM all live in `celox`.
 
 The result is one mutable object whose valid fields depend on which phase happened to run. An
-`Option<MemoryLayout>` and an `Option<EvalCombPlan>` encode pipeline state implicitly, and a backend
+`Option<MemoryLayout>` and the former `Option<EvalCombPlan>` encoded pipeline state implicitly, and a backend
 can see frontend structures that should have ceased to exist before code generation.
 
 The split must therefore dissolve `Program`; moving directories into crates without changing that
@@ -354,8 +362,10 @@ Cargo features may remove optional dependencies; they must not reverse these edg
 
 ### `ElaboratedDesign`
 
-Contains hierarchy, semantic state objects, clocks/resets, initial values, runtime event schema, and
-source maps required for diagnostics. It contains no SLT/SIR/layout/backend plan.
+Contains semantic hierarchy identities, flattened semantic state objects, clocks/resets, initial
+values, and runtime event schema. Source-language paths and IDs used for diagnostics or public
+lookup stay in a separate frontend/facade lookup artifact. It contains no SLT/SIR/layout/backend
+plan.
 
 ### `SymbolicRtl`
 
@@ -408,11 +418,12 @@ optional testbench bytecode. It has no compiler IR.
 | `eval_comb`, `eval_*_ffs`, `eval_comb_apply_ffs` | `SirProgram` |
 | `comb_semantic_regions` | `ScheduledRtl`, then explicit SIR provenance if still needed |
 | `arena`, `comb_observers` containing `NodeId` | `SymbolicRtl`; consumed before `SirProgram` |
-| hierarchy/module/variable/clock/reset maps | `ElaboratedDesign` |
+| semantic hierarchy/state/clock/reset maps | `ElaboratedDesign` |
+| Veryl module, variable, and path lookup maps | temporary frontend/facade lookup artifact, then compiled diagnostics |
 | runtime errors and event sites | design/runtime schema |
 | `address_aliases` | `LayoutRequirements` with proof identity |
 | `layout: Option<MemoryLayout>` | separate `LaidOutProgram` |
-| `eval_comb_plan` | concrete backend planning result |
+| former `eval_comb_plan` | Cranelift-private planning result, constructed from final SIR at the backend boundary |
 | initial memory values | design initial state, then laid-out memory image |
 | Veryl `initial_statements` and `tb_functions` | compiled by frontend into `celox-testbench` bytecode |
 

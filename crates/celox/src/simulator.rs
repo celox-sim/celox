@@ -526,7 +526,7 @@ impl<B: SimBackend> Simulator<B> {
     fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
         match err {
             RuntimeErrorCode::DetectedTrueLoopCode(code) => {
-                let Some(info) = self.program.runtime_errors.get(&code) else {
+                let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {
                     return RuntimeErrorCode::DetectedTrueLoop;
                 };
                 let signals = info
@@ -569,7 +569,7 @@ impl<B: SimBackend> Simulator<B> {
 
     pub(crate) fn apply_initial_values(&mut self) {
         let mut applied = false;
-        let initial_memory_values = std::mem::take(&mut self.program.initial_memory_values);
+        let initial_memory_values = std::mem::take(&mut self.program.design.initial_state);
         for init in &initial_memory_values {
             applied = true;
             let signal = self.backend.resolve_signal(&init.address);
@@ -602,7 +602,7 @@ impl<B: SimBackend> Simulator<B> {
         if applied {
             self.dirty = true;
         }
-        self.program.initial_memory_values = initial_memory_values;
+        self.program.design.initial_state = initial_memory_values;
     }
 
     fn apply_initial_memory_writes(&mut self, signal: SignalRef, runs: &[InitialMemoryWriteRun]) {
@@ -680,7 +680,7 @@ impl<B: SimBackend> Simulator<B> {
             !self.runtime_event_drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
-        if !self.program.comb_observers.is_empty() && self.dirty {
+        if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
             self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
@@ -696,7 +696,9 @@ impl<B: SimBackend> Simulator<B> {
         }
         self.collect_backend_runtime_events()
             .into_iter()
-            .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
+            .filter_map(|raw| {
+                render_raw_runtime_event(raw, &self.program.runtime_schema.runtime_event_sites, ctx)
+            })
             .collect()
     }
 
@@ -706,7 +708,7 @@ impl<B: SimBackend> Simulator<B> {
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             let events = collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 buffer.byte_size(),
                 |offset| buffer.read_u64(offset),
@@ -722,7 +724,7 @@ impl<B: SimBackend> Simulator<B> {
             };
             let events = collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 size,
                 read_u64,
@@ -749,7 +751,7 @@ impl<B: SimBackend> Simulator<B> {
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 buffer.byte_size(),
                 |offset| buffer.read_u64(offset),
@@ -762,7 +764,7 @@ impl<B: SimBackend> Simulator<B> {
             };
             collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 size,
                 read_u64,
@@ -779,7 +781,7 @@ impl<B: SimBackend> Simulator<B> {
         Some(RuntimeEventDrain {
             buffer,
             layout: self.backend.layout().clone(),
-            sites: self.program.runtime_event_sites.clone(),
+            sites: self.program.runtime_schema.runtime_event_sites.clone(),
             read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
             shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
             active: Arc::clone(&self.runtime_event_drain_active),
@@ -860,13 +862,13 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
-        if self.program.runtime_event_sites.is_empty() {
+        if self.program.runtime_schema.runtime_event_sites.is_empty() {
             return self
                 .backend
                 .eval_comb()
                 .map_err(|e| self.decorate_runtime_error(e));
         }
-        if self.program.comb_observers.is_empty() {
+        if self.program.runtime_schema.comb_observers.is_empty() {
             let runtime_event_start_seq = self.runtime_event_write_seq();
             let eval_result = self
                 .backend
@@ -885,16 +887,17 @@ impl<B: SimBackend> Simulator<B> {
             .zip(&self.comb_observer_snapshots)
             .map(|(now, prev)| now != prev)
             .collect();
-        let mut active_sites = vec![false; self.program.runtime_event_sites.len()];
+        let mut active_sites = vec![false; self.program.runtime_schema.runtime_event_sites.len()];
         for (observer, is_active) in self
             .program
+            .runtime_schema
             .comb_observers
             .iter()
             .zip(active_before.iter().copied())
         {
             if is_active || self.comb_observer_initial_eval {
                 let group = observer.activation_group;
-                for group_observer in &self.program.comb_observers {
+                for group_observer in &self.program.runtime_schema.comb_observers {
                     if group_observer.activation_group == group {
                         active_sites[group_observer.site_id as usize] = true;
                     }
@@ -910,8 +913,13 @@ impl<B: SimBackend> Simulator<B> {
         let after = self.snapshot_all_comb_observers();
         let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
         let fatal_error = self.fatal_comb_capture_error(&runtime_events);
-        self.backend
-            .set_comb_capture_event_enabled(&vec![false; self.program.runtime_event_sites.len()]);
+        self.backend.set_comb_capture_event_enabled(&vec![
+            false;
+            self.program
+                .runtime_schema
+                .runtime_event_sites
+                .len()
+        ]);
         self.comb_observer_snapshots = after;
         self.comb_observer_initial_eval = false;
         if let Some(err) = fatal_error {
@@ -922,6 +930,7 @@ impl<B: SimBackend> Simulator<B> {
 
     fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
         self.program
+            .runtime_schema
             .comb_observers
             .iter()
             .map(|observer| {
@@ -950,7 +959,11 @@ impl<B: SimBackend> Simulator<B> {
             let RawRuntimeEvent::Event { site_id, args } = raw else {
                 return None;
             };
-            let site = self.program.runtime_event_sites.get(*site_id)?;
+            let site = self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .get(*site_id)?;
             if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
                 return None;
             }
@@ -1037,7 +1050,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Native testbenches use this between observable expressions so the
     /// preceding comb phase and this FF phase can share one compiled function.
     pub(crate) fn tick_deferred_comb(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        if !self.program.comb_observers.is_empty() {
+        if !self.program.runtime_schema.comb_observers.is_empty() {
             return self.tick(event);
         }
         if self.dirty {
@@ -1060,7 +1073,7 @@ impl<B: SimBackend> Simulator<B> {
         if count == 0 {
             return (0, Ok(()));
         }
-        if !self.program.comb_observers.is_empty() || !self.dirty {
+        if !self.program.runtime_schema.comb_observers.is_empty() || !self.dirty {
             return (1, self.tick_deferred_comb(event));
         }
         let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
@@ -1160,12 +1173,12 @@ impl<B: SimBackend> Simulator<B> {
     /// paths without the original [`Program`].
     pub fn build_vcd_descs(&self, four_state_mode: bool) -> Vec<crate::vcd::VcdSignalDesc> {
         let mut descs = Vec::new();
-        let mut sorted_instances: Vec<_> = self.program.instance_module.iter().collect();
+        let mut sorted_instances: Vec<_> = self.program.frontend.instance_module.iter().collect();
         sorted_instances.sort_by_key(|(id, _)| *id);
 
         for (instance_id, module_id) in sorted_instances {
-            let variables = &self.program.module_variables[module_id];
-            let path_index = &self.program.module_var_path_index[module_id];
+            let variables = &self.program.frontend.module_variables[module_id];
+            let path_index = &self.program.frontend.module_var_path_index[module_id];
             let scope = format!("{}", instance_id);
 
             let mut sorted_vars: Vec<_> = variables
@@ -1213,6 +1226,7 @@ impl<B: SimBackend> Simulator<B> {
     pub fn named_signals(&self) -> Vec<NamedSignal> {
         let top_instance_id = self
             .program
+            .frontend
             .instance_ids
             .get(&InstancePath(vec![]))
             .expect("top-level instance not found");
@@ -1228,7 +1242,12 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .map(|(name, idx)| (veryl_parser::resource_table::insert_str(name), *idx))
             .collect();
-        match self.program.instance_ids.get(&InstancePath(path_str_ids)) {
+        match self
+            .program
+            .frontend
+            .instance_ids
+            .get(&InstancePath(path_str_ids))
+        {
             Some(&instance_id) => self.build_signals_for_instance(instance_id),
             None => Vec::new(),
         }
@@ -1240,9 +1259,9 @@ impl<B: SimBackend> Simulator<B> {
     /// same name) are excluded — they cannot be addressed by path and would
     /// cause silent overwrites in name-keyed maps such as the layout JSON.
     fn build_signals_for_instance(&self, instance_id: crate::ir::InstanceId) -> Vec<NamedSignal> {
-        let module_id = &self.program.instance_module[&instance_id];
-        let module_vars = &self.program.module_variables[module_id];
-        let path_index = &self.program.module_var_path_index[module_id];
+        let module_id = &self.program.frontend.instance_module[&instance_id];
+        let module_vars = &self.program.frontend.module_variables[module_id];
+        let path_index = &self.program.frontend.module_var_path_index[module_id];
 
         let mut result = Vec::new();
         for info in module_vars.values() {
@@ -1270,7 +1289,9 @@ impl<B: SimBackend> Simulator<B> {
             // Resolve associated clock for reset signals
             let associated_clock = self
                 .program
-                .reset_clock_map
+                .design
+                .events
+                .reset_clocks
                 .get(&addr)
                 .map(|clock_addr| self.program.get_path(clock_addr));
 
@@ -1343,12 +1364,14 @@ impl<B: SimBackend> Simulator<B> {
     ) -> InstanceHierarchy {
         let instance_id = self
             .program
+            .frontend
             .instance_ids
             .get(&InstancePath(current_path.to_vec()))
             .expect("instance not found");
-        let module_id = &self.program.instance_module[instance_id];
+        let module_id = &self.program.frontend.instance_module[instance_id];
         let module_name = self
             .program
+            .frontend
             .module_names
             .get(module_id)
             .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
@@ -1362,7 +1385,7 @@ impl<B: SimBackend> Simulator<B> {
         let mut children_map: crate::HashMap<String, Vec<(usize, InstanceHierarchy)>> =
             crate::HashMap::default();
 
-        for path in self.program.instance_ids.keys() {
+        for path in self.program.frontend.instance_ids.keys() {
             if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
                 let (child_name_id, child_index) = path.0[current_len];
                 let child_name = veryl_parser::resource_table::get_str_value(child_name_id)

@@ -610,7 +610,7 @@ fn compile_program(
                             id_to_event: &mut Vec<NativeEventRef>|
      -> Result<(), SimulatorError> {
         for addr in ff_map.keys() {
-            let canonical = sir.clock_domains.get(addr).copied().unwrap_or(*addr);
+            let canonical = sir.design.events.canonical(*addr);
             if let Some(&event) = event_map_out.get(&canonical) {
                 event_map_out.insert(*addr, event);
                 continue;

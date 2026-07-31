@@ -6,9 +6,10 @@ pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
     InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeEventKind, RuntimeEventSite, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind,
-    TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
+    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
+    TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
+pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
     SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
@@ -18,7 +19,6 @@ pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::fmt;
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 
@@ -41,49 +41,11 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
-#[derive(Clone)]
-pub struct VariableInfo {
-    pub id: VarId,
-    pub path: VarPath,
-    pub var_kind: veryl_analyzer::ir::VarKind,
-    pub metadata: VariableMetadata,
-}
-
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
 pub type InitialMemoryData = InitialStateData;
 pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
 pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
-
-impl std::ops::Deref for VariableInfo {
-    type Target = VariableMetadata;
-
-    fn deref(&self) -> &Self::Target {
-        &self.metadata
-    }
-}
-
-impl fmt::Debug for VariableInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VariableInfo")
-            .field("width", &self.width)
-            .field("id", &self.id)
-            .field("is_4state", &self.is_4state)
-            .field("kind", &self.kind)
-            .field("type_kind", &self.type_kind)
-            .finish()
-    }
-}
-
-/// Compilation plan for eval_comb when the CLIF instruction count exceeds
-/// Cranelift's limit. Mutually exclusive strategies.
-#[derive(Debug, Clone)]
-pub enum EvalCombPlan {
-    /// EU-boundary / single-block splitting with live regs in tail-call args.
-    TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
-    /// Memory-spilled multi-block splitting with scratch memory.
-    MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
-}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LogicPathId(pub usize);
@@ -109,34 +71,15 @@ pub struct CombObserver<A = AbsoluteAddr> {
 #[derive(Clone)]
 pub struct Program {
     pub sir: SirProgram,
+    pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
+    pub frontend: VerylFrontendLookup,
     /// Semantic comb process for each exact published range. Physical
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
-    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
-    pub runtime_event_sites: Vec<RuntimeEventSite>,
-    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-    /// Tail-call chain compilation plan, populated by the optimizer when the
-    /// estimated CLIF instruction count exceeds Cranelift's limit.
-    pub eval_comb_plan: Option<EvalCombPlan>,
-    pub instance_ids: HashMap<InstancePath, InstanceId>,
-    pub instance_module: HashMap<InstanceId, ModuleId>,
-    pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
-    /// Reverse index: VarPath → VarId for path-based lookups.
-    /// `None` marks ambiguous paths (multiple VarIds share the same VarPath).
-    pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
-    pub module_names: HashMap<ModuleId, StrId>,
-    pub clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    pub topological_clocks: Vec<AbsoluteAddr>,
-    pub cascaded_clocks: BTreeSet<AbsoluteAddr>,
-    pub arena: SLTNodeArena<AbsoluteAddr>,
-    pub num_events: usize,
-    /// Maps reset AbsoluteAddr → clock AbsoluteAddr (from FfDeclaration).
-    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    /// Initial memory contents loaded from synthesizable initial blocks.
-    pub initial_memory_values: Vec<InitialMemoryValue>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
     /// Functions defined in the top-level module (for testbench function calls).
@@ -178,7 +121,7 @@ impl LaidOutProgram {
 impl fmt::Debug for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Program")
-            .field("num_events", &self.num_events)
+            .field("num_events", &self.design.events.len())
             .finish_non_exhaustive()
     }
 }
@@ -197,8 +140,9 @@ impl Program {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
+        if !self.runtime_schema.comb_observers.is_empty() && !self.address_aliases.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
+                .runtime_schema
                 .comb_observers
                 .iter()
                 .flat_map(|observer| observer.written_inputs.iter().copied())
@@ -250,6 +194,7 @@ impl Program {
             instance_path_str_id.push((id, path.1));
         }
         let instance_id = *self
+            .frontend
             .instance_ids
             .get(&InstancePath(instance_path_str_id))
             .ok_or_else(|| AddrLookupError::InstanceNotFound {
@@ -259,7 +204,7 @@ impl Program {
                     .collect::<Vec<_>>()
                     .join("."),
             })?;
-        let module_id = self.instance_module[&instance_id];
+        let module_id = self.frontend.instance_module[&instance_id];
         let mut var_path_str_id = Vec::new();
         for path in var_path {
             let id = veryl_parser::resource_table::insert_str(path);
@@ -268,7 +213,7 @@ impl Program {
 
         let target_path = VarPath(var_path_str_id);
         let path_str = var_path.join(".");
-        let entry = self.module_var_path_index[&module_id]
+        let entry = self.frontend.module_var_path_index[&module_id]
             .get(&target_path)
             .ok_or_else(|| AddrLookupError::VariableNotFound {
                 path: path_str.clone(),
@@ -285,12 +230,13 @@ impl Program {
         let var_id = addr.var_id;
 
         let instance_path = self
+            .frontend
             .instance_ids
             .iter()
             .find(|(_, id)| **id == instance_id)
             .map(|(path, _)| path);
-        let module_id = self.instance_module.get(&instance_id).unwrap();
-        let module_vars = self.module_variables.get(module_id).unwrap();
+        let module_id = self.frontend.instance_module.get(&instance_id).unwrap();
+        let module_vars = self.frontend.module_variables.get(module_id).unwrap();
         let var_path = module_vars
             .values()
             .find(|info| info.id == var_id)
@@ -319,13 +265,49 @@ impl Program {
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let module_id = self.instance_module.get(&addr.instance_id)?;
-        let module_vars = self.module_variables.get(module_id)?;
+        let module_id = self.frontend.instance_module.get(&addr.instance_id)?;
+        let module_vars = self.frontend.module_variables.get(module_id)?;
         module_vars.get(&addr.var_id)
     }
 
     pub fn num_events(&self) -> usize {
-        self.num_events
+        self.design.events.len()
+    }
+
+    /// Verify the temporary migration projection from frontend lookup tables
+    /// into the source-independent elaborated design. This can be removed once
+    /// the frontend tables are consumed rather than retained beside `design`.
+    pub(crate) fn verify_design_projection(&self) -> Result<(), String> {
+        let expected_count = self
+            .frontend
+            .instance_module
+            .values()
+            .map(|module_id| self.frontend.module_variables[module_id].len())
+            .sum::<usize>();
+        if self.design.state_objects.len() != expected_count {
+            return Err(format!(
+                "state object count differs: design={} frontend={expected_count}",
+                self.design.state_objects.len()
+            ));
+        }
+
+        for (&instance_id, module_id) in &self.frontend.instance_module {
+            for info in self.frontend.module_variables[module_id].values() {
+                let address = AbsoluteAddr {
+                    instance_id,
+                    var_id: info.id,
+                };
+                let Some(metadata) = self.design.state_objects.get(&address) else {
+                    return Err(format!("missing flattened state object {address}"));
+                };
+                if metadata != &info.metadata {
+                    return Err(format!(
+                        "metadata differs for flattened state object {address}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Collect the set of `AbsoluteAddr` values that are accessed in the working
@@ -465,9 +447,6 @@ pub struct SignalRef {
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
 }
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct InstancePath(pub Vec<(StrId, usize)>);
-
 #[derive(Clone)]
 pub struct RelocationModule {
     #[cfg(test)]

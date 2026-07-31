@@ -53,6 +53,7 @@ pub use backend::wasm_runtime::WasmBackend;
 pub use backend::{EventHandle, MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
+pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;
@@ -60,8 +61,8 @@ pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
-    AbsoluteAddr, AddrLookupError, LaidOutProgram, PortTypeKind, Program, RuntimeErrorInfo,
-    SignalRef, SirProgram,
+    AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, PortTypeKind, Program,
+    RuntimeErrorInfo, SignalRef, SirProgram, VariableInfo, VerylFrontendLookup,
 };
 #[cfg(target_arch = "x86_64")]
 pub mod native_backend {

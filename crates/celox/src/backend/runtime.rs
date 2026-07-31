@@ -160,6 +160,84 @@ pub struct JitBackend {
     comb_func: SimFunc,
 }
 
+/// Cranelift-only lowering plan for an oversized `eval_comb` function.
+///
+/// This is deliberately constructed at the backend boundary: it contains
+/// concrete CLIF chunking decisions and must never become part of SIR or the
+/// backend-neutral state layout.
+enum CraneliftEvalCombPlan {
+    Unsplit,
+    TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
+    MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
+}
+
+impl CraneliftEvalCombPlan {
+    fn build(sir: &crate::ir::Program, options: &SimulatorOptions) -> Self {
+        if !options
+            .optimize_options
+            .is_enabled(crate::optimizer::SirPass::TailCallSplit)
+        {
+            return Self::Unsplit;
+        }
+
+        let timing = std::env::var_os("CELOX_OPT_TIMING").is_some();
+        if timing {
+            use crate::optimizer::coalescing::cost_model::{
+                CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost,
+                estimate_eu_value_count,
+            };
+            for (i, eu) in sir.sir.eval_comb.iter().enumerate() {
+                let inst_cost = estimate_eu_cost(eu, options.four_state);
+                let value_count = estimate_eu_value_count(eu, options.four_state);
+                eprintln!(
+                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{VREG_VALUE_THRESHOLD}",
+                    eu.blocks.len(),
+                    eu.blocks
+                        .values()
+                        .map(|block| block.instructions.len())
+                        .sum::<usize>(),
+                );
+            }
+        }
+
+        let split_start = timing.then(crate::timing::now);
+        use crate::optimizer::coalescing::pass_tail_call_split;
+        if let Some(chunks) =
+            pass_tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
+        {
+            if let Some(start) = split_start {
+                eprintln!(
+                    "[split] TailCallChunks: {} chunks, took {:?}",
+                    chunks.len(),
+                    start.elapsed()
+                );
+            }
+            Self::TailCallChunks(chunks)
+        } else if let Some(plan) =
+            pass_tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
+        {
+            if let Some(start) = split_start {
+                eprintln!(
+                    "[split] MemorySpilled: {} chunks, scratch={}B, took {:?}",
+                    plan.chunks.len(),
+                    plan.scratch_bytes,
+                    start.elapsed()
+                );
+            }
+            Self::MemorySpilled(plan)
+        } else {
+            Self::Unsplit
+        }
+    }
+
+    fn scratch_size(&self) -> usize {
+        match self {
+            Self::MemorySpilled(plan) => plan.scratch_bytes,
+            Self::Unsplit | Self::TailCallChunks(_) => 0,
+        }
+    }
+}
+
 impl JitBackend {
     pub fn new(
         laid_out: &crate::ir::LaidOutProgram,
@@ -177,7 +255,6 @@ impl JitBackend {
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
         let sir = laid_out.program();
-        let layout = laid_out.layout().clone();
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's
         // superlinear compile time would dominate. The threshold is half the
@@ -212,6 +289,12 @@ impl JitBackend {
             }
         }
 
+        let eval_comb_plan = CraneliftEvalCombPlan::build(sir, &options);
+        let layout = laid_out
+            .layout()
+            .clone()
+            .with_backend_scratch(eval_comb_plan.scratch_size());
+
         #[cfg(target_arch = "x86_64")]
         let layout_for_mir = if options.trace.mir {
             Some(layout.clone())
@@ -240,16 +323,16 @@ impl JitBackend {
             (None, None, None)
         };
 
-        // Batch compile eval_comb — use chunked compilation if the optimizer
-        // determined that the combined CLIF would exceed Cranelift's instruction limit.
-        let res = match &sir.eval_comb_plan {
-            Some(crate::ir::EvalCombPlan::MemorySpilled(plan)) => {
+        // Batch compile eval_comb, using the backend-local chunking plan when
+        // the combined CLIF would exceed Cranelift's instruction limit.
+        let res = match &eval_comb_plan {
+            CraneliftEvalCombPlan::MemorySpilled(plan) => {
                 engine.compile_spilled_chunks(plan, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
-            Some(crate::ir::EvalCombPlan::TailCallChunks(chunks)) => {
+            CraneliftEvalCombPlan::TailCallChunks(chunks) => {
                 engine.compile_chunks(chunks, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
-            None => {
+            CraneliftEvalCombPlan::Unsplit => {
                 engine.compile_units(&sir.sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
         };
@@ -459,7 +542,7 @@ impl JitBackend {
         let _ = compile_ffs;
 
         // Insert clock_domains aliases so every event signal resolves
-        for (alias, canonical) in &sir.clock_domains {
+        for (alias, canonical) in &sir.design.events.aliases {
             if let Some(&ev) = event_map.get(canonical) {
                 event_map.insert(*alias, ev);
             }
@@ -492,9 +575,11 @@ impl JitBackend {
         if options.four_state {
             for (addr, &offset) in &engine.translator.layout.offsets {
                 let width = engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
 
                 if is_4state {
@@ -505,9 +590,11 @@ impl JitBackend {
             for (addr, &rel_offset) in &engine.translator.layout.working_offsets {
                 let offset = engine.translator.layout.working_base_offset + rel_offset;
                 let width = engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
 
                 if is_4state {

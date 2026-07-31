@@ -62,16 +62,12 @@ pub(super) fn optimize_program_identity_stores(
     let mut blocked_aliases = ff_referenced_addresses(program);
     blocked_aliases.extend(
         program
+            .runtime_schema
             .comb_observers
             .iter()
             .flat_map(|observer| observer.written_inputs.iter().copied()),
     );
-    blocked_aliases.extend(
-        program
-            .initial_memory_values
-            .iter()
-            .map(|init| init.address),
-    );
+    blocked_aliases.extend(program.design.initial_state.iter().map(|init| init.address));
 
     optimize_eval_comb_identity_stores(
         &mut program.sir.eval_comb,
@@ -83,24 +79,20 @@ pub(super) fn optimize_program_identity_stores(
 }
 
 fn address_metadata(program: &Program) -> HashMap<AbsoluteAddr, AddressMetadata> {
-    let mut metadata = HashMap::default();
-    for (&instance_id, module_id) in &program.instance_module {
-        if let Some(variables) = program.module_variables.get(module_id) {
-            for variable in variables.values() {
-                metadata.insert(
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: variable.id,
-                    },
-                    AddressMetadata {
-                        width: variable.width,
-                        is_4state: variable.is_4state,
-                    },
-                );
-            }
-        }
-    }
-    metadata
+    program
+        .design
+        .state_objects
+        .iter()
+        .map(|(&address, metadata)| {
+            (
+                address,
+                AddressMetadata {
+                    width: metadata.width,
+                    is_4state: metadata.is_4state,
+                },
+            )
+        })
+        .collect()
 }
 
 fn optimize_eval_comb_identity_stores(

@@ -409,6 +409,7 @@ dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
  "celox-design",
+ "celox-frontend-veryl",
  "celox-macros",
  "celox-sir",
  "celox-state-layout",
@@ -465,8 +466,19 @@ dependencies = [
 name = "celox-design"
 version = "0.0.0"
 dependencies = [
+ "fxhash",
  "num-bigint",
  "serde",
+]
+
+[[package]]
+name = "celox-frontend-veryl"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "fxhash",
+ "veryl-analyzer",
+ "veryl-parser",
 ]
 
 [[package]]

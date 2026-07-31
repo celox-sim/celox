@@ -9,6 +9,7 @@ description           = "Source-independent elaborated design model for Celox"
 edition.workspace     = true
 
 [dependencies]
+fxhash = { workspace = true }
 num-bigint = { workspace = true }
 serde = { workspace = true }
 

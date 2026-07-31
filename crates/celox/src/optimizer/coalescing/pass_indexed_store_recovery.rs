@@ -38,32 +38,27 @@ pub(super) struct IndexedStoreRecoveryPass {
 impl IndexedStoreRecoveryPass {
     pub(super) fn for_program(program: &Program) -> Self {
         let mut arrays = HashMap::default();
-        for (&instance_id, &module_id) in &program.instance_module {
-            for info in program.module_variables[&module_id].values() {
-                if info.array_dims.is_empty() {
-                    continue;
-                }
-                let Some(element_count) = info
-                    .array_dims
-                    .iter()
-                    .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
-                else {
-                    continue;
-                };
-                if element_count == 0 || info.width % element_count != 0 {
-                    continue;
-                }
-                arrays.insert(
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: info.id,
-                    },
-                    ArrayShape {
-                        element_width: info.width / element_count,
-                        element_count,
-                    },
-                );
+        for (&address, info) in &program.design.state_objects {
+            if info.array_dims.is_empty() {
+                continue;
             }
+            let Some(element_count) = info
+                .array_dims
+                .iter()
+                .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            else {
+                continue;
+            };
+            if element_count == 0 || info.width % element_count != 0 {
+                continue;
+            }
+            arrays.insert(
+                address,
+                ArrayShape {
+                    element_width: info.width / element_count,
+                    element_count,
+                },
+            );
         }
         Self { arrays }
     }

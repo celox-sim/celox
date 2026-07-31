@@ -92,7 +92,6 @@ pub struct LayoutInput<A> {
     pub address_aliases: Vec<(A, A)>,
     pub ff_referenced_addresses: HashSet<A>,
     pub num_events: usize,
-    pub scratch_bytes: usize,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
 }
 
@@ -165,7 +164,6 @@ where
             mut address_aliases,
             ff_referenced_addresses,
             num_events,
-            scratch_bytes,
             runtime_event_sites,
         } = input;
 
@@ -310,7 +308,7 @@ where
         let scratch_base_offset = align_up(triggered_bits_offset + triggered_bits_total_size, 8);
         let runtime_event_buffer_size =
             RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
-        let merged_total_size = align_up(scratch_base_offset + scratch_bytes, 8);
+        let merged_total_size = scratch_base_offset;
 
         address_aliases.sort_unstable();
         for (alias, canonical) in address_aliases {
@@ -349,12 +347,21 @@ where
             triggered_bits_offset,
             triggered_bits_total_size,
             scratch_base_offset,
-            scratch_size: scratch_bytes,
+            scratch_size: 0,
             runtime_event_capacity: RUNTIME_EVENT_CAPACITY,
             runtime_event_slot_size,
             runtime_event_buffer_size,
             runtime_event_site_layouts,
         }
+    }
+
+    /// Append backend-private scratch storage without changing any semantic
+    /// state offset. Backend planning happens after the backend-neutral state
+    /// layout has been finalized, so scratch is always the final region.
+    pub fn with_backend_scratch(mut self, scratch_size: usize) -> Self {
+        self.scratch_size = scratch_size;
+        self.merged_total_size = align_up(self.scratch_base_offset + scratch_size, 8);
+        self
     }
 
     pub fn plane_size(&self, address: &A) -> usize {
@@ -500,19 +507,53 @@ mod tests {
     }
 
     #[test]
+    fn backend_scratch_only_extends_the_final_layout_region() {
+        struct EmptyLayoutSource;
+
+        impl LayoutSource<u32> for EmptyLayoutSource {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                LayoutInput {
+                    state_objects: Vec::new(),
+                    working_addresses: Vec::new(),
+                    sparse_addresses: Vec::new(),
+                    unpacked_arrays: HashMap::default(),
+                    address_aliases: Vec::new(),
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 3,
+                    runtime_event_sites: Vec::new(),
+                }
+            }
+        }
+
+        let base = MemoryLayout::build(&EmptyLayoutSource, false, MemoryLayoutMode::Packed);
+        let expanded = base.clone().with_backend_scratch(13);
+
+        assert_eq!(base.scratch_size, 0);
+        assert_eq!(expanded.scratch_base_offset, base.scratch_base_offset);
+        assert_eq!(expanded.scratch_size, 13);
+        assert_eq!(expanded.merged_total_size, base.scratch_base_offset + 16);
+        assert_eq!(expanded.offsets, base.offsets);
+        assert_eq!(expanded.working_offsets, base.working_offsets);
+        assert_eq!(expanded.triggered_bits_offset, base.triggered_bits_offset);
+    }
+
+    #[test]
     #[cfg(target_arch = "x86_64")]
     fn state_header_fields_do_not_overlap() {
-        assert!(
-            STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET + 8 <= STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET
-        );
-        assert!(
-            STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET + 8
-                <= STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
-        );
-        assert!(
-            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
-                <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
-        );
-        assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= STATE_HEADER_SIZE);
+        const {
+            assert!(
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET + 8
+                    <= STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET
+            );
+            assert!(
+                STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET + 8
+                    <= STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+            );
+            assert!(
+                STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
+                    <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
+            );
+            assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= STATE_HEADER_SIZE);
+        }
     }
 }

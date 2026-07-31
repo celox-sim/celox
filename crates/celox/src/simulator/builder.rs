@@ -603,8 +603,8 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             eprintln!(
                 "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
                 start.elapsed(),
-                program.runtime_event_sites.len(),
-                program.comb_observers.len()
+                program.runtime_schema.runtime_event_sites.len(),
+                program.runtime_schema.comb_observers.len()
             );
         }
 
@@ -976,9 +976,9 @@ fn run_dead_store_elimination(
 
     // PreserveTopPorts: auto-collect top module port addresses
     if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
-        if let Some(&top_instance_id) = program.instance_ids.get(&InstancePath(vec![])) {
-            if let Some(&top_module_id) = program.instance_module.get(&top_instance_id) {
-                if let Some(top_vars) = program.module_variables.get(&top_module_id) {
+        if let Some(&top_instance_id) = program.frontend.instance_ids.get(&InstancePath(vec![])) {
+            if let Some(&top_module_id) = program.frontend.instance_module.get(&top_instance_id) {
+                if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
                     for info in top_vars.values() {
                         if info.var_kind.is_port() {
                             externally_live.insert(AbsoluteAddr {
@@ -994,8 +994,8 @@ fn run_dead_store_elimination(
 
     // PreserveAllPorts: collect port addresses from every instance
     if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
-        for (&instance_id, &module_id) in &program.instance_module {
-            if let Some(vars) = program.module_variables.get(&module_id) {
+        for (&instance_id, &module_id) in &program.frontend.instance_module {
+            if let Some(vars) = program.frontend.module_variables.get(&module_id) {
                 for info in vars.values() {
                     if info.var_kind.is_port() {
                         externally_live.insert(AbsoluteAddr {
@@ -1012,8 +1012,5 @@ fn run_dead_store_elimination(
         program,
         &externally_live,
         options.four_state,
-        options
-            .optimize_options
-            .is_enabled(crate::optimizer::SirPass::TailCallSplit),
     );
 }

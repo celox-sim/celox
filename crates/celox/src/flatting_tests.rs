@@ -410,10 +410,12 @@ fn test_instances_inherit_module_boundaries() {
     let c2_path = InstancePath(vec![(resource_table::insert_str("c2"), 0)]);
 
     let c1_id = program
+        .frontend
         .instance_ids
         .get(&c1_path)
         .expect("c1 instance not found");
     let c2_id = program
+        .frontend
         .instance_ids
         .get(&c2_path)
         .expect("c2 instance not found");
@@ -421,12 +423,13 @@ fn test_instances_inherit_module_boundaries() {
     // Find VarId for 'x' in Child module
     let child_name = resource_table::insert_str("Child");
     let child_module_id = program
+        .frontend
         .module_names
         .iter()
         .find(|(_, name)| **name == child_name)
         .map(|(id, _)| *id)
         .expect("Child module not found");
-    let child_vars = &program.module_variables[&child_module_id];
+    let child_vars = &program.frontend.module_variables[&child_module_id];
     let x_info = child_vars
         .values()
         .find(|info| info.path.0.len() == 1 && info.path.0[0] == resource_table::insert_str("x"))

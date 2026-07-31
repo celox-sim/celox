@@ -1,5 +1,6 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
+use fxhash::FxHashMap as HashMap;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
@@ -68,6 +69,19 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+/// Runtime activation recipe for one combinational event site.
+///
+/// Expression trees used to emit the event have already been lowered into
+/// SIR.  The runtime only retains the persistent-state ranges needed to detect
+/// whether the corresponding combinational process must be observed again.
+#[derive(Clone, Debug)]
+pub struct RuntimeCombObserver<A> {
+    pub site_id: u32,
+    pub activation_group: u32,
+    pub sensitivity: Vec<VarAtomBase<A>>,
+    pub written_inputs: Vec<A>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitialStateWriteRun {
     pub bit_offset: usize,
@@ -96,6 +110,87 @@ pub struct InitialStateValue<A> {
 pub struct RuntimeErrorInfo<A> {
     pub message: String,
     pub signals: Vec<A>,
+}
+
+/// Source-independent runtime diagnostics and observable event descriptions.
+#[derive(Clone, Debug)]
+pub struct RuntimeSchema<A> {
+    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
+    pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub comb_observers: Vec<RuntimeCombObserver<A>>,
+}
+
+impl<A> Default for RuntimeSchema<A> {
+    fn default() -> Self {
+        Self {
+            runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
+            comb_observers: Vec::new(),
+        }
+    }
+}
+
+/// Source-independent event-domain topology after elaboration.
+///
+/// Addresses are already flattened. Source paths and frontend IDs used only
+/// for diagnostics or lookup deliberately live outside this structure.
+#[derive(Clone, Debug)]
+pub struct EventTopology<A> {
+    /// Alias event address to the canonical event-domain address.
+    pub aliases: HashMap<A, A>,
+    /// Canonical event domains in evaluation order.
+    pub ordered_events: Vec<A>,
+    /// Canonical clocks whose value may be changed by another event domain.
+    pub cascaded_events: BTreeSet<A>,
+    /// Canonical asynchronous/synchronous reset to its canonical clock.
+    pub reset_clocks: HashMap<A, A>,
+}
+
+impl<A> Default for EventTopology<A> {
+    fn default() -> Self {
+        Self {
+            aliases: HashMap::default(),
+            ordered_events: Vec::new(),
+            cascaded_events: BTreeSet::new(),
+            reset_clocks: HashMap::default(),
+        }
+    }
+}
+
+impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
+    pub fn canonical(&self, address: A) -> A {
+        self.aliases.get(&address).copied().unwrap_or(address)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ordered_events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ordered_events.is_empty()
+    }
+}
+
+/// Backend-neutral semantic design data after hierarchy flattening.
+///
+/// This is intentionally not a frontend lookup table: every state object is
+/// keyed by its flattened semantic address, and no source-language AST or path
+/// type is retained.
+#[derive(Clone, Debug)]
+pub struct ElaboratedDesign<A> {
+    pub state_objects: HashMap<A, VariableMetadata>,
+    pub events: EventTopology<A>,
+    pub initial_state: Vec<InitialStateValue<A>>,
+}
+
+impl<A> Default for ElaboratedDesign<A> {
+    fn default() -> Self {
+        Self {
+            state_objects: HashMap::default(),
+            events: EventTopology::default(),
+            initial_state: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -454,9 +549,30 @@ mod tests {
             message: "failed".to_string(),
             signals: vec![initial.address],
         };
+        let mut runtime = RuntimeSchema::default();
+        runtime.runtime_errors.insert(1, error.clone());
+        runtime.runtime_event_sites.push(RuntimeEventSite {
+            kind: RuntimeEventKind::AssertFatal,
+            template: Some("failed".to_string()),
+            arg_widths: Vec::new(),
+            arg_signed: Vec::new(),
+            arg_is_string: Vec::new(),
+        });
+        runtime.comb_observers.push(RuntimeCombObserver {
+            site_id: 0,
+            activation_group: 0,
+            sensitivity: vec![VarAtomBase {
+                id: initial.address,
+                access: BitAccess { lsb: 3, msb: 7 },
+            }],
+            written_inputs: vec![initial.address],
+        });
 
         assert_eq!(error.signals, vec![initial.address]);
         assert!(matches!(initial.data, InitialStateData::Writes(_)));
+        assert_eq!(runtime.runtime_errors[&1], error);
+        assert_eq!(runtime.runtime_event_sites.len(), 1);
+        assert_eq!(runtime.comb_observers[0].sensitivity[0].id, initial.address);
     }
 
     #[test]
@@ -471,5 +587,28 @@ mod tests {
 
         assert_eq!(metadata.width, 32);
         assert_eq!(metadata.array_dims, vec![4]);
+    }
+
+    #[test]
+    fn elaborated_design_uses_flat_addresses_and_canonical_event_topology() {
+        let mut design = ElaboratedDesign::<u32>::default();
+        design.state_objects.insert(
+            10,
+            VariableMetadata {
+                width: 1,
+                is_4state: false,
+                kind: DomainKind::ClockPosedge,
+                type_kind: PortTypeKind::Clock,
+                array_dims: Vec::new(),
+            },
+        );
+        design.events.aliases.insert(11, 10);
+        design.events.ordered_events.push(10);
+
+        assert_eq!(design.events.canonical(11), 10);
+        assert_eq!(design.events.canonical(12), 12);
+        assert_eq!(design.events.len(), 1);
+        assert!(!design.events.is_empty());
+        assert_eq!(design.state_objects[&10].width, 1);
     }
 }

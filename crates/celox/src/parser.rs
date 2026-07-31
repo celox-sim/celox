@@ -1399,24 +1399,17 @@ pub(crate) fn flatten(
                     apply_ffs: HashMap::default(),
                     eval_comb: Vec::new(),
                 },
+                design: celox_design::ElaboratedDesign::default(),
+                frontend: crate::ir::VerylFrontendLookup {
+                    instance_ids: expanded.clone(),
+                    instance_module: instance_modules.clone(),
+                    module_variables: err_vars,
+                    module_var_path_index: err_path_idx,
+                    module_names: module_names.clone(),
+                },
                 comb_semantic_regions: HashMap::default(),
-                runtime_errors: HashMap::default(),
-                runtime_event_sites: Vec::new(),
-                comb_observers: Vec::new(),
-                eval_comb_plan: None,
-                instance_ids: expanded.clone(),
-                instance_module: instance_modules.clone(),
-                module_variables: err_vars,
-                module_var_path_index: err_path_idx,
-                module_names: module_names.clone(),
-                clock_domains: HashMap::default(),
-                topological_clocks: Vec::new(),
-                cascaded_clocks: BTreeSet::new(),
-                arena: SLTNodeArena::new(),
-                num_events: 0,
-                reset_clock_map: HashMap::default(),
+                runtime_schema: celox_design::RuntimeSchema::default(),
                 address_aliases: HashMap::default(),
-                initial_memory_values: Vec::new(),
                 initial_statements: None,
                 tb_functions: fxhash::FxHashMap::default(),
             };
@@ -1564,7 +1557,6 @@ pub(crate) fn flatten(
         if stmts.is_empty() { None } else { Some(stmts) }
     });
 
-    let num_events = topological_clocks.len();
     let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
     let initial_memory_values = instance_modules
         .iter()
@@ -1581,6 +1573,29 @@ pub(crate) fn flatten(
                 })
         })
         .collect();
+    let state_objects = instance_modules
+        .iter()
+        .flat_map(|(&instance_id, module_id)| {
+            mod_vars[module_id].values().map(move |info| {
+                (
+                    AbsoluteAddr {
+                        instance_id,
+                        var_id: info.id,
+                    },
+                    info.metadata.clone(),
+                )
+            })
+        })
+        .collect();
+    let runtime_comb_observers = comb_observers
+        .iter()
+        .map(|observer| celox_design::RuntimeCombObserver {
+            site_id: observer.site_id,
+            activation_group: observer.activation_group,
+            sensitivity: observer.sensitivity.clone(),
+            written_inputs: observer.written_inputs.clone(),
+        })
+        .collect();
     let program = Program {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
@@ -1589,24 +1604,30 @@ pub(crate) fn flatten(
             apply_ffs,
             eval_comb,
         },
+        design: celox_design::ElaboratedDesign {
+            state_objects,
+            events: celox_design::EventTopology {
+                aliases: clock_domains,
+                ordered_events: topological_clocks,
+                cascaded_events: cascaded_clocks,
+                reset_clocks: reset_clock_map,
+            },
+            initial_state: initial_memory_values,
+        },
+        frontend: crate::ir::VerylFrontendLookup {
+            instance_ids: expanded,
+            instance_module: instance_modules,
+            module_variables: mod_vars,
+            module_var_path_index: mod_path_idx,
+            module_names,
+        },
         comb_semantic_regions,
-        runtime_errors,
-        runtime_event_sites,
-        comb_observers,
-        eval_comb_plan: None,
-        instance_ids: expanded,
-        instance_module: instance_modules,
-        module_variables: mod_vars,
-        module_var_path_index: mod_path_idx,
-        module_names,
-        clock_domains,
-        topological_clocks,
-        cascaded_clocks,
-        arena: global_arena,
-        num_events,
-        reset_clock_map,
+        runtime_schema: celox_design::RuntimeSchema {
+            runtime_errors,
+            runtime_event_sites,
+            comb_observers: runtime_comb_observers,
+        },
         address_aliases: HashMap::default(),
-        initial_memory_values,
         initial_statements,
         tb_functions: module_ir
             .get(root_id)
@@ -1617,19 +1638,15 @@ pub(crate) fn flatten(
     // --- Trigger Injection ---
     let mut trigger_map: HashMap<AbsoluteAddr, Vec<crate::ir::TriggerIdWithKind>> =
         HashMap::default();
-    let module_vars = &program.module_variables;
-    for (id, addr) in program.topological_clocks.iter().enumerate() {
-        if let Some(module_id) = program.instance_module.get(&addr.instance_id) {
-            if let Some(vars) = module_vars.get(module_id) {
-                // Find variable info by var_id
-                if let Some(info) = vars.get(&addr.var_id) {
-                    let kind = info.kind;
-                    trigger_map
-                        .entry(*addr)
-                        .or_default()
-                        .push(crate::ir::TriggerIdWithKind { kind, id });
-                }
-            }
+    for (id, addr) in program.design.events.ordered_events.iter().enumerate() {
+        if let Some(metadata) = program.design.state_objects.get(addr) {
+            trigger_map
+                .entry(*addr)
+                .or_default()
+                .push(crate::ir::TriggerIdWithKind {
+                    kind: metadata.kind,
+                    id,
+                });
         }
     }
 
@@ -1646,14 +1663,14 @@ pub(crate) fn flatten(
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
@@ -1671,14 +1688,14 @@ pub(crate) fn flatten(
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
@@ -1696,7 +1713,7 @@ pub(crate) fn flatten(
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, ..) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 if let crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) =
                                     inst
@@ -1707,7 +1724,7 @@ pub(crate) fn flatten(
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, ..) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                            let canonical = program.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 if let crate::ir::SIRInstruction::Commit(.., triggers) = inst {
                                     *triggers = ts.clone();
@@ -1726,14 +1743,14 @@ pub(crate) fn flatten(
                 match inst {
                     crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                         let abs = addr.absolute_addr();
-                        let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                        let canonical = program.design.events.canonical(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
                             *triggers = ts.clone();
                         }
                     }
                     crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                         let abs = dst.absolute_addr();
-                        let canonical = program.clock_domains.get(&abs).copied().unwrap_or(abs);
+                        let canonical = program.design.events.canonical(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
                             *triggers = ts.clone();
                         }
@@ -1756,8 +1773,8 @@ fn dump_addr_map_if_requested(program: &Program) {
 
     let filter = parse_addr_map_filter();
     let mut entries = Vec::new();
-    for (&instance_id, &module_id) in &program.instance_module {
-        let Some(vars) = program.module_variables.get(&module_id) else {
+    for (&instance_id, &module_id) in &program.frontend.instance_module {
+        let Some(vars) = program.frontend.module_variables.get(&module_id) else {
             continue;
         };
         for (&var_id, info) in vars {
@@ -1778,6 +1795,7 @@ fn dump_addr_map_if_requested(program: &Program) {
 
     for (instance_id, module_id, var_id, info) in entries {
         let module_name = program
+            .frontend
             .module_names
             .get(&module_id)
             .and_then(|name| resource_table::get_str_value(*name))
@@ -2129,6 +2147,9 @@ fn expand(
 }
 
 fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), ParserError> {
+    program.verify_design_projection().map_err(|detail| {
+        ParserError::illegal_context("elaborated design projection", detail, None)
+    })?;
     let units = program
         .sir
         .eval_comb
@@ -2551,8 +2572,9 @@ pub fn parse(
         verify_program_sir(&program, "before optimization")
     )?;
 
-    // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
-    // may be enabled and need to execute.
+    // Always run the SIR pipeline so required canonicalization and explicit
+    // per-pass overrides are applied consistently. Concrete backend planning
+    // (including Cranelift function splitting) happens after this phase.
     timed_phase!("optimize", {
         if preserve_element_storage_layout {
             crate::optimizer::optimize_preserving_element_storage(
