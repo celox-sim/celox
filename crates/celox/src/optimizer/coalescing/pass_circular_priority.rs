@@ -2244,7 +2244,6 @@ fn instruction_uses(
         | SIRInstruction::CombCaptureEvent {
             args: arguments, ..
         } => uses.extend(arguments.iter().copied()),
-        SIRInstruction::LaneAggregate { inputs, .. } => uses.extend(inputs.iter().copied()),
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             uses.extend([*condition, *true_value, *false_value]);
         }
@@ -3305,7 +3304,6 @@ fn replace_sparse_loop_use(
         | SIRInstruction::CombCaptureEvent {
             args: arguments, ..
         } => arguments.iter_mut().for_each(replace),
-        SIRInstruction::LaneAggregate { inputs, .. } => inputs.iter_mut().for_each(replace),
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             replace(condition);
             replace(true_value);
@@ -3331,8 +3329,7 @@ fn replace_instruction_definition(
         | SIRInstruction::Slice(dst, ..)
         | SIRInstruction::Load(dst, ..)
         | SIRInstruction::Concat(dst, ..)
-        | SIRInstruction::Mux(dst, ..)
-        | SIRInstruction::LaneAggregate { dst, .. } => *dst = definition,
+        | SIRInstruction::Mux(dst, ..) => *dst = definition,
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }

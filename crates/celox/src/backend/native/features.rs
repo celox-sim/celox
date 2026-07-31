@@ -33,7 +33,6 @@ pub(crate) enum StateBaseStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct X86Features {
     bmi2: bool,
-    avx2: bool,
     state_base: StateBaseStrategy,
 }
 
@@ -41,26 +40,17 @@ impl X86Features {
     pub(crate) fn detect() -> Self {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         let bmi2 = std::arch::is_x86_feature_detected!("bmi2");
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let avx2 = std::arch::is_x86_feature_detected!("avx2");
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         let bmi2 = false;
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        let avx2 = false;
 
         Self {
             bmi2,
-            avx2,
             state_base: detect_state_base_strategy(),
         }
     }
 
     pub(crate) const fn bmi2(self) -> bool {
         self.bmi2
-    }
-
-    pub(crate) const fn avx2(self) -> bool {
-        self.avx2
     }
 
     pub(crate) const fn variable_shift_encoding(self) -> VariableShiftEncoding {
@@ -90,7 +80,6 @@ impl X86Features {
     pub(crate) const fn for_test(bmi2: bool) -> Self {
         Self {
             bmi2,
-            avx2: false,
             state_base: StateBaseStrategy::R15,
         }
     }
@@ -100,11 +89,7 @@ impl X86Features {
         bmi2: bool,
         state_base: StateBaseStrategy,
     ) -> Self {
-        Self {
-            bmi2,
-            avx2: false,
-            state_base,
-        }
+        Self { bmi2, state_base }
     }
 }
 

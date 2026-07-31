@@ -10,8 +10,6 @@ mod control_region_feasibility;
 pub mod cost_model;
 mod dead_working_stores;
 mod fused_comb_dse;
-#[cfg(target_arch = "x86_64")]
-mod lane_aggregate_feasibility;
 mod pass_bit_extract_peephole;
 mod pass_branchify_mux;
 mod pass_circular_priority;
@@ -121,123 +119,6 @@ pub(crate) fn remove_final_identity_alias_stores(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn analyze_lane_aggregate_feasibility(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-) -> Result<lane_aggregate_feasibility::LaneAggregateFeasibilityReport, String> {
-    lane_aggregate_feasibility::analyze(eu, layout, four_state)
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn vectorize_around_lane_aggregate_plan(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    plan: &crate::lane_aggregate_plan::LaneAggregatePlan,
-) -> Result<(), crate::ir::verify::SirVerifyError> {
-    // The executable aggregate plan names exact SIR definitions and root
-    // instruction sites. Keep only those definitions unchanged while
-    // restoring ordinary Concat vectorization around them, including in the
-    // same block.
-    let mut protected_definitions = plan
-        .nodes
-        .iter()
-        .flat_map(|node| node.lanes.iter().copied())
-        .collect::<crate::HashSet<_>>();
-    protected_definitions.extend(plan.dead_scalar_registers.iter().copied());
-    protected_definitions.extend(plan.roots.iter().map(|root| root.original_root));
-    for root_index in 0..plan.roots.len() {
-        if let Some(inputs) = plan.scalar_inputs_for_root(root_index) {
-            protected_definitions.extend(inputs);
-        }
-    }
-
-    VectorizeConcatPass::after_lane_planning(Arc::default(), protected_definitions)
-        .run(eu, &PassOptions::default());
-    // Selective vectorization may recreate a packed Concat for a publication
-    // while an identical Concat already feeds a summary/reduction sink. Fold
-    // them to one SSA value before rebuilding the executable lane plan so the
-    // aggregate replaces the scalar cone for every use, not just the final
-    // packed Store.
-    GvnPass.run(eu, &PassOptions::default());
-    eu.verify_result()
-}
-
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn materialize_lane_aggregate_plan(
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    plan: &crate::lane_aggregate_plan::LaneAggregatePlan,
-) -> Result<(), String> {
-    let mut replaced_publications = crate::HashMap::<BlockId, crate::HashSet<usize>>::default();
-    for (root_index, root) in plan.roots.iter().enumerate() {
-        let root_id = u16::try_from(root_index)
-            .map_err(|_| "lane aggregate plan has more than u16::MAX roots".to_owned())?;
-        let inputs = plan.scalar_inputs_for_root(root_index).ok_or_else(|| {
-            format!("lane aggregate root {root_index} has no executable frontier")
-        })?;
-        let block = eu
-            .blocks
-            .get_mut(&root.block)
-            .ok_or_else(|| format!("lane aggregate block b{} is missing", root.block.0))?;
-        let instruction = block
-            .instructions
-            .iter_mut()
-            .find(|instruction| shared::def_reg(instruction) == Some(root.original_root))
-            .ok_or_else(|| {
-                format!(
-                    "lane aggregate root r{} is missing from b{}",
-                    root.original_root.0, root.block.0
-                )
-            })?;
-        *instruction = SIRInstruction::LaneAggregate {
-            dst: root.original_root,
-            root: root_id,
-            inputs,
-            writes_state: !root.publication_locations.is_empty(),
-        };
-        replaced_publications
-            .entry(root.block)
-            .or_default()
-            .extend(root.publication_instruction_indices.iter().copied());
-    }
-
-    // A direct aggregate publication replaces the old Slice/Store scatter.
-    // Remove those exact analyzed sites before indices can shift. Packed
-    // publications have no such sites and retain their ordinary Store, which
-    // also keeps the pure aggregate result live for standard DCE.
-    for (block_id, indices) in replaced_publications {
-        if indices.is_empty() {
-            continue;
-        }
-        let block = eu.blocks.get_mut(&block_id).ok_or_else(|| {
-            format!(
-                "lane aggregate publication block b{} is missing",
-                block_id.0
-            )
-        })?;
-        if indices
-            .iter()
-            .any(|&index| index >= block.instructions.len())
-        {
-            return Err(format!(
-                "lane aggregate publication index is outside b{}",
-                block_id.0
-            ));
-        }
-        block.instructions = std::mem::take(&mut block.instructions)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, instruction)| (!indices.contains(&index)).then_some(instruction))
-            .collect();
-    }
-
-    // The aggregate roots now carry their real scalar frontier operands.
-    // Ordinary mark/sweep DCE can therefore remove the disconnected scalar
-    // graph without consulting lane-analysis candidate bookkeeping.
-    remove_dead_sir_definitions(eu);
-    eu.verify_result().map_err(|error| error.to_string())
-}
-
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
@@ -321,19 +202,8 @@ pub(crate) fn optimize_native_merged_chain(
     }
     if !four_state && pass_vectorize_concat::expose_packed_bit_store_sinks(eu) {
         changed = true;
-        // Lane-aggregate analysis consumes the exact packed publication shape
-        // produced above.  Ordinary Concat vectorization intentionally erases
-        // that shape, so defer it when the verified lane recipe is requested.
-        // The aggregate lowering replaces the same scalar definitions and
-        // publication sites; when no executable recipe is found, ISel keeps
-        // the untouched scalar SIR as its semantic fallback.
-        let preserve_lane_publications = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY")
-            .is_some()
-            || crate::backend::native::lane_aggregate_codegen_enabled();
-        if !preserve_lane_publications {
-            VectorizeConcatPass::default().run(eu, &PassOptions::default());
-            GvnPass.run(eu, &PassOptions::default());
-        }
+        VectorizeConcatPass::default().run(eu, &PassOptions::default());
+        GvnPass.run(eu, &PassOptions::default());
         eu.verify_result()
             .map_err(|error| ("after native packed bit-store vectorization", error))?;
     }

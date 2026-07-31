@@ -3,15 +3,6 @@
 //! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
-use crate::ir::{
-    BasicBlock, BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
-    SIRTerminator, UnaryOp,
-};
-use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
-use crate::lane_aggregate_plan::{
-    LaneAggregateMaterialization, LaneAggregatePlan, LaneAggregatePlanOp,
-};
-
 use super::mir::*;
 use super::sparse_write_state::{
     SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
@@ -19,6 +10,11 @@ use super::sparse_write_state::{
 use crate::backend::MemoryLayout;
 #[cfg(test)]
 use crate::backend::memory_layout::MemoryLayoutMode;
+use crate::ir::{
+    BasicBlock, BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+    SIRTerminator, UnaryOp,
+};
+use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 use crate::{HashMap, HashSet};
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
@@ -1101,228 +1097,6 @@ fn find_packed_field_compare_plans(
     result
 }
 
-#[derive(Default)]
-struct LaneAggregateBlockRoots {
-    roots: HashMap<usize, LaneAggregateRootLowering>,
-    skip_indices: HashSet<usize>,
-}
-
-struct LaneAggregateRootLowering {
-    dst: VReg,
-    plan: LaneAggregatePlanId,
-    root: u16,
-    source_block: crate::ir::BlockId,
-    inputs: Vec<VReg>,
-    read_ranges: Vec<MemoryAliasRange>,
-    write_ranges: Vec<MemoryAliasRange>,
-}
-
-fn coalesce_aggregate_ranges(mut ranges: Vec<(i32, usize)>) -> Option<Vec<MemoryAliasRange>> {
-    const MAX_EFFECT_RANGES: usize = 16;
-
-    ranges.sort_unstable();
-    let mut merged = Vec::<(i32, usize)>::new();
-    for (offset, byte_len) in ranges {
-        let end = i64::from(offset).checked_add(i64::try_from(byte_len).ok()?)?;
-        if let Some((previous_offset, previous_len)) = merged.last_mut() {
-            let previous_end =
-                i64::from(*previous_offset).checked_add(i64::try_from(*previous_len).ok()?)?;
-            if i64::from(offset) <= previous_end {
-                *previous_len =
-                    usize::try_from(end.max(previous_end) - i64::from(*previous_offset)).ok()?;
-                continue;
-            }
-        }
-        merged.push((offset, byte_len));
-    }
-
-    // MIR keeps a bounded effect summary so scheduling remains sparse. More
-    // than sixteen disjoint lanes must not disable an otherwise executable
-    // SIMD operation: merge the closest neighboring ranges until the bound is
-    // met. The added gaps are conservative aliases, not omitted effects.
-    while merged.len() > MAX_EFFECT_RANGES {
-        let merge_index = merged
-            .windows(2)
-            .enumerate()
-            .min_by_key(|(_, pair)| {
-                let left_end = i64::from(pair[0].0) + pair[0].1 as i64;
-                i64::from(pair[1].0) - left_end
-            })
-            .map(|(index, _)| index)?;
-        let right = merged[merge_index + 1];
-        let right_end = i64::from(right.0).checked_add(i64::try_from(right.1).ok()?)?;
-        let left_offset = merged[merge_index].0;
-        merged[merge_index].1 = usize::try_from(right_end - i64::from(left_offset)).ok()?;
-        merged.remove(merge_index + 1);
-    }
-
-    merged
-        .into_iter()
-        .map(|(offset, byte_len)| MemoryAliasRange::new(offset, byte_len))
-        .collect()
-}
-
-fn lane_aggregate_root_effects(
-    plan: &LaneAggregatePlan,
-    root_index: usize,
-) -> Option<(Vec<MemoryAliasRange>, Vec<MemoryAliasRange>)> {
-    let root = plan.roots.get(root_index)?;
-    let mut ancestors = HashSet::default();
-    let mut work = vec![root.recipe_root];
-    let mut reads = Vec::new();
-    while let Some(index) = work.pop() {
-        if !ancestors.insert(index) {
-            continue;
-        }
-        let node = plan.nodes.get(index)?;
-        work.extend(node.children.iter().copied());
-        match &node.operation {
-            LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtSink(loads)) => {
-                for load in loads {
-                    let covered_bits = load.physical_bit.checked_add(load.width)?;
-                    if covered_bits == 0 || covered_bits > 64 {
-                        return None;
-                    }
-                    let read_bytes = match covered_bits.div_ceil(8) {
-                        1 => 1,
-                        2 => 2,
-                        3..=4 => 4,
-                        5..=8 => 8,
-                        _ => return None,
-                    };
-                    reads.push((load.native_byte_offset, read_bytes));
-                }
-            }
-            LaneAggregatePlanOp::StateRead(LaneAggregateMaterialization::ReloadAtFrontier {
-                ..
-            }) => return None,
-            _ => {}
-        }
-    }
-    let mut writes = Vec::with_capacity(root.lane_count);
-    for location in &root.publication_locations {
-        writes.push((
-            location.native_byte_offset,
-            usize::from(location.bit).checked_add(1)?.div_ceil(8),
-        ));
-    }
-    Some((
-        coalesce_aggregate_ranges(reads)?,
-        coalesce_aggregate_ranges(writes)?,
-    ))
-}
-
-fn lane_aggregate_roots_for_block(
-    ctx: &ISelContext<'_>,
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    plan_id: LaneAggregatePlanId,
-    plan: &LaneAggregatePlan,
-) -> LaneAggregateBlockRoots {
-    let diagnostics = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY").is_some();
-    let mut result = LaneAggregateBlockRoots::default();
-    for (instruction_index, instruction) in block.instructions.iter().enumerate() {
-        let SIRInstruction::LaneAggregate {
-            dst,
-            root: root_id,
-            inputs: input_registers,
-            writes_state,
-        } = instruction
-        else {
-            continue;
-        };
-        let root_index = usize::from(*root_id);
-        let Some(root) = plan.roots.get(root_index) else {
-            if diagnostics {
-                eprintln!(
-                    "[lane-aggregate-codegen-fallback] block={} root={} reason=plan-root-not-found",
-                    block.id.0, root_index
-                );
-            }
-            continue;
-        };
-        let expected_inputs = plan.scalar_inputs_for_root(root_index);
-        if root.block != block.id
-            || root.original_root != *dst
-            || expected_inputs.as_deref() != Some(input_registers.as_slice())
-            || *writes_state != !root.publication_locations.is_empty()
-        {
-            if diagnostics {
-                eprintln!(
-                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=explicit-sir-plan-mismatch",
-                    block.id.0, dst.0
-                );
-            }
-            continue;
-        }
-        let Some((read_ranges, write_ranges)) = lane_aggregate_root_effects(plan, root_index)
-        else {
-            if diagnostics {
-                let blockers = plan
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, node)| match &node.operation {
-                        LaneAggregatePlanOp::StateRead(
-                            LaneAggregateMaterialization::ReloadAtSink(loads),
-                        ) if loads.iter().any(|load| load.physical_bit + load.width > 64) => {
-                            Some(format!("node{index}=cross-word-state-read"))
-                        }
-                        LaneAggregatePlanOp::StateRead(
-                            LaneAggregateMaterialization::ReloadAtSink(_),
-                        ) => None,
-                        LaneAggregatePlanOp::StateRead(_) => {
-                            Some(format!("node{index}=non-sink-state-read"))
-                        }
-                        LaneAggregatePlanOp::BroadcastScalar(_) => {
-                            Some(format!("node{index}=scalar-broadcast"))
-                        }
-                        LaneAggregatePlanOp::SsaPack { .. } => {
-                            Some(format!("node{index}=ssa-pack"))
-                        }
-                        LaneAggregatePlanOp::ScalarInsert { .. } => {
-                            Some(format!("node{index}=scalar-insert"))
-                        }
-                        _ => None,
-                    })
-                    .take(8)
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "[lane-aggregate-codegen-fallback] block={} root=r{} reason=non-local-or-unencodable-recipe blockers={blockers:?}",
-                    block.id.0, root.original_root.0
-                );
-            }
-            continue;
-        };
-        let inputs = input_registers
-            .iter()
-            .map(|register| ctx.reg_map.get(*register))
-            .collect::<Vec<_>>();
-        result.roots.insert(
-            instruction_index,
-            LaneAggregateRootLowering {
-                dst: ctx.reg_map.get(root.original_root),
-                plan: plan_id,
-                root: *root_id,
-                source_block: block.id,
-                inputs,
-                read_ranges,
-                write_ranges,
-            },
-        );
-        if diagnostics {
-            eprintln!(
-                "[lane-aggregate-codegen] block={} root=r{} plan_root={} read_ranges={} write_ranges={}",
-                block.id.0,
-                root.original_root.0,
-                root_index,
-                result.roots[&instruction_index].read_ranges.len(),
-                result.roots[&instruction_index].write_ranges.len(),
-            );
-        }
-    }
-    result
-}
-
 /// Lower a single SIR execution unit to a MIR function.
 ///
 /// Only handles 2-state values ≤64 bits for now.
@@ -1330,15 +1104,6 @@ pub fn lower_execution_unit(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
     four_state: bool,
-) -> MFunction {
-    lower_execution_unit_with_lane_aggregate(eu, layout, four_state, None)
-}
-
-pub(crate) fn lower_execution_unit_with_lane_aggregate(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    layout: &MemoryLayout,
-    four_state: bool,
-    lane_aggregate_plan: Option<crate::lane_aggregate_plan::LaneAggregatePlan>,
 ) -> MFunction {
     if cfg!(debug_assertions) || std::env::var_os("CELOX_SIR_VERIFY").is_some() {
         if let Err(error) = eu.verify_result() {
@@ -1365,24 +1130,7 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         spill_descs.push(SpillDesc::transient());
     }
 
-    let lane_aggregate_lowering_plan = lane_aggregate_plan.clone();
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-    let lane_aggregate_plan_id = if let Some(plan) = lane_aggregate_plan {
-        if std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY").is_some() {
-            eprintln!(
-                "[lane-aggregate-isel-plan] roots={:?}",
-                plan.roots
-                    .iter()
-                    .map(|root| (root.block.0, root.original_root.0))
-                    .collect::<Vec<_>>()
-            );
-        }
-        let plan_id = func.add_lane_aggregate_plan(plan);
-        debug_assert!(func.lane_aggregate_plan(plan_id).is_some());
-        Some(plan_id)
-    } else {
-        None
-    };
     let native_packed_bit_stores = !four_state && func.target_features.bmi2();
     let native_packed_field_compares = !four_state && func.target_features.bmi2();
     let mut block_ids = ordered_sir_blocks(eu);
@@ -1590,39 +1338,12 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         } else {
             PackedByteAffineComparePlans::default()
         };
-        let aggregate_roots = match (
-            lane_aggregate_plan_id,
-            lane_aggregate_lowering_plan.as_ref(),
-        ) {
-            (Some(plan_id), Some(plan)) => {
-                lane_aggregate_roots_for_block(&ctx, sir_block, plan_id, plan)
-            }
-            _ => LaneAggregateBlockRoots::default(),
-        };
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
-            if let Some(root) = aggregate_roots.roots.get(&inst_idx) {
-                mblock.push(MInst::LaneAggregate {
-                    dst: root.dst,
-                    plan: root.plan,
-                    root: root.root,
-                    source_block: root.source_block,
-                    inputs: root.inputs.clone(),
-                    captured_inputs: 0,
-                    input_bytes: 0,
-                    input_base_offset: 0,
-                    read_ranges: root.read_ranges.clone(),
-                    write_ranges: root.write_ranges.clone(),
-                });
-                continue;
-            }
-            if aggregate_roots.skip_indices.contains(&inst_idx) {
-                continue;
-            }
             if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
                 continue;
             }
@@ -1843,8 +1564,7 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
                 | SIRInstruction::Load(d, _, _, _)
                 | SIRInstruction::Concat(d, _)
                 | SIRInstruction::Slice(d, _, _, _)
-                | SIRInstruction::Mux(d, _, _, _)
-                | SIRInstruction::LaneAggregate { dst: d, .. } => Some(*d),
+                | SIRInstruction::Mux(d, _, _, _) => Some(*d),
                 SIRInstruction::Store(..)
                 | SIRInstruction::Commit(..)
                 | SIRInstruction::RuntimeEvent { .. }
@@ -3924,11 +3644,6 @@ fn collect_sir_inst_uses(
                 add(arg);
             }
         }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for &input in inputs {
-                add(input);
-            }
-        }
         SIRInstruction::Mux(_, cond, then_val, else_val) => {
             add(*cond);
             add(*then_val);
@@ -4286,8 +4001,7 @@ fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _)
-        | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(_, _, _, _, _, _)
         | SIRInstruction::Commit(_, _, _, _, _)
         | SIRInstruction::RuntimeEvent { .. }
@@ -6639,9 +6353,6 @@ fn lower_instruction(
         return;
     }
     match inst {
-        SIRInstruction::LaneAggregate { .. } => {
-            unreachable!("lane aggregate roots are lowered before scalar instruction selection")
-        }
         SIRInstruction::RuntimeEvent { site_id, args } => {
             let event_ptr = load_runtime_event_ptr(ctx, block);
             lower_runtime_event_write(ctx, block, event_ptr, *site_id, args);
@@ -14635,20 +14346,6 @@ mod tests {
     use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
     use num_bigint::BigUint;
     use veryl_analyzer::ir::VarId;
-
-    #[test]
-    fn lane_aggregate_effect_summary_bounds_disjoint_simd_lanes_conservatively() {
-        let original = (0..32).map(|lane| (lane * 64, 8usize)).collect::<Vec<_>>();
-        let summary = coalesce_aggregate_ranges(original.clone()).unwrap();
-
-        assert_eq!(summary.len(), 16);
-        for (offset, byte_len) in original {
-            let end = i64::from(offset) + i64::try_from(byte_len).unwrap();
-            assert!(summary.iter().any(|range| {
-                i64::from(range.offset()) <= i64::from(offset) && range.end() >= end
-            }));
-        }
-    }
 
     fn empty_layout() -> MemoryLayout {
         MemoryLayout {

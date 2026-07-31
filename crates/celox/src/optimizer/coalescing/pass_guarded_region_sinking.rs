@@ -1556,11 +1556,6 @@ fn replace_register_uses_in_instruction(
                 replace(arg);
             }
         }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for input in inputs {
-                replace(input);
-            }
-        }
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             replace(condition);
             replace(true_value);
@@ -3291,7 +3286,6 @@ fn clone_pure_instruction(
             },
             *width,
         ),
-        SIRInstruction::LaneAggregate { .. } => return None,
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }

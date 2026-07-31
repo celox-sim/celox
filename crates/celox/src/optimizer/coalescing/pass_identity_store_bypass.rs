@@ -537,7 +537,6 @@ fn instruction_uses(
         | SIRInstruction::CombCaptureEvent {
             args: arguments, ..
         } => uses.extend(arguments.iter().copied()),
-        SIRInstruction::LaneAggregate { inputs, .. } => uses.extend(inputs.iter().copied()),
         SIRInstruction::Mux(_, condition, then_value, else_value) => {
             uses.extend([*condition, *then_value, *else_value]);
         }

@@ -187,7 +187,7 @@ impl LivenessProgram for PlannedStackLivenessProgram {
     }
 
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
-        self.blocks[block].instructions[instruction].uses.clone()
+        self.blocks[block].instructions[instruction].uses
     }
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {

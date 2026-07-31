@@ -65,8 +65,7 @@ pub(super) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<RegisterId> {
         | SIRInstruction::Load(dst, _, _, _)
         | SIRInstruction::Concat(dst, _)
         | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _)
-        | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
+        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
         SIRInstruction::Store(_, _, _, _, _, _)
         | SIRInstruction::Commit(_, _, _, _, _)
         | SIRInstruction::RuntimeEvent { .. }
@@ -146,9 +145,6 @@ fn collect_used_regs_into(
         }
         SIRInstruction::Concat(_, args) => {
             out.extend(args.iter().copied());
-        }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            out.extend(inputs.iter().copied());
         }
         SIRInstruction::Slice(_, src, _, _) => {
             out.insert(*src);
@@ -459,13 +455,6 @@ pub(super) fn batch_replace_in_inst(
             for arg in args {
                 if let Some(&to) = map.get(arg) {
                     *arg = to;
-                }
-            }
-        }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for input in inputs {
-                if let Some(&to) = map.get(input) {
-                    *input = to;
                 }
             }
         }

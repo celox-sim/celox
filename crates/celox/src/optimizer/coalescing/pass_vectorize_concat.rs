@@ -26,27 +26,12 @@ use std::sync::Arc;
 #[derive(Default)]
 pub(super) struct VectorizeConcatPass {
     unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>,
-    excluded_definitions: Arc<HashSet<RegisterId>>,
-    resume_after_lane_planning: bool,
 }
 
 impl VectorizeConcatPass {
     pub(super) fn new(unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>) -> Self {
         Self {
             unpacked_element_widths,
-            excluded_definitions: Arc::default(),
-            resume_after_lane_planning: false,
-        }
-    }
-
-    pub(super) fn after_lane_planning(
-        unpacked_element_widths: Arc<HashMap<AbsoluteAddr, usize>>,
-        excluded_definitions: HashSet<RegisterId>,
-    ) -> Self {
-        Self {
-            unpacked_element_widths,
-            excluded_definitions: Arc::new(excluded_definitions),
-            resume_after_lane_planning: true,
         }
     }
 }
@@ -65,25 +50,7 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         }
 
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
-        let mut any_changed = if self.resume_after_lane_planning {
-            false
-        } else {
-            expose_packed_bit_store_sinks_with_counter(eu, &mut max_reg)
-        };
-
-        // The lane-vector pipeline consumes the synchronous product before it
-        // is collapsed into ordinary packed bitvector operations.  Preserve
-        // that explicit publication shape until lane analysis has replaced it
-        // with typed lane operations.
-        let preserve_lane_publications = std::env::var_os("CELOX_LANE_AGGREGATE_FEASIBILITY")
-            .is_some()
-            || crate::backend::native::lane_aggregate_codegen_enabled();
-        if preserve_lane_publications && !self.resume_after_lane_planning {
-            if any_changed {
-                remove_dead_definitions(eu);
-            }
-            return;
-        }
+        let mut any_changed = expose_packed_bit_store_sinks_with_counter(eu, &mut max_reg);
 
         // A load-based pack is materialized at the Concat, after the scalar
         // loads it replaces.  That is only the same memory version when this
@@ -146,7 +113,6 @@ impl ExecutionUnitPass for VectorizeConcatPass {
                     &lane_definition_credits,
                     &mut claimed_lane_definitions,
                     &self.unpacked_element_widths,
-                    &self.excluded_definitions,
                 ) {
                     any_changed = true;
                     iteration_changed = true;
@@ -850,9 +816,6 @@ fn push_instruction_uses(
             worklist.push(*then_value);
             worklist.push(*else_value);
         }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            worklist.extend(inputs.iter().copied());
-        }
         SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
             worklist.push(*old);
             worklist.push(*new);
@@ -922,21 +885,11 @@ pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
     let mut definitions = HashMap::<RegisterId, (BlockId, usize)>::default();
     let mut parameter_inputs = HashMap::<RegisterId, Vec<RegisterId>>::default();
     let mut worklist = Vec::new();
-    let mut observable_definitions = Vec::new();
 
     for (&block_id, block) in &eu.blocks {
         for (instruction_index, inst) in block.instructions.iter().enumerate() {
             if let Some(definition) = def_reg(inst) {
                 definitions.insert(definition, (block_id, instruction_index));
-                if matches!(
-                    inst,
-                    SIRInstruction::LaneAggregate {
-                        writes_state: true,
-                        ..
-                    }
-                ) {
-                    observable_definitions.push(definition);
-                }
             } else {
                 push_instruction_uses(inst, &mut worklist);
             }
@@ -966,8 +919,6 @@ pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
             SIRTerminator::Switch { .. } | SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
-    worklist.extend(observable_definitions);
-
     let mut live = HashSet::default();
     while let Some(register) = worklist.pop() {
         if !live.insert(register) {
@@ -2271,7 +2222,6 @@ fn vectorize_concats(
     lane_definition_credits: &HashSet<RegisterId>,
     claimed_lane_definitions: &mut HashSet<RegisterId>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
-    excluded_definitions: &HashSet<RegisterId>,
 ) -> bool {
     let defs = global_defs;
 
@@ -2287,11 +2237,6 @@ fn vectorize_concats(
             continue;
         };
         let key = args.clone();
-        if excluded_definitions.contains(dst) {
-            packed_vectors.insert(key, *dst);
-            continue;
-        }
-
         if let Some(&packed) = packed_vectors.get(&key) {
             replacements.push(Replacement::LaneDag {
                 inst_idx: idx,

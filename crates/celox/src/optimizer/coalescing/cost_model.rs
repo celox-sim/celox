@@ -205,7 +205,6 @@ pub fn estimate_clif_cost(
             (load_cost + store_cost + 3) * state_mul
         }
         SIRInstruction::Concat(_, args) => 3 * args.len() * state_mul,
-        SIRInstruction::LaneAggregate { inputs, .. } => inputs.len().max(1) * state_mul,
         SIRInstruction::Slice(_, _, _, _) => 3 * state_mul,
         SIRInstruction::RuntimeEvent { args, .. }
         | SIRInstruction::CombCaptureEvent { args, .. } => 12 + args.len() * 2,

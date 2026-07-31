@@ -5650,7 +5650,6 @@ fn branchified_instruction_cost(
             3 * chunks(*width) + 3 * u128::from(offset.is_dynamic())
         }
         SIRInstruction::Concat(dst, args) => chunks(register_width(*dst)) + args.len() as u128,
-        SIRInstruction::LaneAggregate { inputs, .. } => inputs.len().max(1) as u128,
         SIRInstruction::Slice(dst, _, _, _) => 2 * chunks(register_width(*dst)),
         SIRInstruction::Mux(dst, _, true_value, false_value) => chunks(
             register_width(*dst)
@@ -6600,7 +6599,6 @@ fn inst_uses(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Vec<RegisterId> {
             offset.dynamic_registers().into_iter().flatten().collect()
         }
         SIRInstruction::Concat(_, args) => args.clone(),
-        SIRInstruction::LaneAggregate { inputs, .. } => inputs.clone(),
         SIRInstruction::Slice(_, src, _, _) => vec![*src],
         SIRInstruction::Mux(_, cond, true_val, false_val) => vec![*cond, *true_val, *false_val],
         SIRInstruction::RuntimeEvent { args, .. }

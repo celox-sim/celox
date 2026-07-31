@@ -721,7 +721,7 @@ impl AllocationIr {
             block: block_row.id,
             identity,
             slots,
-            uses: instruction.uses.clone(),
+            uses: instruction.uses,
             definition: instruction.definition,
         })
     }
@@ -947,7 +947,7 @@ impl AllocationIr {
                         rewrite_original_instruction(
                             source_instruction,
                             original_snapshot.uses(),
-                            instruction.uses.clone(),
+                            instruction.uses,
                             self.original_value_count,
                             allocation_block.id,
                             original_instruction,
@@ -970,7 +970,7 @@ impl AllocationIr {
                             allocation_block.id,
                             position,
                             operation,
-                            instruction.uses.clone(),
+                            instruction.uses,
                             instruction.definition,
                         )?
                     }
@@ -2760,7 +2760,7 @@ impl AllocationIr {
                             )
                         })?;
                         if synthetic_definitions[definition.0 as usize]
-                            .replace((id, instruction.uses.clone()))
+                            .replace((id, instruction.uses))
                             .is_some()
                         {
                             return Err(AllocationIrError::new(
@@ -4689,7 +4689,7 @@ impl LivenessProgram for AllocationIr {
     }
 
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
-        self.blocks[block].instructions[instruction].uses.clone()
+        self.blocks[block].instructions[instruction].uses
     }
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {

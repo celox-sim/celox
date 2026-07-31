@@ -69,7 +69,6 @@ fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
             out.extend(offset.dynamic_registers().into_iter().flatten());
         }
         SIRInstruction::Concat(_, args) => out.extend(args.iter().copied()),
-        SIRInstruction::LaneAggregate { inputs, .. } => out.extend(inputs.iter().copied()),
         SIRInstruction::Slice(_, src, _, _) => {
             out.push(*src);
         }
@@ -771,7 +770,6 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
             | SIRInstruction::Binary(..)
             | SIRInstruction::Unary(..)
             | SIRInstruction::Concat(..)
-            | SIRInstruction::LaneAggregate { .. }
             | SIRInstruction::Slice(..)
             | SIRInstruction::Mux(..) => {}
         }

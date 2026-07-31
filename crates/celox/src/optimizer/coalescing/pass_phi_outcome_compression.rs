@@ -395,11 +395,6 @@ fn replace_instruction_use(
                 replace(argument, old, new);
             }
         }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for input in inputs {
-                replace(input, old, new);
-            }
-        }
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             replace(condition, old, new);
             replace(true_value, old, new);

@@ -636,7 +636,6 @@ fn pure_expression_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Pu
             Some(PureExprKey::Mux(*cond, *then_value, *else_value))
         }
         SIRInstruction::Load(..)
-        | SIRInstruction::LaneAggregate { .. }
         | SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }
@@ -920,11 +919,6 @@ fn apply_aliases(
         SIRInstruction::Concat(_, args) => {
             for arg in args {
                 *arg = resolve_canonical(*arg, aliases);
-            }
-        }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for input in inputs {
-                *input = resolve_canonical(*input, aliases);
             }
         }
         SIRInstruction::Slice(_, src, _, _) => {

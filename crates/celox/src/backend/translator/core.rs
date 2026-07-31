@@ -320,9 +320,6 @@ impl SIRTranslator {
                     self.translate_concat_inst(state, dst, args);
                 }
             }
-            SIRInstruction::LaneAggregate { .. } => {
-                unreachable!("lane aggregates are native-backend-only final SIR")
-            }
             SIRInstruction::Binary(dst, lhs, op, rhs) => {
                 if matches!(op, BinaryOp::Shr | BinaryOp::Shl | BinaryOp::Sar)
                     && state.imm_constants.get(rhs) == Some(&0)

@@ -220,8 +220,7 @@ fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
         | SIRInstruction::Unary(d, _, _)
         | SIRInstruction::Concat(d, _)
         | SIRInstruction::Slice(d, _, _, _)
-        | SIRInstruction::Mux(d, _, _, _)
-        | SIRInstruction::LaneAggregate { dst: d, .. } => Some(*d),
+        | SIRInstruction::Mux(d, _, _, _) => Some(*d),
         SIRInstruction::Store(..)
         | SIRInstruction::Commit(..)
         | SIRInstruction::RuntimeEvent { .. }

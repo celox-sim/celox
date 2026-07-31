@@ -302,9 +302,6 @@ impl PlacementAnalysis {
                     | SIRInstruction::Concat(..)
                     | SIRInstruction::Slice(..)
                     | SIRInstruction::Mux(..) => ValueSafety::Pure,
-                    SIRInstruction::LaneAggregate { .. } => {
-                        ValueSafety::Pinned(PinReason::UnversionedStateRead)
-                    }
                     SIRInstruction::Load(destination, address, ..) => {
                         if include_state_and_effects {
                             state
@@ -899,7 +896,6 @@ fn instruction_operands(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> V
         | SIRInstruction::CombCaptureEvent {
             args: arguments, ..
         } => arguments.clone(),
-        SIRInstruction::LaneAggregate { inputs, .. } => inputs.clone(),
         SIRInstruction::Mux(_, condition, true_value, false_value) => {
             vec![*condition, *true_value, *false_value]
         }
@@ -933,7 +929,6 @@ fn build_effect_ssa(
                 | SIRInstruction::Unary(..)
                 | SIRInstruction::Load(..)
                 | SIRInstruction::Concat(..)
-                | SIRInstruction::LaneAggregate { .. }
                 | SIRInstruction::Slice(..)
                 | SIRInstruction::Mux(..) => None,
             };

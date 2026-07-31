@@ -1166,11 +1166,6 @@ fn replace_sir_uses<A>(
                 replace(source);
             }
         }
-        SIRInstruction::LaneAggregate { inputs, .. } => {
-            for input in inputs {
-                replace(input);
-            }
-        }
         SIRInstruction::Mux(_, condition, then_value, else_value) => {
             replace(condition);
             replace(then_value);
@@ -1292,17 +1287,6 @@ fn renumber_sir_inst<A: Clone>(
         SIRInstruction::Concat(dst, args) => {
             SIRInstruction::Concat(r(*dst), args.iter().map(|a| r(*a)).collect())
         }
-        SIRInstruction::LaneAggregate {
-            dst,
-            root,
-            inputs,
-            writes_state,
-        } => SIRInstruction::LaneAggregate {
-            dst: r(*dst),
-            root: *root,
-            inputs: inputs.iter().map(|input| r(*input)).collect(),
-            writes_state: *writes_state,
-        },
         SIRInstruction::Slice(dst, src, offset, width) => {
             SIRInstruction::Slice(r(*dst), r(*src), *offset, *width)
         }
@@ -1783,21 +1767,6 @@ pub enum SIRInstruction<Addr> {
     /// A known one in `cond` selects `then_val`. If `cond` has no known one but
     /// contains X/Z, equal arm bits are preserved and differing bits become X.
     Mux(RegisterId, RegisterId, RegisterId, RegisterId), // dst, cond, then_val, else_val
-    /// A verified lane-wise aggregate selected by the native SIR vectorizer.
-    ///
-    /// `inputs` is the complete explicit scalar materialization frontier.
-    /// State reloads and the vector recipe are named by `root` in the
-    /// function's lane-aggregate plan. Making the frontier visible here lets
-    /// ordinary SIR SSA verification and DCE remove the replaced scalar cone.
-    LaneAggregate {
-        dst: RegisterId,
-        root: u16,
-        inputs: Vec<RegisterId>,
-        /// The aggregate directly replaces a scalar scatter publication and
-        /// is therefore an observable DCE root. Packed publications leave
-        /// this false and retain their ordinary SIR Store.
-        writes_state: bool,
-    },
     RuntimeEvent {
         site_id: u32,
         args: Vec<RegisterId>,
@@ -1879,25 +1848,6 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     dst.0, cond.0, then_val.0, else_val.0
                 )
             }
-            SIRInstruction::LaneAggregate {
-                dst,
-                root,
-                inputs,
-                writes_state,
-            } => {
-                write!(
-                    f,
-                    "r{} = LaneAggregate(root={}, writes_state={}, inputs=[",
-                    dst.0, root, writes_state
-                )?;
-                for (index, input) in inputs.iter().enumerate() {
-                    if index != 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "r{}", input.0)?;
-                }
-                write!(f, "])")
-            }
             SIRInstruction::RuntimeEvent { site_id, args } => {
                 write!(f, "RuntimeEvent(site={}, args=[", site_id)?;
                 for (i, arg) in args.iter().enumerate() {
@@ -1948,8 +1898,7 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Load(dst, _, _, _)
             | SIRInstruction::Concat(dst, _)
             | SIRInstruction::Slice(dst, _, _, _)
-            | SIRInstruction::Mux(dst, _, _, _)
-            | SIRInstruction::LaneAggregate { dst, .. } => Some(*dst),
+            | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
             SIRInstruction::Store(..)
             | SIRInstruction::Commit(..)
             | SIRInstruction::RuntimeEvent { .. }
@@ -1979,17 +1928,6 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Mux(dst, cond, then_val, else_val) => {
                 SIRInstruction::Mux(dst, cond, then_val, else_val)
             }
-            SIRInstruction::LaneAggregate {
-                dst,
-                root,
-                inputs,
-                writes_state,
-            } => SIRInstruction::LaneAggregate {
-                dst,
-                root,
-                inputs,
-                writes_state,
-            },
             SIRInstruction::RuntimeEvent { site_id, args } => {
                 SIRInstruction::RuntimeEvent { site_id, args }
             }
@@ -2041,17 +1979,6 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Mux(dst, cond, then_val, else_val) => {
                 SIRInstruction::Mux(*dst, *cond, *then_val, *else_val)
             }
-            SIRInstruction::LaneAggregate {
-                dst,
-                root,
-                inputs,
-                writes_state,
-            } => SIRInstruction::LaneAggregate {
-                dst: *dst,
-                root: *root,
-                inputs: inputs.clone(),
-                writes_state: *writes_state,
-            },
             SIRInstruction::RuntimeEvent { site_id, args } => SIRInstruction::RuntimeEvent {
                 site_id: *site_id,
                 args: args.clone(),
