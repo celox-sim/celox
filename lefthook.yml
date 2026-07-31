@@ -14,9 +14,8 @@ pre-push:
     biome:
       priority: 2
       run: pnpm run lint
-    cargo-clippy:
+    # Keep the local gate bounded. Full clippy, tests, NAPI builds, frontend
+    # builds, and documentation builds remain required in GitHub Actions.
+    cargo-check:
       priority: 3
-      run: cargo clippy -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets
-    test:
-      priority: 4
-      run: pnpm test
+      run: cargo check --workspace --locked
