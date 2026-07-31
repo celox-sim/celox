@@ -43,6 +43,16 @@
         "cargo"
       ],
       "matchPackageNames": [
+        "syn",
+        "prettyplease"
+      ],
+      "groupName": "syn ecosystem"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
         "/^veryl-/"
       ],
       "groupName": "veryl crates"
