@@ -3,6 +3,18 @@ use crate::ir::{
     AbsoluteAddr, Program, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
     STABLE_REGION, collect_exact_zero_registers,
 };
+pub use celox_state_layout::{
+    MemoryLayoutMode, RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_HEADER_SIZE,
+    RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET,
+    RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+    RuntimeEventArgLayout, RuntimeEventSiteLayout, STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET,
+    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET, STATE_HEADER_SIZE, SparseWorkingLayout,
+    UnpackedArrayLayout, get_byte_size,
+};
+#[cfg(target_arch = "x86_64")]
+pub use celox_state_layout::{
+    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
+};
 
 type LayoutVariable = (AbsoluteAddr, usize, bool, usize, usize);
 
@@ -14,66 +26,6 @@ fn sort_layout_variables(variables: &mut [LayoutVariable]) {
     variables.sort_unstable_by_key(|(address, _, _, _, alignment)| {
         (std::cmp::Reverse(*alignment), *address)
     });
-}
-
-pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
-pub const STATE_HEADER_SIZE: usize = 32;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
-/// Remaining iterations for an in-function native tick loop.
-#[cfg(target_arch = "x86_64")]
-pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
-#[cfg(target_arch = "x86_64")]
-pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
-/// Runtime-event write sequence observed when a native tick batch starts.
-pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
-pub const RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET: usize = 24;
-
-#[derive(Debug, Clone)]
-pub struct RuntimeEventArgLayout {
-    pub value_word_offset: usize,
-    pub mask_word_offset: usize,
-    pub word_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeEventSiteLayout {
-    pub args: Vec<RuntimeEventArgLayout>,
-    pub payload_words: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct SparseWorkingLayout {
-    pub active_index: usize,
-    pub chunk_count: usize,
-    pub dirty_words_offset: usize,
-    pub dirty_word_count: usize,
-    pub summary_words_offset: usize,
-    pub summary_word_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryLayoutMode {
-    Packed,
-    ElementStrided,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnpackedArrayLayout {
-    pub element_width: usize,
-    pub element_count: usize,
-    pub element_stride: usize,
-    pub plane_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -614,10 +566,6 @@ fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<Absolute
         }
     }
     addrs
-}
-
-pub fn get_byte_size(width: usize) -> usize {
-    (width + 7) >> 3
 }
 
 fn get_alignment(width: usize) -> usize {
