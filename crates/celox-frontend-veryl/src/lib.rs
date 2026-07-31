@@ -4,11 +4,17 @@
 //! public path lookup. Semantic design and backend phases must not depend on
 //! them.
 
+pub mod bitaccess;
+pub mod bitslicer;
+pub mod case;
 mod config;
 mod error;
+pub mod loop_provenance;
+mod types;
 
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
 use fxhash::FxHashMap as HashMap;

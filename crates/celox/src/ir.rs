@@ -449,7 +449,6 @@ fn comb_capture_enable_needs_unaliased_old_value(
     false
 }
 
-pub type VarAtom = VarAtomBase<VarId>;
 pub(crate) mod cfg {
     pub(crate) use celox_sir::cfg::*;
 }

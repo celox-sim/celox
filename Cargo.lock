@@ -482,6 +482,8 @@ dependencies = [
  "celox-slt",
  "fxhash",
  "miette",
+ "num-bigint",
+ "num-traits",
  "thiserror 2.0.19",
  "veryl-analyzer",
  "veryl-metadata",

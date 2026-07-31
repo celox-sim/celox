@@ -492,6 +492,7 @@ mod slt_root_verify_tests {
 }
 
 pub(crate) use celox_frontend_veryl::BuildConfig;
+pub(crate) use celox_frontend_veryl::resolve_total_width;
 pub mod bitaccess;
 mod bitslicer;
 pub(crate) mod case;
@@ -513,43 +514,6 @@ use std::hash::Hash;
 use veryl_analyzer::ir::{Declaration, FfDeclaration};
 
 pub use celox_frontend_veryl::{LoweringPhase, ParserError, SourceLocation};
-
-/// Resolve the total storage size of a variable (total_width * total_array),
-/// returning `ParserError::UnresolvedWidth` when it cannot be determined.
-pub(crate) fn resolve_total_width(
-    module: &veryl_analyzer::ir::Module,
-    var: &veryl_analyzer::ir::Variable,
-) -> Result<usize, ParserError> {
-    let width = var
-        .total_width()
-        .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))?;
-    let array = var
-        .r#type
-        .total_array()
-        .ok_or_else(|| ParserError::unresolved_width(module, var, var.r#type.to_string()))?;
-    Ok(width * array)
-}
-
-/// Resolve each dimension in an array/width shape, returning an error when any is `None`.
-pub(crate) fn resolve_dims(
-    module: &veryl_analyzer::ir::Module,
-    var: &veryl_analyzer::ir::Variable,
-    shape: &[Option<usize>],
-    kind: &str,
-) -> Result<Vec<usize>, ParserError> {
-    shape
-        .iter()
-        .map(|d| {
-            d.ok_or_else(|| {
-                ParserError::unresolved_width(
-                    module,
-                    var,
-                    format!("{} dimension in {}", kind, var.r#type),
-                )
-            })
-        })
-        .collect()
-}
 
 pub struct ParseIrResult<'a> {
     pub modules: HashMap<ModuleId, SimModule>,
