@@ -1,15 +1,12 @@
-use std::collections::BTreeSet;
-
 use veryl_analyzer::ir::VarId;
 
-use crate::{HashMap, HashSet, ir::VarAtomBase, logic_tree::range_store::RangeStore};
+use crate::{HashSet, ir::VarAtomBase};
 
 use super::NodeId;
 
-// SymbolicStore: Maps variable IDs to their current symbolic representation.
-// Each variable is managed by a RangeStore, which tracks bit-ranges and their associated SLT nodes.
-pub type SymbolicStore<A> = HashMap<VarId, RangeStore<Option<(NodeId, HashSet<VarAtomBase<A>>)>>>;
-pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
+// Frontend specialization of the source-independent symbolic state contract.
+pub type SymbolicStore<A> = celox_slt::SymbolicStore<A, NodeId>;
+pub type BoundaryMap<A> = celox_slt::BoundaryMap<A>;
 
 #[derive(Clone)]
 pub(super) struct LoopControlState {

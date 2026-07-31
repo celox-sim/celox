@@ -1,0 +1,16 @@
+[package]
+name                  = "celox-slt"
+version.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "Source-independent symbolic logic tree core for Celox"
+edition.workspace     = true
+
+[dependencies]
+celox-design = { path = "../celox-design" }
+fxhash       = { workspace = true }
+serde        = { workspace = true }
+
+[lints]
+workspace = true
