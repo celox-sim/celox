@@ -27,6 +27,7 @@ module Top (
         .build_with_trace();
     let sir = result.trace.pre_optimized_sir.as_ref().unwrap();
     let rendered_sir = sir
+        .sir
         .eval_comb
         .iter()
         .map(|eu| format!("{eu}"))

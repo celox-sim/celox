@@ -20,6 +20,21 @@ pub use transform::{
     merge_sir_eu_refs_with_provenance, merge_sir_eus,
 };
 
+/// Backend-independent executable SIR grouped by simulation phase and event.
+///
+/// This type deliberately contains no frontend arena, optimizer plan, physical
+/// layout, or backend artifact.
+#[derive(Debug, Clone)]
+pub struct SirProgram<EventAddr, StateAddr> {
+    pub eval_comb: Vec<ExecutionUnit<StateAddr>>,
+    pub eval_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    /// Native fast path in which required comb values and one FF event were
+    /// scheduled and lowered through the same SIR builder.
+    pub eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+}
+
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub usize);

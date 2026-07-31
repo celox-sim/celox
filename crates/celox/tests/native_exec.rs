@@ -58,7 +58,7 @@ fn compile_and_run_inner(
 
     use celox::native_backend::{emit, isel, jit_mem, regalloc};
 
-    let eu = &sir.eval_comb[0];
+    let eu = &sir.sir.eval_comb[0];
     let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
 
     if debug {
@@ -463,7 +463,7 @@ fn test_debug_let_bitslice_write() {
     use celox::native_backend::{emit, isel, regalloc};
     let layout = celox::MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
-    for (eu_idx, eu) in sir.eval_comb.iter().enumerate() {
+    for (eu_idx, eu) in sir.sir.eval_comb.iter().enumerate() {
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
         eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
         let ra = regalloc::run_regalloc(&mut mfunc).unwrap();

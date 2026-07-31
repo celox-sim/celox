@@ -8,8 +8,9 @@ crates already exist.
 
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
 uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
-the mixed `Program`; dissolving that payload into the phase-specific target types below remains
-part of Milestone 3.
+the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram`.
+Dissolving the remaining design, symbolic, optimizer, and testbench payload into the phase-specific
+target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

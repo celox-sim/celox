@@ -68,7 +68,7 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "combWasmBytes")]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = wasm_codegen::compile_units(
-            &self.program().eval_comb,
+            &self.program().sir.eval_comb,
             self.layout(),
             self.four_state,
             false,
@@ -82,7 +82,7 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "eventWasmBytes")]
     pub fn event_wasm_bytes(&self, event_name: &str) -> Result<Vec<u8>, JsError> {
         // Search through eval_apply_ffs to find matching event
-        for (addr, units) in &self.program().eval_apply_ffs {
+        for (addr, units) in &self.program().sir.eval_apply_ffs {
             let event_path = self.program().get_path(addr);
             if event_path == event_name {
                 let wasm =
@@ -95,6 +95,7 @@ impl SimHandle {
             "Event '{}' not found. Available events: {}",
             event_name,
             self.program()
+                .sir
                 .eval_apply_ffs
                 .keys()
                 .map(|addr| self.program().get_path(addr))
@@ -162,7 +163,7 @@ impl SimHandle {
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
 
-        for (next_id, addr) in self.program().eval_apply_ffs.keys().enumerate() {
+        for (next_id, addr) in self.program().sir.eval_apply_ffs.keys().enumerate() {
             let name = self.program().get_path(addr);
             events.insert(name, next_id);
         }

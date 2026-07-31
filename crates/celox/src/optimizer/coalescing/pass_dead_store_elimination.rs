@@ -19,27 +19,37 @@ pub(crate) fn eliminate_dead_stores(
     let mut dynamic_addrs: HashSet<AbsoluteAddr> = HashSet::default();
 
     let all_eus = program
+        .sir
         .eval_comb
         .iter()
         .chain(
             program
+                .sir
                 .eval_apply_ffs
                 .values()
                 .flat_map(|units| units.iter()),
         )
         .chain(
             program
+                .sir
                 .eval_comb_apply_ffs
                 .values()
                 .flat_map(|units| units.iter()),
         )
         .chain(
             program
+                .sir
                 .eval_only_ffs
                 .values()
                 .flat_map(|units| units.iter()),
         )
-        .chain(program.apply_ffs.values().flat_map(|units| units.iter()));
+        .chain(
+            program
+                .sir
+                .apply_ffs
+                .values()
+                .flat_map(|units| units.iter()),
+        );
 
     for eu in all_eus {
         for block in eu.blocks.values() {
@@ -83,7 +93,7 @@ pub(crate) fn eliminate_dead_stores(
     }
 
     // 2. Remove dead stores from eval_comb.
-    for eu in program.eval_comb.iter_mut() {
+    for eu in program.sir.eval_comb.iter_mut() {
         for block in eu.blocks.values_mut() {
             block.instructions.retain(|inst| {
                 match inst {

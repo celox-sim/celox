@@ -74,7 +74,7 @@ pub(super) fn optimize_program_identity_stores(
     );
 
     optimize_eval_comb_identity_stores(
-        &mut program.eval_comb,
+        &mut program.sir.eval_comb,
         &metadata,
         &blocked_aliases,
         &program.address_aliases,
@@ -138,13 +138,13 @@ pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: b
     let mut valid = aliases.keys().copied().collect::<HashSet<_>>();
 
     retain_aliases_valid_for_units(
-        &program.eval_comb,
+        &program.sir.eval_comb,
         &aliases,
         &metadata,
         four_state,
         &mut valid,
     );
-    for units in program.eval_comb_apply_ffs.values() {
+    for units in program.sir.eval_comb_apply_ffs.values() {
         retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
     }
     program
@@ -164,12 +164,12 @@ pub(crate) fn remove_final_identity_alias_stores(
     }
     let metadata = address_metadata(program);
     remove_proven_alias_stores(
-        &mut program.eval_comb,
+        &mut program.sir.eval_comb,
         validated_aliases,
         &metadata,
         four_state,
     );
-    for units in program.eval_comb_apply_ffs.values_mut() {
+    for units in program.sir.eval_comb_apply_ffs.values_mut() {
         remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
     }
 }
@@ -811,16 +811,24 @@ fn ff_referenced_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
     // The split FF forms below are retained even when the native fused form is
     // selected and therefore remain the authoritative FF-state inventory.
     let units = program
+        .sir
         .eval_apply_ffs
         .values()
         .flat_map(|units| units.iter())
         .chain(
             program
+                .sir
                 .eval_only_ffs
                 .values()
                 .flat_map(|units| units.iter()),
         )
-        .chain(program.apply_ffs.values().flat_map(|units| units.iter()));
+        .chain(
+            program
+                .sir
+                .apply_ffs
+                .values()
+                .flat_map(|units| units.iter()),
+        );
     for eu in units {
         for block in eu.blocks.values() {
             for inst in &block.instructions {

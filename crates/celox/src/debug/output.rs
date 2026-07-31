@@ -75,7 +75,7 @@ pub fn format_program(program: &Program) -> String {
     let mut output = String::new();
 
     output.push_str("=== Evaluation Flip-Flops (eval_apply_ffs) ===\n");
-    for (addr, execution_units) in &program.eval_apply_ffs {
+    for (addr, execution_units) in &program.sir.eval_apply_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -112,7 +112,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Evaluation Flip-Flops (eval_only_ffs) ===\n");
-    for (addr, execution_units) in &program.eval_only_ffs {
+    for (addr, execution_units) in &program.sir.eval_only_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -149,7 +149,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Application Flip-Flops (apply_ffs) ===\n");
-    for (addr, execution_units) in &program.apply_ffs {
+    for (addr, execution_units) in &program.sir.apply_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -186,7 +186,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Evaluation Combinational Logic (eval_comb) ===\n");
-    for (idx, eu) in program.eval_comb.iter().enumerate() {
+    for (idx, eu) in program.sir.eval_comb.iter().enumerate() {
         output.push_str(&format!("Execution Unit {}:\n", idx));
         output.push_str(&format!("  Entry Block: {}\n", eu.entry_block_id.0));
         output.push_str("  Registers:\n");
