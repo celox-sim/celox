@@ -33,7 +33,7 @@ pub struct Program {
     pub eval_comb_plan: Option<EvalCombPlan>,
     // ... instance maps, clock domains, arena, etc.
     pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
     pub layout: Option<MemoryLayout>,
     pub initial_statements: Option<Vec<Statement>>,
     pub tb_functions: FxHashMap<VarId, Function>,
@@ -45,7 +45,7 @@ pub struct Program {
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
 -   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds the safety threshold used to stay below Cranelift's instruction/value limits. See [Tail-Call Splitting](./optimizations.md#214-tail-call-splitting) for details.
 -   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
--   **`address_aliases`**: Memory layout aliases mapping non-canonical → canonical addresses. Variables with identity `Store→Load` roundtrips share physical memory (populated by `IdentityStoreBypass`).
+-   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory. The requirements are retained while `Program` remains publicly re-layoutable.
 -   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
 -   **`initial_statements`**: Initial block statements from the top-level module (for native testbenches).
 -   **`tb_functions`**: Functions defined in the top-level module (for testbench function calls via the bytecode VM).

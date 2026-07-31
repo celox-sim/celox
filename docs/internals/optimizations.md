@@ -64,7 +64,7 @@ Splits wide coalesced stores back into narrower ones after the reschedule pass, 
 Partial store-load forwarding in combinational blocks. When a store covers part of a subsequent load's range, forwards the known portion and narrows the load. Controlled by `SirPass::PartialForward`.
 
 ### 2.14 Identity Store Bypass
-Detects identity copies (Store→Load roundtrips where the value is unchanged) and registers the source and destination as address aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies. Controlled by `SirPass::IdentityStoreBypass`.
+Detects identity copies (Store→Load roundtrips where the value is unchanged) and records the source and destination as semantic state-home aliases in `Program::layout_requirements`. Physical layout validates compatible representations before sharing memory and eliminating redundant copies. Controlled by `SirPass::IdentityStoreBypass`.
 
 ### 2.15 Branch-Aware Mux Lowering
 

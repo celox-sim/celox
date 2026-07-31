@@ -109,10 +109,6 @@ impl<A> LayoutRequirements<A> {
     pub fn is_empty(&self) -> bool {
         self.state_aliases.is_empty()
     }
-
-    pub fn clear(&mut self) {
-        self.state_aliases.clear();
-    }
 }
 
 /// Complete, backend-independent input to physical layout construction.
@@ -551,9 +547,6 @@ mod tests {
 
         assert_eq!(requirements.state_aliases().get(&2), Some(&1));
         assert!(!requirements.is_empty());
-
-        requirements.clear();
-        assert!(requirements.is_empty());
     }
 
     #[test]
