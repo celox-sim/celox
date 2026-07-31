@@ -3169,7 +3169,7 @@ module Top (
     .unwrap();
 
     let tmp_addr = sim.program().get_addr(&[], &["tmp"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
     assert!(
         observer.sensitivity.iter().all(|atom| atom.id != tmp_addr),
         "written LHS must be excluded from always_comb sensitivity: {:?}",
@@ -3202,7 +3202,7 @@ module Top (
 
     let tmp_addr = sim.program().get_addr(&[], &["tmp"]).unwrap();
     let idx_addr = sim.program().get_addr(&[], &["idx"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     // IEEE 1800-2023 9.2.2.2.1 uses expansions of the longest static prefix.
     // For tmp[idx], the dynamic select falls back to tmp's expansion, but the
@@ -3256,7 +3256,7 @@ module Top (
     .unwrap();
 
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     // IEEE 1800-2023 9.2.2.2.1 refers to the expansion of the longest static
     // prefix. For mem[1][idx], the longest static prefix is mem[1], not mem.
@@ -3307,7 +3307,7 @@ module Top (
     .unwrap();
 
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     // The written expression is mem[1][idx], whose longest static prefix is
     // mem[1]. Excluding written expressions must not remove mem[2].
@@ -3351,7 +3351,7 @@ module Top (
     .unwrap();
 
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     // The indexed part-select anchor is dynamic, so the longest static prefix
     // is mem[1], not the bits selected when idx is treated as zero.
@@ -3401,7 +3401,7 @@ module Top (
     .unwrap();
 
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     assert!(
         observer
@@ -3449,7 +3449,7 @@ module Top (
     .unwrap();
 
     let tmp_addr = sim.program().get_addr(&[], &["tmp"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     assert!(
         observer.sensitivity.iter().all(|atom| atom.id != tmp_addr),
@@ -3487,7 +3487,7 @@ module Top (
     .unwrap();
 
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer = &sim.program().comb_observers[0];
+    let observer = &sim.program().runtime_schema.comb_observers[0];
 
     assert!(
         observer
@@ -3539,6 +3539,7 @@ module Top (
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
     let mut observed_ranges: Vec<_> = sim
         .program()
+        .runtime_schema
         .comb_observers
         .iter()
         .map(|observer| {
@@ -3603,6 +3604,7 @@ module Top (
     let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
     let observer =
         sim.program()
+            .runtime_schema
             .comb_observers
             .iter()
             .find(|observer| {

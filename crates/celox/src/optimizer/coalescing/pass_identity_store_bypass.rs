@@ -62,6 +62,7 @@ pub(super) fn optimize_program_identity_stores(
     let mut blocked_aliases = ff_referenced_addresses(program);
     blocked_aliases.extend(
         program
+            .runtime_schema
             .comb_observers
             .iter()
             .flat_map(|observer| observer.written_inputs.iter().copied()),

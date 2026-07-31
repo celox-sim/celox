@@ -77,8 +77,6 @@ pub struct Program {
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
-    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-    pub arena: SLTNodeArena<AbsoluteAddr>,
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -142,8 +140,9 @@ impl Program {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
+        if !self.runtime_schema.comb_observers.is_empty() && !self.address_aliases.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
+                .runtime_schema
                 .comb_observers
                 .iter()
                 .flat_map(|observer| observer.written_inputs.iter().copied())

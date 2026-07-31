@@ -680,7 +680,7 @@ impl<B: SimBackend> Simulator<B> {
             !self.runtime_event_drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
-        if !self.program.comb_observers.is_empty() && self.dirty {
+        if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
             self.eval_comb_checked().unwrap();
             self.dirty = false;
         }
@@ -868,7 +868,7 @@ impl<B: SimBackend> Simulator<B> {
                 .eval_comb()
                 .map_err(|e| self.decorate_runtime_error(e));
         }
-        if self.program.comb_observers.is_empty() {
+        if self.program.runtime_schema.comb_observers.is_empty() {
             let runtime_event_start_seq = self.runtime_event_write_seq();
             let eval_result = self
                 .backend
@@ -890,13 +890,14 @@ impl<B: SimBackend> Simulator<B> {
         let mut active_sites = vec![false; self.program.runtime_schema.runtime_event_sites.len()];
         for (observer, is_active) in self
             .program
+            .runtime_schema
             .comb_observers
             .iter()
             .zip(active_before.iter().copied())
         {
             if is_active || self.comb_observer_initial_eval {
                 let group = observer.activation_group;
-                for group_observer in &self.program.comb_observers {
+                for group_observer in &self.program.runtime_schema.comb_observers {
                     if group_observer.activation_group == group {
                         active_sites[group_observer.site_id as usize] = true;
                     }
@@ -929,6 +930,7 @@ impl<B: SimBackend> Simulator<B> {
 
     fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
         self.program
+            .runtime_schema
             .comb_observers
             .iter()
             .map(|observer| {
@@ -1048,7 +1050,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Native testbenches use this between observable expressions so the
     /// preceding comb phase and this FF phase can share one compiled function.
     pub(crate) fn tick_deferred_comb(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        if !self.program.comb_observers.is_empty() {
+        if !self.program.runtime_schema.comb_observers.is_empty() {
             return self.tick(event);
         }
         if self.dirty {
@@ -1071,7 +1073,7 @@ impl<B: SimBackend> Simulator<B> {
         if count == 0 {
             return (0, Ok(()));
         }
-        if !self.program.comb_observers.is_empty() || !self.dirty {
+        if !self.program.runtime_schema.comb_observers.is_empty() || !self.dirty {
             return (1, self.tick_deferred_comb(event));
         }
         let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
