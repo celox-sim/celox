@@ -138,6 +138,10 @@ export default defineConfig({
           text: "Internals",
           items: [
             { text: "Architecture", link: "/internals/architecture" },
+            {
+              text: "Compiler Crate Architecture",
+              link: "/internals/compiler-crate-architecture",
+            },
             { text: "IR Reference", link: "/internals/ir-reference" },
             { text: "Optimizations", link: "/internals/optimizations" },
             { text: "JIT Roadmap", link: "/internals/jit-roadmap" },
